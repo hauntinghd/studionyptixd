@@ -23,6 +23,75 @@ from .styled_stills import build_styled_scene_prompt, generate_still_t2i
 from .voice_fal import FalVoiceClient
 
 
+def _local_topic_label(topic: str | None, category_label: str = "") -> str:
+    text = re.sub(r"\s+", " ", str(topic or category_label or "the topic")).strip()
+    return text.strip(" .") or "the topic"
+
+
+def _local_script_fallback(topic: str | None, category_label: str = "") -> str:
+    subject = _local_topic_label(topic, category_label)
+    return (
+        f"The real reason {subject} matters is not the obvious one. "
+        f"Most people notice the behavior, but they miss the pattern underneath it. "
+        f"At first, it looks random. Then it repeats in the same moments, around the same pressure, with the same emotional signal. "
+        f"That is the part worth studying. The silence, the distance, or the sudden shift is usually not the whole story. "
+        f"It is a protection strategy, a test, or a reaction to something the person does not know how to explain directly. "
+        f"Once you see the pattern, you stop chasing the surface and start reading the cause. "
+        f"And that is where the lesson is: behavior becomes predictable when you understand what it is trying to protect."
+    )
+
+
+def _local_plan_fallback(
+    *,
+    style: RenderStyle,
+    category_label: str = "",
+    topic: str | None = None,
+    visual_brief: str | None = None,
+) -> dict[str, Any]:
+    subject = _local_topic_label(topic, category_label)
+    plan = {
+        "characters": {
+            "main subject": (
+                "photoreal adult subject in neutral modern clothing, expressive but restrained, "
+                "consistent face and wardrobe across every scene"
+            )
+        },
+        "topic_setting": (
+            f"{style.label} vertical short about {subject}, cinematic interiors, moody contrast, "
+            "symbolic relationship psychology visuals, no text in image"
+        ),
+        "fallback_outfit": "neutral dark jacket, simple shirt, clean modern styling",
+        "local_fallback": True,
+    }
+    if visual_brief:
+        plan["visual_brief_lock"] = visual_brief.strip()
+    return plan
+
+
+def _local_beat_visuals_styled(
+    narration: str,
+    category_label: str,
+    *,
+    style: RenderStyle,
+    plan: dict | None = None,
+    visual_brief: str | None = None,
+) -> tuple[str, str, str]:
+    plan = plan or {}
+    fallback = str(plan.get("fallback_outfit") or "neutral dark jacket, simple shirt").strip()
+    setting = str(plan.get("topic_setting") or f"{style.label} cinematic vertical short").strip()
+    brief = str(visual_brief or plan.get("visual_brief_lock") or "").strip()
+    beat = re.sub(r"\s+", " ", str(narration or category_label or "the idea")).strip()
+    action_parts = [
+        setting,
+        f"Visualize this narration beat: {beat}",
+        brief,
+        "single clear subject, expressive body language, cinematic 9:16 framing, no text, no logos",
+    ]
+    action = ". ".join(part.strip(" .") for part in action_parts if part).strip() + "."
+    motion = "slow controlled camera push, subtle subject movement, restrained emotional tension"
+    return fallback, action, motion
+
+
 def _derive_short_sfx_prompt(scene: dict[str, Any], *, sound_design_brief: str = "") -> str:
     explicit = str(scene.get("sfx_direction") or "").strip()
     action = str(scene.get("scene_action") or scene.get("prompt") or "").strip()
@@ -175,7 +244,15 @@ def analyze_script_styled(
     user_lines.append("Script:")
     user_lines.append(script_text.strip())
     user_lines.append("\nReturn JSON now.")
-    raw = grok.complete(_plan_system(style), "\n".join(user_lines), max_tokens=900, temperature=0.5)
+    try:
+        raw = grok.complete(_plan_system(style), "\n".join(user_lines), max_tokens=900, temperature=0.5)
+    except Exception:
+        return _local_plan_fallback(
+            style=style,
+            category_label=category_label,
+            topic=topic,
+            visual_brief=visual_brief,
+        )
     raw = raw.strip().strip("`").strip()
     if raw.lower().startswith("json"):
         raw = raw[4:].strip()
@@ -226,14 +303,29 @@ def derive_beat_visuals_styled(
     if vbl:
         user += f"Visual lock: {vbl}\n"
 
-    raw = grok.complete(sys, user, max_tokens=500, temperature=0.55)
+    try:
+        raw = grok.complete(sys, user, max_tokens=500, temperature=0.55)
+    except Exception:
+        return _local_beat_visuals_styled(
+            narration,
+            category_label,
+            style=style,
+            plan=plan,
+            visual_brief=visual_brief,
+        )
     raw = raw.strip().strip("`").strip()
     if raw.lower().startswith("json"):
         raw = raw[4:].strip()
     try:
         data = json.loads(raw)
     except json.JSONDecodeError:
-        data = {}
+        return _local_beat_visuals_styled(
+            narration,
+            category_label,
+            style=style,
+            plan=plan,
+            visual_brief=visual_brief,
+        )
     outfit = str(data.get("outfit") or fallback or "").strip()
     action = str(data.get("scene_action") or narration).strip()
     motion = str(data.get("motion_prompt") or action).strip()
@@ -366,7 +458,10 @@ def plan_scenes(
         script_text = existing_script.read_text(encoding="utf-8").strip()
     else:
         user_prompt = build_script_prompt(cat["system_prompt"], topic)
-        script_text = grok.complete(cat["system_prompt"], user_prompt, max_tokens=1500)
+        try:
+            script_text = grok.complete(cat["system_prompt"], user_prompt, max_tokens=1500)
+        except Exception:
+            script_text = _local_script_fallback(topic, cat["label"])
     (workspace / "script.txt").write_text(script_text, encoding="utf-8")
 
     _write_progress(workspace, stage="scene_plan", progress=16, detail=f"Planning {style.label} scenes")

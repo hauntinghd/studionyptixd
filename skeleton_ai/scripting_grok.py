@@ -98,6 +98,7 @@ class GrokClient:
         }
         max_retries = 3
         backoff_seconds = [30, 60, 120]
+        transient_backoff_seconds = [2, 5, 10]
 
         for attempt in range(max_retries + 1):
             with httpx.Client(timeout=180) as c:
@@ -127,6 +128,19 @@ class GrokClient:
                     f"fal any-llm 429 after {max_retries} retries; "
                     f"body={r.text[:200]}"
                 )
+            if 500 <= r.status_code < 600 and attempt < max_retries:
+                wait_s = transient_backoff_seconds[min(attempt, len(transient_backoff_seconds) - 1)]
+                wait_s = wait_s * (1.0 + random.random() * 0.1)
+                try:
+                    import logging
+                    logging.getLogger(__name__).warning(
+                        f"fal any-llm {r.status_code} - retrying in {wait_s:.1f}s "
+                        f"(attempt {attempt+1}/{max_retries})"
+                    )
+                except Exception:
+                    pass
+                time.sleep(wait_s)
+                continue
             r.raise_for_status()
             data = r.json()
             if not isinstance(data, dict):
