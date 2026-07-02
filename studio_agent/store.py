@@ -12,6 +12,13 @@ ContentFormat = Literal["short", "long", "both"]
 ReasoningDepth = Literal["fast", "balanced", "deep"]
 
 DEFAULT_RENDER_STYLE = "cinematic"
+DEFAULT_VIDEO_MODEL = "seedance"
+VIDEO_MODELS = {"ltx_budget", "seedance", "pixverse", "kling_pro"}
+
+
+def normalize_video_model(value: Any) -> str:
+    model = str(value or "").strip().lower()
+    return model if model in VIDEO_MODELS else DEFAULT_VIDEO_MODEL
 
 # Cap context sent to OpenRouter (full transcript still stored on disk).
 MAX_MESSAGES_FOR_MODEL = 80
@@ -243,6 +250,7 @@ def rollover_session(session_id: str, *, user_id: str) -> dict[str, Any] | None:
         content_format=old.get("content_format") or "both",
         reasoning_depth=old.get("reasoning_depth") or "balanced",
         render_style=old.get("render_style") or DEFAULT_RENDER_STYLE,
+        video_model=normalize_video_model(old.get("video_model")),
         web_search=bool(old.get("web_search", True)),
         animate=bool(old.get("animate", True)),
         channel_id=str(old.get("channel_id") or ""),
@@ -275,6 +283,7 @@ def create_session(
     content_format: ContentFormat = "both",
     reasoning_depth: ReasoningDepth = "balanced",
     render_style: str = DEFAULT_RENDER_STYLE,
+    video_model: str = DEFAULT_VIDEO_MODEL,
     web_search: bool = True,
     animate: bool = True,
     captions_enabled: bool = True,
@@ -294,6 +303,7 @@ def create_session(
         "content_format": content_format,
         "reasoning_depth": reasoning_depth,
         "render_style": render_style or DEFAULT_RENDER_STYLE,
+        "video_model": normalize_video_model(video_model),
         "channel_id": str(channel_id or "").strip(),
         "registry_key": str(registry_key or "").strip(),
         "channel_title": str(channel_title or "").strip(),
@@ -486,6 +496,8 @@ def update_session(session_id: str, **fields: Any) -> dict[str, Any]:
     session = get_session(session_id)
     if not session:
         raise KeyError(session_id)
+    if "video_model" in fields:
+        fields["video_model"] = normalize_video_model(fields.get("video_model"))
     session.update(fields)
     _save(session)
     return session

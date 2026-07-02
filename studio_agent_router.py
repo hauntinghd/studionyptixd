@@ -68,6 +68,7 @@ class CreateSessionRequest(BaseModel):
     content_format: Literal["short", "long", "both"] = "both"
     reasoning_depth: Literal["fast", "balanced", "deep"] = "balanced"
     render_style: str | None = "cinematic"
+    video_model: Literal["ltx_budget", "seedance", "pixverse", "kling_pro"] = "seedance"
     channel_id: str | None = ""
     registry_key: str | None = ""
     channel_title: str | None = ""
@@ -84,6 +85,7 @@ class PatchSessionRequest(BaseModel):
     content_format: Literal["short", "long", "both"] | None = None
     reasoning_depth: Literal["fast", "balanced", "deep"] | None = None
     render_style: str | None = None
+    video_model: Literal["ltx_budget", "seedance", "pixverse", "kling_pro"] | None = None
     channel_id: str | None = None
     registry_key: str | None = None
     channel_title: str | None = None
@@ -613,6 +615,7 @@ def build_studio_agent_router(
             content_format=body.content_format,
             reasoning_depth=body.reasoning_depth,
             render_style=body.render_style or store.DEFAULT_RENDER_STYLE,
+            video_model=body.video_model,
             channel_id=body.channel_id or "",
             registry_key=body.registry_key or "",
             channel_title=body.channel_title or "",
@@ -749,6 +752,8 @@ def build_studio_agent_router(
             updates["reasoning_depth"] = body.reasoning_depth
         if body.render_style is not None:
             updates["render_style"] = body.render_style
+        if body.video_model is not None:
+            updates["video_model"] = body.video_model
         if body.channel_id is not None:
             updates["channel_id"] = body.channel_id.strip()
         if body.registry_key is not None:
@@ -960,6 +965,7 @@ def _session_summary(session: dict[str, Any]) -> dict[str, Any]:
         "content_format": session.get("content_format"),
         "reasoning_depth": session.get("reasoning_depth") or "balanced",
         "render_style": session.get("render_style") or store.DEFAULT_RENDER_STYLE,
+        "video_model": store.normalize_video_model(session.get("video_model")),
         "channel_id": session.get("channel_id") or "",
         "registry_key": session.get("registry_key") or "",
         "channel_title": session.get("channel_title") or "",

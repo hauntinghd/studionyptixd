@@ -248,12 +248,25 @@ const FALLBACK_MODELS: AgentModelOption[] = [
 type ContentFormat = 'short' | 'long' | 'both';
 type ReasoningDepth = 'fast' | 'balanced' | 'deep';
 type CaptionMode = 'word' | 'off';
+type VideoModel = 'ltx_budget' | 'seedance' | 'pixverse' | 'kling_pro';
 
 const REASONING_OPTIONS: { id: ReasoningDepth; label: string; hint: string }[] = [
     { id: 'fast', label: 'Fast', hint: 'Quick answers, less deliberation' },
     { id: 'balanced', label: 'Balanced', hint: 'Default depth' },
     { id: 'deep', label: 'Deep', hint: 'Thorough analysis before recommendations' },
 ];
+
+const VIDEO_MODEL_OPTIONS: { id: VideoModel; label: string; price: string; hint: string }[] = [
+    { id: 'ltx_budget', label: 'LTX Budget', price: 'lowest', hint: 'Cheapest full animation lane.' },
+    { id: 'seedance', label: 'Seedance 2.0', price: 'balanced', hint: 'Default balanced motion; falls back when needed.' },
+    { id: 'pixverse', label: 'Pixverse V6', price: 'standard+', hint: 'More permissive moderation for difficult scenes.' },
+    { id: 'kling_pro', label: 'Kling Pro', price: 'premium', hint: 'Best motion quality; highest cost and slower queue.' },
+];
+
+function normalizeVideoModel(value: unknown): VideoModel {
+    const raw = String(value || '').trim();
+    return VIDEO_MODEL_OPTIONS.some((opt) => opt.id === raw) ? raw as VideoModel : 'seedance';
+}
 
 interface RenderStyleOption {
     key: string;
@@ -298,6 +311,7 @@ interface SessionSummary {
     pending_count?: number;
     content_format?: string;
     reasoning_depth?: string;
+    video_model?: VideoModel;
     caption_mode?: CaptionMode;
     captions_enabled?: boolean;
     channel_id?: string;
@@ -492,6 +506,7 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
     const [contentFormat, setContentFormat] = useState<ContentFormat>('both');
     const [reasoningDepth, setReasoningDepth] = useState<ReasoningDepth>('balanced');
     const [renderStyle, setRenderStyle] = useState('cinematic');
+    const [videoModel, setVideoModel] = useState<VideoModel>('seedance');
     const [captionMode, setCaptionMode] = useState<CaptionMode>('word');
     const [, setAnimate] = useState(true); // internal for session compat / patch; UI toggle removed per request
     const [showStyleGrid, setShowStyleGrid] = useState(false);
@@ -1013,6 +1028,7 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
         }
         const rs = String(raw.render_style || '').trim();
         if (rs) setRenderStyle(rs);
+        setVideoModel(normalizeVideoModel(raw.video_model));
         const rawCaptionMode = String(raw.caption_mode || '').trim();
         if (rawCaptionMode === 'word' || rawCaptionMode === 'off') {
             setCaptionMode(rawCaptionMode);
@@ -1117,6 +1133,7 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                     content_format: contentFormat,
                     reasoning_depth: reasoningDepth,
                     render_style: renderStyle,
+                    video_model: videoModel,
                     caption_mode: captionMode,
                     captions_enabled: captionMode !== 'off',
                     channel_id: selectedChannel?.channel_id || '',
@@ -1135,7 +1152,7 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
             if (sid) setDraftsBySession((prev) => ({ ...prev, [sid]: '' }));
             await refreshHistory();
         },
-        [applySessionPayload, approvalMode, authFetch, captionMode, contentFormat, productWebsite, reasoningDepth, renderStyle, refreshHistory, selectedChannel],
+        [applySessionPayload, approvalMode, authFetch, captionMode, contentFormat, productWebsite, reasoningDepth, renderStyle, refreshHistory, selectedChannel, videoModel],
     );
 
     const openSession = useCallback(
@@ -1338,6 +1355,7 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                             model: pickModel,
                             approval_mode: 'confirm',
                             content_format: 'both',
+                            video_model: 'seedance',
                         }),
                     });
                     applySessionPayload((created.session as Record<string, unknown>) || {});
@@ -1386,6 +1404,7 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
             content_format?: ContentFormat;
             reasoning_depth?: ReasoningDepth;
             render_style?: string;
+            video_model?: VideoModel;
             caption_mode?: CaptionMode;
             captions_enabled?: boolean;
             channel_id?: string;
@@ -2280,6 +2299,27 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                                 </div>
                             )}
                         </div>
+                        <label
+                            className="inline-flex items-center gap-1.5 rounded-lg border border-white/[0.06] bg-white/[0.02] px-2 py-0.5 text-[9px] font-semibold uppercase text-cyan-100"
+                            title="Image-to-video model. Stills remain locked to Seedream 4.5."
+                        >
+                            <Video className="h-3 w-3 text-cyan-300" />
+                            <select
+                                value={videoModel}
+                                onChange={(event) => {
+                                    const next = normalizeVideoModel(event.target.value);
+                                    setVideoModel(next);
+                                    void patchSession({ video_model: next });
+                                }}
+                                className="max-w-[120px] bg-transparent text-[9px] font-semibold uppercase text-cyan-100 outline-none"
+                            >
+                                {VIDEO_MODEL_OPTIONS.map((opt) => (
+                                    <option key={opt.id} value={opt.id} className="bg-black text-white">
+                                        {opt.label} · {opt.price}
+                                    </option>
+                                ))}
+                            </select>
+                        </label>
                         <button
                             type="button"
                             onClick={() => {

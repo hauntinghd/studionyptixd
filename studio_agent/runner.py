@@ -1152,6 +1152,7 @@ def _build_requested_topic_production(
     low = str(user_text or "").lower()
     fmt = str(content_format or "").strip().lower()
     render_style = str(session.get("render_style") or "cinematic").strip() or "cinematic"
+    video_model = store.normalize_video_model(session.get("video_model"))
     is_long = (
         fmt == "long"
         or bool(re.search(r"\blong[- ]?form\b|\b8\s*-\s*15\s*min|\bdocumentary\b", low))
@@ -1179,7 +1180,7 @@ def _build_requested_topic_production(
         "render_style": render_style,
         "category_key": category_key,
         "topic": topic,
-        "video_model": "seedance",
+        "video_model": video_model,
         "visual_brief": visual_brief,
         "animate": False,
         "captions_enabled": True,
@@ -1844,6 +1845,16 @@ def _inject_shortform_render_style(args: dict[str, Any], session: dict[str, Any]
     return merged
 
 
+def _inject_shortform_video_model(args: dict[str, Any], session: dict[str, Any]) -> dict[str, Any]:
+    """Ensure shortform jobs inherit the session I2V model when the model omits it."""
+    merged = dict(args or {})
+    if not str(merged.get("video_model") or "").strip():
+        merged["video_model"] = store.normalize_video_model(session.get("video_model"))
+    else:
+        merged["video_model"] = store.normalize_video_model(merged.get("video_model"))
+    return merged
+
+
 def _inject_shortform_caption_options(args: dict[str, Any], session: dict[str, Any]) -> dict[str, Any]:
     """Ensure shortform jobs inherit session caption preferences when omitted."""
     merged = dict(args or {})
@@ -2018,6 +2029,7 @@ def system_prompt(
     reasoning_depth: str = "balanced",
     billing_profile: dict[str, Any] | None = None,
     render_style: str = "cinematic",
+    video_model: str = "seedance",
     memory_summary: str = "",
     active_registry: str = "",
 ) -> str:
@@ -2062,6 +2074,20 @@ def system_prompt(
             "USER RENDER STYLE: cinematic (default). Call list_render_styles; pass render_style on "
             "start_shortform_generate. Use skeleton_host only when the Art Style picker is set to Skeleton."
         )
+    selected_video_model = store.normalize_video_model(video_model)
+    video_model_labels = {
+        "ltx_budget": "LTX Budget (cheapest full animation)",
+        "seedance": "Seedance 2.0 (default balanced motion)",
+        "pixverse": "Pixverse V6 (permissive moderation)",
+        "kling_pro": "Kling 2.1 Pro (premium motion, highest cost)",
+    }
+    video_model_hint = (
+        "USER IMAGE-TO-VIDEO MODEL (session picker): "
+        f"{video_model_labels.get(selected_video_model, selected_video_model)} (`{selected_video_model}`). "
+        "Pass this as video_model on start_shortform_generate unless the user changes it in chat. "
+        "Do not offer image model choices: stills are locked to Seedream 4.5 edit/text-to-image for consistency. "
+        "Only I2V is user-selectable; better motion costs more credits."
+    )
 
     color_accessibility_hint = (
         "COLOR ACCESSIBILITY DEFAULT (protan-safe): The operator/viewer may have protan colorblindness, "
@@ -2102,6 +2128,8 @@ format-specific, channel-specific pacing, packaging, and delivery.
 {thinking_hint}
 
 {style_hint}
+
+{video_model_hint}
 
 {color_accessibility_hint}
 
@@ -2205,13 +2233,13 @@ Quality target: feels like a $5k+ edit — NOT "good enough AI."
 - `start_longform_render` after outline approval; poll until complete.
 
 ═══ SHORTFORM RENDER (start_shortform_generate + poll_render_job kind=shortform) ═══
-REQUIRED on every short render: `render_style` from list_render_styles OR the user's session Art Style picker.
+REQUIRED on every short render: `render_style` from list_render_styles OR the user's session Art Style picker, and `video_model` from the user's session I2V picker unless they override it in chat.
 - Shorts quality target: benchmark against the selected channel's own Shorts outliers and niche-specific
   high-retention Shorts. Optimize viewed-vs-swiped, first-1-to-3-second retention, completion/APV, rewatches,
   engaged views, and interactions per view. Do not use long-form CTR/AVD/chapter benchmarks as substitutes.
 - Default for most channels: cinematic, ultra_realism, comic_book, historical_18th_century, etc. — real subjects.
 - `skeleton_host` is a niche art style like comic or Ghibli — use it only when the user picked Skeleton in Art Style.
-- Before approving render, state the render_style label so the user sees what visuals they are buying.
+- Before approving render, state the render_style label and selected image-to-video model so the user sees what visuals and motion tier they are buying.
 - Final package must include title, tags, description, hashtags, timestamps/beat map, and CTA notes.
 - The selected chat channel is the source of truth for watermark, copyright/branding, CTA, and package copy. Never reuse
   ZeroTier branding on skeleton channels, Empire Magnates copy on ZeroTier, or any other cross-channel brand.
@@ -2673,6 +2701,7 @@ async def _run_turn_impl(
             name, args = recovered
             if name == "start_shortform_generate":
                 args = _inject_shortform_render_style(args, session)
+                args = _inject_shortform_video_model(args, session)
                 args = _inject_shortform_caption_options(args, session)
                 args = _normalize_shortform_category_args(args)
             args = _channel_guard_tool_args(name, args, active_registry, active_channel_id)
@@ -2878,6 +2907,7 @@ async def _run_turn_impl(
         reasoning_depth=reasoning_depth,
         billing_profile=profile,
         render_style=str(session.get("render_style") or "cinematic"),
+        video_model=str(session.get("video_model") or "seedance"),
         memory_summary=memory_summary,
         active_registry=active_registry,
     )
@@ -3267,6 +3297,7 @@ async def _run_turn_impl(
                     args = {}
                 if name == "start_shortform_generate":
                     args = _inject_shortform_render_style(args, session)
+                    args = _inject_shortform_video_model(args, session)
                     args = _inject_shortform_caption_options(args, session)
                     args = _normalize_shortform_category_args(args)
                 args = _channel_guard_tool_args(name, args, active_registry, active_channel_id)
@@ -3501,6 +3532,7 @@ async def _run_turn_impl(
                 name, args = recovered
                 if name == "start_shortform_generate":
                     args = _inject_shortform_render_style(args, session)
+                    args = _inject_shortform_video_model(args, session)
                     args = _inject_shortform_caption_options(args, session)
                     args = _normalize_shortform_category_args(args)
                 args = _channel_guard_tool_args(name, args, active_registry, active_channel_id)
@@ -3908,6 +3940,7 @@ async def _approve_action_impl(
     args = action.get("arguments") or {}
     if name == "start_shortform_generate":
         args = _inject_shortform_render_style(args, session)
+        args = _inject_shortform_video_model(args, session)
         args = _inject_shortform_caption_options(args, session)
         args = _normalize_shortform_category_args(args)
 
@@ -4045,6 +4078,7 @@ async def retry_last_production(
         raise KeyError("no production to retry — approve or run start_shortform_generate first")
     if name == "start_shortform_generate":
         args = _inject_shortform_render_style(args, fresh)
+        args = _inject_shortform_video_model(args, fresh)
         args = _inject_shortform_caption_options(args, fresh)
         args = _normalize_shortform_category_args(args)
         # Resume the last shortform job's workspace so finished stills/clips/VO
