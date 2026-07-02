@@ -19,10 +19,12 @@ FastAPI router for NYPTID Studio Agent (OpenRouter + Rookcast skills).
 from __future__ import annotations
 
 import asyncio
+import hmac
 import os
+import time
 from typing import Any, Callable, Literal
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
@@ -140,6 +142,13 @@ class TrainingConsentRequest(BaseModel):
     include_feedback: bool = True
 
 
+class LoadTestSimulationRequest(BaseModel):
+    stages: list[str] = Field(default_factory=lambda: ["render"], max_length=20)
+    iterations: int = Field(1, ge=1, le=50)
+    hold_ms: int = Field(250, ge=0, le=30000)
+    response_kb: int = Field(1, ge=0, le=256)
+
+
 def _apply_chat_turn_options(session_id: str, session: dict[str, Any], body: ChatRequest) -> dict[str, Any]:
     has_channel_selection = any(
         str(value or "").strip()
@@ -255,6 +264,51 @@ def build_studio_agent_router(
             "expensive_tools": sorted(production_budget.EXPENSIVE_TOOLS),
             "default_caps_usd": production_budget.DEFAULT_CAPS_USD,
         }
+
+    @router.post("/load-test/render-simulation", include_in_schema=False)
+    async def render_load_test_simulation(request: Request, body: LoadTestSimulationRequest):
+        """Token-locked queue exerciser. It never calls OpenRouter, FAL, Stripe, or production tools."""
+        expected = str(os.getenv("STUDIO_LOAD_TEST_TOKEN", "") or "").strip()
+        if not expected:
+            raise HTTPException(404, "not found")
+        supplied = str(request.headers.get("x-studio-load-test-token") or "").strip()
+        auth = str(request.headers.get("authorization") or "").strip()
+        if not supplied and auth.lower().startswith("bearer "):
+            supplied = auth.split(None, 1)[1].strip()
+        if not supplied or not hmac.compare_digest(supplied, expected):
+            raise HTTPException(403, "invalid load-test token")
+
+        allowed = {"render", "stills", "i2v", "i2v_premium", "audio", "compose"}
+        stages = [str(stage or "").strip().lower() for stage in (body.stages or ["render"])]
+        stages = [stage for stage in stages if stage in allowed]
+        if not stages:
+            raise HTTPException(400, "no valid stages")
+
+        def _run() -> dict[str, Any]:
+            from studio_agent.production_slots import production_slot, slot_snapshot
+
+            admissions: list[dict[str, Any]] = []
+            started = time.time()
+            for _i in range(int(body.iterations)):
+                for lane in stages:
+                    with production_slot(lane) as admission:
+                        admissions.append(admission.as_dict())
+                        time.sleep(float(body.hold_ms) / 1000.0)
+            payload = "x" * (int(body.response_kb) * 1024)
+            return {
+                "ok": True,
+                "simulated": True,
+                "provider_spend_usd": 0.0,
+                "stages": stages,
+                "iterations": int(body.iterations),
+                "hold_ms": int(body.hold_ms),
+                "elapsed_ms": round((time.time() - started) * 1000.0, 2),
+                "admissions": admissions,
+                "slot_snapshot": slot_snapshot(),
+                "payload": payload,
+            }
+
+        return await run_in_threadpool(_run)
 
     @router.post("/queue/reset")
     async def agent_queue_reset(user: dict = Depends(_agent_user)):

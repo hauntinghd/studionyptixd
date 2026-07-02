@@ -28,10 +28,14 @@ import os
 import time
 from pathlib import Path
 
-import fal_client
 import httpx
+try:
+    import fal_client
+except Exception:  # pragma: no cover - optional when simulation mode is active
+    fal_client = None  # type: ignore[assignment]
 
 from .fal_auth import require_fal_key
+from . import render_simulation
 
 FAL_SUBSCRIBE_TIMEOUT_SEC = int(os.getenv("FAL_I2V_SUBSCRIBE_TIMEOUT_SEC", "600"))
 FAL_I2V_POLL_INTERVAL_SEC = float(os.getenv("FAL_I2V_POLL_INTERVAL_SEC", "5"))
@@ -265,6 +269,30 @@ def generate(
     """
     out_path = Path(out_path)
     if out_path.exists() and out_path.stat().st_size > 1024:
+        return out_path
+
+    if render_simulation.enabled():
+        render_simulation.write_video(
+            out_path,
+            still_path=still_path,
+            duration_sec=float(duration_sec or 5),
+        )
+        try:
+            (out_path.with_suffix(out_path.suffix + ".fal.json")).write_text(
+                json.dumps(
+                    {
+                        "endpoint": "simulation/i2v",
+                        "request_id": "",
+                        "duration_sec": int(duration_sec),
+                        "video_model": video_model or tier,
+                        "simulated": True,
+                    },
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
         return out_path
 
     _ensure_fal()

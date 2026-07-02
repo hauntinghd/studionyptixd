@@ -16,10 +16,14 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-import fal_client
 import httpx
+try:
+    import fal_client
+except Exception:  # pragma: no cover - optional when simulation mode is active
+    fal_client = None  # type: ignore[assignment]
 
 from .fal_auth import require_fal_key
+from . import render_simulation
 
 SEEDREAM_EDIT_ENDPOINT = "fal-ai/bytedance/seedream/v4.5/edit"
 SEEDREAM_EDIT_URL = f"https://fal.run/{SEEDREAM_EDIT_ENDPOINT}"
@@ -181,6 +185,8 @@ def resolve_master_reference_urls(
     extra_refs: list[str] | None = None,
 ) -> list[str]:
     """Return fal-uploadable URLs for edit (uploads local files when needed)."""
+    if render_simulation.enabled():
+        return ["simulation://canonical-master"]
     _ensure_fal()
     urls: list[str] = []
     master = str(master_url or os.getenv("SKELETON_GLOBAL_REFERENCE_IMAGE_URL", "")).strip()
@@ -329,6 +335,17 @@ def generate_still_edit(
     out_path = Path(out_path)
     if out_path.exists() and out_path.stat().st_size > 1024:
         return {"local_path": str(out_path), "provider": "seedream_v45_edit", "cached": True}
+
+    if render_simulation.enabled():
+        render_simulation.write_still(out_path, label="Seedream edit simulation")
+        return {
+            "local_path": str(out_path),
+            "provider": "simulation_seedream_edit",
+            "provider_label": "Simulation Seedream Edit",
+            "seed": seed,
+            "bytes": out_path.stat().st_size,
+            "simulated": True,
+        }
 
     _ensure_fal()
     image_urls = resolve_master_reference_urls(master_url=master_url, extra_refs=extra_refs)

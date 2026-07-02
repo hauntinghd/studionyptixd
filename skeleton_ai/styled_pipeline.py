@@ -16,6 +16,7 @@ from studio_agent import production_costs
 from studio_agent.production_slots import production_slot
 from studio_agent.render_styles import RenderStyle, get_render_style
 
+from . import render_simulation
 from .compose import concat_demuxer, mux_narration, probe_duration, trim_with_captions
 from .i2v_engine import ac_cost_for_video_model, generate as gen_clip, resolve_video_model_chain
 from .pipeline import Beat, _write_progress, apply_wardrobe_motion_lock, check_cancelled, split_script_into_beats
@@ -131,6 +132,8 @@ def _generate_short_audio_bed(prompt: str, duration_sec: float, out_path: Path) 
     out_path = Path(out_path)
     if out_path.exists() and out_path.stat().st_size > 1024:
         return out_path
+    if render_simulation.enabled():
+        return render_simulation.write_audio(out_path, duration_sec=duration_sec)
     try:
         from long_form.pipeline import MMAUDIO_URL, _download, _fal_post
 
@@ -146,6 +149,12 @@ def _generate_short_audio_bed(prompt: str, duration_sec: float, out_path: Path) 
         return out_path if out_path.exists() and out_path.stat().st_size > 1024 else None
     except Exception:
         return None
+
+
+def _metered_provider_values(provider: str, amount: float, note: str) -> tuple[str, float, str]:
+    if render_simulation.enabled():
+        return "simulation", 0.0, f"simulation: {note}"
+    return provider, float(amount or 0.0), note
 
 
 def _concat_audio_tracks(paths: list[Path], out_path: Path) -> Path | None:
@@ -590,10 +599,11 @@ def plan_scenes(
                             seed=420042 + i,
                         )
                         amount, note, key = production_costs.price_fal_image(edit=False)
+            provider, amount, note = _metered_provider_values("fal", amount, note)
             production_costs.record_event(
                 workspace,
                 stage="stills",
-                provider="fal",
+                provider=provider,
                 operation=key,
                 usd=amount,
                 quantity=1,
@@ -716,7 +726,6 @@ def edit_scene(workspace: Path, index: int, instruction: str, scope: str = "full
     change ("make the lighting darker", "put him in ancient Rome", ...).
     The scope controls preservation for premium character/background passes.
     """
-    import fal_client
     from .canonical_edit import _ensure_fal, generate_still_edit
 
     workspace = Path(workspace)
@@ -729,8 +738,12 @@ def edit_scene(workspace: Path, index: int, instruction: str, scope: str = "full
     if not still_target.exists():
         raise RuntimeError(f"scene {index} has no still to edit")
 
-    _ensure_fal()
-    current_url = fal_client.upload_file(str(still_target))
+    current_url = str(still_target)
+    if not render_simulation.enabled():
+        import fal_client
+
+        _ensure_fal()
+        current_url = fal_client.upload_file(str(still_target))
     edit_prompt, normalized_scope = _scoped_edit_prompt(
         str(sc.get("prompt") or ""),
         instruction,
@@ -859,10 +872,11 @@ def animate_scenes_stage(
             endpoint = str(clip_meta.get("endpoint") or "")
             duration = float(clip_meta.get("duration_sec") or sc.get("duration_sec") or 5.0)
             amount, note, key = production_costs.price_fal_video(endpoint, seconds=duration)
+            provider, amount, note = _metered_provider_values("fal", amount, note)
             production_costs.record_event(
                 workspace,
                 stage="animation",
-                provider="fal",
+                provider=provider,
                 operation=key,
                 usd=amount,
                 quantity=duration,
@@ -982,10 +996,11 @@ def finalize_stage(
         ):
             na = el.synthesize(text=sc["narration"], out_path=na_path, voice_id=voice_id)
         amount, note, key, qty = production_costs.price_fal_tts(sc["narration"])
+        provider, amount, note = _metered_provider_values("fal", amount, note)
         production_costs.record_event(
             workspace,
             stage="narration",
-            provider="fal",
+            provider=provider,
             operation=key,
             usd=amount,
             quantity=qty,
@@ -1032,10 +1047,11 @@ def finalize_stage(
         ):
             narration_audio = el.synthesize(text=script_text, out_path=narration_target, voice_id=voice_id)
         amount, note, key, qty = production_costs.price_fal_tts(script_text)
+        provider, amount, note = _metered_provider_values("fal", amount, note)
         production_costs.record_event(
             workspace,
             stage="narration",
-            provider="fal",
+            provider=provider,
             operation=key,
             usd=amount,
             quantity=qty,
@@ -1077,10 +1093,11 @@ def finalize_stage(
                         fallback_key="mmaudio_v2_per_second",
                         quantity=float(duration or 0.0),
                     )
+                    provider, amount, note = _metered_provider_values("fal", amount, note)
                     production_costs.record_event(
                         workspace,
                         stage="sound_design",
-                        provider="fal",
+                        provider=provider,
                         operation="mmaudio_v2",
                         usd=amount,
                         quantity=float(duration or 0.0),
@@ -1120,10 +1137,11 @@ def finalize_stage(
                         fallback_key="mmaudio_v2_per_second",
                         quantity=bgm_duration,
                     )
+                    provider, amount, note = _metered_provider_values("fal", amount, note)
                     production_costs.record_event(
                         workspace,
                         stage="sound_design",
-                        provider="fal",
+                        provider=provider,
                         operation="mmaudio_v2_background_music",
                         usd=amount,
                         quantity=bgm_duration,

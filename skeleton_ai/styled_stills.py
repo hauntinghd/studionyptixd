@@ -6,10 +6,14 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-import fal_client
+try:
+    import fal_client
+except Exception:  # pragma: no cover - optional when simulation mode is active
+    fal_client = None  # type: ignore[assignment]
 
 from .fal_auth import require_fal_key
 from .canonical_edit import _queue_result
+from . import render_simulation
 
 SEEDREAM_T2I_URL = "https://fal.run/fal-ai/bytedance/seedream/v4.5/text-to-image"
 
@@ -69,6 +73,16 @@ def generate_still_t2i(
             "cached": True,
         }
 
+    if render_simulation.enabled():
+        render_simulation.write_still(out_path, label="Seedream T2I simulation")
+        return {
+            "local_path": str(out_path),
+            "provider": "simulation_seedream_t2i",
+            "seed": seed,
+            "bytes": out_path.stat().st_size,
+            "simulated": True,
+        }
+
     _ensure_fal()
     payload = {
         "prompt": str(prompt or "")[:3500],
@@ -121,6 +135,15 @@ def generate_still_reference_edit(
     out_path = Path(out_path)
     if out_path.exists() and out_path.stat().st_size > 1024:
         return {"local_path": str(out_path), "provider": "seedream_v45_product_edit", "cached": True}
+    if render_simulation.enabled():
+        render_simulation.write_still(out_path, label="Product edit simulation")
+        return {
+            "local_path": str(out_path),
+            "provider": "simulation_seedream_product_edit",
+            "seed": seed,
+            "bytes": out_path.stat().st_size,
+            "simulated": True,
+        }
     _ensure_fal()
     urls: list[str] = []
     for raw in list(reference_paths or [])[:3]:

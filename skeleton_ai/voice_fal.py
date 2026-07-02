@@ -12,7 +12,12 @@ import os
 import urllib.request
 from pathlib import Path
 
-import fal_client
+try:
+    import fal_client
+except Exception:  # pragma: no cover - optional when simulation mode is active
+    fal_client = None  # type: ignore[assignment]
+
+from . import render_simulation
 
 TTS_ENDPOINT = "fal-ai/minimax/speech-02-hd"
 DEFAULT_VOICE = "English_Trustworthy_Man"
@@ -34,10 +39,12 @@ def synthesize(
     speed: float = 0.95,
 ) -> Path:
     """Synthesize narration to out_path (mp3) and return the path."""
-    _ensure_fal_key()
     clean = (text or "").strip()
     if not clean:
         raise RuntimeError("empty narration text")
+    if render_simulation.enabled():
+        return render_simulation.write_audio(out_path, duration_sec=max(1.0, len(clean) / 18.0))
+    _ensure_fal_key()
     result = fal_client.subscribe(
         TTS_ENDPOINT,
         arguments={
