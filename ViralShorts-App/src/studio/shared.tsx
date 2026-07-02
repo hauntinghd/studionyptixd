@@ -53,6 +53,9 @@ export const FLY_DIRECT_API_PREFIXES = [
     '/api/studio-hub',
     '/api/youtube',
     '/api/studio/analytics',
+    '/api/checkout',
+    '/api/billing-portal',
+    '/api/paypal',
 ];
 
 /** Routes that must not go through RunPod (429 queue, cold sync, session loss). */

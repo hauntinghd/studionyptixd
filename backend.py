@@ -20104,8 +20104,6 @@ async def _create_topup_checkout(req: TopupCheckoutRequest, user: dict = Depends
     pack = TOPUP_PACKS.get(req.price_id)
     if not pack:
         raise HTTPException(400, "Invalid top-up pack")
-    if user.get("email", "") in ADMIN_EMAILS:
-        raise HTTPException(400, "Admin account does not require top-up packs")
     preferred_method = str(getattr(req, "preferred_method", "") or "").strip().lower()
     if preferred_method not in {"card", "paypal"}:
         preferred_method = "card" if (STRIPE_SECRET_KEY and STRIPE_TOPUP_PUBLIC_ENABLED) else "paypal"
