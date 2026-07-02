@@ -296,6 +296,16 @@ const readJsonResponse = async <T = any>(res: Response): Promise<{ data: T | nul
     }
 };
 
+const fetchWithTimeout = async (url: string, init: RequestInit, timeoutMs = 20000): Promise<Response> => {
+    const controller = new AbortController();
+    const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
+    try {
+        return await fetch(url, { ...init, signal: controller.signal });
+    } finally {
+        window.clearTimeout(timeoutId);
+    }
+};
+
 const normalizeWaitlistPlan = (planName: string): string => {
     const normalized = String(planName || "").trim().toLowerCase();
     if (["starter", "creator", "pro", "studio", "studio_pro_1k", "studio_pro_2500", "studio_pro_5k", "studio_pro_11k", "studio_pro_17k", "studio_pro_24k", "studio_pro_32k", "studio_pro_2k", "studio_pro_8k", "studio_pro_15k"].includes(normalized)) return normalized;
@@ -1181,7 +1191,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         ].includes(targetPlanId);
         if (!validPlan) return "Missing membership checkout details";
         try {
-            const res = await fetch(`${API}/api/checkout`, {
+            const res = await fetchWithTimeout(resolveStudioBackendUrl('/api/checkout'), {
                 method: "POST",
                 headers: {
                     "Content-Type": "application/json",
@@ -1201,7 +1211,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             return "Checkout URL missing";
         } catch (e) {
             console.error("Checkout failed", e);
-            return "Membership checkout failed";
+            return e instanceof DOMException && e.name === 'AbortError'
+                ? "Membership checkout timed out. Try again in a moment."
+                : "Membership checkout failed";
         }
     }, [defaultMembershipPlanId, session]);
 
@@ -1224,7 +1236,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const checkoutTopup = useCallback(async (priceId: string, preferredMethod: 'card' | 'paypal' = 'card'): Promise<string | null> => {
         if (!priceId || !session) return "Missing top-up price";
         try {
-            const res = await fetch(`${API}/api/checkout/topup`, {
+            const res = await fetchWithTimeout(resolveStudioBackendUrl('/api/checkout/topup'), {
                 method: "POST",
                 headers: {
                     "Content-Type": "application/json",
@@ -1242,14 +1254,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             return "Checkout URL missing";
         } catch (e) {
             console.error("Top-up checkout failed", e);
-            return "Top-up checkout failed";
+            return e instanceof DOMException && e.name === 'AbortError'
+                ? "Top-up checkout timed out. Try again in a moment."
+                : "Top-up checkout failed";
         }
     }, [session]);
 
     const manageBilling = useCallback(async (): Promise<string | null> => {
         if (!session) return "Not signed in";
         try {
-            const res = await fetch(`${API}/api/billing-portal`, {
+            const res = await fetchWithTimeout(resolveStudioBackendUrl('/api/billing-portal'), {
                 method: "POST",
                 headers: {
                     Authorization: `Bearer ${session.access_token}`,

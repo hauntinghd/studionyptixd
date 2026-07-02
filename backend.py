@@ -19758,11 +19758,7 @@ async def _create_stripe_membership_checkout(user: dict, plan: str, price_usd: f
         "metadata": {"user_id": user["id"], "plan": normalized_plan},
         "subscription_data": {"metadata": {"user_id": user["id"], "plan": normalized_plan}},
     }
-    customer_id = _stripe_find_customer_id_by_email(user.get("email", ""))
-    if customer_id:
-        checkout_payload["customer"] = customer_id
-    else:
-        checkout_payload["customer_email"] = user["email"]
+    checkout_payload["customer_email"] = user["email"]
     session = stripe_lib.checkout.Session.create(**checkout_payload)
     if not session.url:
         raise HTTPException(500, "Stripe checkout URL missing")
@@ -20146,11 +20142,7 @@ async def _create_topup_checkout(req: TopupCheckoutRequest, user: dict = Depends
                 "topup_credits": str(int(pack.get("credits", 0) or 0)),
             },
         }
-        customer_id = _stripe_find_customer_id_by_email(user["email"])
-        if customer_id:
-            checkout_payload["customer"] = customer_id
-        else:
-            checkout_payload["customer_email"] = user["email"]
+        checkout_payload["customer_email"] = user["email"]
         session = stripe_lib.checkout.Session.create(**checkout_payload)
         return {"checkout_url": session.url, "provider": "stripe"}
     except Exception as e:
