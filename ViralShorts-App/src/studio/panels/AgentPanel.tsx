@@ -303,7 +303,7 @@ const FALLBACK_IMAGE_MODELS: AgentModelOption[] = [
 
 const FALLBACK_VIDEO_MODELS: AgentModelOption[] = [
     { id: 'grok_imagine_video', name: 'Grok Imagine Video', provider: 'xAI', recommended: true, intelligence: 4, speed: 5, description: '$0.05/sec at 720p. Cheapest Grok I2V lane.' },
-    { id: 'grok_imagine_video_15', name: 'Grok Imagine Video 1.5', provider: 'xAI', intelligence: 5, speed: 4, description: '$0.14/sec at 720p. Higher quality Grok I2V.' },
+    { id: 'grok_imagine_video_15', name: 'Grok Imagine Video 1.5', provider: 'xAI', intelligence: 5, speed: 4, description: '$0.08/sec at 720p. Higher quality Grok I2V.' },
     { id: 'grok_imagine_video_15_1080p', name: 'Grok Imagine Video 1.5 1080p', provider: 'xAI', intelligence: 5, speed: 2, description: '$0.25/sec at 1080p. Expensive final tests only.' },
     { id: 'seedance', name: 'Seedance 2.0', provider: 'legacy', intelligence: 4, speed: 4, description: 'Legacy balanced Studio I2V lane.' },
 ];
@@ -1059,6 +1059,7 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
         pollResetKey,
         getToken,
         onProgress: upsertProgressLine,
+        onRunningPreview: appendJobDeliverable,
         onJobComplete: (snap: AgentJobSnapshot) => {
             const ownerSession = jobSessionRef.current.get(snap.job_id);
             if (ownerSession && ownerSession !== sessionIdRef.current) return;

@@ -13,6 +13,20 @@ from pathlib import Path
 from typing import Any
 
 USD_QUANT = Decimal("0.000001")
+XAI_IMAGE_RATES = {
+    "grok_imagine": Decimal("0.05"),
+    "grok_imagine_quality": Decimal("0.05"),
+    "grok-imagine-image-quality": Decimal("0.05"),
+    "grok_imagine_standard": Decimal("0.02"),
+    "grok-imagine-image": Decimal("0.02"),
+}
+XAI_VIDEO_RATES = {
+    "grok_imagine_video": Decimal("0.05"),
+    "grok_imagine_video_15": Decimal("0.08"),
+    "grok_imagine_video_15_1080p": Decimal("0.25"),
+    "xai:grok-imagine-video": Decimal("0.05"),
+    "xai:grok-imagine-video-1.5": Decimal("0.08"),
+}
 
 
 def _dec(value: Any) -> Decimal:
@@ -219,6 +233,15 @@ def price_fal_image(*, edit: bool = False, quantity: int = 1) -> tuple[Decimal, 
     return amount, note, key
 
 
+def price_xai_image(model_id: str, *, quantity: int = 1) -> tuple[Decimal, str, str]:
+    key = str(model_id or "grok_imagine").strip().lower()
+    unit = XAI_IMAGE_RATES.get(key, XAI_IMAGE_RATES["grok_imagine"])
+    qty = max(1, int(quantity or 1))
+    amount = _usd(unit * Decimal(qty))
+    api_model = "grok-imagine-image-quality" if unit == Decimal("0.05") else "grok-imagine-image"
+    return amount, f"xai:{api_model}_per_image", key
+
+
 def price_fal_tts(text: str) -> tuple[Decimal, str, str, float]:
     chars = max(1, len(str(text or "")))
     thousands = chars / 1000.0
@@ -253,12 +276,46 @@ def price_fal_video(endpoint: str, *, seconds: float) -> tuple[Decimal, str, str
     return amount, note, key
 
 
+def price_xai_video(model_or_endpoint: str, *, seconds: float, resolution: str = "") -> tuple[Decimal, str, str]:
+    raw = str(model_or_endpoint or "").strip().lower()
+    res = str(resolution or "").strip().lower()
+    if raw == "grok_imagine_video_15_1080p" or ("1.5" in raw and res == "1080p"):
+        key = "grok_imagine_video_15_1080p"
+    elif raw == "grok_imagine_video_15" or "1.5" in raw:
+        key = "grok_imagine_video_15"
+    else:
+        key = "grok_imagine_video"
+    qty = max(0.0, float(seconds or 0.0))
+    amount = _usd(XAI_VIDEO_RATES[key] * Decimal(str(qty)))
+    return amount, f"xai:{key}_per_second", key
+
+
 def attach_to_progress(workspace: Path, payload: dict[str, Any]) -> dict[str, Any]:
     summary = load_summary(workspace)
+    by_provider = summary.get("by_provider_decimal") or summary.get("by_provider") or {}
+    provider_labels = {
+        "fal": "FAL",
+        "xai": "xAI",
+        "simulation": "Simulation",
+    }
+    active_providers: list[str] = []
+    if isinstance(by_provider, dict):
+        for provider, amount in by_provider.items():
+            if _usd(amount) > 0:
+                active_providers.append(str(provider))
+    if len(active_providers) == 1:
+        spend_label = f"{provider_labels.get(active_providers[0], active_providers[0])} spent so far"
+    elif len(active_providers) > 1:
+        spend_label = "Total provider spend so far"
+    else:
+        spend_label = "Provider spend so far"
     payload["cost"] = {
         "actual_usd": summary.get("total_usd", 0.0),
         "actual_usd_decimal": summary.get("total_usd_decimal", "0.000000"),
         "event_count": summary.get("event_count", 0),
+        "by_provider": summary.get("by_provider", {}),
+        "by_provider_decimal": summary.get("by_provider_decimal", {}),
+        "spend_label": spend_label,
         "status": summary.get("status", "derived_from_job_events"),
     }
     return payload

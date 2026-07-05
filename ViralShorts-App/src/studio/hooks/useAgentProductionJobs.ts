@@ -17,6 +17,7 @@ export function useAgentProductionJobs({
     onJobComplete,
     onJobFailed,
     onAwaitingApproval,
+    onRunningPreview,
     onProgress,
     autoFinalizeLongform = false,
     onAutoFinalizeStarted,
@@ -30,6 +31,7 @@ export function useAgentProductionJobs({
     onJobComplete?: (snap: AgentJobSnapshot) => void;
     onJobFailed?: (snap: AgentJobSnapshot) => void;
     onAwaitingApproval?: (snap: AgentJobSnapshot) => void;
+    onRunningPreview?: (snap: AgentJobSnapshot) => void;
     onProgress?: (update: ProductionProgressUpdate, snap: AgentJobSnapshot) => void;
     /** When true, POST finalize as soon as stills gate opens (auto-approve mode). */
     autoFinalizeLongform?: boolean;
@@ -73,6 +75,13 @@ export function useAgentProductionJobs({
             }
 
             setSnapshots((prev) => ({ ...prev, [track.job_id]: data }));
+            if (
+                data.status === 'running'
+                && data.kind === 'shortform'
+                && (data.still_preview_urls?.length || data.scenes?.some((scene) => scene.still_preview_url))
+            ) {
+                onRunningPreview?.(data);
+            }
 
             const key = `${snapshotKind}:${track.job_id}`;
             if (!isTerminalJob(data)) return;
@@ -108,6 +117,7 @@ export function useAgentProductionJobs({
             onAwaitingApproval,
             onJobComplete,
             onJobFailed,
+            onRunningPreview,
             onProgress,
             sessionId,
         ],

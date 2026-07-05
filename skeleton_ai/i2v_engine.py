@@ -57,6 +57,7 @@ XAI_VIDEO_STATUS_ENDPOINT = "https://api.x.ai/v1/videos/{request_id}"
 XAI_GROK_VIDEO_ENDPOINT = "xai:grok-imagine-video"
 XAI_GROK_VIDEO_15_ENDPOINT = "xai:grok-imagine-video-1.5"
 XAI_GROK_VIDEO_15_1080P_ENDPOINT = "xai:grok-imagine-video-1.5:1080p"
+XAI_USD_TICKS_PER_DOLLAR = 10_000_000_000
 
 # Standard tier fallback chain — first model that doesn't 422 wins.
 STANDARD_FALLBACK_CHAIN = [SEEDANCE_ENDPOINT, PIXVERSE_V6_ENDPOINT]
@@ -190,6 +191,17 @@ def _image_data_uri(path: Path) -> str:
     return f"data:{mime};base64,{data}"
 
 
+def _xai_cost_usd(payload: dict) -> float | None:
+    try:
+        usage = payload.get("usage") if isinstance(payload, dict) else None
+        ticks = usage.get("cost_in_usd_ticks") if isinstance(usage, dict) else None
+        if ticks is None:
+            return None
+        return max(0.0, float(ticks) / XAI_USD_TICKS_PER_DOLLAR)
+    except Exception:
+        return None
+
+
 def _xai_endpoint_config(endpoint: str) -> tuple[str, str]:
     if endpoint == XAI_GROK_VIDEO_15_1080P_ENDPOINT:
         return "grok-imagine-video-1.5", "1080p"
@@ -241,6 +253,7 @@ def _xai_i2v_result(endpoint: str, motion_prompt: str, still_path: Path, *, dura
                 status_body["_xai_model"] = model
                 status_body["_xai_request_id"] = request_id
                 status_body["_xai_resolution"] = resolution
+                status_body["_xai_cost_usd"] = _xai_cost_usd(status_body)
                 return status_body
             if status in {"failed", "expired", "cancelled", "canceled", "error"}:
                 raise I2VError(f"{model} {status} on {request_id}: {status_body}")
@@ -465,6 +478,7 @@ def generate(
                     "video_url": video_url,
                     "xai_model": result.get("_xai_model"),
                     "xai_resolution": result.get("_xai_resolution"),
+                    "xai_cost_usd": result.get("_xai_cost_usd"),
                 },
                 indent=2,
             ),

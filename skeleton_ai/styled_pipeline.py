@@ -22,7 +22,7 @@ from .i2v_engine import ac_cost_for_video_model, generate as gen_clip, resolve_v
 from .pipeline import Beat, _write_progress, apply_wardrobe_motion_lock, check_cancelled, split_script_into_beats
 from .prompts.category_registry import get_category
 from .scripting_grok import GrokClient, build_script_prompt
-from .styled_stills import build_styled_scene_prompt, generate_still_t2i
+from .styled_stills import StyledStillError, build_styled_scene_prompt, generate_still_t2i, generate_still_xai_edit
 from .voice_fal import FalVoiceClient
 
 
@@ -572,21 +572,44 @@ def plan_scenes(
             sfx_direction = f"{str(sound_design_brief).strip()} {sfx_direction}".strip()
         still_target = stills_dir / f"{sid}.png"
         if not (still_target.exists() and still_target.stat().st_size > 0):
+            provider_name = "fal"
             with production_slot(
                 "stills",
                 on_wait=_slot_wait_progress(workspace, "stills_queue", f"Scene {i + 1} still"),
             ):
                 if is_skeleton and selected_image_model in {"grok_imagine", "grok_imagine_standard"}:
-                    generate_still_t2i(
-                        prompt,
-                        still_target,
-                        negative_prompt="human skin, muscle tissue, nudity, gore, deformed anatomy, extra limbs, text, watermark",
-                        seed=420042 + i,
-                        image_model_id=selected_image_model,
-                    )
-                    amount, note, key = production_costs.price_fal_image(edit=False)
-                    note = f"xAI {selected_image_model} still generation"
-                    key = selected_image_model
+                    provider_name = "xai"
+                    amount, note, key = production_costs.price_xai_image(selected_image_model)
+                    try:
+                        still_result = generate_still_t2i(
+                            prompt,
+                            still_target,
+                            negative_prompt="human skin, muscle tissue, nudity, gore, deformed anatomy, extra limbs, text, watermark",
+                            seed=420042 + i,
+                            image_model_id=selected_image_model,
+                        )
+                        if still_result.get("cost_usd") is not None:
+                            amount = production_costs._usd(still_result.get("cost_usd"))
+                    except StyledStillError as exc:
+                        charged = exc.cost_usd if exc.cost_usd is not None else 0.0
+                        if charged:
+                            err_provider, err_amount, err_note = _metered_provider_values(
+                                "xai",
+                                charged,
+                                f"{note}: failed request",
+                            )
+                            production_costs.record_event(
+                                workspace,
+                                stage="stills",
+                                provider=err_provider,
+                                operation=key,
+                                usd=err_amount,
+                                quantity=1,
+                                unit="image",
+                                scene_index=i,
+                                metadata={"pricing_note": err_note, "cached": False, "failed": True},
+                            )
+                        raise
                 elif is_skeleton:
                     from .canonical_edit import generate_still_edit
 
@@ -605,15 +628,42 @@ def plan_scenes(
                         )
                         amount, note, key = production_costs.price_fal_image(edit=True)
                     else:
-                        generate_still_t2i(
-                            prompt,
-                            still_target,
-                            negative_prompt=style.negative_prompt,
-                            seed=420042 + i,
-                            image_model_id=selected_image_model,
-                        )
-                        amount, note, key = production_costs.price_fal_image(edit=False)
-            provider, amount, note = _metered_provider_values("fal", amount, note)
+                        if selected_image_model in {"grok_imagine", "grok_imagine_standard"}:
+                            provider_name = "xai"
+                            amount, note, key = production_costs.price_xai_image(selected_image_model)
+                        else:
+                            amount, note, key = production_costs.price_fal_image(edit=False)
+                        try:
+                            still_result = generate_still_t2i(
+                                prompt,
+                                still_target,
+                                negative_prompt=style.negative_prompt,
+                                seed=420042 + i,
+                                image_model_id=selected_image_model,
+                            )
+                            if provider_name == "xai" and still_result.get("cost_usd") is not None:
+                                amount = production_costs._usd(still_result.get("cost_usd"))
+                        except StyledStillError as exc:
+                            charged = exc.cost_usd if exc.cost_usd is not None else 0.0
+                            if provider_name == "xai" and charged:
+                                err_provider, err_amount, err_note = _metered_provider_values(
+                                    "xai",
+                                    charged,
+                                    f"{note}: failed request",
+                                )
+                                production_costs.record_event(
+                                    workspace,
+                                    stage="stills",
+                                    provider=err_provider,
+                                    operation=key,
+                                    usd=err_amount,
+                                    quantity=1,
+                                    unit="image",
+                                    scene_index=i,
+                                    metadata={"pricing_note": err_note, "cached": False, "failed": True},
+                                )
+                            raise
+            provider, amount, note = _metered_provider_values(provider_name, amount, note)
             production_costs.record_event(
                 workspace,
                 stage="stills",
@@ -638,6 +688,7 @@ def plan_scenes(
             "image_model_id": selected_image_model or prev.get("image_model_id") or "",
             "status": "still_ready", "duration_sec": float(prev.get("duration_sec", 5.0)),
         })
+        save_scenes(workspace, scenes)
     save_scenes(workspace, scenes)
 
     _write_progress(workspace, stage="awaiting_scene_review", progress=80, detail="Review scenes")
@@ -673,7 +724,48 @@ def regenerate_scene(workspace: Path, index: int, *, seed: int | None = None) ->
     style = _style_for(workspace)
     still_target = stills_dir / f"{sc['sid']}.png"
     still_target.unlink(missing_ok=True)
-    if style.pipeline == "skeleton_host":
+    image_model_id = str(sc.get("image_model_id") or "").strip().lower()
+    if image_model_id in {"grok_imagine", "grok_imagine_standard"}:
+        amount, note, key = production_costs.price_xai_image(image_model_id)
+        try:
+            result = generate_still_t2i(
+                sc["prompt"],
+                still_target,
+                negative_prompt=style.negative_prompt,
+                seed=int(seed if seed is not None else (990000 + index)),
+                image_model_id=image_model_id,
+            )
+            if result.get("cost_usd") is not None:
+                amount = production_costs._usd(result.get("cost_usd"))
+        except StyledStillError as exc:
+            charged = exc.cost_usd if exc.cost_usd is not None else 0.0
+            if charged:
+                provider, failed_amount, failed_note = _metered_provider_values("xai", charged, f"{note}: failed regenerate")
+                production_costs.record_event(
+                    workspace,
+                    stage="regenerate",
+                    provider=provider,
+                    operation=key,
+                    usd=failed_amount,
+                    quantity=1,
+                    unit="image",
+                    scene_index=index,
+                    metadata={"pricing_note": failed_note, "failed": True},
+                )
+            raise
+        provider, amount, note = _metered_provider_values("xai", amount, note)
+        production_costs.record_event(
+            workspace,
+            stage="regenerate",
+            provider=provider,
+            operation=key,
+            usd=amount,
+            quantity=1,
+            unit="image",
+            scene_index=index,
+            metadata={"pricing_note": note},
+        )
+    elif style.pipeline == "skeleton_host":
         from .canonical_edit import generate_still_edit
 
         generate_still_edit(
@@ -681,10 +773,36 @@ def regenerate_scene(workspace: Path, index: int, *, seed: int | None = None) ->
             still_target,
             seed=int(seed if seed is not None else (990000 + index)),
         )
+        amount, note, key = production_costs.price_fal_image(edit=True)
+        provider, amount, note = _metered_provider_values("fal", amount, note)
+        production_costs.record_event(
+            workspace,
+            stage="regenerate",
+            provider=provider,
+            operation=key,
+            usd=amount,
+            quantity=1,
+            unit="image",
+            scene_index=index,
+            metadata={"pricing_note": note},
+        )
     else:
         generate_still_t2i(
             sc["prompt"], still_target, negative_prompt=style.negative_prompt,
             seed=int(seed if seed is not None else (990000 + index)),
+        )
+        amount, note, key = production_costs.price_fal_image(edit=False)
+        provider, amount, note = _metered_provider_values("fal", amount, note)
+        production_costs.record_event(
+            workspace,
+            stage="regenerate",
+            provider=provider,
+            operation=key,
+            usd=amount,
+            quantity=1,
+            unit="image",
+            scene_index=index,
+            metadata={"pricing_note": note},
         )
     # New still invalidates any existing animation for this scene.
     (workspace / "clips" / f"{sc['sid']}.mp4").unlink(missing_ok=True)
@@ -760,12 +878,6 @@ def edit_scene(workspace: Path, index: int, instruction: str, scope: str = "full
     if not still_target.exists():
         raise RuntimeError(f"scene {index} has no still to edit")
 
-    current_url = str(still_target)
-    if not render_simulation.enabled():
-        import fal_client
-
-        _ensure_fal()
-        current_url = fal_client.upload_file(str(still_target))
     edit_prompt, normalized_scope = _scoped_edit_prompt(
         str(sc.get("prompt") or ""),
         instruction,
@@ -773,28 +885,88 @@ def edit_scene(workspace: Path, index: int, instruction: str, scope: str = "full
     )
     out_tmp = stills_dir / f"{sc['sid']}_edit.png"
     out_tmp.unlink(missing_ok=True)
-    extra_refs: list[str] | None = None
-    if _style_for(workspace).pipeline == "skeleton_host":
-        public_dir = Path(__file__).resolve().parents[1] / "ViralShorts-App" / "public"
-        canonical = next(
-            (
-                path
-                for path in (
-                    public_dir / "canonical-skeleton-master-hires.png",
-                    public_dir / "canonical-skeleton-master.png",
+    image_model_id = str(sc.get("image_model_id") or "").strip().lower()
+    if image_model_id in {"grok_imagine", "grok_imagine_standard"}:
+        amount, note, key = production_costs.price_xai_image(image_model_id)
+        try:
+            result = generate_still_xai_edit(
+                edit_prompt,
+                out_tmp,
+                reference_path=still_target,
+                image_model_id=image_model_id,
+            )
+            if result.get("cost_usd") is not None:
+                amount = production_costs._usd(result.get("cost_usd"))
+        except StyledStillError as exc:
+            charged = exc.cost_usd if exc.cost_usd is not None else 0.0
+            if charged:
+                provider, failed_amount, failed_note = _metered_provider_values("xai", charged, f"{note}: failed edit")
+                production_costs.record_event(
+                    workspace,
+                    stage="edit",
+                    provider=provider,
+                    operation=f"{key}_edit",
+                    usd=failed_amount,
+                    quantity=1,
+                    unit="image",
+                    scene_index=index,
+                    metadata={"pricing_note": failed_note, "failed": True, "edit_scope": normalized_scope},
                 )
-                if path.is_file()
-            ),
-            None,
+            raise
+        provider, amount, note = _metered_provider_values("xai", amount, note)
+        production_costs.record_event(
+            workspace,
+            stage="edit",
+            provider=provider,
+            operation=f"{key}_edit",
+            usd=amount,
+            quantity=1,
+            unit="image",
+            scene_index=index,
+            metadata={"pricing_note": note, "edit_scope": normalized_scope},
         )
-        if canonical is not None:
-            extra_refs = [str(canonical)]
-    generate_still_edit(
-        edit_prompt,
-        out_tmp,
-        master_url=current_url,
-        extra_refs=extra_refs,
-    )
+    else:
+        current_url = str(still_target)
+        if not render_simulation.enabled():
+            import fal_client
+
+            _ensure_fal()
+            current_url = fal_client.upload_file(str(still_target))
+        extra_refs: list[str] | None = None
+        if _style_for(workspace).pipeline == "skeleton_host":
+            public_dir = Path(__file__).resolve().parents[1] / "ViralShorts-App" / "public"
+            canonical = next(
+                (
+                    path
+                    for path in (
+                        public_dir / "canonical-skeleton-master-hires.png",
+                        public_dir / "canonical-skeleton-master.png",
+                    )
+                    if path.is_file()
+                ),
+                None,
+            )
+            if canonical is not None:
+                extra_refs = [str(canonical)]
+        generate_still_edit(
+            edit_prompt,
+            out_tmp,
+            master_url=current_url,
+            extra_refs=extra_refs,
+        )
+        amount, note, key = production_costs.price_fal_image(edit=True)
+        provider, amount, note = _metered_provider_values("fal", amount, note)
+        production_costs.record_event(
+            workspace,
+            stage="edit",
+            provider=provider,
+            operation=key,
+            usd=amount,
+            quantity=1,
+            unit="image",
+            scene_index=index,
+            metadata={"pricing_note": note, "edit_scope": normalized_scope},
+        )
     # Promote the edit to the canonical still; drop stale animation.
     still_target.unlink(missing_ok=True)
     out_tmp.rename(still_target)
@@ -893,8 +1065,18 @@ def animate_scenes_stage(
                 clip_meta = {}
             endpoint = str(clip_meta.get("endpoint") or "")
             duration = float(clip_meta.get("duration_sec") or sc.get("duration_sec") or 5.0)
-            amount, note, key = production_costs.price_fal_video(endpoint, seconds=duration)
-            provider, amount, note = _metered_provider_values("fal", amount, note)
+            if endpoint.startswith("xai:"):
+                amount, note, key = production_costs.price_xai_video(
+                    str(clip_meta.get("video_model") or endpoint),
+                    seconds=duration,
+                    resolution=str(clip_meta.get("xai_resolution") or ""),
+                )
+                if clip_meta.get("xai_cost_usd") is not None:
+                    amount = production_costs._usd(clip_meta.get("xai_cost_usd"))
+                provider, amount, note = _metered_provider_values("xai", amount, note)
+            else:
+                amount, note, key = production_costs.price_fal_video(endpoint, seconds=duration)
+                provider, amount, note = _metered_provider_values("fal", amount, note)
             production_costs.record_event(
                 workspace,
                 stage="animation",

@@ -448,7 +448,7 @@ def _video_cost(video_model: str, seconds: float) -> tuple[float, float, str]:
         cost = round(0.05 * qty, 4)
         return cost, _unit_rate(cost, qty), "xai:grok_imagine_video_per_second"
     if model == "grok_imagine_video_15":
-        cost = round(0.14 * qty, 4)
+        cost = round(0.08 * qty, 4)
         return cost, _unit_rate(cost, qty), "xai:grok_imagine_video_15_per_second"
     if model == "grok_imagine_video_15_1080p":
         cost = round(0.25 * qty, 4)

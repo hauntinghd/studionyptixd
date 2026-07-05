@@ -501,6 +501,21 @@ def _shortform_status(job_id: str) -> dict[str, Any]:
             "running": True,
             "title": "Short-form video",
         }
+        scene_snapshots = _shortform_scene_snapshots(job_id, workspace)
+        scene_count = len(scene_snapshots) or _shortform_scene_count(workspace)
+        if scene_count > 0:
+            snap["current_scene"] = scene_count
+            snap["total_scenes"] = scene_count
+            snap["still_count"] = scene_count
+            snap["scenes"] = scene_snapshots
+            snap["still_preview_urls"] = [
+                str(scene.get("still_preview_url"))
+                for scene in scene_snapshots[:12]
+                if scene.get("still_preview_url")
+            ] or [
+                f"/api/studio-agent/jobs/{job_id}/still/{i}"
+                for i in range(min(scene_count, 12))
+            ]
         _attach_cost(snap)
         return _attach_production_control(
             snap,

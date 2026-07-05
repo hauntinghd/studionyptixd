@@ -44,6 +44,7 @@ export default function AgentRenderDock({
     const actualCost = snapshot.cost?.actual_usd_decimal
         || (typeof snapshot.cost?.actual_usd === 'number' ? snapshot.cost.actual_usd.toFixed(6) : '');
     const costLabel = actualCost && Number(actualCost) > 0 ? `$${actualCost}` : '';
+    const spendLabel = snapshot.cost?.spend_label || 'Provider spend so far';
 
     return (
         <div className="pointer-events-auto fixed bottom-5 right-5 z-[70] w-[min(100vw-2rem,340px)]">
@@ -134,7 +135,7 @@ export default function AgentRenderDock({
                         </p>
                         {costLabel ? (
                             <p className="mt-1 text-[10px] font-medium text-cyan-200/80">
-                                FAL spent so far: <span className="tabular-nums">{costLabel}</span>
+                                {spendLabel}: <span className="tabular-nums">{costLabel}</span>
                             </p>
                         ) : null}
                         <div className="mt-2 flex flex-wrap items-center gap-2">
@@ -150,7 +151,7 @@ export default function AgentRenderDock({
                                     disabled={cancelling}
                                     onClick={onCancel}
                                     className="inline-flex items-center gap-1 rounded-lg border border-red-500/30 bg-red-500/10 px-2 py-1 text-[11px] font-semibold text-red-100 hover:bg-red-500/20 disabled:opacity-50"
-                                    title="Stop this render at the next scene (no more fal spend)"
+                                    title="Stop this render at the next scene (no more provider spend)"
                                 >
                                     <Square className="h-3 w-3" />
                                     {cancelling ? 'Cancelling…' : 'Cancel'}

@@ -87,6 +87,9 @@ export type AgentJobSnapshot = {
         actual_usd?: number;
         actual_usd_decimal?: string;
         event_count?: number;
+        by_provider?: Record<string, number>;
+        by_provider_decimal?: Record<string, string>;
+        spend_label?: string;
         status?: string;
     };
 };

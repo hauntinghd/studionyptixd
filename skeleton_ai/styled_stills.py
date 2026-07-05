@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import base64
+import json
 from pathlib import Path
 from typing import Any
 
@@ -18,10 +19,72 @@ from . import render_simulation
 
 SEEDREAM_T2I_URL = "https://fal.run/fal-ai/bytedance/seedream/v4.5/text-to-image"
 XAI_IMAGE_URL = "https://api.x.ai/v1/images/generations"
+XAI_IMAGE_EDIT_URL = "https://api.x.ai/v1/images/edits"
+XAI_USD_TICKS_PER_DOLLAR = 10_000_000_000
 
 
 class StyledStillError(RuntimeError):
-    pass
+    def __init__(
+        self,
+        message: str,
+        *,
+        cost_usd: float | None = None,
+        provider: str = "",
+        operation: str = "",
+    ) -> None:
+        super().__init__(message)
+        self.cost_usd = cost_usd
+        self.provider = provider
+        self.operation = operation
+
+
+def _xai_error_cost_usd(text: str) -> float | None:
+    try:
+        payload = json.loads(str(text or ""))
+        usage = payload.get("usage") if isinstance(payload, dict) else None
+        ticks = usage.get("cost_in_usd_ticks") if isinstance(usage, dict) else None
+        if ticks is None:
+            return None
+        return max(0.0, float(ticks) / XAI_USD_TICKS_PER_DOLLAR)
+    except Exception:
+        return None
+
+
+def _xai_payload_cost_usd(payload: dict[str, Any]) -> float | None:
+    try:
+        usage = payload.get("usage") if isinstance(payload, dict) else None
+        ticks = usage.get("cost_in_usd_ticks") if isinstance(usage, dict) else None
+        if ticks is None:
+            return None
+        return max(0.0, float(ticks) / XAI_USD_TICKS_PER_DOLLAR)
+    except Exception:
+        return None
+
+
+def _data_uri(path: Path) -> str:
+    suffix = path.suffix.lower()
+    mime = "image/jpeg" if suffix in {".jpg", ".jpeg"} else "image/png"
+    return f"data:{mime};base64,{base64.b64encode(path.read_bytes()).decode('ascii')}"
+
+
+def _write_xai_image_response(response_json: dict[str, Any], out_path: Path) -> dict[str, Any]:
+    data = (response_json or {}).get("data") or []
+    item = (data[0] or {}) if data else {}
+    b64 = str(item.get("b64_json") or "").strip()
+    url = str(item.get("url") or "").strip()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    if b64:
+        out_path.write_bytes(base64.b64decode(b64))
+    elif url:
+        _download(url, out_path)
+    else:
+        raise StyledStillError(f"xAI returned no image data: {str(response_json)[:200]}")
+    return {
+        "local_path": str(out_path),
+        "cdn_url": url or None,
+        "cost_usd": _xai_payload_cost_usd(response_json),
+        "bytes": out_path.stat().st_size,
+    }
 
 
 def _ensure_fal() -> None:
@@ -110,19 +173,19 @@ def generate_still_t2i(
                 },
             )
         if response.status_code not in (200, 201):
-            raise StyledStillError(f"{xai_model} {response.status_code}: {response.text[:300]}")
-        data = (response.json() or {}).get("data") or []
-        b64 = str((data[0] or {}).get("b64_json") or "").strip() if data else ""
-        if not b64:
-            raise StyledStillError(f"{xai_model} returned no image data: {response.text[:200]}")
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        out_path.write_bytes(base64.b64decode(b64))
+            raise StyledStillError(
+                f"{xai_model} {response.status_code}: {response.text[:300]}",
+                cost_usd=_xai_error_cost_usd(response.text),
+                provider="xai",
+                operation=normalized_model,
+            )
+        response_json = response.json() or {}
+        written = _write_xai_image_response(response_json, out_path)
         return {
-            "local_path": str(out_path),
+            **written,
             "provider": normalized_model,
             "xai_model": xai_model,
             "seed": seed,
-            "bytes": out_path.stat().st_size,
         }
 
     _ensure_fal()
@@ -162,6 +225,62 @@ def generate_still_t2i(
         "provider": "seedream_v45_t2i",
         "seed": seed,
         "bytes": out_path.stat().st_size,
+    }
+
+
+def generate_still_xai_edit(
+    prompt: str,
+    out_path: Path,
+    *,
+    reference_path: str | Path,
+    image_model_id: str = "grok_imagine",
+) -> dict[str, Any]:
+    out_path = Path(out_path)
+    ref = Path(reference_path)
+    if not ref.is_file() or ref.stat().st_size <= 1024:
+        raise StyledStillError("xAI image edit requires a usable source image")
+    if render_simulation.enabled():
+        render_simulation.write_still(out_path, label="xAI image edit simulation")
+        return {
+            "local_path": str(out_path),
+            "provider": "simulation_xai_image_edit",
+            "simulated": True,
+            "cost_usd": 0.0,
+        }
+    api_key = str(os.environ.get("XAI_API_KEY") or "").strip()
+    if not api_key:
+        raise StyledStillError("xAI image edit requires XAI_API_KEY")
+    normalized_model = str(image_model_id or "grok_imagine").strip().lower()
+    xai_model = "grok-imagine-image" if normalized_model == "grok_imagine_standard" else "grok-imagine-image-quality"
+    payload = {
+        "model": xai_model,
+        "prompt": str(prompt or "")[:3500],
+        "image": {"url": _data_uri(ref), "type": "image_url"},
+        "response_format": "b64_json",
+        "resolution": "2k",
+    }
+    with httpx.Client(timeout=240, follow_redirects=True) as client:
+        response = client.post(
+            XAI_IMAGE_EDIT_URL,
+            json=payload,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+        )
+    if response.status_code not in (200, 201):
+        raise StyledStillError(
+            f"{xai_model} edit {response.status_code}: {response.text[:300]}",
+            cost_usd=_xai_error_cost_usd(response.text),
+            provider="xai",
+            operation=f"{normalized_model}_edit",
+        )
+    response_json = response.json() or {}
+    written = _write_xai_image_response(response_json, out_path)
+    return {
+        **written,
+        "provider": f"{normalized_model}_edit",
+        "xai_model": xai_model,
     }
 
 
