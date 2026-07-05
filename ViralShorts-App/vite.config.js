@@ -4,14 +4,14 @@ import react from '@vitejs/plugin-react';
 function googleSiteVerificationPlugin() {
     return {
         name: 'google-site-verification',
-        transformIndexHtml: function (html) {
-            var token = String(process.env.VITE_GOOGLE_SITE_VERIFICATION || '').trim();
+        transformIndexHtml(html) {
+            const token = String(process.env.VITE_GOOGLE_SITE_VERIFICATION || '').trim();
             if (!token)
                 return html;
-            var tag = "<meta name=\"google-site-verification\" content=\"".concat(token, "\" />");
+            const tag = `<meta name="google-site-verification" content="${token}" />`;
             if (html.includes('google-site-verification'))
                 return html;
-            return html.replace('</head>', "    ".concat(tag, "\n</head>"));
+            return html.replace('</head>', `    ${tag}\n</head>`);
         },
     };
 }
@@ -25,7 +25,7 @@ export default defineConfig({
         // (DashboardPage.tsx) this drops cold-refresh payload materially.
         rollupOptions: {
             output: {
-                manualChunks: function (id) {
+                manualChunks(id) {
                     if (!id.includes('node_modules'))
                         return;
                     if (id.includes('react-dom') || id.includes('scheduler'))

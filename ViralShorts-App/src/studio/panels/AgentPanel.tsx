@@ -3,7 +3,7 @@
  */
 import { useCallback, useContext, useEffect, useRef, useState, type ClipboardEvent } from 'react';
 import {
-    ArrowLeft, ArrowUp, BookOpen, Brain, Check, ChevronsLeft, ChevronsRight, History, Loader2,
+    ArrowLeft, ArrowUp, BookOpen, Brain, Check, ChevronsLeft, ChevronsRight, Clapperboard, History, ImageIcon, Loader2,
     MessageSquarePlus, Mic, MicOff, Palette, Paperclip, Play, RefreshCw, RotateCcw, Search, Shield,
     ShieldOff, Sparkles, Trash2, Users, Video, X, Zap,
 } from 'lucide-react';
@@ -47,6 +47,29 @@ interface ChatMessage {
     productionUpdate?: ProductionProgressUpdate;
 }
 
+function deliverableDisplayText(messageText: string, snap?: AgentJobSnapshot) {
+    if (!snap || snap.kind !== 'cliplab') return messageText;
+    const jobType = String(snap.job_type || '').toLowerCase();
+    const isIngest = jobType === 'cliplab_ingest' || snap.job_id.startsWith('clipi_');
+    const isAnalyze = jobType === 'cliplab_analyze' || snap.job_id.startsWith('clipa_');
+    const isRender = jobType === 'cliplab_render' || snap.job_id.startsWith('clipr_');
+    if (snap.status === 'running') return 'ClipLab is working - track progress in the dock.';
+    if (snap.status === 'failed') return `ClipLab failed: ${snap.error || 'unknown error'}`;
+    if (isIngest) {
+        return 'ClipLab ingest is ready. The source video is loaded; continue to analyze and pick clip moments.';
+    }
+    if (isAnalyze) {
+        const count = snap.segment_count || snap.segments?.length || 0;
+        return `ClipLab analysis is ready. ${count} candidate segment(s) were found; continue to render the strongest 9:16 clips.`;
+    }
+    if (isRender) {
+        const clips = snap.clip_count || snap.clips?.length || 0;
+        const packages = snap.upload_package_count || snap.upload_packages?.length || 0;
+        return `ClipLab clips are ready. ${clips} clip(s) and ${packages} upload package(s) are available.`;
+    }
+    return 'ClipLab step is ready. Continue to the next ClipLab step.';
+}
+
 type VerificationStepStatus = 'pending' | 'running' | 'done' | 'error' | 'skipped';
 
 interface AgentVerificationStep {
@@ -65,7 +88,7 @@ interface SessionUiCache {
     dockDismissed: boolean;
 }
 
-const SESSION_UI_CACHE_VERSION = 1;
+const SESSION_UI_CACHE_VERSION = 2;
 const MAX_SESSION_UI_CACHE_ENTRIES = 30;
 const MAX_SESSION_UI_CACHE_MESSAGES = 160;
 const MAX_SESSION_UI_CACHE_MESSAGE_CHARS = 24000;
@@ -124,7 +147,7 @@ function trimCachedMessage(msg: ChatMessage): ChatMessage {
 function sanitizeSessionUiCacheEntry(entry: SessionUiCache): SessionUiCache {
     return {
         messages: (entry.messages || []).slice(-MAX_SESSION_UI_CACHE_MESSAGES).map(trimCachedMessage),
-        pending: entry.pending || [],
+        pending: [],
         jobTracks: entry.jobTracks || [],
         dockDismissed: Boolean(entry.dockDismissed),
     };
@@ -164,20 +187,22 @@ interface AttachedFile {
     name: string;
     size: number;
     mimeType: string;
-    kind: 'image' | 'text' | 'binary';
+    kind: 'image' | 'text' | 'video' | 'binary';
 }
 
 interface AttachmentPayload {
     name: string;
     mime_type: string;
     size: number;
-    kind: 'image' | 'text' | 'binary';
+    kind: 'image' | 'text' | 'video' | 'binary';
     text?: string;
     data_url?: string;
+    server_path?: string;
 }
 
 const MAX_AGENT_IMAGE_ATTACHMENTS = 4;
 const MAX_AGENT_IMAGE_BYTES = 8 * 1024 * 1024;
+const MAX_AGENT_VIDEO_BYTES = 3 * 1024 * 1024 * 1024;
 
 function readFileAsDataUrl(file: File): Promise<string> {
     return new Promise((resolve, reject) => {
@@ -248,7 +273,18 @@ const FALLBACK_MODELS: AgentModelOption[] = [
 type ContentFormat = 'short' | 'long' | 'both';
 type ReasoningDepth = 'fast' | 'balanced' | 'deep';
 type CaptionMode = 'word' | 'off';
-type VideoModel = 'ltx_budget' | 'seedance' | 'pixverse' | 'kling_pro';
+type AgentMode = 'studio' | 'cliplab';
+type CreativeModelProfile = {
+    id?: string;
+    label?: string;
+    provider?: string;
+    tier?: string;
+    summary?: string;
+    speed?: string;
+    estimated_unit_usd?: number;
+    billing_unit?: string;
+    enabled?: boolean;
+};
 
 const REASONING_OPTIONS: { id: ReasoningDepth; label: string; hint: string }[] = [
     { id: 'fast', label: 'Fast', hint: 'Quick answers, less deliberation' },
@@ -256,16 +292,68 @@ const REASONING_OPTIONS: { id: ReasoningDepth; label: string; hint: string }[] =
     { id: 'deep', label: 'Deep', hint: 'Thorough analysis before recommendations' },
 ];
 
-const VIDEO_MODEL_OPTIONS: { id: VideoModel; label: string; price: string; hint: string }[] = [
-    { id: 'ltx_budget', label: 'LTX Budget', price: 'lowest', hint: 'Cheapest full animation lane.' },
-    { id: 'seedance', label: 'Seedance 2.0', price: 'balanced', hint: 'Default balanced motion; falls back when needed.' },
-    { id: 'pixverse', label: 'Pixverse V6', price: 'standard+', hint: 'More permissive moderation for difficult scenes.' },
-    { id: 'kling_pro', label: 'Kling Pro', price: 'premium', hint: 'Best motion quality; highest cost and slower queue.' },
+const DEFAULT_IMAGE_MODEL = 'ernie_image';
+const DEFAULT_VIDEO_MODEL = 'seedance';
+
+const FALLBACK_IMAGE_MODELS: AgentModelOption[] = [
+    { id: 'grok_imagine', name: 'Grok Imagine Quality', provider: 'xAI', recommended: true, intelligence: 5, speed: 5, description: '$0.05/image. Best Grok still lane for skeleton and thumbnails.' },
+    { id: 'grok_imagine_standard', name: 'Grok Imagine', provider: 'xAI', intelligence: 4, speed: 5, description: '$0.02/image. Lower-cost Grok still tests.' },
+    { id: 'ernie_image', name: 'ERNIE-Image', provider: 'fal', intelligence: 4, speed: 5, description: '$0.01/image. Cheap default fal still lane.' },
 ];
 
-function normalizeVideoModel(value: unknown): VideoModel {
-    const raw = String(value || '').trim();
-    return VIDEO_MODEL_OPTIONS.some((opt) => opt.id === raw) ? raw as VideoModel : 'seedance';
+const FALLBACK_VIDEO_MODELS: AgentModelOption[] = [
+    { id: 'grok_imagine_video', name: 'Grok Imagine Video', provider: 'xAI', recommended: true, intelligence: 4, speed: 5, description: '$0.05/sec at 720p. Cheapest Grok I2V lane.' },
+    { id: 'grok_imagine_video_15', name: 'Grok Imagine Video 1.5', provider: 'xAI', intelligence: 5, speed: 4, description: '$0.14/sec at 720p. Higher quality Grok I2V.' },
+    { id: 'grok_imagine_video_15_1080p', name: 'Grok Imagine Video 1.5 1080p', provider: 'xAI', intelligence: 5, speed: 2, description: '$0.25/sec at 1080p. Expensive final tests only.' },
+    { id: 'seedance', name: 'Seedance 2.0', provider: 'legacy', intelligence: 4, speed: 4, description: 'Legacy balanced Studio I2V lane.' },
+];
+
+const VIDEO_MODEL_OPTIONS = FALLBACK_VIDEO_MODELS.map((model) => ({
+    id: model.id,
+    label: model.name,
+    price: String(model.provider || ''),
+}));
+
+function normalizeVideoModel(value: unknown): string {
+    return String(value || '').trim() || DEFAULT_VIDEO_MODEL;
+}
+
+function speedStars(speed?: string): number {
+    const raw = String(speed || '').toLowerCase();
+    if (raw.includes('very')) return 5;
+    if (raw.includes('fast')) return 5;
+    if (raw.includes('balanced')) return 4;
+    if (raw.includes('medium')) return 3;
+    if (raw.includes('slow')) return 2;
+    return 3;
+}
+
+function tierStars(tier?: string): number {
+    const raw = String(tier || '').toLowerCase();
+    if (raw.includes('elite')) return 5;
+    if (raw.includes('premium')) return 4;
+    return 3;
+}
+
+function creativeModelOption(profile: CreativeModelProfile): AgentModelOption | null {
+    const id = String(profile.id || '').trim();
+    if (!id || profile.enabled === false) return null;
+    const cost = typeof profile.estimated_unit_usd === 'number'
+        ? `$${profile.estimated_unit_usd.toFixed(3).replace(/0+$/, '').replace(/\.$/, '')}/${profile.billing_unit || 'unit'}`
+        : '';
+    return {
+        id,
+        name: String(profile.label || id),
+        provider: String(profile.provider || 'Other').toUpperCase() === 'XAI' ? 'xAI' : String(profile.provider || 'Other'),
+        recommended: id.includes('grok') || id === DEFAULT_IMAGE_MODEL || id === 'kling21_standard',
+        intelligence: tierStars(profile.tier),
+        speed: speedStars(profile.speed),
+        description: [cost, profile.summary].filter(Boolean).join('. '),
+    };
+}
+
+function selectedModelLabel(models: AgentModelOption[], selectedId: string, fallback: string): string {
+    return models.find((m) => m.id === selectedId)?.name || selectedId || fallback;
 }
 
 interface RenderStyleOption {
@@ -311,7 +399,8 @@ interface SessionSummary {
     pending_count?: number;
     content_format?: string;
     reasoning_depth?: string;
-    video_model?: VideoModel;
+    image_model?: string;
+    video_model?: string;
     caption_mode?: CaptionMode;
     captions_enabled?: boolean;
     channel_id?: string;
@@ -321,6 +410,7 @@ interface SessionSummary {
 }
 
 const STARTER_PROMPTS = [
+    'ClipLab: use my uploaded long video, study my channel + public demand, cut the best 9:16 clips with upload packages.',
     "I don't know what to film — audit my channel, rank 5 topics, and pick the best short vs long path.",
     'Reference: paste a MrBeast / Magnates URL — analyze pacing, blueprint scenes, then start a render.',
     'Long-form: outline a 12-min documentary, start render, and walk me through stills → finalize → download.',
@@ -400,43 +490,131 @@ function pendingActionLabel(tool: string) {
 }
 
 const PENDING_ACTION_ID_RE = /act_[a-f0-9]{12}/gi;
+const TITLE_STOPWORDS = new Set([
+    'the', 'and', 'for', 'with', 'that', 'this', 'when', 'they', 'them', 'you', 'your',
+    'into', 'from', 'short', 'video', 'scene', 'test', 'make', 'making', 'going', 'title',
+    'lets', 'let', 'will', 'we', 'one', 'exactly',
+]);
 
-function productionAlreadyApproved(
+function titleKeywords(value: string): Set<string> {
+    return new Set(
+        String(value || '')
+            .toLowerCase()
+            .match(/[a-z0-9]+/g)
+            ?.filter((word) => word.length > 2 && !TITLE_STOPWORDS.has(word)) || [],
+    );
+}
+
+function cleanTitleCandidate(value: string): string {
+    return String(value || '')
+        .trim()
+        .replace(/^[-:,. ]+|[-:,. ]+$/g, '')
+        .replace(/^(?:let'?s\s+see|let\s+us\s+see|maybe|okay|ok)\s*,?\s*/i, '')
+        .replace(/^[-:,. ]+|[-:,. ]+$/g, '');
+}
+
+function explicitTitleCandidate(text: string): string {
+    const value = String(text || '');
+    const quoted = Array.from(value.matchAll(/"([^"\n]{8,140})"/g))
+        .map((match) => cleanTitleCandidate(match[1] || ''))
+        .filter((candidate) => titleKeywords(candidate).size >= 2);
+    if (quoted.length) return quoted[quoted.length - 1];
+
+    const patterns = [
+        /(?:title\s+(?:we'?re\s+going\s+to\s+go\s+with|is|it)\s*[:,]?\s*)([^.\n]{8,140})/gi,
+        /(?:we\s+will\s+do|we'?ll\s+do|let'?s\s+do|lets\s+do)\s+([^.\n]{8,140})/gi,
+    ];
+    for (const pattern of patterns) {
+        const matches = Array.from(value.matchAll(pattern))
+            .map((match) => cleanTitleCandidate(match[1] || ''))
+            .filter((candidate) => titleKeywords(candidate).size >= 2);
+        if (matches.length) return matches[matches.length - 1];
+    }
+    return '';
+}
+
+function latestUserText(messages: Array<{ role?: string; content?: string }>, limit = 4): string {
+    return messages
+        .filter((m) => m.role === 'user')
+        .slice(-limit)
+        .map((m) => String(m.content || ''))
+        .join('\n');
+}
+
+function isProductionDiagnosticText(text: string): boolean {
+    const value = String(text || '').toLowerCase();
+    const startsNewProduction = /\b(?:let'?s|lets)\s+(?:do|make|produce|create|start|generate|render)\b/i.test(value)
+        || /\b(?:start|go ahead|do it|render|generate|make|begin)\b.*\b(?:it|this|video|render|production)\b/i.test(value);
+    if (startsNewProduction) return false;
+    return [
+        'wrong short',
+        'wrong video',
+        'wrong one',
+        'previous short',
+        'previous video',
+        'old short',
+        'old video',
+        'same video',
+        'same short',
+        'already made',
+        'already been made',
+        'why are you',
+        'why is it',
+        'what is causing',
+        "what's causing",
+        'causing it',
+        'stuck',
+        'do i need to start a new chat',
+        'need to start a new chat',
+        'trying to build',
+        'keeps trying',
+        'keep getting stuck',
+    ].some((term) => value.includes(term));
+}
+
+function pendingActionTitle(action: PendingAction): string {
+    const args = action.arguments || {};
+    return String(args.title || args.video_title || args.topic || '').trim();
+}
+
+function isStaleShortformPendingAction(
+    action: PendingAction,
     messages: Array<{ role?: string; content?: string }>,
 ): boolean {
-    return messages.some(
-        (m) =>
-            m.role === 'user'
-            && (String(m.content || '').startsWith('[User approved start_shortform_generate]')
-                || String(m.content || '').startsWith('[User approved start_longform_render]')),
-    );
+    if (action.tool !== 'start_shortform_generate') return false;
+    const latestText = latestUserText(messages);
+    if (isProductionDiagnosticText(latestText)) return true;
+    const actionTitle = pendingActionTitle(action);
+    const requestedTitle = explicitTitleCandidate(latestText);
+    if (!actionTitle || !requestedTitle) return false;
+    const actionWords = titleKeywords(actionTitle);
+    const requestedWords = titleKeywords(requestedTitle);
+    if (!actionWords.size || !requestedWords.size) return false;
+    let intersection = 0;
+    actionWords.forEach((word) => {
+        if (requestedWords.has(word)) intersection += 1;
+    });
+    const overlap = intersection / Math.max(1, Math.min(actionWords.size, requestedWords.size));
+    return overlap < 0.34;
+}
+
+function filterStalePendingActions(
+    actions: PendingAction[],
+    messages: Array<{ role?: string; content?: string }>,
+): PendingAction[] {
+    return actions.filter((action) => !isStaleShortformPendingAction(action, messages));
 }
 
 function mergePendingFromTranscript(
     messages: Array<{ role?: string; content?: string; tool_call_id?: string }>,
     serverPending: PendingAction[],
 ): PendingAction[] {
-    if (serverPending.length > 0) return serverPending;
-    if (productionAlreadyApproved(messages)) return [];
-
-    const recovered = new Map<string, PendingAction>();
-    for (const m of messages) {
-        const text = String(m.content || '');
-        if (!text.includes('awaiting_user_approval')) continue;
-        try {
-            const parsed = JSON.parse(text) as { action_id?: string; status?: string };
-            const aid = String(parsed.action_id || '').trim();
-            if (!aid || parsed.status !== 'awaiting_user_approval') continue;
-            recovered.set(aid, {
-                id: aid,
-                tool: 'start_shortform_generate',
-                summary: 'Tap Sync chat first so the server loads full args, then Approve & run',
-            });
-        } catch {
-            /* ignore */
-        }
-    }
-    return Array.from(recovered.values());
+    const filteredServerPending = filterStalePendingActions(serverPending, messages);
+    if (filteredServerPending.length > 0) return filteredServerPending;
+    // Do not resurrect approval cards from raw transcript JSON. The backend is
+    // the only safe source of runnable approval state because users can change
+    // direction after a tool approval was originally prepared.
+    return [];
 }
 
 function transcriptMentionsPendingAction(messages: ChatMessage[]): boolean {
@@ -488,6 +666,12 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
     const [model, setModel] = useState(FALLBACK_MODELS[0].id);
     const [modelCatalog, setModelCatalog] = useState<AgentModelOption[]>(FALLBACK_MODELS);
     const [modelPickerOpen, setModelPickerOpen] = useState(false);
+    const [imageModel, setImageModel] = useState(DEFAULT_IMAGE_MODEL);
+    const [imageModelCatalog, setImageModelCatalog] = useState<AgentModelOption[]>(FALLBACK_IMAGE_MODELS);
+    const [imageModelPickerOpen, setImageModelPickerOpen] = useState(false);
+    const [videoModelCatalog, setVideoModelCatalog] = useState<AgentModelOption[]>(FALLBACK_VIDEO_MODELS);
+    const [videoModelPickerOpen, setVideoModelPickerOpen] = useState(false);
+    const [visualModelMenuOpen, setVisualModelMenuOpen] = useState(false);
     const [approvalMode, setApprovalMode] = useState<ApprovalMode>('confirm');
     const [messages, setMessages] = useState<ChatMessage[]>([]);
     const [pending, setPending] = useState<PendingAction[]>([]);
@@ -505,8 +689,9 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
     const [productWebsite, setProductWebsite] = useState('');
     const [contentFormat, setContentFormat] = useState<ContentFormat>('both');
     const [reasoningDepth, setReasoningDepth] = useState<ReasoningDepth>('balanced');
+    const [agentMode, setAgentMode] = useState<AgentMode>('studio');
     const [renderStyle, setRenderStyle] = useState('cinematic');
-    const [videoModel, setVideoModel] = useState<VideoModel>('seedance');
+    const [videoModel, setVideoModel] = useState(DEFAULT_VIDEO_MODEL);
     const [captionMode, setCaptionMode] = useState<CaptionMode>('word');
     const [, setAnimate] = useState(true); // internal for session compat / patch; UI toggle removed per request
     const [showStyleGrid, setShowStyleGrid] = useState(false);
@@ -523,6 +708,7 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
     const scrollRef = useRef<HTMLDivElement>(null);
     const inputRef = useRef<HTMLTextAreaElement>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
+    const messagesRef = useRef<ChatMessage[]>([]);
     const stickToBottomRef = useRef(true);
     const sessionIdRef = useRef<string | null>(null);
     const jobSessionRef = useRef<Map<string, string>>(new Map());
@@ -550,6 +736,10 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
         const payload = attachmentPayload[f.id];
         return Boolean(payload && (payload.data_url || payload.text));
     });
+
+    useEffect(() => {
+        messagesRef.current = messages;
+    }, [messages]);
 
     const setInput = useCallback((next: string | ((prev: string) => string)) => {
         const sid = sessionIdRef.current;
@@ -646,12 +836,25 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
         if (!sessionId) return;
         sessionUiCacheRef.current.set(sessionId, {
             messages,
-            pending,
+            pending: [],
             jobTracks,
             dockDismissed,
         });
         persistStoredSessionUiCache(userCacheKey, sessionUiCacheRef.current);
-    }, [dockDismissed, jobTracks, messages, pending, sessionId, userCacheKey]);
+    }, [dockDismissed, jobTracks, messages, sessionId, userCacheKey]);
+
+    useEffect(() => {
+        setPending((current) => {
+            const filtered = filterStalePendingActions(current, messages);
+            if (
+                filtered.length === current.length
+                && filtered.every((action, index) => action.id === current[index]?.id)
+            ) {
+                return current;
+            }
+            return filtered;
+        });
+    }, [messages]);
 
     // First-time Studio Agent greeting (only once per user, only for non-owners, and only if no channels connected).
     // This runs on initial mount of the agent experience.
@@ -759,7 +962,7 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
         setMessages((m) => {
             const nextRow: ChatMessage = {
                 role: 'assistant' as const,
-                content: label,
+                content: deliverableDisplayText(label, snap),
                 jobDeliverable: snap,
             };
             let replaced = false;
@@ -1001,11 +1204,13 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                 msgs.length === 0 && serverMessageCount > 0 && cached?.messages?.length
                     ? cached.messages
                     : msgs;
+            messagesRef.current = effectiveMessages;
             setMessages(effectiveMessages);
         } else if (sid) {
             const cached = sessionUiCacheRef.current.get(sid);
             if (cached?.messages?.length) {
                 effectiveMessages = cached.messages;
+                messagesRef.current = effectiveMessages;
                 setMessages(cached.messages);
             }
         }
@@ -1014,7 +1219,7 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
             setPending(mergePendingFromTranscript(effectiveMessages, serverPending));
         } else if (sid) {
             const cached = sessionUiCacheRef.current.get(sid);
-            if (cached) setPending(cached.pending);
+            if (cached) setPending(filterStalePendingActions(cached.pending, cached.messages));
         }
         if (raw.model) setModel(String(raw.model));
         if (raw.approval_mode === 'auto' || raw.approval_mode === 'confirm') {
@@ -1028,7 +1233,8 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
         }
         const rs = String(raw.render_style || '').trim();
         if (rs) setRenderStyle(rs);
-        setVideoModel(normalizeVideoModel(raw.video_model));
+        setImageModel(String(raw.image_model || raw.image_model_id || DEFAULT_IMAGE_MODEL).trim() || DEFAULT_IMAGE_MODEL);
+        setVideoModel(String(raw.video_model || DEFAULT_VIDEO_MODEL).trim() || DEFAULT_VIDEO_MODEL);
         const rawCaptionMode = String(raw.caption_mode || '').trim();
         if (rawCaptionMode === 'word' || rawCaptionMode === 'off') {
             setCaptionMode(rawCaptionMode);
@@ -1133,6 +1339,7 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                     content_format: contentFormat,
                     reasoning_depth: reasoningDepth,
                     render_style: renderStyle,
+                    image_model: imageModel,
                     video_model: videoModel,
                     caption_mode: captionMode,
                     captions_enabled: captionMode !== 'off',
@@ -1152,7 +1359,7 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
             if (sid) setDraftsBySession((prev) => ({ ...prev, [sid]: '' }));
             await refreshHistory();
         },
-        [applySessionPayload, approvalMode, authFetch, captionMode, contentFormat, productWebsite, reasoningDepth, renderStyle, refreshHistory, selectedChannel, videoModel],
+        [applySessionPayload, approvalMode, authFetch, captionMode, contentFormat, imageModel, productWebsite, reasoningDepth, renderStyle, refreshHistory, selectedChannel, videoModel],
     );
 
     const openSession = useCallback(
@@ -1163,8 +1370,9 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
             setSessionId(id);
             const cached = sessionUiCacheRef.current.get(id);
             if (cached) {
+                messagesRef.current = cached.messages;
                 setMessages(cached.messages);
-                setPending(cached.pending);
+                setPending([]);
                 setJobTracks(cached.jobTracks);
                 setDockDismissed(cached.dockDismissed);
             } else {
@@ -1330,6 +1538,25 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                         setModel(pickModel);
                     }
                 }
+                try {
+                    const configData = await authFetch('/api/config');
+                    const creative = (configData?.creative_model_catalog || {}) as {
+                        image_models?: CreativeModelProfile[];
+                        video_models?: CreativeModelProfile[];
+                    };
+                    const imageOptions = (creative.image_models || [])
+                        .map(creativeModelOption)
+                        .filter((m): m is AgentModelOption => Boolean(m));
+                    const videoOptions = (creative.video_models || [])
+                        .map(creativeModelOption)
+                        .filter((m): m is AgentModelOption => Boolean(m));
+                    if (!cancelled) {
+                        if (imageOptions.length) setImageModelCatalog(imageOptions);
+                        if (videoOptions.length) setVideoModelCatalog([...FALLBACK_VIDEO_MODELS, ...videoOptions].filter((m, i, arr) => arr.findIndex((x) => x.id === m.id) === i));
+                    }
+                } catch {
+                    /* picker falls back to the baked catalog */
+                }
                 const listData = await authFetch('/api/studio-agent/sessions?limit=50');
                 const sessions = (listData?.sessions as SessionSummary[]) || [];
                 if (!cancelled) setHistory(sessions);
@@ -1355,7 +1582,8 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                             model: pickModel,
                             approval_mode: 'confirm',
                             content_format: 'both',
-                            video_model: 'seedance',
+                            image_model: DEFAULT_IMAGE_MODEL,
+                            video_model: DEFAULT_VIDEO_MODEL,
                         }),
                     });
                     applySessionPayload((created.session as Record<string, unknown>) || {});
@@ -1404,7 +1632,8 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
             content_format?: ContentFormat;
             reasoning_depth?: ReasoningDepth;
             render_style?: string;
-            video_model?: VideoModel;
+            image_model?: string;
+            video_model?: string;
             caption_mode?: CaptionMode;
             captions_enabled?: boolean;
             channel_id?: string;
@@ -1461,19 +1690,30 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
     const buildOutboundMessage = useCallback(
         (text: string) => {
             const hasImages = attachments.some((f) => f.kind === 'image' && attachmentPayload[f.id]?.data_url);
-            const parts = [text.trim() || (hasImages ? 'Please analyze the attached image(s).' : '')];
+            const hasVideo = attachments.some((f) => f.kind === 'video' && attachmentPayload[f.id]?.server_path);
+            const parts = [text.trim() || (hasImages ? 'Please analyze the attached image(s).' : hasVideo ? 'Use the attached video with ClipLab.' : '')];
+            if (agentMode === 'cliplab') {
+                parts.unshift(
+                    '[Studio Agent mode: ClipLab]\n'
+                    + 'Use ClipLab only for this turn. If a video is attached, ingest it, poll until complete, pull selected-channel analytics plus public demand, analyze the uploaded source for strongest 9:16 clip candidates, render the selected clips, and return upload packages. Do not use normal generated-short render tools, art style presets, or image-to-video style controls unless I explicitly ask for Remix Lab on an already-cut clip.\n\n',
+                );
+            } else {
+                parts.unshift('[Studio Agent mode: Normal]\nUse normal Studio Agent behavior for planning, generated videos, research, editing, and production.\n\n');
+            }
             for (const f of attachments) {
                 const payload = attachmentPayload[f.id];
                 if (!payload) continue;
                 if (payload.kind === 'text' && payload.text) {
                     parts.push(`\n\n[Attachment: ${f.name}]\n${payload.text.slice(0, 12000)}`);
+                } else if (payload.kind === 'video' && payload.server_path) {
+                    parts.push(`\n\n[Video attachment ready for ClipLab: ${f.name}]\nUse ingest_cliplab_attachment, then analyze_cliplab_video for the selected channel and render the strongest clips with upload packages.`);
                 } else if (payload.kind === 'binary') {
                     parts.push(`\n\n[Attachment: ${f.name}]\n[Binary file, ${Math.round(f.size / 1024)}KB. Ask the user for a supported image or text file if visual/text access is required.]`);
                 }
             }
             return parts.join('');
         },
-        [attachmentPayload, attachments],
+        [agentMode, attachmentPayload, attachments],
     );
 
     const buildOutboundAttachments = useCallback((): AgentChatAttachment[] => {
@@ -1527,6 +1767,7 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
             setInput('');
             setAttachments([]);
             setAttachmentPayload({});
+            setPending([]);
             markSessionRunning(activeSessionId, 'Thinking...');
             setError('');
             setQueueHint('');
@@ -1536,7 +1777,11 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
             const readableAttachments = buildOutboundAttachments();
             const visibleUserText = text.trim()
                 || (readableAttachments.length ? `Please analyze the attached image${readableAttachments.length === 1 ? '' : 's'}.` : '');
-            setMessages((m) => [...m, { role: 'user', content: visibleUserText }]);
+            setMessages((m) => {
+                const next = [...m, { role: 'user' as const, content: visibleUserText }];
+                messagesRef.current = next;
+                return next;
+            });
             let completedCleanly = false;
             const queuePoll = window.setInterval(() => {
                 if (sessionIdRef.current !== activeSessionId) return;
@@ -1603,7 +1848,7 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                     } else if (ev.event === 'active_jobs' && Array.isArray(ev.jobs)) {
                         ingestActiveJobs(ev.jobs, activeSessionId);
                     } else if (ev.event === 'pending_actions' && Array.isArray(ev.actions)) {
-                        setPending(ev.actions as PendingAction[]);
+                        setPending(filterStalePendingActions(ev.actions as PendingAction[], messagesRef.current));
                     }
                 };
 
@@ -1615,6 +1860,8 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                         attachments: readableAttachments,
                         captions_enabled: captionMode !== 'off',
                         caption_mode: captionMode,
+                        image_model: imageModel,
+                        video_model: videoModel,
                         channel: selectedChannel ? {
                             channel_id: selectedChannel.channel_id || '',
                             registry_key: channelRegistryKey(selectedChannel),
@@ -1653,7 +1900,10 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                     return;
                 }
                 const reply = String(data?.assistant_message || '').trim();
-                const nextPending = (data?.pending_actions as PendingAction[]) || [];
+                const nextPending = filterStalePendingActions(
+                    (data?.pending_actions as PendingAction[]) || [],
+                    messagesRef.current,
+                );
                 updateVerificationStep('final_audit', {
                     status: 'done',
                     label: 'Audit final answer before replying',
@@ -1664,7 +1914,11 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                             : 'Backend completed without a usable assistant message.',
                 });
                 if (reply) {
-                    setMessages((m) => [...m, { role: 'assistant', content: reply }]);
+                    setMessages((m) => {
+                        const next = [...m, { role: 'assistant' as const, content: reply }];
+                        messagesRef.current = next;
+                        return next;
+                    });
                 } else if (nextPending.length > 0) {
                     setMessages((m) => [
                         ...m,
@@ -1731,9 +1985,11 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
         for (const file of Array.from(files)) {
             const id = `f_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
             const isImage = file.type.startsWith('image/');
+            const isVideo = file.type.startsWith('video/')
+                || /\.(mp4|mov|mkv|webm|m4v)$/i.test(file.name);
             const isText = file.type.startsWith('text/')
                 || /\.(md|txt|json|csv|py|ts|tsx|js|jsx|yaml|yml)$/i.test(file.name);
-            const kind: AttachedFile['kind'] = isImage ? 'image' : isText ? 'text' : 'binary';
+            const kind: AttachedFile['kind'] = isImage ? 'image' : isVideo ? 'video' : isText ? 'text' : 'binary';
             const name = file.name || 'pasted-image.png';
             if (isImage) {
                 if (imageCount >= MAX_AGENT_IMAGE_ATTACHMENTS) {
@@ -1760,6 +2016,36 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                     kind,
                     text: await file.text(),
                 };
+            } else if (isVideo) {
+                setAgentMode('cliplab');
+                if (!sessionId) {
+                    setError('Open or create a Studio Agent chat before attaching a video.');
+                    continue;
+                }
+                if (file.size > MAX_AGENT_VIDEO_BYTES) {
+                    setError(`${name} is too large. Keep Agent ClipLab video attachments under 3GB for now.`);
+                    continue;
+                }
+                const tok = await getToken();
+                const form = new FormData();
+                form.append('file', file);
+                const res = await fetch(resolveStudioBackendUrl(`/api/studio-agent/sessions/${sessionId}/attachments/video`), {
+                    method: 'POST',
+                    headers: { Authorization: `Bearer ${tok}` },
+                    body: form,
+                });
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok) {
+                    setError(typeof data.detail === 'string' ? data.detail : `Video upload failed (${res.status})`);
+                    continue;
+                }
+                payload[id] = {
+                    name,
+                    mime_type: file.type || 'video/mp4',
+                    size: file.size,
+                    kind,
+                    server_path: String(data.path || ''),
+                };
             } else {
                 payload[id] = {
                     name,
@@ -1773,7 +2059,7 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
         setAttachments((a) => [...a, ...next]);
         setAttachmentPayload(payload);
         if (fileInputRef.current) fileInputRef.current.value = '';
-    }, [attachmentPayload, attachments]);
+    }, [attachmentPayload, attachments, getToken, sessionId]);
 
     const onPasteIntoInput = useCallback((e: ClipboardEvent<HTMLTextAreaElement>) => {
         const clipboard = e.clipboardData;
@@ -1814,6 +2100,11 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
         async (actionId: string) => {
             if (!sessionId || currentSessionRunning) return;
             const approved = pending.find((a) => a.id === actionId);
+            if (approved && isStaleShortformPendingAction(approved, messagesRef.current)) {
+                setPending((p) => p.filter((a) => a.id !== actionId));
+                setError('Blocked stale production approval. Sync chat, then approve the current title.');
+                return;
+            }
             markSessionRunning(sessionId, 'Approving action...');
             setError('');
             stickToBottomRef.current = true;
@@ -1834,7 +2125,11 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                 }
                 const reply = String(data?.assistant_message || '').trim();
                 if (reply) {
-                    setMessages((m) => [...m, { role: 'assistant', content: reply }]);
+                    setMessages((m) => {
+                        const next = [...m, { role: 'assistant' as const, content: reply }];
+                        messagesRef.current = next;
+                        return next;
+                    });
                 } else if (approvedAction?.error) {
                     setMessages((m) => [
                         ...m,
@@ -1852,12 +2147,17 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                         },
                     ]);
                 }
-                setPending((data?.pending_actions as PendingAction[]) || []);
+                setPending(filterStalePendingActions(
+                    (data?.pending_actions as PendingAction[]) || [],
+                    messagesRef.current,
+                ));
                 ingestActiveJobs(data?.active_jobs, sessionId);
                 setDockDismissed(false);
             } catch (e) {
                 setError((e as Error).message);
-                if (approved) setPending((p) => [...p, approved]);
+                if (approved && !isStaleShortformPendingAction(approved, messagesRef.current)) {
+                    setPending((p) => filterStalePendingActions([...p, approved], messagesRef.current));
+                }
             } finally {
                 clearSessionRunning(sessionId);
             }
@@ -1942,6 +2242,8 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
         }
     }, [cancellingProduction, dockTrack, getToken, sessionId]);
 
+    const visiblePending = filterStalePendingActions(pending, messages);
+
     if (booting) {
         return (
             <div className="flex flex-1 items-center justify-center gap-2 text-sm text-gray-400">
@@ -1961,6 +2263,34 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                     patchSession({ model: id });
                 }}
                 onClose={() => setModelPickerOpen(false)}
+            />
+            <AgentModelPicker
+                open={imageModelPickerOpen}
+                models={imageModelCatalog}
+                selectedId={imageModel}
+                title="Choose an image model"
+                subtitle="Used for stills, scene images, thumbnails, and artifact testing."
+                statusText={`${imageModelCatalog.length} image models available through Studio providers`}
+                searchPlaceholder="Search image models, providers, or costs..."
+                onSelect={(id) => {
+                    setImageModel(id);
+                    patchSession({ image_model: id });
+                }}
+                onClose={() => setImageModelPickerOpen(false)}
+            />
+            <AgentModelPicker
+                open={videoModelPickerOpen}
+                models={videoModelCatalog}
+                selectedId={videoModel}
+                title="Choose an image-to-video model"
+                subtitle="Used when approved stills are animated into motion clips."
+                statusText={`${videoModelCatalog.length} video models available through Studio providers`}
+                searchPlaceholder="Search video models, providers, or costs..."
+                onSelect={(id) => {
+                    setVideoModel(id);
+                    patchSession({ video_model: id });
+                }}
+                onClose={() => setVideoModelPickerOpen(false)}
             />
             {deleteTarget && (
                 <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/65 px-4 backdrop-blur-sm">
@@ -2166,6 +2496,35 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                         {/* Decluttered: removed Short/Long/Auto tabs (user request). Agent now infers from chat text ("make a 45s short about X" or "12-min documentary"). This makes the header much cleaner. */}
                         <div
                             className="flex items-center gap-0.5 rounded-lg border border-white/[0.06] bg-white/[0.02] p-0.5"
+                            title="Choose whether this chat is normal Studio Agent or ClipLab long-video clipping"
+                        >
+                            <button
+                                type="button"
+                                onClick={() => setAgentMode('studio')}
+                                className={`inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-[9px] font-semibold uppercase transition ${
+                                    agentMode === 'studio'
+                                        ? 'bg-violet-600/25 text-violet-100'
+                                        : 'text-gray-500 hover:text-gray-300'
+                                }`}
+                            >
+                                <Sparkles className="h-2.5 w-2.5" />
+                                Agent
+                            </button>
+                            <button
+                                type="button"
+                                onClick={() => setAgentMode('cliplab')}
+                                className={`inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-[9px] font-semibold uppercase transition ${
+                                    agentMode === 'cliplab'
+                                        ? 'bg-rose-600/25 text-rose-100'
+                                        : 'text-gray-500 hover:text-gray-300'
+                                }`}
+                            >
+                                <Clapperboard className="h-2.5 w-2.5" />
+                                ClipLab
+                            </button>
+                        </div>
+                        <div
+                            className="flex items-center gap-0.5 rounded-lg border border-white/[0.06] bg-white/[0.02] p-0.5"
                             title="How deeply Claude reasons"
                         >
                             {REASONING_OPTIONS.map((opt) => (
@@ -2189,6 +2548,8 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                                 </button>
                             ))}
                         </div>
+                        {agentMode === 'studio' && (
+                            <>
                         {/* Visual Style Grid - Seedream stills + on-demand i2v motion previews */}
                         <div className="relative">
                             <button
@@ -2300,7 +2661,7 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                             )}
                         </div>
                         <label
-                            className="inline-flex items-center gap-1.5 rounded-lg border border-white/[0.06] bg-white/[0.02] px-2 py-0.5 text-[9px] font-semibold uppercase text-cyan-100"
+                            className="hidden"
                             title="Image-to-video model. Stills remain locked to Seedream 4.5."
                         >
                             <Video className="h-3 w-3 text-cyan-300" />
@@ -2320,6 +2681,8 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                                 ))}
                             </select>
                         </label>
+                            </>
+                        )}
                         <button
                             type="button"
                             onClick={() => {
@@ -2470,22 +2833,22 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                 )}
 
                 {(verificationSteps.length > 0 || toolActivity) && (
-                    <div className="mx-auto mb-2 w-full max-w-3xl shrink-0 rounded-xl border border-cyan-400/20 bg-cyan-500/[0.06] px-3 py-2 shadow-lg shadow-black/20">
-                        <div className="flex items-center justify-between gap-3">
-                            <p className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wider text-cyan-100">
+                    <div className="mx-auto mb-2 w-full max-w-3xl shrink-0 rounded-xl border border-cyan-400/20 bg-cyan-500/[0.06] px-3 py-1.5 shadow-lg shadow-black/20">
+                        <div className="flex items-center justify-between gap-2">
+                            <p className="flex items-center gap-2 text-[10px] font-semibold uppercase tracking-wider text-cyan-100">
                                 <Shield className="h-3.5 w-3.5 text-cyan-300" />
-                                Verification checklist
+                                Verification
                             </p>
-                            <p className="truncate text-[11px] text-cyan-100/80">
-                                {toolActivity || 'Required before Studio Agent replies'}
+                            <p className="truncate text-[10px] text-cyan-100/80">
+                                {toolActivity || 'Required before reply'}
                             </p>
                         </div>
                         {verificationSteps.length > 0 && (
-                            <div className="mt-2 grid gap-1">
+                            <div className="mt-2 flex flex-wrap gap-1.5">
                                 {verificationSteps.map((row, index) => (
                                     <div
                                         key={row.id}
-                                        className={`flex items-start gap-2 rounded-lg border px-2 py-1.5 text-[11px] ${
+                                        className={`flex items-center gap-1.5 rounded-full border px-2 py-1 text-[10px] ${
                                             row.status === 'error'
                                                 ? 'border-red-400/25 bg-red-500/10 text-red-100'
                                             : row.status === 'done'
@@ -2497,19 +2860,16 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                                             : 'border-white/10 bg-black/20 text-gray-200'
                                         }`}
                                     >
-                                        <span className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full border border-current text-[9px] font-semibold">
+                                        <span className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full border border-current text-[9px] font-semibold">
                                             {row.status === 'done' ? '✓' : row.status === 'error' ? '!' : index + 1}
                                         </span>
-                                        <div className="min-w-0 flex-1">
-                                            <div className="flex items-center justify-between gap-2">
-                                                <span className="truncate font-medium">{row.label}</span>
+                                        <div className="min-w-0">
+                                            <div className="flex items-center gap-1.5">
+                                                <span className="font-medium">Step {index + 1}/{verificationSteps.length}</span>
                                                 <span className="shrink-0 text-[10px] uppercase tracking-wider text-white/35">
                                                     {row.status}
                                                 </span>
                                             </div>
-                                            {row.detail && (
-                                                <p className="mt-0.5 line-clamp-2 text-white/55">{row.detail}</p>
-                                            )}
                                         </div>
                                     </div>
                                 ))}
@@ -2551,9 +2911,10 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                                 {/* Premium, luxurious starter journeys */}
                                 <div className="grid w-full max-w-[720px] grid-cols-1 gap-2 sm:grid-cols-2">
                                     {STARTER_PROMPTS.map((p, index) => {
-                                        const icons = [Video, BookOpen, Users, Zap];
-                                        const labels = ["VIRAL SHORTS", "REFERENCE-LED", "LONG-FORM DOCS", "SIGNATURE STYLE"];
+                                        const icons = [Video, BookOpen, Users, Zap, Sparkles];
+                                        const labels = ["CLIPLAB", "VIRAL SHORTS", "REFERENCE-LED", "LONG-FORM DOCS", "SIGNATURE STYLE"];
                                         const sub = [
+                                            "Upload long video -> clips + packaging",
                                             "Audit → rank → script → render live",
                                             "Paste any video → blueprint + build",
                                             "Outline → chapter stills → finalize",
@@ -2602,7 +2963,7 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                                         />
                                     );
                                 }
-                                const text = String(m.content ?? '');
+                                const text = deliverableDisplayText(String(m.content ?? ''), m.jobDeliverable);
                                 if (!text.trim() && !m.jobDeliverable) return null;
 
                                 const isUser = m.role === 'user';
@@ -2670,40 +3031,41 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                     </div>
                 </div>
 
-                {pending.length > 0 && (
-                    <div className="relative z-30 mx-auto w-full max-w-3xl shrink-0 border-t-2 border-amber-500/60 bg-gradient-to-t from-[#1a1408] to-[#12100a] px-3 py-3 shadow-[0_-12px_40px_rgba(0,0,0,0.65)]">
-                        <div className="mb-2 flex items-center justify-between gap-2">
-                            <p className="flex items-center gap-1.5 text-xs font-semibold text-amber-100">
-                                <Zap className="h-4 w-4 text-amber-400" />
-                                Approval required — tap the green button to run production
+                {visiblePending.length > 0 && (
+                    <div className="relative z-30 mx-auto mb-1 w-full max-w-3xl shrink-0 px-3">
+                        <div className="rounded-xl border border-amber-500/35 bg-[#140f08]/95 px-2.5 py-2 shadow-lg shadow-black/30">
+                        <div className="mb-1.5 flex items-center justify-between gap-2">
+                            <p className="flex items-center gap-1.5 text-[11px] font-semibold text-amber-100">
+                                <Zap className="h-3.5 w-3.5 text-amber-400" />
+                                Approval required
                             </p>
                             <button
                                 type="button"
                                 disabled={resuming}
                                 onClick={() => void reloadCurrentSession()}
-                                className="shrink-0 rounded-lg border border-amber-500/30 px-2 py-1 text-[10px] font-semibold text-amber-200 hover:bg-amber-500/15 disabled:opacity-50"
+                                className="shrink-0 rounded-md border border-amber-500/25 px-2 py-0.5 text-[10px] font-semibold text-amber-200 hover:bg-amber-500/15 disabled:opacity-50"
                             >
                                 {resuming ? 'Syncing…' : 'Sync chat'}
                             </button>
                         </div>
-                        <div className="space-y-2">
-                            {pending.map((a) => (
+                        <div className="space-y-1.5">
+                            {visiblePending.map((a) => (
                                 <div
                                     key={a.id}
-                                    className="rounded-xl border border-amber-500/35 bg-black/40 p-3"
+                                    className="rounded-lg border border-amber-500/25 bg-black/30 p-2"
                                 >
-                                    <p className="text-sm font-semibold text-white">
+                                    <p className="text-xs font-semibold text-white">
                                         {pendingActionLabel(a.tool)}
                                     </p>
-                                    <p className="mt-1 line-clamp-3 text-[11px] text-gray-400">
+                                    <p className="mt-0.5 line-clamp-1 text-[10px] text-gray-400">
                                         {formatPendingArgs(a.arguments) || a.summary || JSON.stringify(a.arguments)}
                                     </p>
-                                    <div className="mt-3 flex flex-wrap gap-2">
+                                    <div className="mt-2 flex gap-2">
                                         <button
                                             type="button"
                                             disabled={currentSessionRunning}
                                             onClick={() => approveAction(a.id)}
-                                            className="inline-flex min-h-11 flex-1 items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 py-2.5 text-sm font-bold text-white shadow-lg shadow-emerald-900/40 transition hover:bg-emerald-500 disabled:opacity-50"
+                                            className="inline-flex min-h-9 flex-1 items-center justify-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-bold text-white transition hover:bg-emerald-500 disabled:opacity-50"
                                         >
                                             {currentSessionRunning ? (
                                                 <Loader2 className="h-4 w-4 animate-spin" />
@@ -2716,7 +3078,7 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                                             type="button"
                                             disabled={currentSessionRunning}
                                             onClick={() => rejectAction(a.id)}
-                                            className="inline-flex min-h-11 items-center justify-center gap-1 rounded-xl border border-white/15 px-4 py-2.5 text-xs font-semibold text-gray-300 hover:bg-white/[0.06]"
+                                            className="inline-flex min-h-9 items-center justify-center gap-1 rounded-lg border border-white/15 px-3 py-1.5 text-xs font-semibold text-gray-300 hover:bg-white/[0.06]"
                                         >
                                             <X className="h-4 w-4" />
                                             Reject
@@ -2724,6 +3086,7 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                                     </div>
                                 </div>
                             ))}
+                        </div>
                         </div>
                         <p className="mt-2 text-center text-[10px] text-amber-200/70">
                             Not the shield toggle below — use Approve & run above.
@@ -2746,7 +3109,7 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                                             className="h-9 w-9 rounded-lg border border-white/10 object-cover"
                                         />
                                     )}
-                                    {f.kind === 'image' ? 'Image: ' : f.kind === 'text' ? 'File: ' : 'Unsupported: '}
+                                    {f.kind === 'image' ? 'Image: ' : f.kind === 'text' ? 'File: ' : f.kind === 'video' ? 'Video: ' : 'Unsupported: '}
                                     {f.name}
                                     <button
                                         type="button"
@@ -2817,7 +3180,7 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                                 ref={fileInputRef}
                                 type="file"
                                 multiple
-                                accept="image/*,.txt,.md,.json,.csv,.py,.ts,.tsx,.js,.jsx,.yaml,.yml"
+                                accept="image/*,video/*,.mp4,.mov,.mkv,.webm,.m4v,.txt,.md,.json,.csv,.py,.ts,.tsx,.js,.jsx,.yaml,.yml"
                                 className="hidden"
                                 onChange={(e) => onPickFiles(e.target.files)}
                             />
@@ -2829,6 +3192,34 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                             >
                                 <Paperclip className="h-4 w-4" />
                             </button>
+                            <div className="flex items-center gap-0.5 rounded-lg border border-white/[0.06] bg-black/20 p-0.5">
+                                <button
+                                    type="button"
+                                    onClick={() => setAgentMode('studio')}
+                                    className={`inline-flex items-center gap-1 rounded-md px-2 py-1 text-[10px] font-semibold transition ${
+                                        agentMode === 'studio'
+                                            ? 'bg-violet-600/25 text-violet-100'
+                                            : 'text-gray-500 hover:text-gray-300'
+                                    }`}
+                                    title="Normal Studio Agent: research, plan, generate, edit, animate, package"
+                                >
+                                    <Sparkles className="h-3 w-3" />
+                                    Agent
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={() => setAgentMode('cliplab')}
+                                    className={`inline-flex items-center gap-1 rounded-md px-2 py-1 text-[10px] font-semibold transition ${
+                                        agentMode === 'cliplab'
+                                            ? 'bg-rose-600/25 text-rose-100'
+                                            : 'text-gray-500 hover:text-gray-300'
+                                    }`}
+                                    title="ClipLab: cut uploaded long-form footage into 9:16 shorts with packages"
+                                >
+                                    <Clapperboard className="h-3 w-3" />
+                                    ClipLab
+                                </button>
+                            </div>
                             <button
                                 type="button"
                                 disabled={!sessionId || !dictation.supported || dictation.transcribing || currentSessionRunning}
@@ -2887,6 +3278,55 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                                     </>
                                 )}
                             </button>
+                            {agentMode === 'studio' && (
+                                <div className="relative">
+                                    <button
+                                        type="button"
+                                        onClick={() => setVisualModelMenuOpen((open) => !open)}
+                                        className="inline-flex max-w-[210px] items-center gap-1.5 rounded-lg px-2 py-1.5 text-[11px] font-medium text-cyan-100 transition hover:bg-cyan-500/10"
+                                        title="Choose the image and image-to-video models used for Studio Agent visuals."
+                                    >
+                                        <ImageIcon className="h-3.5 w-3.5 shrink-0 text-cyan-300" />
+                                        <span className="truncate">Choose image/video</span>
+                                    </button>
+                                    {visualModelMenuOpen && (
+                                        <div className="absolute bottom-full left-0 z-40 mb-2 w-[310px] overflow-hidden rounded-xl border border-cyan-500/20 bg-[#08090d]/95 p-1.5 shadow-2xl backdrop-blur">
+                                            <button
+                                                type="button"
+                                                onClick={() => {
+                                                    setVisualModelMenuOpen(false);
+                                                    setImageModelPickerOpen(true);
+                                                }}
+                                                className="flex w-full items-center gap-2 rounded-lg px-2 py-2 text-left transition hover:bg-white/[0.06]"
+                                            >
+                                                <ImageIcon className="h-4 w-4 shrink-0 text-cyan-300" />
+                                                <span className="min-w-0 flex-1">
+                                                    <span className="block text-[10px] font-semibold uppercase tracking-wide text-cyan-300">Image model</span>
+                                                    <span className="block truncate text-xs text-white">
+                                                        {selectedModelLabel(imageModelCatalog, imageModel, 'Image model')}
+                                                    </span>
+                                                </span>
+                                            </button>
+                                            <button
+                                                type="button"
+                                                onClick={() => {
+                                                    setVisualModelMenuOpen(false);
+                                                    setVideoModelPickerOpen(true);
+                                                }}
+                                                className="mt-1 flex w-full items-center gap-2 rounded-lg px-2 py-2 text-left transition hover:bg-white/[0.06]"
+                                            >
+                                                <Video className="h-4 w-4 shrink-0 text-cyan-300" />
+                                                <span className="min-w-0 flex-1">
+                                                    <span className="block text-[10px] font-semibold uppercase tracking-wide text-cyan-300">Video model</span>
+                                                    <span className="block truncate text-xs text-white">
+                                                        {selectedModelLabel(videoModelCatalog, videoModel, 'Video model')}
+                                                    </span>
+                                                </span>
+                                            </button>
+                                        </div>
+                                    )}
+                                </div>
+                            )}
                             <div className="flex-1" />
                             <button
                                 type="button"

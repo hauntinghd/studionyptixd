@@ -1,0 +1,8 @@
+{
+  "experimentalServices": {
+    "nyptid-studio-api": {
+      "type": "web",
+      "routePrefix": "/"
+    }
+  }
+}

@@ -292,7 +292,7 @@ if FAL_AI_KEY and not os.getenv("FAL_KEY"):
     # fal_client reads FAL_KEY, while the platform secret is FAL_AI_KEY.
     os.environ["FAL_KEY"] = FAL_AI_KEY.strip()
 FAL_IMAGE_BACKUP_MODEL = str(os.getenv("FAL_IMAGE_BACKUP_MODEL", "ernie_image") or "ernie_image").strip().lower()
-XAI_IMAGE_MODEL = os.getenv("XAI_IMAGE_MODEL", "grok-imagine-image-pro")
+XAI_IMAGE_MODEL = os.getenv("XAI_IMAGE_MODEL", "grok-imagine-image-quality")
 XAI_VIDEO_MODEL = os.getenv("XAI_VIDEO_MODEL", "grok-imagine-video")
 PIKZELS_THUMBNAIL_MODEL = os.getenv("PIKZELS_THUMBNAIL_MODEL", "pkz-3")
 PIKZELS_RECREATE_MODEL = os.getenv("PIKZELS_RECREATE_MODEL", "pkz-3")
@@ -320,6 +320,24 @@ XAI_IMAGE_ASPECT_RATIO = os.getenv("XAI_IMAGE_ASPECT_RATIO", "9:16")
 XAI_IMAGE_RESOLUTION = os.getenv("XAI_IMAGE_RESOLUTION", "2k")
 USE_XAI_VIDEO = os.getenv("USE_XAI_VIDEO", "1").lower() in ("1", "true", "yes", "on")
 PRODUCT_DEMO_PUBLIC_ENABLED = os.getenv("PRODUCT_DEMO_PUBLIC_ENABLED", "0").lower() in ("1", "true", "yes", "on")
+try:
+    STUDIO_FREE_TRIAL_DAYS = max(0, int(os.getenv("STUDIO_FREE_TRIAL_DAYS", "3") or "0"))
+except (TypeError, ValueError):
+    STUDIO_FREE_TRIAL_DAYS = 3
+try:
+    STUDIO_FREE_TRIAL_CREDITS = max(0, int(os.getenv("STUDIO_FREE_TRIAL_CREDITS", "1000") or "0"))
+except (TypeError, ValueError):
+    STUDIO_FREE_TRIAL_CREDITS = 1000
+try:
+    STUDIO_FREE_TRIAL_IP_COOLDOWN_DAYS = max(0, int(os.getenv("STUDIO_FREE_TRIAL_IP_COOLDOWN_DAYS", "180") or "0"))
+except (TypeError, ValueError):
+    STUDIO_FREE_TRIAL_IP_COOLDOWN_DAYS = 180
+try:
+    STUDIO_TRIAL_MAX_PROVIDER_USD = max(0.0, float(os.getenv("STUDIO_TRIAL_MAX_PROVIDER_USD", "10") or "0"))
+except (TypeError, ValueError):
+    STUDIO_TRIAL_MAX_PROVIDER_USD = 10.0
+FAL_PUBLIC_RENDERS_ENABLED = os.getenv("FAL_PUBLIC_RENDERS_ENABLED", "1").lower() in ("1", "true", "yes", "on")
+XAI_PUBLIC_RENDERS_ENABLED = os.getenv("XAI_PUBLIC_RENDERS_ENABLED", "1").lower() in ("1", "true", "yes", "on")
 WAITLIST_ONLY_MODE = os.getenv("WAITLIST_ONLY_MODE", "0").lower() in ("1", "true", "yes", "on")
 WAITLIST_REQUIRE_STRIPE_PAYMENT = os.getenv("WAITLIST_REQUIRE_STRIPE_PAYMENT", "0").lower() in ("1", "true", "yes", "on")
 SKELETON_GLOBAL_REFERENCE_IMAGE_URL = os.getenv(

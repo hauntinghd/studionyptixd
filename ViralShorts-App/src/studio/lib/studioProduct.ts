@@ -27,6 +27,7 @@ export type DashboardTab =
     | 'automate'
     | 'analytics'
     | 'catalyst'
+    | 'blog'
     | 'refunds'
     | 'waitlist'
     | 'network'

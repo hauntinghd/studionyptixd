@@ -23,7 +23,9 @@ Pipeline:
 FAL queue polling is throttled for full multi-scene renders.
 """
 from __future__ import annotations
+import base64
 import json
+import mimetypes
 import os
 import time
 from pathlib import Path
@@ -50,6 +52,11 @@ SEEDANCE_ENDPOINT = "bytedance/seedance-2.0/image-to-video"
 PIXVERSE_V6_ENDPOINT = "fal-ai/pixverse/v6/image-to-video"
 KLING_PRO_ENDPOINT = "fal-ai/kling-video/v2.1/pro/image-to-video"
 LTX_098_ENDPOINT = "fal-ai/ltxv-13b-098-distilled/image-to-video"
+XAI_VIDEO_ENDPOINT = "https://api.x.ai/v1/videos/generations"
+XAI_VIDEO_STATUS_ENDPOINT = "https://api.x.ai/v1/videos/{request_id}"
+XAI_GROK_VIDEO_ENDPOINT = "xai:grok-imagine-video"
+XAI_GROK_VIDEO_15_ENDPOINT = "xai:grok-imagine-video-1.5"
+XAI_GROK_VIDEO_15_1080P_ENDPOINT = "xai:grok-imagine-video-1.5:1080p"
 
 # Standard tier fallback chain — first model that doesn't 422 wins.
 STANDARD_FALLBACK_CHAIN = [SEEDANCE_ENDPOINT, PIXVERSE_V6_ENDPOINT]
@@ -82,6 +89,24 @@ VIDEO_MODELS: dict[str, dict[str, object]] = {
         "endpoints": [LTX_098_ENDPOINT],
         "ac_cost": 3,
     },
+    "grok_imagine_video": {
+        "label": "Grok Imagine Video",
+        "description": "Low-cost xAI image-to-video lane for cheaper motion tests.",
+        "endpoints": [XAI_GROK_VIDEO_ENDPOINT],
+        "ac_cost": AC_COST_STANDARD,
+    },
+    "grok_imagine_video_15": {
+        "label": "Grok Imagine Video 1.5",
+        "description": "Higher-quality xAI image-to-video at 720p.",
+        "endpoints": [XAI_GROK_VIDEO_15_ENDPOINT],
+        "ac_cost": AC_COST_PREMIUM,
+    },
+    "grok_imagine_video_15_1080p": {
+        "label": "Grok Imagine Video 1.5 1080p",
+        "description": "1080p xAI image-to-video for final tests only.",
+        "endpoints": [XAI_GROK_VIDEO_15_1080P_ENDPOINT],
+        "ac_cost": 10,
+    },
 }
 
 
@@ -90,6 +115,13 @@ def _ensure_fal():
         return require_fal_key("image-to-video")
     except RuntimeError as exc:
         raise I2VError(str(exc)) from exc
+
+
+def _ensure_xai() -> str:
+    api_key = str(os.getenv("XAI_API_KEY") or "").strip()
+    if not api_key:
+        raise I2VError("xAI image-to-video requires XAI_API_KEY")
+    return api_key
 
 
 def _is_content_policy_error(exc: Exception) -> bool:
@@ -150,6 +182,70 @@ def _build_args(endpoint: str, motion_prompt: str, image_url: str,
         "duration": str(duration_sec),
         "aspect_ratio": aspect_ratio,
     }
+
+
+def _image_data_uri(path: Path) -> str:
+    mime = mimetypes.guess_type(str(path))[0] or "image/png"
+    data = base64.b64encode(Path(path).read_bytes()).decode("ascii")
+    return f"data:{mime};base64,{data}"
+
+
+def _xai_endpoint_config(endpoint: str) -> tuple[str, str]:
+    if endpoint == XAI_GROK_VIDEO_15_1080P_ENDPOINT:
+        return "grok-imagine-video-1.5", "1080p"
+    if endpoint == XAI_GROK_VIDEO_15_ENDPOINT:
+        return "grok-imagine-video-1.5", "720p"
+    if endpoint == XAI_GROK_VIDEO_ENDPOINT:
+        return "grok-imagine-video", "720p"
+    raise I2VError(f"unknown xAI video endpoint {endpoint!r}")
+
+
+def _xai_i2v_result(endpoint: str, motion_prompt: str, still_path: Path, *, duration_sec: int, aspect_ratio: str) -> dict:
+    api_key = _ensure_xai()
+    model, resolution = _xai_endpoint_config(endpoint)
+    duration = max(1, min(15, int(duration_sec or 5)))
+    payload = {
+        "model": model,
+        "prompt": motion_prompt,
+        "image": {"url": _image_data_uri(still_path)},
+        "duration": duration,
+        "aspect_ratio": aspect_ratio,
+        "resolution": resolution,
+    }
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}",
+    }
+    with httpx.Client(timeout=120) as client:
+        response = client.post(XAI_VIDEO_ENDPOINT, headers=headers, json=payload)
+        if response.status_code >= 400:
+            detail = response.text.replace(api_key, "[redacted]")[:500]
+            raise I2VError(f"{model} {response.status_code}: {detail}")
+        body = response.json()
+        request_id = str(body.get("request_id") or "").strip()
+        if not request_id:
+            raise I2VError(f"{model} returned no request_id: {body}")
+
+        deadline = time.monotonic() + max(60, FAL_SUBSCRIBE_TIMEOUT_SEC)
+        while time.monotonic() < deadline:
+            status_response = client.get(
+                XAI_VIDEO_STATUS_ENDPOINT.format(request_id=request_id),
+                headers={"Authorization": headers["Authorization"]},
+            )
+            if status_response.status_code >= 400:
+                detail = status_response.text.replace(api_key, "[redacted]")[:500]
+                raise I2VError(f"{model} status {status_response.status_code}: {detail}")
+            status_body = status_response.json()
+            status = str(status_body.get("status") or "").lower()
+            if status in {"done", "completed", "succeeded", "success"}:
+                status_body["_xai_model"] = model
+                status_body["_xai_request_id"] = request_id
+                status_body["_xai_resolution"] = resolution
+                return status_body
+            if status in {"failed", "expired", "cancelled", "canceled", "error"}:
+                raise I2VError(f"{model} {status} on {request_id}: {status_body}")
+            time.sleep(max(1.0, FAL_I2V_POLL_INTERVAL_SEC))
+    raise I2VError(f"{model} timed out after {FAL_SUBSCRIBE_TIMEOUT_SEC}s on request {request_id}")
 
 
 def _queue_result(endpoint: str, args: dict, *, timeout_sec: int) -> dict:
@@ -224,6 +320,27 @@ def list_video_models() -> list[dict[str, object]]:
             "ac_cost": AC_COST_PREMIUM,
             "image_model": "seedream_v45_edit (locked — not selectable)",
         },
+        {
+            "key": "grok_imagine_video",
+            "label": "Grok Imagine Video",
+            "description": "Low-cost xAI image-to-video lane for cheaper motion tests.",
+            "ac_cost": AC_COST_STANDARD,
+            "image_model": "user-selected image model",
+        },
+        {
+            "key": "grok_imagine_video_15",
+            "label": "Grok Imagine Video 1.5",
+            "description": "Higher-quality xAI image-to-video at 720p.",
+            "ac_cost": AC_COST_PREMIUM,
+            "image_model": "user-selected image model",
+        },
+        {
+            "key": "grok_imagine_video_15_1080p",
+            "label": "Grok Imagine Video 1.5 1080p",
+            "description": "1080p xAI image-to-video for final tests only.",
+            "ac_cost": 10,
+            "image_model": "user-selected image model",
+        },
     ]
 
 
@@ -295,18 +412,29 @@ def generate(
             pass
         return out_path
 
-    _ensure_fal()
-    image_url = fal_client.upload_file(str(still_path))
-
     chain, _vm = resolve_video_model_chain(video_model=video_model, tier=tier)
+    is_xai_chain = all(str(endpoint).startswith("xai:") for endpoint in chain)
+    image_url = ""
+    if not is_xai_chain:
+        _ensure_fal()
+        image_url = fal_client.upload_file(str(still_path))
 
     last_exc: Exception | None = None
     used_endpoint: str | None = None
     result: dict | None = None
     for endpoint in chain:
-        args = _build_args(endpoint, motion_prompt, image_url, duration_sec, aspect_ratio)
         try:
-            result = _queue_result(endpoint, args, timeout_sec=FAL_SUBSCRIBE_TIMEOUT_SEC)
+            if str(endpoint).startswith("xai:"):
+                result = _xai_i2v_result(
+                    endpoint,
+                    motion_prompt,
+                    still_path,
+                    duration_sec=duration_sec,
+                    aspect_ratio=aspect_ratio,
+                )
+            else:
+                args = _build_args(endpoint, motion_prompt, image_url, duration_sec, aspect_ratio)
+                result = _queue_result(endpoint, args, timeout_sec=FAL_SUBSCRIBE_TIMEOUT_SEC)
             used_endpoint = endpoint
             break
         except Exception as e:
@@ -320,7 +448,7 @@ def generate(
     if result is None:
         raise I2VError(f"all i2v endpoints failed on {still_path.name}: {last_exc}")
 
-    video_url = (result.get("video") or {}).get("url") or result.get("video_url")
+    video_url = (result.get("video") or {}).get("url") or result.get("video_url") or result.get("url")
     if not video_url:
         raise I2VError(f"{used_endpoint} returned no video URL: {result}")
 
@@ -331,10 +459,12 @@ def generate(
             json.dumps(
                 {
                     "endpoint": used_endpoint,
-                    "request_id": result.get("_fal_request_id"),
+                    "request_id": result.get("_fal_request_id") or result.get("_xai_request_id"),
                     "duration_sec": int(duration_sec),
                     "video_model": _vm,
                     "video_url": video_url,
+                    "xai_model": result.get("_xai_model"),
+                    "xai_resolution": result.get("_xai_resolution"),
                 },
                 indent=2,
             ),

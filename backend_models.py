@@ -76,6 +76,7 @@ class CheckoutRequest(BaseModel):
     price_id: str = ""
     product: str = ""
     plan: str = ""
+    trial: bool = False
 
 
 class TopupCheckoutRequest(BaseModel):
@@ -97,6 +98,16 @@ class WaitlistJoinRequest(BaseModel):
 class SetPlanRequest(BaseModel):
     email: str
     plan: str
+
+
+class BlogPostRequest(BaseModel):
+    slug: str = ""
+    title: str
+    date: str = ""
+    label: str = "Product update"
+    summary: str
+    bullets: list[str] = []
+    published: bool = True
 
 
 class FeedbackRequest(BaseModel):

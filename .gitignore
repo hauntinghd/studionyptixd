@@ -5,6 +5,7 @@ runpod-serverless/.runpod.env
 temp_assets/
 generated_videos/
 demo_uploads/
+thumbnails/
 __pycache__/
 *.pyc
 .DS_Store

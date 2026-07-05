@@ -7,7 +7,7 @@ import {
     Upload,
     Youtube,
 } from 'lucide-react';
-import { API, AuthContext, DIRECT_API } from '../shared';
+import { AuthContext, resolveStudioBackendUrl } from '../shared';
 import { ThumbProgressBar } from '../components/StudioWidgets';
 
 type Segment = {
@@ -27,12 +27,13 @@ type Job = {
     video_id?: string;
     segments?: Segment[];
     clips?: Array<{ index: number; url?: string; filename?: string; error?: string; virality_score?: number }>;
+    remix?: { url?: string; filename?: string; style_preset?: string; caption_style?: string; edit_intensity?: string; background_mode?: string };
 };
 
 export default function ClipLabPanel() {
     const { session } = useContext(AuthContext);
     const token = session?.access_token || '';
-    const api = DIRECT_API || API;
+    const backendUrl = useCallback((path: string) => resolveStudioBackendUrl(path), []);
 
     const [youtubeUrl, setYoutubeUrl] = useState('');
     const [videoId, setVideoId] = useState('');
@@ -40,21 +41,26 @@ export default function ClipLabPanel() {
     const [ingestJobId, setIngestJobId] = useState('');
     const [analyzeJobId, setAnalyzeJobId] = useState('');
     const [renderJobId, setRenderJobId] = useState('');
+    const [remixJobId, setRemixJobId] = useState('');
     const [ingestJob, setIngestJob] = useState<Job | null>(null);
     const [analyzeJob, setAnalyzeJob] = useState<Job | null>(null);
     const [renderJob, setRenderJob] = useState<Job | null>(null);
+    const [remixJob, setRemixJob] = useState<Job | null>(null);
     const [selected, setSelected] = useState<Set<number>>(new Set());
     const [uploading, setUploading] = useState(false);
     const [busy, setBusy] = useState('');
     const [error, setError] = useState('');
     const [registry, setRegistry] = useState<Record<string, unknown> | null>(null);
+    const [remixStyle, setRemixStyle] = useState('clean_viral');
+    const [remixCaptionStyle, setRemixCaptionStyle] = useState('bold');
+    const [remixIntensity, setRemixIntensity] = useState('medium');
 
     const pollJob = useCallback(async (jobId: string, setter: (j: Job) => void) => {
         if (!token || !jobId) return;
         let cancelled = false;
         const tick = async () => {
             try {
-                const r = await fetch(`${api}/api/status/${jobId}`, {
+                const r = await fetch(backendUrl(`/api/status/${jobId}`), {
                     headers: { Authorization: `Bearer ${token}` },
                 });
                 const data = await r.json();
@@ -68,15 +74,15 @@ export default function ClipLabPanel() {
         };
         tick();
         return () => { cancelled = true; };
-    }, [token, api]);
+    }, [token, backendUrl]);
 
     useEffect(() => {
         if (!token) return;
-        fetch(`${api}/api/cliplab/status`, { headers: { Authorization: `Bearer ${token}` } })
+        fetch(backendUrl('/api/cliplab/status'), { headers: { Authorization: `Bearer ${token}` } })
             .then((r) => r.json())
             .then(setRegistry)
             .catch(() => setRegistry(null));
-    }, [token, api]);
+    }, [token, backendUrl]);
 
     useEffect(() => {
         if (ingestJobId) pollJob(ingestJobId, setIngestJob);
@@ -89,6 +95,10 @@ export default function ClipLabPanel() {
     useEffect(() => {
         if (renderJobId) pollJob(renderJobId, setRenderJob);
     }, [renderJobId, pollJob]);
+
+    useEffect(() => {
+        if (remixJobId) pollJob(remixJobId, setRemixJob);
+    }, [remixJobId, pollJob]);
 
     useEffect(() => {
         if (ingestJob?.video_id) setVideoId(ingestJob.video_id);
@@ -107,7 +117,7 @@ export default function ClipLabPanel() {
         try {
             const fd = new FormData();
             fd.append('file', file);
-            const r = await fetch(`${api}/api/cliplab/ingest/upload`, {
+            const r = await fetch(backendUrl('/api/cliplab/ingest/upload'), {
                 method: 'POST',
                 headers: { Authorization: `Bearer ${token}` },
                 body: fd,
@@ -129,7 +139,7 @@ export default function ClipLabPanel() {
         setBusy('ingest');
         setError('');
         try {
-            const r = await fetch(`${api}/api/cliplab/ingest/youtube`, {
+            const r = await fetch(backendUrl('/api/cliplab/ingest/youtube'), {
                 method: 'POST',
                 headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
                 body: JSON.stringify({ youtube_url: youtubeUrl.trim() }),
@@ -154,7 +164,7 @@ export default function ClipLabPanel() {
         setBusy('analyze');
         setError('');
         try {
-            const r = await fetch(`${api}/api/cliplab/analyze`, {
+            const r = await fetch(backendUrl('/api/cliplab/analyze'), {
                 method: 'POST',
                 headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
                 body: JSON.stringify({ video_id: videoId, prompt: prompt.trim(), max_segments: 12 }),
@@ -175,7 +185,7 @@ export default function ClipLabPanel() {
         setBusy('render');
         setError('');
         try {
-            const r = await fetch(`${api}/api/cliplab/render`, {
+            const r = await fetch(backendUrl('/api/cliplab/render'), {
                 method: 'POST',
                 headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -191,6 +201,38 @@ export default function ClipLabPanel() {
             setRenderJob({ status: 'queued', progress: 0 });
         } catch (e: unknown) {
             setError(e instanceof Error ? e.message : 'Render failed');
+        } finally {
+            setBusy('');
+        }
+    };
+
+    const remixUploadedShort = async () => {
+        if (!token || !videoId) {
+            setError('Upload or ingest a short first');
+            return;
+        }
+        setBusy('remix');
+        setError('');
+        try {
+            const r = await fetch(backendUrl('/api/cliplab/remix'), {
+                method: 'POST',
+                headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    video_id: videoId,
+                    style_preset: remixStyle,
+                    caption_style: remixCaptionStyle,
+                    edit_intensity: remixIntensity,
+                    background_mode: 'blur',
+                    burn_captions: true,
+                    notes: 'Internal Remix Lab v1 test from ClipLab panel.',
+                }),
+            });
+            const data = await r.json();
+            if (!r.ok) throw new Error(data.detail || 'Remix failed');
+            setRemixJobId(String(data.job_id || ''));
+            setRemixJob({ status: 'queued', progress: 0 });
+        } catch (e: unknown) {
+            setError(e instanceof Error ? e.message : 'Remix failed');
         } finally {
             setBusy('');
         }
@@ -295,6 +337,16 @@ export default function ClipLabPanel() {
                 {analyzeJob && (
                     <div className="mt-4">
                         <ThumbProgressBar progress={analyzeJob.progress} status={analyzeJob.status} />
+                        {analyzeJob.error && (
+                            <p className="mt-2 rounded-lg border border-red-400/20 bg-red-500/10 px-3 py-2 text-xs text-red-200">
+                                {analyzeJob.error}
+                            </p>
+                        )}
+                        {analyzeJob.status === 'complete' && (!analyzeJob.segments || analyzeJob.segments.length === 0) && (
+                            <p className="mt-2 rounded-lg border border-yellow-400/20 bg-yellow-500/10 px-3 py-2 text-xs text-yellow-100">
+                                No viral segments were returned. Try a clearer prompt or upload a video with speech/audio.
+                            </p>
+                        )}
                     </div>
                 )}
                 {analyzeJob?.segments && analyzeJob.segments.length > 0 && (
@@ -345,7 +397,7 @@ export default function ClipLabPanel() {
                                 <span className="text-gray-300">Clip #{c.index + 1}</span>
                                 {c.url ? (
                                     <a
-                                        href={`${api}${c.url}`}
+                                        href={backendUrl(c.url || '')}
                                         download
                                         className="inline-flex items-center gap-1 text-rose-300 hover:text-rose-200"
                                     >
@@ -357,6 +409,79 @@ export default function ClipLabPanel() {
                             </li>
                         ))}
                     </ul>
+                )}
+            </section>
+
+            <section className="rounded-2xl border border-white/[0.08] bg-white/[0.02] p-5">
+                <h2 className="text-sm font-semibold uppercase tracking-wider text-cyan-300">Remix Lab - Internal</h2>
+                <p className="mt-1 text-xs text-gray-500">
+                    Upload an already-cut 9:16 short, then polish it with blurred background, captions, color, and Catalyst-ready edit metadata.
+                </p>
+                <div className="mt-4 grid gap-3 sm:grid-cols-3">
+                    <label className="block text-xs font-semibold uppercase tracking-[0.16em] text-gray-500">
+                        Style
+                        <select
+                            value={remixStyle}
+                            onChange={(e) => setRemixStyle(e.target.value)}
+                            className="mt-2 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm normal-case tracking-normal text-white"
+                        >
+                            <option value="clean_viral">Clean viral</option>
+                            <option value="empire">Empire Magnates</option>
+                            <option value="documentary">Documentary</option>
+                            <option value="streamer">Streamer</option>
+                            <option value="high_energy">High energy</option>
+                        </select>
+                    </label>
+                    <label className="block text-xs font-semibold uppercase tracking-[0.16em] text-gray-500">
+                        Captions
+                        <select
+                            value={remixCaptionStyle}
+                            onChange={(e) => setRemixCaptionStyle(e.target.value)}
+                            className="mt-2 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm normal-case tracking-normal text-white"
+                        >
+                            <option value="bold">Bold</option>
+                            <option value="empire">Empire</option>
+                            <option value="minimal">Minimal</option>
+                        </select>
+                    </label>
+                    <label className="block text-xs font-semibold uppercase tracking-[0.16em] text-gray-500">
+                        Intensity
+                        <select
+                            value={remixIntensity}
+                            onChange={(e) => setRemixIntensity(e.target.value)}
+                            className="mt-2 w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm normal-case tracking-normal text-white"
+                        >
+                            <option value="low">Low</option>
+                            <option value="medium">Medium</option>
+                            <option value="high">High</option>
+                        </select>
+                    </label>
+                </div>
+                <button
+                    type="button"
+                    onClick={remixUploadedShort}
+                    disabled={busy === 'remix' || !videoId}
+                    className="mt-4 inline-flex items-center gap-2 rounded-xl bg-cyan-500/15 px-5 py-2.5 text-sm font-bold text-cyan-200 ring-1 ring-cyan-400/30 hover:bg-cyan-500/20 disabled:opacity-50"
+                >
+                    {busy === 'remix' ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
+                    Remix uploaded short
+                </button>
+                {remixJob && (
+                    <div className="mt-4">
+                        <ThumbProgressBar progress={remixJob.progress} status={remixJob.status} />
+                    </div>
+                )}
+                {remixJob?.remix?.url && (
+                    <div className="mt-4 flex items-center justify-between rounded-lg border border-cyan-400/20 bg-cyan-400/5 p-3 text-sm">
+                        <span className="text-gray-300">Remixed short ready</span>
+                        <a
+                            href={backendUrl(remixJob.remix.url)}
+                            download
+                            className="inline-flex items-center gap-1 text-cyan-200 hover:text-white"
+                        >
+                            <Download className="h-4 w-4" /> MP4
+                        </a>
+                    </div>
                 )}
             </section>
 

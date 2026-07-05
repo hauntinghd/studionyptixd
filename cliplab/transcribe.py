@@ -25,6 +25,31 @@ def _ts_to_sec(h: str, m: str, s: str, ms: str) -> float:
     return int(h) * 3600 + int(m) * 60 + int(s) + int(ms) / 1000.0
 
 
+def _float_time(value, default: float = 0.0) -> float:
+    try:
+        if isinstance(value, (list, tuple)):
+            value = next((v for v in value if v is not None), default)
+        return float(value if value is not None else default)
+    except Exception:
+        return float(default)
+
+
+def _row_times(row: dict, text: str) -> tuple[float, float]:
+    timestamp = row.get("timestamp")
+    if isinstance(timestamp, (list, tuple)):
+        start = _float_time(timestamp[0] if len(timestamp) > 0 else row.get("start"), 0.0)
+        end = _float_time(timestamp[1] if len(timestamp) > 1 else row.get("end"), 0.0)
+    elif isinstance(timestamp, dict):
+        start = _float_time(timestamp.get("start") or timestamp.get("from") or row.get("start"), 0.0)
+        end = _float_time(timestamp.get("end") or timestamp.get("to") or row.get("end"), 0.0)
+    else:
+        start = _float_time(row.get("start") if row.get("start") is not None else timestamp, 0.0)
+        end = _float_time(row.get("end"), 0.0)
+    if end <= start:
+        end = start + max(1.0, len(str(text or "").split()) * 0.35)
+    return start, end
+
+
 def parse_vtt_cues(raw_vtt: str) -> list[TranscriptCue]:
     cues: list[TranscriptCue] = []
     blocks = re.split(r"\n\s*\n", str(raw_vtt or ""))
@@ -93,8 +118,7 @@ async def transcribe_with_fal_whisper(audio_path: str, fal_key: str) -> list[Tra
             text = str(row.get("text") or "").strip()
             if not text:
                 continue
-            start = float(row.get("timestamp") or row.get("start") or 0)
-            end = float(row.get("end") or start + max(1.0, len(text.split()) * 0.35))
+            start, end = _row_times(row, text)
             words_raw = text.split()
             step = max(0.05, (end - start) / max(1, len(words_raw)))
             words = [

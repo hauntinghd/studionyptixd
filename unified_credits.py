@@ -95,6 +95,7 @@ def _wallet(user_id: str) -> dict[str, Any]:
             "lifetime_spent": 0,
             "unlimited": False,
             "reservations": {},
+            "trial": {},
             "processed_events": [],
             "updated_at": time.time(),
         }
@@ -113,6 +114,7 @@ def _wallet(user_id: str) -> dict[str, Any]:
     w.setdefault("lifetime_spent", 0)
     w.setdefault("unlimited", False)
     w.setdefault("reservations", {})
+    w.setdefault("trial", {})
     w.setdefault("processed_events", [])
     _sync_balance(w)
     return w
@@ -126,6 +128,25 @@ def _sync_balance(w: dict[str, Any]) -> int:
     )
     w["balance"] = total
     return total
+
+
+def _trial_locked(w: dict[str, Any]) -> dict[str, Any]:
+    trial = w.get("trial")
+    if not isinstance(trial, dict):
+        trial = {}
+        w["trial"] = trial
+    return trial
+
+
+def _trial_remaining_provider_usd_locked(w: dict[str, Any]) -> Decimal | None:
+    trial = _trial_locked(w)
+    if not bool(trial.get("active")):
+        return None
+    cap = _usd_decimal(trial.get("max_provider_usd", "0"))
+    if cap <= 0:
+        return None
+    spent = _usd_decimal(trial.get("provider_usd_spent", "0"))
+    return max(Decimal("0"), cap - spent)
 
 
 def _consume_locked(w: dict[str, Any], credits: int) -> dict[str, int] | None:
@@ -299,6 +320,10 @@ def set_plan(user_id: str, plan: str, *, grant_now: bool = True) -> dict[str, An
         w = _wallet(user_id)
         w["plan"] = plan
         if grant_now:
+            trial = _trial_locked(w)
+            if trial.get("active"):
+                trial["active"] = False
+                trial["ended_at"] = time.time()
             _grant_monthly_locked(user_id, plan)
         w["updated_at"] = time.time()
         _save()
@@ -393,6 +418,44 @@ def add_credits(
             "reason": reason,
             "metadata": metadata or {},
             "idempotency_key": key,
+            "balance_after": w["balance"],
+            "ts": time.time(),
+        })
+        return dict(w)
+
+
+def activate_trial(
+    user_id: str,
+    *,
+    plan: str,
+    credits: int,
+    source_id: str = "",
+    max_provider_usd: float | Decimal | str = "0",
+) -> dict[str, Any]:
+    """Mark this wallet as trial-limited until a paid monthly grant replaces it."""
+    uid = str(user_id or "").strip()
+    with _lock:
+        w = _wallet(uid)
+        trial = _trial_locked(w)
+        trial.update({
+            "active": True,
+            "plan": str(plan or "").strip().lower(),
+            "credits_granted": max(0, int(credits or 0)),
+            "source_id": str(source_id or ""),
+            "max_provider_usd": str(_usd_decimal(max_provider_usd)),
+            "provider_usd_spent": str(_usd_decimal(trial.get("provider_usd_spent", "0"))),
+            "started_at": float(trial.get("started_at") or time.time()),
+            "updated_at": time.time(),
+        })
+        w["updated_at"] = time.time()
+        _save()
+        _append_ledger({
+            "type": "trial_guard_activated",
+            "user_id": uid,
+            "plan": trial["plan"],
+            "credits": trial["credits_granted"],
+            "max_provider_usd_decimal": trial["max_provider_usd"],
+            "source_id": trial["source_id"],
             "balance_after": w["balance"],
             "ts": time.time(),
         })
@@ -521,6 +584,16 @@ def debit_usd(
 ) -> tuple[int, int]:
     """Convert provider USD -> credits and debit. Returns (credits_charged, balance_after)."""
     provider_amount = _usd_decimal(provider_usd)
+    uid = str(user_id or "").strip()
+    if uid and provider_amount > 0:
+        with _lock:
+            w = _wallet(uid)
+            remaining = _trial_remaining_provider_usd_locked(w)
+            if remaining is not None and provider_amount > remaining and not allow_negative:
+                raise InsufficientCreditsError(
+                    "This trial can only spend "
+                    f"${remaining:.2f} more in provider costs. Choose a paid plan or top up credits."
+                )
     credits = usd_to_credits(provider_usd)
     md = dict(metadata or {})
     md["provider_usd"] = _usd_float(provider_amount)
@@ -529,6 +602,15 @@ def debit_usd(
     md["credit_usd_value_decimal"] = str(_decimal(CREDIT_USD_VALUE))
     md["credit_margin"] = float(CREDIT_MARGIN)
     _ok, bal = debit_credits(user_id, credits, reason=reason, metadata=md, allow_negative=allow_negative)
+    if _ok and uid and provider_amount > 0:
+        with _lock:
+            w = _wallet(uid)
+            trial = _trial_locked(w)
+            if bool(trial.get("active")):
+                trial["provider_usd_spent"] = str(_usd_decimal(trial.get("provider_usd_spent", "0")) + provider_amount)
+                trial["updated_at"] = time.time()
+                w["updated_at"] = time.time()
+                _save()
     return credits, bal
 
 
@@ -595,6 +677,16 @@ def reserve_usd(
     repair_reserve_pct: float = 0.25,
 ) -> dict[str, Any]:
     provider_amount = _usd_decimal(provider_usd)
+    uid = str(user_id or "").strip()
+    if uid and provider_amount > 0:
+        with _lock:
+            w = _wallet(uid)
+            remaining = _trial_remaining_provider_usd_locked(w)
+            if remaining is not None and provider_amount > remaining:
+                raise InsufficientCreditsError(
+                    "This trial can only spend "
+                    f"${remaining:.2f} more in provider costs. Choose a paid plan or top up credits."
+                )
     base = usd_to_credits(provider_usd)
     repair_multiplier = Decimal("1") + max(Decimal("0"), _decimal(repair_reserve_pct))
     held = int((Decimal(base) * repair_multiplier).to_integral_value(rounding=ROUND_CEILING))
@@ -668,6 +760,13 @@ def commit_reservation(
             _restore_locked(w, restored)
         w["reservations"] = reservations
         w["lifetime_spent"] = int(w.get("lifetime_spent", 0) or 0) + charged
+        trial = _trial_locked(w)
+        if bool(trial.get("active")) and charged > 0:
+            credit_value = max(_decimal(CREDIT_USD_VALUE), Decimal("0.000000001"))
+            margin_multiplier = Decimal("1") + max(_decimal(CREDIT_MARGIN), Decimal("0"))
+            provider_spend = (Decimal(charged) * credit_value / margin_multiplier).quantize(USD_QUANT)
+            trial["provider_usd_spent"] = str(_usd_decimal(trial.get("provider_usd_spent", "0")) + provider_spend)
+            trial["updated_at"] = time.time()
         w["updated_at"] = time.time()
         _save()
         _append_ledger({

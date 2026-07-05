@@ -1,4 +1,4 @@
-import { useCallback, useContext, useEffect, useMemo, useState } from 'react';
+import { useContext, useEffect, useMemo, useState } from 'react';
 import MembershipPremiumView from '../components/membership/MembershipPremiumView';
 import StudioShell from '../components/layout/StudioShell';
 import { UNIFIED_PLANS, type UnifiedPlanId } from '../lib/studioProduct';
@@ -13,9 +13,10 @@ export default function SubscriptionPage({ onNavigate }: { onNavigate: PageNav }
         membershipPlanId,
         membershipSource,
         creditsTotalRemaining,
+        monthlyCreditsRemaining,
+        topupCreditsRemaining,
+        nextRenewalUnix,
         nextRenewalSource,
-        checkout,
-        manageBilling,
         verifyPayPalOrder,
     } = useContext(AuthContext);
     const params = useMemo(() => {
@@ -29,31 +30,15 @@ export default function SubscriptionPage({ onNavigate }: { onNavigate: PageNav }
     const paypalOrderId = String(params.get('order_id') || '').trim();
     const [paypalVerifyState, setPaypalVerifyState] = useState<'idle' | 'verifying' | 'verified' | 'failed' | 'revoked'>('idle');
     const [paypalVerifyError, setPaypalVerifyError] = useState('');
-    const [actionError, setActionError] = useState('');
-    const [loadingPlanId, setLoadingPlanId] = useState('');
+    const [actionError] = useState('');
     const [unifiedBalance, setUnifiedBalance] = useState<number | null>(null);
     const normalizedMembershipSource = String(membershipSource || nextRenewalSource || '').trim().toLowerCase();
-    const usesStripeMembership = billingActive && normalizedMembershipSource === 'stripe';
-    const usesManualPayPalMembership = billingActive && normalizedMembershipSource === 'paypal_manual';
     const normalizedCurrentPlan = useMemo<UnifiedPlanId | ''>(() => {
         const raw = String(membershipPlanId || '').trim().toLowerCase();
         const alias = raw === 'creator' ? 'studio_pro_2500' : raw === 'studio' ? 'studio_pro_11k' : raw;
         if (UNIFIED_PLANS.some((p) => p.id === alias)) return alias as UnifiedPlanId;
         return '';
     }, [membershipPlanId]);
-
-    const planCards = useMemo(
-        () =>
-            UNIFIED_PLANS.map((p) => ({
-                id: p.id,
-                title: p.title,
-                priceLabel: `$${p.priceUsd}/mo`,
-                subtitle: p.description,
-                bullets: p.features,
-                bestValue: Boolean(p.bestValue),
-            })),
-        [],
-    );
 
     useEffect(() => {
         const tok = session?.access_token;
@@ -133,36 +118,6 @@ export default function SubscriptionPage({ onNavigate }: { onNavigate: PageNav }
         onNavigate('billing');
     };
 
-    const handlePlanAction = useCallback(
-        async (planId: UnifiedPlanId) => {
-            if (!session) {
-                onNavigate('auth');
-                return;
-            }
-            setActionError('');
-            setLoadingPlanId(planId);
-            try {
-                if (billingActive && usesStripeMembership) {
-                    const err = await manageBilling();
-                    if (err) setActionError(err);
-                    return;
-                }
-                if (billingActive && normalizedCurrentPlan === planId) {
-                    if (usesManualPayPalMembership) {
-                        const err = await checkout(planId);
-                        if (err) setActionError(err);
-                        return;
-                    }
-                }
-                const err = await checkout(planId);
-                if (err) setActionError(err);
-            } finally {
-                setLoadingPlanId('');
-            }
-        },
-        [billingActive, checkout, manageBilling, normalizedCurrentPlan, onNavigate, session, usesManualPayPalMembership, usesStripeMembership],
-    );
-
     const banners = (
         <>
             {subscriptionResult === 'success' && (!paypalProvider || paypalVerifyState === 'verified') && (
@@ -198,33 +153,17 @@ export default function SubscriptionPage({ onNavigate }: { onNavigate: PageNav }
         </>
     );
 
-    const plans = planCards.map((planCard) => {
-        const isCurrent = billingActive && normalizedCurrentPlan === planCard.id;
-        const actionLabel = isCurrent
-            ? usesStripeMembership
-                ? 'Manage plan'
-                : 'Extend plan'
-            : billingActive
-                ? `Switch to ${planCard.title}`
-                : `Start ${planCard.title}`;
-        return {
-            ...planCard,
-            isCurrent,
-            actionLabel,
-            loading: loadingPlanId === planCard.id,
-            disabled: false,
-            onAction: () => void handlePlanAction(planCard.id),
-        };
-    });
-
     const creditBalance = unifiedBalance ?? Number(creditsTotalRemaining || 0);
 
     return (
         <StudioShell onNavigate={onNavigate}>
             <MembershipPremiumView
                 currentStatus={currentStatus}
-                plans={plans}
                 creditBalance={creditBalance}
+                monthlyCreditsRemaining={monthlyCreditsRemaining}
+                topupCreditsRemaining={topupCreditsRemaining}
+                nextRenewalUnix={nextRenewalUnix}
+                membershipSource={normalizedMembershipSource}
                 onBack={handleBack}
                 onOpenBilling={handleOpenBilling}
                 banners={banners}

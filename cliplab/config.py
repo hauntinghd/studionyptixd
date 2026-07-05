@@ -44,3 +44,12 @@ RUNPOD_CLIPLAB_URL = (
     if RUNPOD_CLIPLAB_ENDPOINT
     else ""
 )
+
+# Temporary internal provider bridge while Catalyst learns enough to replace it.
+# Keep the key server-side only. Never expose this to the frontend bundle.
+CLIPLAB_PROVIDER = os.getenv("CLIPLAB_PROVIDER", "local").strip().lower()  # local | opus | hybrid
+OPUSCLIP_API_BASE = os.getenv("OPUSCLIP_API_BASE", "https://api.opus.pro/api").rstrip("/")
+OPUSCLIP_API_KEY = os.getenv("OPUSCLIP_API_KEY", "").strip()
+OPUSCLIP_ORG_ID = os.getenv("OPUSCLIP_ORG_ID", "").strip()
+OPUSCLIP_POLL_INTERVAL_SEC = float(os.getenv("OPUSCLIP_POLL_INTERVAL_SEC", "20"))
+OPUSCLIP_POLL_TIMEOUT_SEC = float(os.getenv("OPUSCLIP_POLL_TIMEOUT_SEC", "2400"))

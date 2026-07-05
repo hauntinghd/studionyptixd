@@ -2,7 +2,7 @@ import { resolveStudioBackendUrl } from './backend';
 
 const agentApi = (path: string) => resolveStudioBackendUrl(path);
 
-export type AgentJobKind = 'longform' | 'shortform' | 'competitor';
+export type AgentJobKind = 'longform' | 'shortform' | 'competitor' | 'cliplab';
 
 export type AgentJobTrack = {
     job_id: string;
@@ -12,7 +12,7 @@ export type AgentJobTrack = {
 };
 
 export function normalizeAgentJobKind(_jobId: string, kind?: string): AgentJobKind {
-    if (kind === 'longform' || kind === 'shortform' || kind === 'competitor') return kind;
+    if (kind === 'longform' || kind === 'shortform' || kind === 'competitor' || kind === 'cliplab') return kind;
     return 'shortform';
 }
 
@@ -43,6 +43,9 @@ export type AgentJobSnapshot = {
     error?: string | null;
     running?: boolean;
     title?: string;
+    job_type?: 'cliplab_ingest' | 'cliplab_analyze' | 'cliplab_render' | 'cliplab_remix' | string;
+    video_id?: string;
+    cue_count?: number;
     mp4_url?: string;
     download_url?: string;
     package_url?: string;
@@ -72,6 +75,14 @@ export type AgentJobSnapshot = {
     engagement?: Record<string, number>;
     frame_count?: number;
     blueprint_hint?: string;
+    segments?: unknown[];
+    segment_count?: number;
+    clips?: unknown[];
+    clip_count?: number;
+    upload_packages?: unknown[];
+    upload_package_count?: number;
+    remix?: unknown;
+    next_action?: string;
     cost?: {
         actual_usd?: number;
         actual_usd_decimal?: string;

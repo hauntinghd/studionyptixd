@@ -575,6 +575,11 @@ _ANTHROPIC_CORE_TOOL_PRIORITY = (
     "recommend_video_topics",
     "search_youtube_public",
     "analyze_reference_video",
+    "ingest_cliplab_attachment",
+    "analyze_cliplab_video",
+    "render_cliplab_segments",
+    "remix_cliplab_short",
+    "poll_cliplab_job",
 )
 
 
@@ -609,6 +614,30 @@ def _select_anthropic_tools(
         "final": ("finalize_production", "finalize_longform_render"),
         "channel": ("get_channel_analytics", "recommend_video_topics"),
         "youtube": ("search_youtube_public", "analyze_reference_video"),
+        "cliplab": (
+            "ingest_cliplab_attachment",
+            "analyze_cliplab_video",
+            "render_cliplab_segments",
+            "poll_cliplab_job",
+        ),
+        "clip lab": (
+            "ingest_cliplab_attachment",
+            "analyze_cliplab_video",
+            "render_cliplab_segments",
+            "poll_cliplab_job",
+        ),
+        "clips": (
+            "ingest_cliplab_attachment",
+            "analyze_cliplab_video",
+            "render_cliplab_segments",
+            "poll_cliplab_job",
+        ),
+        "uploaded video": (
+            "ingest_cliplab_attachment",
+            "analyze_cliplab_video",
+            "render_cliplab_segments",
+            "poll_cliplab_job",
+        ),
     }
     for keyword, names in keyword_tools.items():
         if keyword in recent_text:

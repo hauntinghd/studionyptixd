@@ -63,6 +63,42 @@ function isModelUrl(url?: string) {
     return /\.(glb|gltf)(\?|#|$)/i.test(String(url || ''));
 }
 
+type ClipLabClip = {
+    index?: number;
+    filename?: string;
+    url?: string;
+    start?: number;
+    end?: number;
+    duration_sec?: number;
+    virality_score?: number;
+    score_breakdown?: Record<string, number>;
+    hook_text?: string;
+    why_it_matches?: string;
+    visual_notes?: string;
+    audio_notes?: string;
+    narrative_role?: string;
+    retention_reason?: string;
+    edit_plan?: string[];
+};
+
+type ClipLabUploadPackage = {
+    clip_index?: number;
+    title?: string;
+    description?: string;
+    tags?: string[];
+    hook?: string;
+    rationale?: string;
+    visual_notes?: string;
+    audio_notes?: string;
+    narrative_role?: string;
+    retention_reason?: string;
+    edit_plan?: string[];
+    score_breakdown?: Record<string, number>;
+    start?: number;
+    end?: number;
+    virality_score?: number;
+};
+
 function useModelViewerScript(enabled: boolean) {
     const [ready, setReady] = useState(() => (
         typeof customElements !== 'undefined' && Boolean(customElements.get('model-viewer'))
@@ -307,6 +343,25 @@ export default function AgentJobDeliverable({
 
     const title = snapshot.title || (snapshot.kind === 'shortform' ? 'Your Short' : 'Production');
     const isAnalysis = snapshot.kind === 'competitor';
+    const isClipLab = snapshot.kind === 'cliplab';
+    const cliplabJobType = String(snapshot.job_type || '').toLowerCase();
+    const isClipLabIngest = isClipLab && (cliplabJobType === 'cliplab_ingest' || snapshot.job_id.startsWith('clipi_'));
+    const isClipLabAnalyze = isClipLab && (cliplabJobType === 'cliplab_analyze' || snapshot.job_id.startsWith('clipa_'));
+    const isClipLabRender = isClipLab && (cliplabJobType === 'cliplab_render' || snapshot.job_id.startsWith('clipr_'));
+    const clipLabStepLabel = isClipLabIngest
+        ? 'Ingest ready'
+        : isClipLabAnalyze
+            ? 'Analysis ready'
+            : isClipLabRender
+                ? 'Clips ready'
+                : 'ClipLab ready';
+    const clipLabStepDetail = isClipLabIngest
+        ? `Source video is ingested${snapshot.cue_count != null ? ` with ${snapshot.cue_count} transcript cues` : ''}. Send continue to analyze and select clip moments.`
+        : isClipLabAnalyze
+            ? `${snapshot.segment_count || snapshot.segments?.length || 0} candidate segment(s) found. Approve/render the strongest picks to create 9:16 clips.`
+            : isClipLabRender
+                ? `${snapshot.clip_count || snapshot.clips?.length || 0} rendered clip(s) and ${snapshot.upload_package_count || snapshot.upload_packages?.length || 0} upload package(s) are ready.`
+                : snapshot.next_action || 'Continue to the next ClipLab step.';
     const complete = snapshot.status === 'complete';
     const failed = snapshot.status === 'failed';
     const awaiting = snapshot.status === 'awaiting_approval';
@@ -343,10 +398,18 @@ export default function AgentJobDeliverable({
     const totalScenes = snapshot.total_scenes || stills.length || 0;
     const currentScene = snapshot.current_scene || 0;
     const pct = Math.max(0, Math.min(100, Number(snapshot.progress || (awaiting ? 80 : running ? 35 : complete ? 100 : 0))));
+    const clipLabClips = useMemo(
+        () => (Array.isArray(snapshot.clips) ? snapshot.clips : []).filter(Boolean) as ClipLabClip[],
+        [snapshot.clips],
+    );
+    const clipLabPackages = useMemo(
+        () => (Array.isArray(snapshot.upload_packages) ? snapshot.upload_packages : []).filter(Boolean) as ClipLabUploadPackage[],
+        [snapshot.upload_packages],
+    );
 
     const loadVideo = useCallback(async () => {
         const tok = session?.access_token;
-        if (!tok || !snapshot.job_id || isAnalysis) return;
+        if (!tok || !snapshot.job_id || isAnalysis || isClipLab) return;
         const url = agentJobMediaUrl(snapshot.job_id, snapshot.kind);
         try {
             const res = await fetch(url, { headers: { Authorization: `Bearer ${tok}` } });
@@ -359,7 +422,7 @@ export default function AgentJobDeliverable({
         } catch {
             /* ignore */
         }
-    }, [isAnalysis, session?.access_token, snapshot.job_id, snapshot.kind]);
+    }, [isAnalysis, isClipLab, session?.access_token, snapshot.job_id, snapshot.kind]);
 
     useEffect(() => {
         if ((complete || awaiting) && snapshot.mp4_url) void loadVideo();
@@ -782,6 +845,18 @@ export default function AgentJobDeliverable({
                     <p className="mb-2 text-xs text-gray-400">{snapshot.stage_detail}</p>
                 )}
 
+                {isClipLab && complete && !isClipLabRender && (
+                    <div className="mt-2 rounded-xl border border-cyan-400/20 bg-cyan-500/5 p-3 text-xs text-cyan-100/90">
+                        <p className="font-semibold text-cyan-100">{clipLabStepLabel}</p>
+                        <p className="mt-1 text-cyan-100/70">{clipLabStepDetail}</p>
+                        {snapshot.next_action && (
+                            <p className="mt-2 border-t border-cyan-400/10 pt-2 text-[10px] uppercase tracking-wide text-cyan-200/60">
+                                Next: {snapshot.next_action}
+                            </p>
+                        )}
+                    </div>
+                )}
+
                 {modelUrls.length > 0 && (
                     <div className="mb-3 rounded-xl border border-cyan-400/20 bg-cyan-500/5 p-3">
                         <div className="mb-2 flex items-center gap-2 text-xs font-semibold text-cyan-100">
@@ -858,8 +933,117 @@ export default function AgentJobDeliverable({
                     </div>
                 )}
 
+                {complete && isClipLabRender && (
+                    <div className="mt-2 space-y-3">
+                        <div className="rounded-xl border border-emerald-400/20 bg-emerald-500/5 p-3 text-xs text-emerald-100/90">
+                            <p className="font-semibold text-emerald-100">{clipLabStepLabel}</p>
+                            <p className="mt-1 text-emerald-100/70">{clipLabStepDetail}</p>
+                        </div>
+                        {clipLabClips.length ? (
+                            <div className="grid gap-3 sm:grid-cols-2">
+                                {clipLabClips.map((clip, idx) => {
+                                    const pkg = clipLabPackages.find((item) => Number(item.clip_index) === Number(clip.index ?? idx)) || clipLabPackages[idx];
+                                    const tok = session?.access_token || '';
+                                    const href = clip.url?.startsWith('http') ? clip.url : clip.url && tok ? mediaUrl(clip.url, tok) : clip.url || '';
+                                    const breakdown = clip.score_breakdown || pkg?.score_breakdown || {};
+                                    const editPlan = clip.edit_plan?.length ? clip.edit_plan : pkg?.edit_plan || [];
+                                    const score = clip.virality_score ?? pkg?.virality_score;
+                                    return (
+                                        <div key={`${clip.filename || clip.url || idx}`} className="overflow-hidden rounded-xl border border-white/10 bg-black/30">
+                                            {href ? (
+                                                <video
+                                                    src={href}
+                                                    controls
+                                                    className="aspect-[9/16] w-full bg-black object-contain"
+                                                    playsInline
+                                                />
+                                            ) : (
+                                                <div className="flex aspect-[9/16] items-center justify-center bg-black/50 text-xs text-gray-500">
+                                                    Clip URL missing
+                                                </div>
+                                            )}
+                                            <div className="space-y-2 p-3">
+                                                <div className="flex items-start justify-between gap-2">
+                                                    <div>
+                                                        <p className="text-xs font-semibold text-white">
+                                                            Clip {idx + 1}{pkg?.title ? ` - ${pkg.title}` : ''}
+                                                        </p>
+                                                        {(clip.start != null || clip.end != null || score != null) && (
+                                                            <p className="mt-0.5 text-[10px] text-gray-500">
+                                                                {clip.start ?? '?'}s - {clip.end ?? '?'}s{score != null ? ` · ${Math.round(Number(score))}/100` : ''}
+                                                            </p>
+                                                        )}
+                                                    </div>
+                                                    {href && (
+                                                        <a
+                                                            href={href}
+                                                            download={clip.filename || `cliplab_clip_${idx + 1}.mp4`}
+                                                            className="shrink-0 rounded-lg border border-emerald-400/20 bg-emerald-500/10 px-2 py-1 text-[10px] font-semibold text-emerald-100 hover:bg-emerald-500/15"
+                                                        >
+                                                            Download
+                                                        </a>
+                                                    )}
+                                                </div>
+                                                {pkg?.hook && <p className="text-[11px] text-cyan-100/80">Hook: {pkg.hook}</p>}
+                                                {(clip.why_it_matches || pkg?.rationale || clip.retention_reason || pkg?.retention_reason) && (
+                                                    <div className="rounded-lg border border-cyan-400/15 bg-cyan-500/[0.04] p-2 text-[11px] text-cyan-50/80">
+                                                        {(clip.why_it_matches || pkg?.rationale) && <p>{clip.why_it_matches || pkg?.rationale}</p>}
+                                                        {(clip.retention_reason || pkg?.retention_reason) && (
+                                                            <p className="mt-1 text-cyan-100/60">{clip.retention_reason || pkg?.retention_reason}</p>
+                                                        )}
+                                                    </div>
+                                                )}
+                                                {(clip.visual_notes || pkg?.visual_notes || clip.audio_notes || pkg?.audio_notes || Object.keys(breakdown).length > 0) && (
+                                                    <details className="rounded-lg border border-white/10 bg-white/[0.025] p-2 text-[11px] text-gray-300">
+                                                        <summary className="cursor-pointer font-semibold text-gray-100">Clip intelligence</summary>
+                                                        {(clip.visual_notes || pkg?.visual_notes) && <p className="mt-2">Visual: {clip.visual_notes || pkg?.visual_notes}</p>}
+                                                        {(clip.audio_notes || pkg?.audio_notes) && <p className="mt-1">Audio: {clip.audio_notes || pkg?.audio_notes}</p>}
+                                                        {(clip.narrative_role || pkg?.narrative_role) && <p className="mt-1">Role: {clip.narrative_role || pkg?.narrative_role}</p>}
+                                                        {Object.keys(breakdown).length > 0 && (
+                                                            <div className="mt-2 flex flex-wrap gap-1.5">
+                                                                {Object.entries(breakdown).slice(0, 6).map(([key, value]) => (
+                                                                    <span key={key} className="rounded-full border border-white/10 px-2 py-1 text-[10px] text-gray-300">
+                                                                        {key}: {Math.round(Number(value))}
+                                                                    </span>
+                                                                ))}
+                                                            </div>
+                                                        )}
+                                                    </details>
+                                                )}
+                                                {editPlan.length ? (
+                                                    <details className="rounded-lg border border-white/10 bg-white/[0.025] p-2 text-[11px] text-gray-300">
+                                                        <summary className="cursor-pointer font-semibold text-gray-100">Edit plan</summary>
+                                                        <ol className="mt-2 list-decimal space-y-1 pl-4">
+                                                            {editPlan.slice(0, 7).map((step, stepIdx) => (
+                                                                <li key={`${stepIdx}-${step}`}>{step}</li>
+                                                            ))}
+                                                        </ol>
+                                                    </details>
+                                                ) : null}
+                                                {pkg?.description && (
+                                                    <details className="rounded-lg border border-white/10 bg-white/[0.025] p-2 text-[11px] text-gray-300">
+                                                        <summary className="cursor-pointer font-semibold text-gray-100">Upload package</summary>
+                                                        <p className="mt-2 whitespace-pre-wrap">{pkg.description}</p>
+                                                        {pkg.tags?.length ? (
+                                                            <p className="mt-2 text-cyan-100/70">{pkg.tags.join(', ')}</p>
+                                                        ) : null}
+                                                    </details>
+                                                )}
+                                            </div>
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                        ) : (
+                            <div className="rounded-xl border border-amber-400/20 bg-amber-500/5 p-3 text-xs text-amber-100/80">
+                                ClipLab says render is complete, but no clip URLs were returned in the job snapshot. Ask Studio Agent to poll this render again.
+                            </div>
+                        )}
+                    </div>
+                )}
+
                 {/* Final video (the payoff, right in the chat) */}
-                {complete && !isAnalysis && (
+                {complete && !isAnalysis && !isClipLab && (
                     <div className="mt-1">
                         {videoSrc ? (
                             <video
@@ -893,7 +1077,7 @@ export default function AgentJobDeliverable({
             </div>
 
             {/* Bottom actions */}
-            {complete && !isAnalysis && (
+                {complete && !isAnalysis && !isClipLab && (
                 <div className="border-t border-white/[0.06] bg-black/20 px-3 py-2">
                     {(() => {
                         const tok = session?.access_token || '';

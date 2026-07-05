@@ -888,6 +888,7 @@ async def _youtube_finalize_oauth_connection(state_payload: dict, code: str = ""
         if not channels:
             return RedirectResponse(_youtube_redirect_target(next_url, False, "Google account returned no YouTube channels. Try again — YouTube may be slow."), status_code=302)
         now = time.time()
+        connected_channel_ids: list[str] = []
         async with _youtube_connections_lock:
             _load_youtube_connections()
             bucket = _youtube_bucket_for_user(user_id)
@@ -896,6 +897,7 @@ async def _youtube_finalize_oauth_connection(state_payload: dict, code: str = ""
                 channel_id = str(channel.get("channel_id", "") or "").strip()
                 if not channel_id:
                     continue
+                connected_channel_ids.append(channel_id)
                 previous = dict(existing_channels.get(channel_id) or {})
                 existing_channels[channel_id] = {
                     **previous,
@@ -921,13 +923,19 @@ async def _youtube_finalize_oauth_connection(state_payload: dict, code: str = ""
                 bucket["default_channel_id"] = str(channels[0].get("channel_id", "") or "").strip()
             _save_youtube_connections()
             default_channel_id = str(bucket.get("default_channel_id", "") or "").strip()
-        if default_channel_id:
+        sync_channel_ids: list[str] = []
+        for candidate_id in [requested_channel_id, default_channel_id, *connected_channel_ids]:
+            candidate = str(candidate_id or "").strip()
+            if candidate and candidate not in sync_channel_ids:
+                sync_channel_ids.append(candidate)
+        if sync_channel_ids:
             # Sync in background — don't block the OAuth redirect (prevents Render 502 timeout)
             async def _background_sync():
-                try:
-                    await _youtube_sync_and_persist_for_user(user_id, default_channel_id)
-                except Exception:
-                    pass
+                for channel_id in sync_channel_ids:
+                    try:
+                        await _youtube_sync_and_persist_for_user(user_id, channel_id)
+                    except Exception:
+                        pass
             asyncio.create_task(_background_sync())
         success_message = "YouTube channel connected"
         if oauth_mode == "installed":
@@ -1782,6 +1790,17 @@ def _youtube_apply_public_inventory_to_snapshot(snapshot: dict | None, public_ro
         for key, value in dict(row or {}).items():
             if value not in (None, "", [], {}):
                 merged[key] = value
+        public_views = int(float((row or {}).get("views", 0) or 0) or 0)
+        existing_views = int(float(merged.get("views", 0) or 0) or 0)
+        if public_views or existing_views:
+            merged["views"] = max(public_views, existing_views)
+            merged["view_count"] = max(
+                int(float(merged.get("view_count", 0) or 0) or 0),
+                public_views,
+                existing_views,
+            )
+            if public_views >= existing_views and public_views > 0:
+                merged["view_count_source"] = "public_inventory_freshness"
         merged["video_id"] = clean_video_id
         merged["privacy_status"] = str(
             (row or {}).get("privacy_status", "") or merged.get("privacy_status", "") or "public"
@@ -2556,7 +2575,17 @@ async def _youtube_fetch_channel_analytics(access_token: str, channel_id: str) -
             metrics = dict(bulk_video_metrics.get(str(row.get("video_id", "") or "").strip()) or {})
             if not metrics:
                 continue
-            row["views"] = int(metrics.get("views", row.get("views", 0) or 0) or 0)
+            existing_views = int(float(row.get("views", row.get("view_count", 0)) or 0) or 0)
+            analytics_views = int(float(metrics.get("views", existing_views) or 0) or 0)
+            row["views"] = max(existing_views, analytics_views)
+            row["view_count"] = max(
+                int(float(row.get("view_count", 0) or 0) or 0),
+                existing_views,
+                analytics_views,
+            )
+            if existing_views > analytics_views and existing_views > 0:
+                row["view_count_source"] = "public_inventory_fresher_than_analytics"
+                row["analytics_views_lagged"] = analytics_views
             row["average_view_duration_sec"] = int(metrics.get("averageViewDuration", row.get("average_view_duration_sec", 0) or 0) or 0)
             row["average_view_percentage"] = round(float(metrics.get("averageViewPercentage", row.get("average_view_percentage", 0.0) or 0.0) or 0.0), 2)
             row["impressions"] = int(metrics.get("impressions", row.get("impressions", 0) or 0) or 0)

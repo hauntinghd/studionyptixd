@@ -22,6 +22,7 @@ import asyncio
 import hmac
 import os
 import time
+from pathlib import Path
 from typing import Any, Callable, Literal
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
@@ -68,7 +69,8 @@ class CreateSessionRequest(BaseModel):
     content_format: Literal["short", "long", "both"] = "both"
     reasoning_depth: Literal["fast", "balanced", "deep"] = "balanced"
     render_style: str | None = "cinematic"
-    video_model: Literal["ltx_budget", "seedance", "pixverse", "kling_pro"] = "seedance"
+    image_model: str = store.DEFAULT_IMAGE_MODEL
+    video_model: str = store.DEFAULT_VIDEO_MODEL
     channel_id: str | None = ""
     registry_key: str | None = ""
     channel_title: str | None = ""
@@ -85,7 +87,8 @@ class PatchSessionRequest(BaseModel):
     content_format: Literal["short", "long", "both"] | None = None
     reasoning_depth: Literal["fast", "balanced", "deep"] | None = None
     render_style: str | None = None
-    video_model: Literal["ltx_budget", "seedance", "pixverse", "kling_pro"] | None = None
+    image_model: str | None = None
+    video_model: str | None = None
     channel_id: str | None = None
     registry_key: str | None = None
     channel_title: str | None = None
@@ -105,6 +108,8 @@ class ChatRequest(BaseModel):
     channel_title: str | None = ""
     captions_enabled: bool | None = None
     caption_mode: Literal["word", "off"] | None = None
+    image_model: str | None = None
+    video_model: str | None = None
 
 
 class RememberRequest(BaseModel):
@@ -170,6 +175,10 @@ def _apply_chat_turn_options(session_id: str, session: dict[str, Any], body: Cha
         updates["caption_mode"] = body.caption_mode
         if body.caption_mode == "off":
             updates["captions_enabled"] = False
+    if body.image_model is not None and str(body.image_model or "").strip():
+        updates["image_model"] = body.image_model
+    if body.video_model is not None and str(body.video_model or "").strip():
+        updates["video_model"] = body.video_model
     if not updates:
         return session
     return store.update_session(session_id, **updates) or session
@@ -557,7 +566,7 @@ def build_studio_agent_router(
         user: dict = Depends(_agent_user),
         audio: UploadFile = File(...),
     ):
-        """Firefox-safe STT: browser records audio, server runs fal whisper."""
+        """Firefox-safe STT: browser records audio, server runs xAI Grok STT."""
         raw = await audio.read()
         try:
             text = await transcribe_audio_bytes(
@@ -572,6 +581,56 @@ def build_studio_agent_router(
         except Exception as exc:
             raise HTTPException(502, f"Transcription failed: {exc}") from exc
         return {"text": text, "chars": len(text)}
+
+    @router.post("/sessions/{session_id}/attachments/video")
+    async def upload_video_attachment(
+        session_id: str,
+        file: UploadFile = File(...),
+        user: dict = Depends(_agent_user),
+    ):
+        """Persist an internal Studio Agent video attachment for ClipLab ingestion."""
+        if not is_owner(user, is_admin_check):
+            raise HTTPException(403, "ClipLab video attachments are internal beta only")
+        uid = _user_id(user)
+        session = store.get_session(session_id, user_id=uid)
+        if not session:
+            raise HTTPException(404, "session not found")
+        if not file or not file.filename:
+            raise HTTPException(400, "No video file")
+        ext = Path(file.filename).suffix.lower() or ".mp4"
+        if ext not in {".mp4", ".mov", ".mkv", ".webm", ".m4v"}:
+            raise HTTPException(400, "Unsupported video format")
+        try:
+            from studio_agent.tools import SKELETON_OUTPUT
+        except Exception:
+            SKELETON_OUTPUT = Path(os.getenv("SKELETON_AI_OUTPUT_ROOT", "skeleton_ai/output"))
+        safe_session = "".join(c for c in str(session_id or "") if c.isalnum() or c in "-_")[:80]
+        target = SKELETON_OUTPUT / "_session_inputs" / safe_session
+        target.mkdir(parents=True, exist_ok=True)
+        stamp = int(time.time() * 1000)
+        dest = target / f"agent_video_{stamp}{ext}"
+        size = 0
+        with dest.open("wb") as fh:
+            while True:
+                chunk = await file.read(1024 * 1024)
+                if not chunk:
+                    break
+                size += len(chunk)
+                fh.write(chunk)
+        existing = [str(p) for p in list(session.get("latest_attachment_paths") or []) if p]
+        next_paths = [*existing, str(dest.resolve())][-8:]
+        store.update_session(
+            session_id,
+            latest_attachment_paths=next_paths,
+            latest_attachment_at=time.time(),
+        )
+        return {
+            "ok": True,
+            "name": str(file.filename or dest.name),
+            "mime_type": str(file.content_type or "video/mp4"),
+            "size": size,
+            "path": str(dest.resolve()),
+        }
 
     @router.get("/credits")
     async def credits(user: dict = Depends(_agent_user)):
@@ -615,6 +674,7 @@ def build_studio_agent_router(
             content_format=body.content_format,
             reasoning_depth=body.reasoning_depth,
             render_style=body.render_style or store.DEFAULT_RENDER_STYLE,
+            image_model=body.image_model,
             video_model=body.video_model,
             channel_id=body.channel_id or "",
             registry_key=body.registry_key or "",
@@ -727,9 +787,11 @@ def build_studio_agent_router(
         session = store.get_session(session_id, user_id=_user_id(user))
         if not session:
             raise HTTPException(404, "session not found")
-        if sync_pending:
-            store.sync_pending_from_messages(session_id)
-            session = store.get_session(session_id, user_id=_user_id(user)) or session
+        # Pending production approvals are turn-local safety gates. Always
+        # validate them before returning a session, even when the caller is
+        # only trying to hydrate cached UI state.
+        store.sync_pending_from_messages(session_id)
+        session = store.get_session(session_id, user_id=_user_id(user)) or session
         return {"session": _public_session(session)}
 
     @router.patch("/sessions/{session_id}")
@@ -752,6 +814,8 @@ def build_studio_agent_router(
             updates["reasoning_depth"] = body.reasoning_depth
         if body.render_style is not None:
             updates["render_style"] = body.render_style
+        if body.image_model is not None:
+            updates["image_model"] = body.image_model
         if body.video_model is not None:
             updates["video_model"] = body.video_model
         if body.channel_id is not None:
@@ -965,6 +1029,7 @@ def _session_summary(session: dict[str, Any]) -> dict[str, Any]:
         "content_format": session.get("content_format"),
         "reasoning_depth": session.get("reasoning_depth") or "balanced",
         "render_style": session.get("render_style") or store.DEFAULT_RENDER_STYLE,
+        "image_model": store.normalize_image_model(session.get("image_model")),
         "video_model": store.normalize_video_model(session.get("video_model")),
         "channel_id": session.get("channel_id") or "",
         "registry_key": session.get("registry_key") or "",

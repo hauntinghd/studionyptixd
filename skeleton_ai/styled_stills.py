@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import base64
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +17,7 @@ from .canonical_edit import _queue_result
 from . import render_simulation
 
 SEEDREAM_T2I_URL = "https://fal.run/fal-ai/bytedance/seedream/v4.5/text-to-image"
+XAI_IMAGE_URL = "https://api.x.ai/v1/images/generations"
 
 
 class StyledStillError(RuntimeError):
@@ -64,6 +66,7 @@ def generate_still_t2i(
     *,
     negative_prompt: str,
     seed: int = 420042,
+    image_model_id: str = "",
 ) -> dict[str, Any]:
     out_path = Path(out_path)
     if out_path.exists() and out_path.stat().st_size > 1024:
@@ -81,6 +84,45 @@ def generate_still_t2i(
             "seed": seed,
             "bytes": out_path.stat().st_size,
             "simulated": True,
+        }
+
+    normalized_model = str(image_model_id or "").strip().lower()
+    if normalized_model in {"grok_imagine", "grok_imagine_standard"}:
+        api_key = str(os.environ.get("XAI_API_KEY") or "").strip()
+        if not api_key:
+            raise StyledStillError("xAI image generation requires XAI_API_KEY")
+        xai_model = "grok-imagine-image-quality" if normalized_model == "grok_imagine" else "grok-imagine-image"
+        payload = {
+            "model": xai_model,
+            "prompt": str(prompt or "")[:3500],
+            "n": 1,
+            "response_format": "b64_json",
+            "aspect_ratio": "9:16",
+            "resolution": "2k",
+        }
+        with httpx.Client(timeout=240, follow_redirects=True) as client:
+            response = client.post(
+                XAI_IMAGE_URL,
+                json=payload,
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+            )
+        if response.status_code not in (200, 201):
+            raise StyledStillError(f"{xai_model} {response.status_code}: {response.text[:300]}")
+        data = (response.json() or {}).get("data") or []
+        b64 = str((data[0] or {}).get("b64_json") or "").strip() if data else ""
+        if not b64:
+            raise StyledStillError(f"{xai_model} returned no image data: {response.text[:200]}")
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_bytes(base64.b64decode(b64))
+        return {
+            "local_path": str(out_path),
+            "provider": normalized_model,
+            "xai_model": xai_model,
+            "seed": seed,
+            "bytes": out_path.stat().st_size,
         }
 
     _ensure_fal()

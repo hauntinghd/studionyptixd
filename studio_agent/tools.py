@@ -6,6 +6,7 @@ import concurrent.futures
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -18,6 +19,7 @@ from studio_agent import production_budget, production_costs
 from studio_agent.production_slots import production_slot
 from studio_agent import skills as skill_loader
 from studio_agent import telemetry
+from backend_settings import FAL_PUBLIC_RENDERS_ENABLED, XAI_PUBLIC_RENDERS_ENABLED
 
 ROOT = Path(__file__).resolve().parents[1]
 SKELETON_OUTPUT = Path(os.getenv("SKELETON_AI_OUTPUT_ROOT", "skeleton_ai/output"))
@@ -27,6 +29,9 @@ SKELETON_OUTPUT.mkdir(parents=True, exist_ok=True)
 APPROVAL_REQUIRED = frozenset({
     "start_longform_render",
     "start_shortform_generate",
+    "ingest_cliplab_attachment",
+    "render_cliplab_segments",
+    "remix_cliplab_short",
     "set_production_scenes_animate",
     "animate_production_scenes",
     "finalize_production",
@@ -34,6 +39,19 @@ APPROVAL_REQUIRED = frozenset({
     "run_build_script",
     "write_project_file",
 })
+
+CLIPLAB_AGENT_ADMIN_USER_IDS = {
+    uid.strip()
+    for uid in (
+        os.getenv("CLIPLAB_ADMIN_USER_IDS", "")
+        + ","
+        + os.getenv("STUDIO_ADMIN_USER_IDS", "")
+        + ","
+        + os.getenv("STUDIO_OWNER_USER_ID", "")
+        + ",c16550b3-caf0-4aa4-bdcf-2f3fe53b2837"
+    ).split(",")
+    if uid.strip()
+}
 
 _async_pool = concurrent.futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix="studio-agent-async")
 
@@ -48,6 +66,23 @@ _SHORTFORM_CHANNEL_CATEGORY_ALIASES = {
 }
 
 _CREDIT_RESERVATION_FILE = "credit_reservation.json"
+
+
+def _public_provider_block_message(name: str, arguments: dict[str, Any], budget: Any, user_id: str) -> str:
+    try:
+        import unified_credits as uc
+        if uc.is_unlimited(user_id):
+            return ""
+    except Exception:
+        pass
+    payload = json.dumps({"tool": name, "arguments": arguments or {}, "budget": getattr(budget, "breakdown", {}) or {}}, default=str).lower()
+    uses_xai = any(marker in payload for marker in ("grok", "xai", "grok_imagine"))
+    uses_fal = any(marker in payload for marker in ("fal", "seedream", "seedance", "pixverse", "kling", "minimax", "mmaudio"))
+    if uses_xai and not XAI_PUBLIC_RENDERS_ENABLED:
+        return "xAI/Grok public rendering is temporarily disabled. Owner can test it, but public users cannot spend against the xAI key."
+    if uses_fal and not FAL_PUBLIC_RENDERS_ENABLED:
+        return "FAL public rendering is temporarily disabled. Owner can test it, but public users cannot spend against the FAL key."
+    return ""
 
 
 def _run_async(coro):
@@ -96,10 +131,33 @@ def _compact_video_metric_rows(rows: list[dict[str, Any]], *, limit: int = 12) -
             "impression_click_through_rate": round(float(row.get("impression_click_through_rate", 0.0) or 0.0), 2),
             "is_short": bool(row.get("is_short") or row.get("shorts") or row.get("is_youtube_short")),
         }
+        if row.get("view_count_source"):
+            item["view_count_source"] = str(row.get("view_count_source") or "")
+        if row.get("analytics_views_lagged") is not None:
+            item["analytics_views_lagged"] = int(float(row.get("analytics_views_lagged") or 0))
+        if row.get("velocity_views_lagged") is not None:
+            item["velocity_views_lagged"] = int(float(row.get("velocity_views_lagged") or 0))
         if row.get("duration_sec") is not None:
             item["duration_sec"] = int(float(row.get("duration_sec") or 0))
             if item["duration_sec"] <= 180:
                 item["is_short"] = True
+        for source_key, out_key in (
+            ("engaged_views", "engaged_views"),
+            ("engagedViews", "engaged_views"),
+            ("shorts_engaged_views", "engaged_views"),
+            ("viewed_vs_swiped_away", "viewed_vs_swiped_away"),
+            ("viewedVsSwipedAway", "viewed_vs_swiped_away"),
+            ("swipe_away_rate", "swipe_away_rate"),
+            ("swipeAwayRate", "swipe_away_rate"),
+            ("stayed_to_watch_rate", "stayed_to_watch_rate"),
+            ("stayedToWatchRate", "stayed_to_watch_rate"),
+        ):
+            if row.get(source_key) is not None:
+                try:
+                    value = float(row.get(source_key) or 0)
+                    item[out_key] = int(value) if out_key == "engaged_views" else round(value, 2)
+                except Exception:
+                    item[out_key] = row.get(source_key)
         out.append(item)
         if len(out) >= limit:
             break
@@ -167,6 +225,144 @@ def _video_metric_summary(snapshot: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _shortform_metric_value(row: dict[str, Any], *keys: str) -> float:
+    for key in keys:
+        value = (row or {}).get(key)
+        if value in (None, ""):
+            continue
+        try:
+            return float(value or 0)
+        except Exception:
+            continue
+    return 0.0
+
+
+def _is_shortform_metric_row(row: dict[str, Any]) -> bool:
+    if not isinstance(row, dict):
+        return False
+    if bool(row.get("is_short") or row.get("shorts") or row.get("is_youtube_short")):
+        return True
+    try:
+        duration = int(float(row.get("duration_sec") or 0))
+        return 0 < duration <= 180
+    except Exception:
+        return False
+
+
+def _shortform_performance_score(row: dict[str, Any], latest_views_baseline: float = 0.0) -> float:
+    views = _shortform_metric_value(row, "views", "view_count")
+    engaged = _shortform_metric_value(row, "engaged_views", "engagedViews", "shorts_engaged_views")
+    apv = _shortform_metric_value(row, "average_view_percentage")
+    stayed = _shortform_metric_value(row, "stayed_to_watch_rate", "stayedToWatchRate", "viewed_vs_swiped_away", "viewedVsSwipedAway")
+    swipe_away = _shortform_metric_value(row, "swipe_away_rate", "swipeAwayRate")
+    likes = _shortform_metric_value(row, "likes", "like_count")
+    comments = _shortform_metric_value(row, "comments", "comment_count")
+    interactions_per_view = ((likes + comments) / views * 100.0) if views > 0 else 0.0
+    normalized_views = min((views / max(latest_views_baseline, 1.0)) * 20.0, 45.0) if latest_views_baseline else min(views / 25.0, 45.0)
+    engaged_score = min(engaged / 25.0, 35.0) if engaged else 0.0
+    swipe_score = stayed if stayed else max(0.0, 100.0 - swipe_away) if swipe_away else 0.0
+    return round(
+        normalized_views
+        + min(apv, 160.0) * 0.35
+        + min(swipe_score, 100.0) * 0.25
+        + engaged_score
+        + min(interactions_per_view, 15.0),
+        2,
+    )
+
+
+def _compare_shortform_video_metrics(video_metrics: dict[str, Any]) -> dict[str, Any]:
+    rows_by_key: dict[str, dict[str, Any]] = {}
+
+    def _add_rows(raw_rows: Any) -> None:
+        candidates = raw_rows if isinstance(raw_rows, list) else [raw_rows]
+        for raw in list(candidates or []):
+            if not isinstance(raw, dict):
+                continue
+            key = str(raw.get("video_id") or "").strip() or str(raw.get("title") or "").strip().lower()
+            if not key:
+                continue
+            merged = dict(rows_by_key.get(key) or {})
+            merged.update({k: v for k, v in raw.items() if v not in (None, "", [], {})})
+            rows_by_key[key] = merged
+
+    for bucket_name in ("latest_upload", "top_shorts_by_retention", "top_by_retention", "top_by_views"):
+        _add_rows((video_metrics or {}).get(bucket_name))
+
+    rows = [dict(row or {}) for row in rows_by_key.values() if _is_shortform_metric_row(row)]
+    latest = dict((video_metrics or {}).get("latest_upload") or {})
+    if latest and _is_shortform_metric_row(latest):
+        latest_key = str(latest.get("video_id") or "").strip() or str(latest.get("title") or "").strip().lower()
+        if latest_key and latest_key in rows_by_key:
+            latest.update(rows_by_key[latest_key])
+        elif latest_key:
+            rows.append(latest)
+    latest_id = str(latest.get("video_id") or "").strip()
+    latest_views = _shortform_metric_value(latest, "views", "view_count")
+
+    prior_rows = [
+        dict(row or {})
+        for row in rows
+        if not latest_id or str(row.get("video_id") or "").strip() != latest_id
+    ]
+    if not prior_rows and rows:
+        prior_rows = [dict(row or {}) for row in rows if str(row.get("title") or "") != str(latest.get("title") or "")]
+    scored_prior: list[dict[str, Any]] = []
+    for row in prior_rows:
+        scored = dict(row)
+        scored["shortform_score"] = _shortform_performance_score(scored, latest_views_baseline=max(latest_views, 1.0))
+        scored_prior.append(scored)
+    best = dict(max(scored_prior, key=lambda row: float(row.get("shortform_score") or 0), default={}))
+    latest_scored = dict(latest)
+    if latest_scored:
+        latest_scored["shortform_score"] = _shortform_performance_score(latest_scored, latest_views_baseline=max(latest_views, 1.0))
+
+    available_metrics: list[str] = []
+    missing_metrics: list[str] = []
+    sample_rows = [latest_scored, best, *scored_prior[:3]]
+    metric_checks = {
+        "views": ("views", "view_count"),
+        "average_percentage_viewed": ("average_view_percentage",),
+        "average_view_duration": ("average_view_duration_sec",),
+        "engaged_views": ("engaged_views", "engagedViews", "shorts_engaged_views"),
+        "stayed_to_watch_or_swipe_rate": ("stayed_to_watch_rate", "viewed_vs_swiped_away", "swipe_away_rate"),
+        "likes_comments": ("likes", "comments", "like_count", "comment_count"),
+    }
+    for label, keys in metric_checks.items():
+        if any(_shortform_metric_value(row, *keys) > 0 for row in sample_rows):
+            available_metrics.append(label)
+        else:
+            missing_metrics.append(label)
+
+    recommendations: list[str] = []
+    best_title = str(best.get("title") or "").strip()
+    latest_title = str(latest_scored.get("title") or "").strip()
+    if best_title:
+        recommendations.append(f"Use the prior winner's promise shape as the control: {best_title}")
+    if latest_title:
+        recommendations.append(f"Do not judge the latest Short from stale low private rows if public views are fresher: {latest_title}")
+    if _shortform_metric_value(latest_scored, "average_view_percentage") and _shortform_metric_value(best, "average_view_percentage"):
+        if _shortform_metric_value(latest_scored, "average_view_percentage") < _shortform_metric_value(best, "average_view_percentage"):
+            recommendations.append("Tighten the first 1-2 seconds: the latest Short is behind the prior winner on average percentage viewed.")
+        else:
+            recommendations.append("The latest Short is competitive on average percentage viewed; package the next upload around the same immediate-stakes hook.")
+    recommendations.append("For Lexi Manhua Shorts, title around the character conflict, betrayal, revenge, secret identity, or impossible comeback instead of generic anime/manhwa labels.")
+
+    return {
+        "content_type": "shorts",
+        "latest_short": latest_scored,
+        "best_prior_short": best,
+        "prior_short_count": len(prior_rows),
+        "available_short_metrics": available_metrics,
+        "missing_short_metrics": missing_metrics,
+        "metric_policy": (
+            "Shorts are compared on views, engaged views when available, stayed-to-watch/swipe signals when available, "
+            "average percentage viewed, AVD, and interactions per view. Long-form CTR/chapter logic is not used as a substitute."
+        ),
+        "recommendations": recommendations,
+    }
+
+
 def _promote_latest_upload_from_velocity(
     video_metrics: dict[str, Any],
     velocity: dict[str, Any],
@@ -199,14 +395,21 @@ def _promote_latest_upload_from_velocity(
     latest = dict(matching_metric_row)
     title = str((velocity or {}).get("title") or "").strip()
     published_at = str((velocity or {}).get("published_at") or "").strip()
+    existing_views = int(float(latest.get("views", latest.get("view_count", 0)) or 0) or 0)
+    velocity_views = int(float((velocity or {}).get("views", existing_views) or 0) or 0)
+    best_views = max(existing_views, velocity_views)
     latest.update({
         "video_id": latest_video_id,
         "title": title or str(latest.get("title") or "").strip(),
         "watch_url": str((velocity or {}).get("watch_url") or f"https://www.youtube.com/watch?v={latest_video_id}").strip(),
         "published_at": published_at or str(latest.get("published_at") or "").strip(),
-        "views": int(float((velocity or {}).get("views", latest.get("views", 0)) or 0)),
+        "views": best_views,
+        "view_count": best_views,
         "latest_upload_source": "youtube_latest_video_velocity",
     })
+    if existing_views > velocity_views and existing_views > 0:
+        latest["view_count_source"] = "existing_public_or_inventory_fresher_than_velocity"
+        latest["velocity_views_lagged"] = velocity_views
     if (velocity or {}).get("hours_since_upload") is not None:
         latest["hours_since_upload"] = float((velocity or {}).get("hours_since_upload") or 0)
     if (velocity or {}).get("velocity_vph") is not None:
@@ -230,8 +433,12 @@ def _promote_latest_upload_from_velocity(
                     "watch_url": latest["watch_url"],
                     "published_at": latest["published_at"],
                     "views": latest["views"],
+                    "view_count": latest["views"],
                     "latest_upload_source": "youtube_latest_video_velocity",
                 })
+                if latest.get("view_count_source"):
+                    patched["view_count_source"] = latest.get("view_count_source")
+                    patched["velocity_views_lagged"] = latest.get("velocity_views_lagged")
                 updated_bucket.append(patched)
             else:
                 updated_bucket.append(row)
@@ -256,6 +463,8 @@ def _channel_match_token(value: Any) -> str:
 
 
 def _channel_registry_aliases(registry_key: str) -> set[str]:
+    if str(registry_key or "").strip() == "lexi_manhua":
+        registry_key = "lexi_manhwa"
     raw: set[Any] = {registry_key}
     try:
         from long_form.prompts.channels import CHANNELS
@@ -275,6 +484,8 @@ def _channel_registry_aliases(registry_key: str) -> set[str]:
         "cryptic_science": ["CrypticScience", "Cryptic Science", "@crypticscience"],
         "history_rewind": ["History Rewind", "@historyyyrewinddd"],
         "pb_live": ["PB Lies", "PB Live", "@pblies"],
+        "lexi_manhwa": ["Lexi Manhwa", "Lexi Manhua", "MLEXI MANHUA", "@leximanhwa", "@leximanhua"],
+        "lexi_manhua": ["Lexi Manhwa", "Lexi Manhua", "MLEXI MANHUA", "@leximanhwa", "@leximanhua"],
     }
     raw.update(hard_aliases.get(registry_key, []))
     return {_channel_match_token(v) for v in raw if _channel_match_token(v)}
@@ -687,14 +898,35 @@ def tool_schemas() -> list[dict[str, Any]]:
                         },
                         "video_model": {
                             "type": "string",
-                            "enum": ["ltx_budget", "seedance", "pixverse", "kling_pro"],
+                            "enum": [
+                                "ltx_budget", "seedance", "pixverse", "kling_pro",
+                                "kling21_standard", "pixverse_v6", "pixverse_c1", "kling21_pro",
+                                "veo3_fast", "kling21_master", "grok_imagine_video",
+                                "grok_imagine_video_15", "grok_imagine_video_15_1080p",
+                            ],
                             "description": "i2v model for motion clips. Use ltx_budget when full animation must be cheaper.",
+                        },
+                        "image_model_id": {
+                            "type": "string",
+                            "enum": [
+                                "grok_imagine", "grok_imagine_standard", "imagen4_fast", "imagen4_preview",
+                                "imagen4_ultra", "recraft_v4", "seedream45", "ernie_image", "flux_2_pro",
+                                "nano_banana_pro", "recraft_v4_pro", "flux_lora_skeleton",
+                            ],
+                            "description": "Image model for still generation. Inherit the user's session picker unless they override it in chat.",
                         },
                         "visual_brief": {
                             "type": "string",
                             "description": (
                                 "Scene-level creative lock: characters, era, wardrobe, palette, "
                                 "composition notes â€” applied every beat."
+                            ),
+                        },
+                        "visual_proof_only": {
+                            "type": "boolean",
+                            "description": (
+                                "Hard safety gate for model/prompt tests. If true, Studio generates exactly one still, "
+                                "does not animate, and stops for user approval before any remaining scenes are generated."
                             ),
                         },
                         "product_reference_id": {
@@ -1086,7 +1318,7 @@ def tool_schemas() -> list[dict[str, Any]]:
                 "name": "get_channel_analytics",
                 "description": (
                     "Channel intelligence: Catalyst harvest + live YouTube Analytics (90d Reporting API: "
-                    "views, CTR, AVD, per-video retention rows when available, top titles, series arcs) "
+                    "views, CTR, AVD, per-video retention rows when available, Shorts-specific latest-vs-winner comparison, top titles, series arcs) "
                     "and latest upload velocity when OAuth is connected. If video_level_retention_available "
                     "is false, do not infer which specific video had high AVD."
                 ),
@@ -1184,6 +1416,118 @@ def tool_schemas() -> list[dict[str, Any]]:
                         },
                     },
                     "required": [],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "ingest_cliplab_attachment",
+                "description": (
+                    "Internal/admin ClipLab: ingest the latest uploaded video attachment from this Studio Agent chat "
+                    "as a long-form source, transcribe it, and create a ClipLab video_id. Use this first when the "
+                    "user uploads a long recording and asks Studio Agent to find/produce clips. This does not use "
+                    "Studio short-form render styles because it cuts existing footage."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "attachment_path": {
+                            "type": "string",
+                            "description": "Optional server-persisted attachment path. Usually omit and use the latest video attachment.",
+                        },
+                        "channel_id": {"type": "string", "description": "Selected YouTube channel id for Catalyst learning context."},
+                        "registry_key": {"type": "string", "description": "Studio channel registry key for Catalyst learning context."},
+                    },
+                    "required": [],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "analyze_cliplab_video",
+                "description": (
+                    "ClipLab: analyze an already-ingested long video/short by ClipLab video_id and return ranked 9:16 clip candidates. "
+                    "Use after the user uploads/pulls a source in ClipLab or gives a ClipLab video_id. Logs candidates into Catalyst training data. "
+                    "Do not apply generated short-form style presets; this is clip selection from existing footage."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "video_id": {"type": "string", "description": "ClipLab video_id, e.g. vid_... or yt_..."},
+                        "prompt": {"type": "string", "description": "What to find: hooks, tension, controversy, emotional peaks, stream highlights, etc."},
+                        "max_segments": {"type": "integer", "default": 12},
+                        "channel_id": {"type": "string", "description": "Selected YouTube channel id for Catalyst learning context."},
+                        "registry_key": {"type": "string", "description": "Studio channel registry key for Catalyst learning context."},
+                        "provider": {
+                            "type": "string",
+                            "enum": ["auto", "local", "opus", "hybrid"],
+                            "description": "ClipLab provider. Use opus only for owner/admin OpusClip testing; local keeps Studio's native Catalyst pipeline.",
+                        },
+                    },
+                    "required": ["video_id", "prompt"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "render_cliplab_segments",
+                "description": (
+                    "ClipLab: render selected analyzed segments into 9:16 clips with face-track reframe and captions. "
+                    "Requires an analyze_cliplab_video job_id and selected segment indices. Does not use generated-scene "
+                    "short-form styles or image-to-video styles."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "video_id": {"type": "string"},
+                        "analyze_job_id": {"type": "string"},
+                        "segment_indices": {"type": "array", "items": {"type": "integer"}},
+                        "burn_captions": {"type": "boolean", "default": True},
+                        "channel_id": {"type": "string"},
+                        "registry_key": {"type": "string"},
+                    },
+                    "required": ["video_id", "analyze_job_id", "segment_indices"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "remix_cliplab_short",
+                "description": (
+                    "ClipLab Remix Lab: polish an already-cut 9:16 short with blurred background, captions, color, and pacing treatment. "
+                    "Use when the user uploads an Opus-style clip and wants Studio to make it feel native/viral."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "video_id": {"type": "string"},
+                        "style_preset": {"type": "string", "enum": ["clean_viral", "empire", "empire_magnates", "documentary", "streamer", "high_energy"], "default": "clean_viral"},
+                        "caption_style": {"type": "string", "enum": ["bold", "minimal", "empire"], "default": "bold"},
+                        "edit_intensity": {"type": "string", "enum": ["low", "medium", "high"], "default": "medium"},
+                        "background_mode": {"type": "string", "enum": ["blur", "solid"], "default": "blur"},
+                        "burn_captions": {"type": "boolean", "default": True},
+                        "channel_id": {"type": "string"},
+                        "notes": {"type": "string"},
+                    },
+                    "required": ["video_id"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "poll_cliplab_job",
+                "description": "Poll a ClipLab ingest/analyze/render/remix job and return persisted segments, clips, errors, or remix output.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "job_id": {"type": "string"},
+                    },
+                    "required": ["job_id"],
                 },
             },
         },
@@ -1489,7 +1833,7 @@ def tool_schemas() -> list[dict[str, Any]]:
                     "type": "object",
                     "properties": {
                         "job_id": {"type": "string"},
-                        "kind": {"type": "string", "enum": ["longform", "shortform", "competitor"]},
+                        "kind": {"type": "string", "enum": ["longform", "shortform", "competitor", "cliplab"]},
                     },
                     "required": ["job_id", "kind"],
                 },
@@ -1615,6 +1959,51 @@ def _session_channel_brand(session_id: str | None) -> str:
     if handle:
         return handle[:48]
     return "Studio"
+
+
+def _session_channel_context(session_id: str | None) -> dict[str, str]:
+    if not session_id:
+        return {"channel_id": "", "registry_key": "", "channel_title": ""}
+    from studio_agent import store
+
+    session = store.get_session(session_id) or {}
+    return {
+        "channel_id": str(session.get("channel_id") or "").strip(),
+        "registry_key": str(session.get("registry_key") or "").strip(),
+        "channel_title": str(session.get("channel_title") or session.get("channel_name") or "").strip(),
+    }
+
+
+def _require_cliplab_admin(user_id: str) -> None:
+    uid = str(user_id or "").strip()
+    if uid and uid in CLIPLAB_AGENT_ADMIN_USER_IDS:
+        return
+    if uid:
+        try:
+            import unified_credits as uc
+
+            state = uc.get_state(uid) or {}
+            plan = str(state.get("plan") or "").strip().lower()
+            if bool(state.get("unlimited")) or plan in {"owner", "admin"}:
+                return
+        except Exception:
+            pass
+    raise PermissionError("ClipLab Agent tools are internal/admin-only right now.")
+
+
+def _latest_video_attachment_path(session_id: str | None, user_id: str) -> str:
+    if not session_id:
+        return ""
+    from studio_agent import store
+
+    session = store.get_session(str(session_id or ""), user_id=str(user_id or "")) or {}
+    allowed = {".mp4", ".mov", ".mkv", ".webm", ".m4v"}
+    candidates = list(session.get("latest_attachment_paths") or [])
+    for raw in reversed(candidates):
+        path = Path(str(raw or ""))
+        if path.is_file() and path.suffix.lower() in allowed:
+            return str(path)
+    return ""
 
 
 def _shortform_credit_reservation_path(workspace: Path) -> Path:
@@ -1825,7 +2214,9 @@ def _spawn_shortform_job(
     category_key: str,
     topic: str | None,
     script: str | None,
+    scene_count: int | None = None,
     tier: str = "standard",
+    image_model_id: str | None = None,
     video_model: str | None = None,
     visual_brief: str | None = None,
     render_style: str,
@@ -1843,6 +2234,7 @@ def _spawn_shortform_job(
     credit_reservation: dict[str, Any] | None = None,
     credit_session_id: str | None = None,
     credit_budget: dict[str, Any] | None = None,
+    visual_proof_only: bool = False,
 ) -> str:
     # Resume: reuse the prior job's workspace so finished stills/clips/VO are
     # not re-rendered (and not re-billed). Falls back to a fresh job otherwise.
@@ -1870,12 +2262,19 @@ def _spawn_shortform_job(
                 prior_result.unlink(missing_ok=True)
     except Exception:
         pass
+    if visual_proof_only:
+        scene_count = 1
+        animate = False
+
     spec = {
         "job_id": job_id,
         "category_key": category_key,
         "topic": topic,
         "script": script,
+        "scene_count": scene_count,
+        "visual_proof_only": bool(visual_proof_only),
         "tier": tier,
+        "image_model_id": image_model_id,
         "video_model": video_model,
         "visual_brief": visual_brief,
         "render_style": render_style,
@@ -1963,8 +2362,10 @@ def _spawn_shortform_job(
                     workspace=workspace,
                     render_style=render_style,
                     tier=tier,
+                    image_model_id=image_model_id,
                     video_model=video_model,
                     visual_brief=visual_brief,
+                    beats_target=1 if visual_proof_only else int(scene_count) if scene_count else 12,
                     script_override=script,
                     user_id=user_id,
                     default_animate=False,
@@ -2896,7 +3297,41 @@ def execute_tool(
         topic = str(args.get("topic") or "").strip() or None
         script = str(args.get("script") or "").strip() or None
         visual_brief = str(args.get("visual_brief") or "").strip() or None
+        scene_count_raw = args.get("scene_count")
+        try:
+            scene_count = int(scene_count_raw) if scene_count_raw is not None else None
+        except Exception:
+            scene_count = None
+        scene_count = max(1, min(scene_count, 60)) if scene_count else None
+        intent_text = " ".join(
+            str(v or "")
+            for v in (
+                topic,
+                script,
+                visual_brief,
+                args.get("user_request"),
+                args.get("brief"),
+                args.get("instruction"),
+            )
+        ).lower()
+        visual_proof_only = bool(args.get("visual_proof_only", False))
+        if (
+            "exactly one scene" in intent_text
+            or "one scene" in intent_text
+            or "1 scene" in intent_text
+            or "single scene" in intent_text
+            or "first image" in intent_text
+            or "first still" in intent_text
+            or "visual proof" in intent_text
+            or "proof image" in intent_text
+        ) and any(marker in intent_text for marker in ("test", "try", "visual", "consistency", "grok", "approve", "quality", "prompt")):
+            visual_proof_only = True
+        if scene_count == 1:
+            visual_proof_only = True
+        if visual_proof_only:
+            scene_count = 1
         product_reference_id = str(args.get("product_reference_id") or "").strip()
+        image_model_id = str(args.get("image_model_id") or args.get("image_model") or "").strip()
         video_model = str(args.get("video_model") or "seedance").strip()
         tier = str(args.get("tier") or "standard").strip()
         if video_model == "kling_pro":
@@ -2948,7 +3383,9 @@ def execute_tool(
             category_key=category_key,
             topic=topic,
             script=script,
+            scene_count=scene_count,
             tier=tier,
+            image_model_id=image_model_id or None,
             video_model=resolved_vm,
             visual_brief=visual_brief,
             render_style=style.key,
@@ -2966,8 +3403,9 @@ def execute_tool(
             credit_reservation=args.get("_credit_reservation") if isinstance(args.get("_credit_reservation"), dict) else None,
             credit_session_id=str(args.get("_credit_session_id") or session_id or ""),
             credit_budget=args.get("_credit_budget") if isinstance(args.get("_credit_budget"), dict) else None,
+            visual_proof_only=visual_proof_only,
         )
-        stills_model = (
+        stills_model = image_model_id or (
             "seedream_v45_edit_canonical"
             if is_skeleton_style(style)
             else "seedream_v45_edit_product_reference"
@@ -2989,9 +3427,12 @@ def execute_tool(
             "job_id": job_id,
             "category_key": category_key,
             "topic": topic,
+            "scene_count": scene_count,
+            "visual_proof_only": visual_proof_only,
             "visual_brief": visual_brief,
             "render_style": style.key,
             "render_style_label": style.label,
+            "image_model_id": image_model_id or None,
             "video_model": resolved_vm,
             "stills_model": stills_model,
             "product_reference_id": product_reference_id or None,
@@ -3003,7 +3444,11 @@ def execute_tool(
             "sound_design_brief": sound_design_brief,
             "background_music": background_music,
             "poll_url": f"/api/skeleton-ai/jobs/{job_id}",
-            "note": pipeline_note + f" Channel watermark/package is locked to {watermark_text}. Captions are {'word-level and enabled' if captions_enabled else 'disabled'}. Sound design is {'enabled' if sfx_enabled else 'disabled'} and will be mixed during finalize_production. Poll until result.json reaches awaiting_scene_review. Then list scenes, edit artifacted stills, approve scenes with set_production_scenes_animate, optionally animate approved scenes, and only then finalize_production.",
+            "note": pipeline_note + (
+                " Visual proof mode is active: exactly one still will be generated before any remaining scenes are allowed."
+                if visual_proof_only
+                else ""
+            ) + f" Channel watermark/package is locked to {watermark_text}. Captions are {'word-level and enabled' if captions_enabled else 'disabled'}. Sound design is {'enabled' if sfx_enabled else 'disabled'} and will be mixed during finalize_production. Poll until result.json reaches awaiting_scene_review. Then list scenes, edit artifacted stills, approve scenes with set_production_scenes_animate, optionally animate approved scenes, and only then finalize_production.",
         }, indent=2)
 
     # === Granular scene control tools (full creative control) ===
@@ -3208,6 +3653,8 @@ def execute_tool(
 
             ch_id = str(args.get("channel_id") or "").strip()
             reg_key = str(args.get("registry_key") or "").strip()
+            if reg_key == "lexi_manhua":
+                reg_key = "lexi_manhwa"
             focus = str(args.get("focus") or "general").strip().lower()
             if not ch_id and reg_key:
                 ch_id = CHANNEL_KEY_TO_ID.get(reg_key, "")
@@ -3346,11 +3793,12 @@ def execute_tool(
                 if use_live_metrics
                 else video_metrics
             )
-            if latest_upload_focus and isinstance(velocity, dict) and str(velocity.get("video_id") or "").strip():
+            if isinstance(velocity, dict) and str(velocity.get("video_id") or "").strip():
                 effective_video_metrics = _promote_latest_upload_from_velocity(
                     effective_video_metrics,
                     velocity,
                 )
+            shortform_comparison = _compare_shortform_video_metrics(effective_video_metrics)
             effective_insights = live_insights if bool(live_analytics.get("oauth_connected")) and live_insights else insights
             effective_growth = live_growth if bool(live_analytics.get("oauth_connected")) and live_growth else growth
             effective_harvest = True if bool(live_analytics.get("oauth_connected")) and live_insights else harvest
@@ -3460,6 +3908,7 @@ def execute_tool(
                     if isinstance(effective_video_metrics.get("latest_upload"), dict)
                     else {}
                 ),
+                "shortform_performance_comparison": shortform_comparison,
                 "harvest_video_metrics": video_metrics,
                 "youtube_analytics_live": live_analytics,
                 "latest_video_velocity": velocity,
@@ -3650,6 +4099,311 @@ def execute_tool(
             return json.dumps(snap, indent=2)
         except Exception as exc:
             return json.dumps({"error": str(exc), "note": "Set FAL_AI_KEY for live fal.ai pricing."})
+
+    if name == "ingest_cliplab_attachment":
+        _require_cliplab_admin(user_id)
+        from cliplab.config import CLIPLAB_UPLOAD_DIR
+        from cliplab.pipeline import _safe_user_dir, new_job_id, run_ingest_pipeline, save_job_state
+
+        source = str(args.get("attachment_path") or "").strip()
+        if not source:
+            source = _latest_video_attachment_path(session_id, user_id)
+        src = Path(source)
+        if not src.is_file():
+            raise FileNotFoundError("No uploaded video attachment found. Attach an MP4/MOV/MKV/WEBM/M4V in this Studio Agent chat first.")
+        ext = src.suffix.lower() or ".mp4"
+        if ext not in {".mp4", ".mov", ".mkv", ".webm", ".m4v"}:
+            raise ValueError("ClipLab source must be MP4, MOV, MKV, WEBM, or M4V.")
+        uid = str(user_id or "").strip()
+        upload_id = new_job_id("clipvid").replace("clipvid_", "vid_")
+        dest_dir = CLIPLAB_UPLOAD_DIR / _safe_user_dir({"id": uid})
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        dest = dest_dir / f"{upload_id}{ext}"
+        shutil.copy2(src, dest)
+        ctx = _session_channel_context(session_id)
+        channel_id = str(args.get("channel_id") or ctx.get("channel_id") or "").strip()
+        registry_key = str(args.get("registry_key") or ctx.get("registry_key") or "").strip()
+        fal_key = str(os.getenv("FAL_AI_KEY") or os.getenv("FAL_KEY") or "").strip()
+        job_id = new_job_id("clipi")
+        local_jobs = {
+            job_id: {
+                "status": "queued",
+                "progress": 0,
+                "type": "cliplab_ingest",
+                "lane": "cliplab",
+                "video_id": upload_id,
+                "user_id": uid,
+                "channel_id": channel_id,
+                "registry_key": registry_key,
+                "created_at": time.time(),
+            }
+        }
+        save_job_state(job_id, {
+            **local_jobs[job_id],
+            "video_path": str(dest),
+            "source_attachment": str(src),
+            "cues": [],
+        })
+
+        def _worker() -> None:
+            _run_async(run_ingest_pipeline(
+                job_id,
+                local_jobs,
+                {"id": uid},
+                video_path=str(dest),
+                video_id=upload_id,
+                fal_key=fal_key,
+            ))
+
+        threading.Thread(target=_worker, name=f"cliplab-ingest-{job_id}", daemon=True).start()
+        telemetry.record_event(
+            user_id,
+            "cliplab_agent_ingest_started",
+            {"job_id": job_id, "video_id": upload_id, "channel_id": channel_id, "registry_key": registry_key},
+            session_id=session_id,
+        )
+        return json.dumps({
+            "status": "running",
+            "job_id": job_id,
+            "kind": "cliplab",
+            "video_id": upload_id,
+            "channel_id": channel_id,
+            "registry_key": registry_key,
+            "poll_tool": "poll_cliplab_job",
+            "next_action": (
+                "Poll poll_cliplab_job until ingest is complete, then call analyze_cliplab_video "
+                "with the selected channel context and clip-finding prompt."
+            ),
+        }, indent=2, ensure_ascii=True)
+
+    if name == "analyze_cliplab_video":
+        _require_cliplab_admin(user_id)
+        from cliplab.pipeline import load_job_state, new_job_id, run_analyze_pipeline, save_job_state
+
+        video_id = str(args.get("video_id") or "").strip()
+        prompt = str(args.get("prompt") or "").strip()
+        if not video_id or not prompt:
+            raise ValueError("video_id and prompt required")
+        ctx = _session_channel_context(session_id)
+        channel_id = str(args.get("channel_id") or ctx.get("channel_id") or "").strip()
+        registry_key = str(args.get("registry_key") or ctx.get("registry_key") or "").strip()
+        max_segments = max(1, min(int(args.get("max_segments") or 12), 40))
+        provider = str(args.get("provider") or os.getenv("CLIPLAB_PROVIDER") or "auto").strip().lower()
+        job_id = new_job_id("clipa")
+        local_jobs = {
+            job_id: {
+                "status": "queued",
+                "progress": 0,
+                "type": "cliplab_analyze",
+                "lane": "cliplab",
+                "video_id": video_id,
+                "user_id": str(user_id or ""),
+                "channel_id": channel_id,
+                "registry_key": registry_key,
+                "provider": provider,
+                "created_at": time.time(),
+            }
+        }
+        save_job_state(job_id, {
+            **local_jobs[job_id],
+            "prompt": prompt,
+            "segments": [],
+        })
+
+        def _worker() -> None:
+            _run_async(run_analyze_pipeline(
+                job_id,
+                local_jobs,
+                video_id=video_id,
+                prompt=prompt,
+                max_segments=max_segments,
+                json_completion=None,
+                user_id=str(user_id or ""),
+                channel_id=channel_id,
+                registry_key=registry_key,
+                source="studio_agent_cliplab",
+                provider=provider,
+            ))
+
+        threading.Thread(target=_worker, name=f"cliplab-analyze-{job_id}", daemon=True).start()
+        telemetry.record_event(
+            user_id,
+            "cliplab_agent_analyze_started",
+            {"job_id": job_id, "video_id": video_id, "channel_id": channel_id, "registry_key": registry_key},
+            session_id=session_id,
+        )
+        return json.dumps({
+            "status": "running",
+            "job_id": job_id,
+            "kind": "cliplab",
+            "video_id": video_id,
+            "channel_id": channel_id,
+            "registry_key": registry_key,
+            "provider": provider,
+            "prompt": prompt,
+            "poll_tool": "poll_cliplab_job",
+            "next_action": "Poll poll_cliplab_job until status is complete. If provider is opusclip, review/download returned clips; otherwise choose segment_indices for render_cliplab_segments.",
+            "current": load_job_state(job_id),
+        }, indent=2, ensure_ascii=True)
+
+    if name == "render_cliplab_segments":
+        _require_cliplab_admin(user_id)
+        from cliplab.pipeline import new_job_id, run_render_pipeline, save_job_state
+
+        video_id = str(args.get("video_id") or "").strip()
+        analyze_job_id = str(args.get("analyze_job_id") or args.get("prompt_run_id") or "").strip()
+        raw_indices = args.get("segment_indices") or []
+        indices = [int(x) for x in raw_indices] if isinstance(raw_indices, list) else []
+        if not video_id or not analyze_job_id or not indices:
+            raise ValueError("video_id, analyze_job_id, and segment_indices required")
+        ctx = _session_channel_context(session_id)
+        channel_id = str(args.get("channel_id") or ctx.get("channel_id") or "").strip()
+        registry_key = str(args.get("registry_key") or ctx.get("registry_key") or "").strip()
+        job_id = new_job_id("clipr")
+        local_jobs = {
+            job_id: {
+                "status": "queued",
+                "progress": 0,
+                "type": "cliplab_render",
+                "lane": "cliplab",
+                "video_id": video_id,
+                "user_id": str(user_id or ""),
+                "channel_id": channel_id,
+                "registry_key": registry_key,
+                "created_at": time.time(),
+            }
+        }
+        save_job_state(job_id, {**local_jobs[job_id], "analyze_job_id": analyze_job_id, "segment_indices": indices})
+
+        def _worker() -> None:
+            _run_async(run_render_pipeline(
+                job_id,
+                local_jobs,
+                video_id=video_id,
+                analyze_job_id=analyze_job_id,
+                segment_indices=indices,
+                burn_captions=bool(args.get("burn_captions", True)),
+                user_id=str(user_id or ""),
+                channel_id=channel_id,
+                registry_key=registry_key,
+                source="studio_agent_cliplab",
+            ))
+
+        threading.Thread(target=_worker, name=f"cliplab-render-{job_id}", daemon=True).start()
+        telemetry.record_event(
+            user_id,
+            "cliplab_agent_render_started",
+            {"job_id": job_id, "video_id": video_id, "analyze_job_id": analyze_job_id, "segment_indices": indices},
+            session_id=session_id,
+        )
+        return json.dumps({
+            "status": "running",
+            "job_id": job_id,
+            "kind": "cliplab",
+            "video_id": video_id,
+            "analyze_job_id": analyze_job_id,
+            "segment_indices": indices,
+            "poll_tool": "poll_cliplab_job",
+            "next_action": "Poll poll_cliplab_job until clips are ready.",
+        }, indent=2, ensure_ascii=True)
+
+    if name == "remix_cliplab_short":
+        _require_cliplab_admin(user_id)
+        from cliplab.pipeline import new_job_id, run_remix_pipeline, save_job_state
+
+        video_id = str(args.get("video_id") or "").strip()
+        if not video_id:
+            raise ValueError("video_id required")
+        style_preset = str(args.get("style_preset") or "clean_viral").strip().lower()
+        caption_style = str(args.get("caption_style") or "bold").strip().lower()
+        edit_intensity = str(args.get("edit_intensity") or "medium").strip().lower()
+        background_mode = str(args.get("background_mode") or "blur").strip().lower()
+        if style_preset not in {"clean_viral", "empire", "empire_magnates", "documentary", "streamer", "high_energy"}:
+            style_preset = "clean_viral"
+        if caption_style not in {"bold", "minimal", "empire"}:
+            caption_style = "bold"
+        if edit_intensity not in {"low", "medium", "high"}:
+            edit_intensity = "medium"
+        if background_mode not in {"blur", "solid"}:
+            background_mode = "blur"
+        ctx = _session_channel_context(session_id)
+        channel_id = str(args.get("channel_id") or ctx.get("channel_id") or "").strip()
+        job_id = new_job_id("remix")
+        local_jobs = {
+            job_id: {
+                "status": "queued",
+                "progress": 0,
+                "type": "cliplab_remix",
+                "lane": "cliplab",
+                "video_id": video_id,
+                "user_id": str(user_id or ""),
+                "style_preset": style_preset,
+                "caption_style": caption_style,
+                "edit_intensity": edit_intensity,
+                "background_mode": background_mode,
+                "created_at": time.time(),
+            }
+        }
+        save_job_state(job_id, {**local_jobs[job_id], "remix": {}})
+
+        def _worker() -> None:
+            _run_async(run_remix_pipeline(
+                job_id,
+                local_jobs,
+                video_id=video_id,
+                style_preset=style_preset,
+                caption_style=caption_style,
+                edit_intensity=edit_intensity,
+                background_mode=background_mode,
+                burn_captions=bool(args.get("burn_captions", True)),
+                catalyst_channel_id=channel_id,
+                notes=str(args.get("notes") or "")[:500],
+            ))
+
+        threading.Thread(target=_worker, name=f"cliplab-remix-{job_id}", daemon=True).start()
+        telemetry.record_event(
+            user_id,
+            "cliplab_agent_remix_started",
+            {"job_id": job_id, "video_id": video_id, "style_preset": style_preset, "channel_id": channel_id},
+            session_id=session_id,
+        )
+        return json.dumps({
+            "status": "running",
+            "job_id": job_id,
+            "kind": "cliplab",
+            "video_id": video_id,
+            "style_preset": style_preset,
+            "caption_style": caption_style,
+            "edit_intensity": edit_intensity,
+            "poll_tool": "poll_cliplab_job",
+            "next_action": "Poll poll_cliplab_job until the remixed MP4 URL is ready.",
+        }, indent=2, ensure_ascii=True)
+
+    if name == "poll_cliplab_job":
+        _require_cliplab_admin(user_id)
+        from cliplab.pipeline import load_job_state
+
+        job_id = str(args.get("job_id") or "").strip()
+        if not job_id:
+            raise ValueError("job_id required")
+        state = load_job_state(job_id)
+        if not state:
+            return json.dumps({
+                "job_id": job_id,
+                "kind": "cliplab",
+                "status": "unknown",
+                "running": True,
+                "note": "Job has not persisted final state yet. Poll again shortly.",
+            }, indent=2)
+        status = str(state.get("status") or ("complete" if (state.get("segments") or state.get("clips") or state.get("remix")) else "running"))
+        state = dict(state)
+        state.update({
+            "job_id": job_id,
+            "kind": "cliplab",
+            "status": status,
+            "running": status not in {"complete", "error", "failed"},
+        })
+        return json.dumps(state, indent=2, ensure_ascii=True)
 
     if name == "fetch_archival_for_video":
         from media_sources import fetch_archival_for_video
@@ -3958,7 +4712,7 @@ def execute_tool(
         kind = str(args.get("kind") or "longform").strip().lower()
         if not job_id:
             raise ValueError("job_id required")
-        if kind in {"shortform", "competitor"}:
+        if kind in {"shortform", "competitor", "cliplab"}:
             from studio_agent.jobs import get_job_snapshot
 
             return json.dumps(get_job_snapshot(job_id, kind), indent=2, ensure_ascii=True)
@@ -3992,6 +4746,9 @@ def execute_tool_logged(
     billed_with_actuals = False
     try:
         budget_estimate = production_budget.enforce_budget(name, arguments)
+        provider_block = _public_provider_block_message(name, arguments, budget_estimate, user_id)
+        if provider_block:
+            raise RuntimeError(provider_block)
         if budget_estimate is not None and str(user_id or "").strip():
             import unified_credits as uc
 

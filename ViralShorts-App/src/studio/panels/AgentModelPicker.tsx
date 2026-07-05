@@ -43,12 +43,20 @@ export default function AgentModelPicker({
     selectedId,
     onSelect,
     onClose,
+    title = 'Choose a runner model',
+    subtitle = 'Used for planning, tool calls, and production orchestration.',
+    statusText,
+    searchPlaceholder = 'Search Claude models and capabilities...',
 }: {
     open: boolean;
     models: AgentModelOption[];
     selectedId: string;
     onSelect: (id: string) => void;
     onClose: () => void;
+    title?: string;
+    subtitle?: string;
+    statusText?: string;
+    searchPlaceholder?: string;
 }) {
     const [query, setQuery] = useState('');
     const [tab, setTab] = useState<string>('all');
@@ -105,13 +113,13 @@ export default function AgentModelPicker({
             <div className="relative z-10 flex max-h-[88vh] w-full max-w-4xl flex-col overflow-hidden rounded-t-2xl border border-white/10 bg-[#0a0a0c] shadow-2xl sm:rounded-2xl">
                 <div className="flex items-start justify-between gap-3 border-b border-white/[0.06] px-4 py-3">
                     <div>
-                        <h2 className="text-lg font-semibold text-white">Choose a runner model</h2>
+                        <h2 className="text-lg font-semibold text-white">{title}</h2>
                         <p className="mt-1 text-xs leading-relaxed text-gray-500">
-                            Used for planning, tool calls, and production orchestration.
+                            {subtitle}
                         </p>
                         <p className="mt-2 flex items-center gap-1.5 text-[10px] text-emerald-400/90">
                             <Sparkles className="h-3 w-3" />
-                            {cleanModels.length} Claude models available through your Anthropic API
+                            {statusText || `${cleanModels.length} Claude models available through your Anthropic API`}
                         </p>
                     </div>
                     <button
@@ -129,7 +137,7 @@ export default function AgentModelPicker({
                         <input
                             value={query}
                             onChange={(e) => setQuery(e.target.value)}
-                            placeholder="Search Claude models and capabilities…"
+                            placeholder={searchPlaceholder}
                             className="w-full rounded-xl border border-teal-500/25 bg-black/40 py-2 pl-10 pr-3 text-sm text-white placeholder:text-gray-600 focus:border-teal-400/60 focus:outline-none"
                         />
                     </div>

@@ -43,6 +43,7 @@ export default function BillingPage({ onNavigate }: { onNavigate: PageNav }) {
     const [checkoutError, setCheckoutError] = useState('');
     const [packCheckoutLoadingId, setPackCheckoutLoadingId] = useState('');
     const [planLoadingId, setPlanLoadingId] = useState('');
+    const [trialLoadingId, setTrialLoadingId] = useState('');
     const topupSectionRef = useRef<HTMLElement | null>(null);
 
     const normalizedMembershipSource = String(membershipSource || nextRenewalSource || '').trim().toLowerCase();
@@ -219,6 +220,28 @@ export default function BillingPage({ onNavigate }: { onNavigate: PageNav }) {
         [billingActive, checkout, manageBilling, normalizedCurrentPlan, onNavigate, session, usesManualPayPalMembership, usesStripeMembership],
     );
 
+    const handleTrialAction = useCallback(
+        async (planId: UnifiedPlanId) => {
+            if (!session) {
+                onNavigate('auth');
+                return;
+            }
+            if (billingActive) {
+                setCheckoutError('This account already has an active plan. Use Billing to manage it.');
+                return;
+            }
+            setCheckoutError('');
+            setTrialLoadingId(planId);
+            try {
+                const err = await checkout(planId, { trial: true });
+                if (err) setCheckoutError(err);
+            } finally {
+                setTrialLoadingId('');
+            }
+        },
+        [billingActive, checkout, onNavigate, session],
+    );
+
     const handlePackCheckout = useCallback(async (method: 'stripe' | 'paypal' = 'stripe') => {
         if (!selectedPack) {
             setCheckoutError('Select a credit pack first.');
@@ -286,8 +309,10 @@ export default function BillingPage({ onNavigate }: { onNavigate: PageNav }) {
                 sortedPacks={sortedPacks}
                 onSelectPack={setSelectedPackId}
                 onPlanAction={(id) => void handlePlanAction(id as UnifiedPlanId)}
+                onTrialAction={(id) => void handleTrialAction(id as UnifiedPlanId)}
                 onPackCheckout={(method) => void handlePackCheckout(method)}
                 planLoadingId={planLoadingId}
+                trialLoadingId={trialLoadingId}
                 packCheckoutLoadingId={packCheckoutLoadingId}
                 checkoutError={checkoutError}
                 paypalBanner={paypalBanner}

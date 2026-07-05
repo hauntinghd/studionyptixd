@@ -25,6 +25,7 @@ from cliplab.config import (
 )
 from cliplab.model_registry import registry_status
 from cliplab.models import ClipLabAnalyzeRequest, ClipLabFeedbackRequest, ClipLabIngestRequest, ClipLabRenderRequest
+from cliplab.models import ClipLabRemixRequest
 from cliplab.pipeline import (
     credits_for_duration,
     load_job_state,
@@ -32,6 +33,7 @@ from cliplab.pipeline import (
     run_analyze_pipeline,
     run_ingest_pipeline,
     run_render_pipeline,
+    run_remix_pipeline,
     save_job_state,
     video_upload_path,
     _safe_user_dir,
@@ -49,12 +51,30 @@ def build_cliplab_router(
     fal_ai_key: str = "",
     debit_credits: Callable | None = None,
     refund_credits: Callable | None = None,
+    is_admin_check: Callable[[dict], bool] | None = None,
 ) -> APIRouter:
     router = APIRouter(tags=["cliplab"])
 
+    def _is_internal_user(user: dict) -> bool:
+        if is_admin_check:
+            try:
+                return bool(is_admin_check(user))
+            except Exception:
+                return False
+        return bool(
+            user.get("owner_override")
+            or user.get("is_admin")
+            or str(user.get("role") or "").lower() == "admin"
+        )
+
+    def _require_internal(user: dict) -> None:
+        if not _is_internal_user(user):
+            raise HTTPException(403, "ClipLab is internal beta only")
+
     @router.get("/api/cliplab/status")
     async def cliplab_status(user: dict = Depends(require_auth)):
-        return {"ok": True, **registry_status()}
+        _require_internal(user)
+        return {"ok": True, "internal_beta": True, **registry_status()}
 
     @router.post("/api/cliplab/ingest/upload")
     async def cliplab_upload(
@@ -62,6 +82,7 @@ def build_cliplab_router(
         file: UploadFile = File(...),
         user: dict = Depends(require_auth),
     ):
+        _require_internal(user)
         if not file or not file.filename:
             raise HTTPException(400, "No video file")
         ext = Path(file.filename).suffix.lower() or ".mp4"
@@ -118,6 +139,7 @@ def build_cliplab_router(
         background_tasks: BackgroundTasks,
         user: dict = Depends(require_auth),
     ):
+        _require_internal(user)
         url = str(req.youtube_url or "").strip()
         if not url:
             raise HTTPException(400, "youtube_url required")
@@ -182,6 +204,7 @@ def build_cliplab_router(
         background_tasks: BackgroundTasks,
         user: dict = Depends(require_auth),
     ):
+        _require_internal(user)
         job_id = new_job_id("clipa")
         jobs[job_id] = {
             "status": "queued", "progress": 0, "type": "cliplab_analyze", "lane": "cliplab",
@@ -192,6 +215,11 @@ def build_cliplab_router(
             job_id, jobs,
             video_id=req.video_id, prompt=req.prompt, max_segments=req.max_segments,
             json_completion=fal_json_completion,
+            user_id=str(user.get("id") or ""),
+            channel_id=req.channel_id,
+            registry_key=req.registry_key,
+            source="cliplab_ui",
+            provider=req.provider,
         )
         return {"status": "accepted", "job_id": job_id}
 
@@ -201,6 +229,7 @@ def build_cliplab_router(
         background_tasks: BackgroundTasks,
         user: dict = Depends(require_auth),
     ):
+        _require_internal(user)
         indices = list(req.segment_indices or [])
         if not indices:
             raise HTTPException(400, "segment_indices required")
@@ -218,11 +247,66 @@ def build_cliplab_router(
             analyze_job_id=req.prompt_run_id,
             segment_indices=indices,
             burn_captions=req.burn_captions,
+            user_id=str(user.get("id") or ""),
+            channel_id=req.channel_id,
+            registry_key=req.registry_key,
+            source="cliplab_ui",
         )
         return {"status": "accepted", "job_id": job_id}
 
+    @router.post("/api/cliplab/remix")
+    async def cliplab_remix(
+        req: ClipLabRemixRequest,
+        background_tasks: BackgroundTasks,
+        user: dict = Depends(require_auth),
+    ):
+        _require_internal(user)
+        if not str(req.video_id or "").strip():
+            raise HTTPException(400, "video_id required")
+        style_preset = str(req.style_preset or "clean_viral").strip().lower()
+        caption_style = str(req.caption_style or "bold").strip().lower()
+        edit_intensity = str(req.edit_intensity or "medium").strip().lower()
+        background_mode = str(req.background_mode or "blur").strip().lower()
+        if style_preset not in {"clean_viral", "empire", "empire_magnates", "documentary", "streamer", "high_energy"}:
+            style_preset = "clean_viral"
+        if caption_style not in {"bold", "minimal", "empire"}:
+            caption_style = "bold"
+        if edit_intensity not in {"low", "medium", "high"}:
+            edit_intensity = "medium"
+        if background_mode not in {"blur", "solid"}:
+            background_mode = "blur"
+        job_id = new_job_id("remix")
+        jobs[job_id] = {
+            "status": "queued",
+            "progress": 0,
+            "type": "cliplab_remix",
+            "lane": "cliplab",
+            "video_id": req.video_id,
+            "user_id": str(user.get("id") or ""),
+            "style_preset": style_preset,
+            "caption_style": caption_style,
+            "edit_intensity": edit_intensity,
+            "background_mode": background_mode,
+            "created_at": time.time(),
+        }
+        background_tasks.add_task(
+            run_remix_pipeline,
+            job_id,
+            jobs,
+            video_id=req.video_id,
+            style_preset=style_preset,
+            caption_style=caption_style,
+            edit_intensity=edit_intensity,
+            background_mode=background_mode,
+            burn_captions=bool(req.burn_captions),
+            catalyst_channel_id=req.catalyst_channel_id,
+            notes=req.notes,
+        )
+        return {"status": "accepted", "job_id": job_id, "video_id": req.video_id}
+
     @router.post("/api/cliplab/feedback")
     async def cliplab_feedback(req: ClipLabFeedbackRequest, user: dict = Depends(require_auth)):
+        _require_internal(user)
         from cliplab.config import CLIPLAB_DATASETS_DIR
         CLIPLAB_DATASETS_DIR.mkdir(parents=True, exist_ok=True)
         row = {
@@ -241,6 +325,7 @@ def build_cliplab_router(
 
     @router.get("/api/cliplab/clips/{video_id}/{filename}")
     async def serve_clip(video_id: str, filename: str, user: dict = Depends(require_auth)):
+        _require_internal(user)
         safe_vid = re.sub(r"[^\w\-]", "", video_id)
         safe_name = Path(filename).name
         path = CLIPLAB_RENDER_DIR / safe_vid / safe_name

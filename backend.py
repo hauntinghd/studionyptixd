@@ -89,11 +89,14 @@ from routes import (
     build_studio_utility_router,
 )
 from backend_youtube_catalyst_routes import build_youtube_catalyst_app_router
+from cliplab_router import build_cliplab_router
 from studio_agent_router import build_studio_agent_router
 from studio_analytics_router import build_studio_analytics_router
 from studio_hub_router import build_studio_hub_router
 from backend_settings import (
     XAI_API_KEY,
+    XAI_IMAGE_MODEL,
+    XAI_VIDEO_MODEL,
     ELEVENLABS_API_KEY,
     PIKZELS_API_KEY,
     COMFYUI_URL,
@@ -200,6 +203,12 @@ from backend_settings import (
     MAINTENANCE_BANNER_MESSAGE,
     REDIS_QUEUE_ENABLED,
     REDIS_URL,
+    STUDIO_FREE_TRIAL_DAYS,
+    STUDIO_FREE_TRIAL_CREDITS,
+    STUDIO_FREE_TRIAL_IP_COOLDOWN_DAYS,
+    STUDIO_TRIAL_MAX_PROVIDER_USD,
+    FAL_PUBLIC_RENDERS_ENABLED,
+    XAI_PUBLIC_RENDERS_ENABLED,
     STRIPE_PRICE_TO_PLAN,
     DEMO_PRO_PRICE_ID,
     TOPUP_PACKS,
@@ -609,6 +618,7 @@ from backend_models import (
     TopupCheckoutRequest,
     WaitlistJoinRequest,
     SetPlanRequest,
+    BlogPostRequest,
     FeedbackRequest,
     ThumbnailFeedbackRequest,
     ThumbnailGenerateRequest,
@@ -839,6 +849,7 @@ _SHORTFORM_PROTECTED_LANES = {"create", "chatstory"}
 CATALYST_LEARNING_RECORDS_FILE = TEMP_DIR / "catalyst_learning_records.json"
 CATALYST_CHANNEL_MEMORY_FILE = TEMP_DIR / "catalyst_channel_memory.json"
 CATALYST_REFERENCE_MEMORY_FILE = Path(__file__).resolve().parent / "ops" / "catalyst_documentary_reference_memory.json"
+LANDING_BLOG_POSTS_FILE = TEMP_DIR / "landing_blog_posts.json"
 _catalyst_learning_records: dict[str, dict] = {}
 _catalyst_channel_memory: dict[str, dict] = {}
 _catalyst_reference_memory: dict[str, dict] = {}
@@ -852,6 +863,55 @@ _maintenance_banner_message = (
     (MAINTENANCE_BANNER_MESSAGE or "").strip()
     or "Studio is under high load. Queue times may be longer than usual while we scale capacity."
 )
+
+
+def _blog_slug(text: str) -> str:
+    base = re.sub(r"[^a-z0-9]+", "-", str(text or "").strip().lower()).strip("-")
+    return (base or f"update-{int(time.time())}")[:80]
+
+
+def _load_landing_blog_posts(include_drafts: bool = False) -> list[dict]:
+    try:
+        if not LANDING_BLOG_POSTS_FILE.exists():
+            return []
+        data = json.loads(LANDING_BLOG_POSTS_FILE.read_text(encoding="utf-8"))
+        posts = data if isinstance(data, list) else []
+    except Exception:
+        posts = []
+    clean: list[dict] = []
+    for raw in posts:
+        if not isinstance(raw, dict):
+            continue
+        published = bool(raw.get("published", True))
+        if not include_drafts and not published:
+            continue
+        title = str(raw.get("title", "") or "").strip()
+        summary = str(raw.get("summary", "") or "").strip()
+        if not title or not summary:
+            continue
+        slug = _blog_slug(str(raw.get("slug", "") or title))
+        bullets_raw = raw.get("bullets", [])
+        bullets = [
+            str(b or "").strip()[:240]
+            for b in (bullets_raw if isinstance(bullets_raw, list) else [])
+            if str(b or "").strip()
+        ][:8]
+        clean.append({
+            "slug": slug,
+            "title": title[:140],
+            "date": str(raw.get("date", "") or datetime.now(timezone.utc).date().isoformat())[:32],
+            "label": str(raw.get("label", "") or "Product update").strip()[:48],
+            "summary": summary[:600],
+            "bullets": bullets,
+            "published": published,
+            "updated_at": float(raw.get("updated_at", 0) or 0),
+        })
+    return sorted(clean, key=lambda p: (str(p.get("date", "")), float(p.get("updated_at", 0) or 0)), reverse=True)[:24]
+
+
+def _save_landing_blog_posts(posts: list[dict]) -> None:
+    LANDING_BLOG_POSTS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    LANDING_BLOG_POSTS_FILE.write_text(json.dumps(posts[:50], indent=2), encoding="utf-8")
 
 
 def _prune_longform_sessions(max_age_seconds: int = 72 * 3600) -> None:
@@ -4234,6 +4294,51 @@ def _profile_plan_is_paid(plan: str) -> bool:
     return normalized in PLAN_LIMITS or normalized in UNIFIED_PLANS
 
 
+@app.get("/api/blog/posts")
+async def _public_blog_posts():
+    return {"posts": _load_landing_blog_posts(include_drafts=False)}
+
+
+@app.get("/api/admin/blog/posts", include_in_schema=False)
+async def _admin_blog_posts(user: dict = Depends(require_auth)):
+    if not _is_admin_user(user):
+        raise HTTPException(403, "Admin only")
+    return {"posts": _load_landing_blog_posts(include_drafts=True)}
+
+
+@app.post("/api/admin/blog/posts", include_in_schema=False)
+async def _admin_save_blog_post(req: BlogPostRequest, user: dict = Depends(require_auth)):
+    if not _is_admin_user(user):
+        raise HTTPException(403, "Admin only")
+    slug = _blog_slug(req.slug or req.title)
+    post = {
+        "slug": slug,
+        "title": _clip_text(str(req.title or "").strip(), 140),
+        "date": _clip_text(str(req.date or datetime.now(timezone.utc).date().isoformat()).strip(), 32),
+        "label": _clip_text(str(req.label or "Product update").strip(), 48),
+        "summary": _clip_text(str(req.summary or "").strip(), 600),
+        "bullets": _dedupe_preserve_order([str(b or "") for b in (req.bullets or [])], max_items=8, max_chars=240),
+        "published": bool(req.published),
+        "updated_at": time.time(),
+        "admin_email": str(user.get("email", "") or ""),
+    }
+    if not post["title"] or not post["summary"]:
+        raise HTTPException(400, "Title and summary are required.")
+    posts = [p for p in _load_landing_blog_posts(include_drafts=True) if str(p.get("slug", "")) != slug]
+    _save_landing_blog_posts([post, *posts])
+    return {"ok": True, "post": post, "posts": _load_landing_blog_posts(include_drafts=True)}
+
+
+@app.delete("/api/admin/blog/posts/{slug}", include_in_schema=False)
+async def _admin_delete_blog_post(slug: str, user: dict = Depends(require_auth)):
+    if not _is_admin_user(user):
+        raise HTTPException(403, "Admin only")
+    clean_slug = _blog_slug(slug)
+    posts = [p for p in _load_landing_blog_posts(include_drafts=True) if str(p.get("slug", "")) != clean_slug]
+    _save_landing_blog_posts(posts)
+    return {"ok": True, "posts": _load_landing_blog_posts(include_drafts=True)}
+
+
 CHAT_STORY_ALLOWED_PLANS = set(PUBLIC_PLAN_IDS) | {
     "creator",
     "studio",
@@ -4432,7 +4537,13 @@ def _paid_access_snapshot_for_user(user: Optional[dict]) -> dict:
     if stripe_ok:
         stripe_plan = str(stripe_diag.get("plan", "") or "").strip().lower()
         stored_plan = str((user or {}).get("plan", "none") or "none").strip().lower()
-        effective_plan = stripe_plan if stripe_plan in PLAN_LIMITS else stored_plan if stored_plan in PLAN_LIMITS else "none"
+        effective_plan = (
+            stripe_plan
+            if stripe_plan in PLAN_LIMITS or stripe_plan in UNIFIED_PLANS
+            else stored_plan
+            if stored_plan in PLAN_LIMITS or stored_plan in UNIFIED_PLANS
+            else "none"
+        )
         out.update(
             {
                 "billing_active": True,
@@ -6593,18 +6704,69 @@ async def _generate_image_xai_direct(
     resolution: str = "720p",
     reference_image_url: str = "",
     reference_lock_mode: str = "strict",
+    model_override: str = "",
 ) -> dict:
-    """Backwards-compat shim: delegates to fal `imagen4_fast` via `_generate_image_fal_selected_model`.
-    Kept under the legacy name so existing runtime-hook wiring + any external callers continue to work
-    after the 2026-04-19 fal-first migration.
+    """Generate a still directly through xAI Grok Imagine.
+
+    Reference conditioning intentionally stays on fal lanes for now because xAI's
+    image endpoint behavior differs from fal's edit endpoints. Direct xAI is the
+    clean path for prompt-to-image scene tests and thumbnail-style stills.
     """
-    return await _generate_image_fal_selected_model(
-        "imagen4_fast",
-        prompt,
-        output_path,
-        resolution=resolution,
-        reference_image_url=reference_image_url,
+    if not XAI_API_KEY:
+        raise RuntimeError("XAI_API_KEY required for Grok Imagine direct image generation")
+    if reference_image_url:
+        raise RuntimeError("Direct xAI image generation does not support reference conditioning in this path yet")
+
+    aspect = "16:9" if str(resolution or "").strip().lower().endswith("_landscape") else "9:16"
+    resolved = str(resolution or "").strip().lower()
+    image_resolution = "2k" if resolved in {"1080p", "1080p_landscape", "2k", "2k_landscape"} else "1k"
+    model = str(model_override or XAI_IMAGE_MODEL or "grok-imagine-image-quality").strip() or "grok-imagine-image-quality"
+    payload = {
+        "model": model,
+        "prompt": prompt,
+        "n": 1,
+        "aspect_ratio": aspect,
+        "resolution": image_resolution,
+        "response_format": "b64_json",
+    }
+    headers = {
+        "Authorization": f"Bearer {XAI_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    async with httpx.AsyncClient(timeout=120, follow_redirects=True) as client:
+        resp = await client.post("https://api.x.ai/v1/images/generations", headers=headers, json=payload)
+    if resp.status_code >= 400:
+        raise RuntimeError(f"xAI image generation failed HTTP {resp.status_code}: {resp.text[:300]}")
+    data = resp.json()
+    image_value = ""
+    images = data.get("data") if isinstance(data, dict) else None
+    if isinstance(images, list) and images:
+        first = images[0] if isinstance(images[0], dict) else {}
+        image_value = str(first.get("url") or first.get("b64_json") or "")
+    if not image_value and isinstance(data, dict):
+        direct_images = data.get("images")
+        if isinstance(direct_images, list) and direct_images:
+            first = direct_images[0] if isinstance(direct_images[0], dict) else {}
+            image_value = str(first.get("url") or first.get("b64_json") or "")
+        image_value = image_value or str(data.get("url") or data.get("b64_json") or "")
+    if not image_value:
+        raise RuntimeError("xAI image generation returned no image URL or base64 payload")
+    if image_value and not image_value.startswith(("http://", "https://", "data:")):
+        image_value = "data:image/png;base64," + image_value
+
+    await _write_fal_image_result_to_path(image_value, output_path)
+    gen_id = await _save_training_candidate(prompt, output_path, source=f"xai_{model}")
+    log.info(
+        f"xAI Grok image saved via {model}: {output_path} "
+        f"({Path(output_path).stat().st_size / 1024:.0f} KB)"
     )
+    return {
+        "local_path": output_path,
+        "cdn_url": image_value if image_value.startswith(("http://", "https://")) else "",
+        "generation_id": gen_id,
+        "provider": "xai",
+        "provider_label": model,
+    }
 
 
 async def generate_image_grok(
@@ -6613,10 +6775,24 @@ async def generate_image_grok(
     resolution: str = "720p",
     reference_image_url: str = "",
     reference_lock_mode: str = "strict",
+    model_override: str = "",
 ) -> dict:
     """Generate an image using the configured remote fallback lane.
     Returns {"local_path": str, "cdn_url": str} so animation backends can reuse the CDN URL directly.
     """
+    if XAI_API_KEY and not reference_image_url:
+        try:
+            return await _generate_image_xai_direct(
+                prompt,
+                output_path,
+                resolution=resolution,
+                reference_image_url=reference_image_url,
+                reference_lock_mode=reference_lock_mode,
+                model_override=model_override,
+            )
+        except Exception as e:
+            log.warning(f"xAI Grok Imagine direct image failed; falling back to fal if available: {e}")
+
     fal_model = _normalize_fal_image_backup_model(FAL_IMAGE_BACKUP_MODEL)
     if FAL_AI_KEY:
         try:
@@ -6684,15 +6860,14 @@ async def generate_image_grok(
         except Exception as e:
             log.warning(f"Fal remote image path failed ({fal_model}): {e}; retrying via imagen4_fast")
 
-    # Secondary attempt through the fal-first shim (formerly routed to xAI; now imagen4_fast).
     if not FAL_AI_KEY:
-        raise RuntimeError("FAL_AI_KEY required for remote image generation")
-    return await _generate_image_xai_direct(
+        raise RuntimeError("Remote image generation failed: XAI_API_KEY unavailable/failed and FAL_AI_KEY unavailable")
+    return await _generate_image_fal_selected_model(
+        "imagen4_fast",
         prompt,
         output_path,
         resolution=resolution,
         reference_image_url=reference_image_url,
-        reference_lock_mode=reference_lock_mode,
     )
 
 
@@ -7635,13 +7810,14 @@ async def generate_scene_image(
     if explicit_image_model_requested:
         profile = _creative_image_model_profile(explicit_image_model_id, template=template)
         effective_prompt = _creative_model_prompt(prompt, negative_prompt=negative_prompt)
-        if explicit_image_model_id == "grok_imagine":
+        if str(profile.get("provider") or "").strip().lower() == "xai":
             result = await generate_image_grok(
                 effective_prompt,
                 output_path,
                 resolution=resolution,
                 reference_image_url=reference_image_url,
                 reference_lock_mode=lock_mode,
+                model_override=str(profile.get("xai_model") or ""),
             )
         else:
             result = await _generate_image_fal_selected_model(
@@ -9098,6 +9274,103 @@ async def animate_image_kling(image_path: str, prompt: str, output_clip_path: st
     return output_clip_path
 
 
+async def animate_image_xai_video(
+    image_path: str,
+    prompt: str,
+    output_clip_path: str,
+    *,
+    duration_sec: float = 5,
+    aspect_ratio: str = "9:16",
+    image_cdn_url: str = None,
+    profile: dict | None = None,
+) -> str:
+    """Animate an image directly through xAI Grok Imagine Video."""
+    if not XAI_API_KEY:
+        raise RuntimeError("XAI_API_KEY not configured")
+    profile = dict(profile or {})
+    model = str(profile.get("xai_model") or XAI_VIDEO_MODEL or "grok-imagine-video").strip() or "grok-imagine-video"
+    resolution = str(profile.get("xai_resolution") or "720p").strip().lower() or "720p"
+    if resolution == "1080p" and model != "grok-imagine-video-1.5":
+        resolution = "720p"
+    duration_int = max(1, min(int(round(float(duration_sec or 5))), 15))
+    ratio = str(aspect_ratio or "9:16").strip() or "9:16"
+    image_url = str(image_cdn_url or "").strip()
+    if not image_url:
+        image_url = _file_to_data_image_url(image_path, max_bytes=8 * 1024 * 1024)
+    if not image_url:
+        raise RuntimeError("No source image URL for xAI video (image too large for inline data URI; provide CDN URL)")
+
+    headers = {
+        "Authorization": f"Bearer {XAI_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": model,
+        "prompt": str(prompt or "").strip()[:4000],
+        "image": {"url": image_url},
+        "duration": duration_int,
+        "aspect_ratio": ratio,
+        "resolution": resolution,
+    }
+    async with httpx.AsyncClient(timeout=120, follow_redirects=True) as client:
+        submit = await client.post("https://api.x.ai/v1/videos/generations", headers=headers, json=payload)
+    if submit.status_code >= 400:
+        raise RuntimeError(f"xAI video submit failed HTTP {submit.status_code}: {submit.text[:300]}")
+    submit_data = submit.json()
+    request_id = str(submit_data.get("id") or submit_data.get("request_id") or "").strip()
+    if not request_id:
+        direct_url = ""
+        if isinstance(submit_data.get("video"), dict):
+            direct_url = str(submit_data["video"].get("url") or "")
+        if direct_url:
+            await _download_url_to_file(direct_url, output_clip_path)
+            return output_clip_path
+        raise RuntimeError("No request id from xAI video submit: " + json.dumps(submit_data)[:300])
+
+    log.info(f"xAI video queued: model={model} resolution={resolution} request_id={request_id}")
+    max_wait = 900
+    poll_interval = 5
+    elapsed = 0
+    final_data: dict = {}
+    while elapsed < max_wait:
+        await asyncio.sleep(poll_interval)
+        elapsed += poll_interval
+        async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
+            status_resp = await client.get(f"https://api.x.ai/v1/videos/{request_id}", headers=headers)
+        if status_resp.status_code >= 400:
+            log.warning(f"xAI video status HTTP {status_resp.status_code}: {status_resp.text[:200]}")
+            continue
+        status_data = status_resp.json()
+        status = str(status_data.get("status") or "").strip().lower()
+        if status == "done":
+            final_data = status_data
+            break
+        if status in {"failed", "expired"}:
+            raise RuntimeError("xAI video generation failed: " + json.dumps(status_data)[:300])
+        if elapsed % 30 == 0:
+            log.info(f"xAI video waiting... {elapsed}s elapsed, status={status or 'pending'}")
+        poll_interval = min(poll_interval + 2, 15)
+    else:
+        raise TimeoutError(f"xAI video timed out after {max_wait}s")
+
+    video_url = ""
+    video_data = final_data.get("video")
+    if isinstance(video_data, dict):
+        video_url = str(video_data.get("url") or "")
+    if not video_url:
+        data_list = final_data.get("data")
+        if isinstance(data_list, list) and data_list and isinstance(data_list[0], dict):
+            maybe_video = data_list[0].get("video")
+            if isinstance(maybe_video, dict):
+                video_url = str(maybe_video.get("url") or "")
+            video_url = video_url or str(data_list[0].get("url") or "")
+    if not video_url:
+        raise RuntimeError("No video URL in xAI result: " + json.dumps(final_data)[:300])
+    await _download_url_to_file(video_url, output_clip_path)
+    log.info(f"xAI clip saved: {output_clip_path} ({Path(output_clip_path).stat().st_size / 1024:.0f} KB)")
+    return output_clip_path
+
+
 async def _animate_with_creative_video_model(
     video_model_id: str,
     image_path: str,
@@ -9124,6 +9397,20 @@ async def _animate_with_creative_video_model(
             image_cdn_url=image_cdn_url,
         )
     profile = _creative_video_model_profile(normalized)
+    if str(profile.get("provider") or "").strip().lower() == "xai" or normalized.startswith("grok_imagine_video"):
+        try:
+            duration_sec = float(duration or 5.0)
+        except Exception:
+            duration_sec = 5.0
+        return await animate_image_xai_video(
+            image_path,
+            prompt,
+            output_clip_path,
+            duration_sec=duration_sec,
+            aspect_ratio=aspect_ratio,
+            image_cdn_url=image_cdn_url,
+            profile=profile,
+        )
     endpoint_id = str(profile.get("fal_endpoint_id", "") or "").strip()
     if not endpoint_id:
         return await animate_image_kling(
@@ -18576,6 +18863,17 @@ mount_router(
     )
 )
 
+mount_router(
+    app,
+    build_cliplab_router(
+        require_auth=require_auth,
+        jobs=jobs,
+        fal_json_completion=_fal_openrouter_json_completion,
+        fal_ai_key=FAL_AI_KEY,
+        is_admin_check=_is_admin_user,
+    ),
+)
+
 
 _billing_refund_request, _admin_refunds_list, _admin_refund_update = build_refund_handlers(
     get_current_user_from_request=get_current_user_from_request,
@@ -19714,7 +20012,155 @@ def _price_id_for_plan_id(plan_id: str) -> str:
     return ""
 
 
-async def _create_stripe_membership_checkout(user: dict, plan: str, price_usd: float) -> str:
+def _grant_stripe_trial_credits_once(user_id: str, plan: str, source_id: str) -> None:
+    uid = str(user_id or "").strip()
+    normalized_plan = str(plan or "").strip().lower()
+    if not uid or normalized_plan not in UNIFIED_PLANS:
+        return
+    trial_credits = max(0, int(STUDIO_FREE_TRIAL_CREDITS or 0))
+    try:
+        import unified_credits as uc
+        uc.set_plan(uid, normalized_plan, grant_now=False)
+        if trial_credits > 0:
+            uc.add_credits(
+                uid,
+                trial_credits,
+                reason="free_trial",
+                metadata={
+                    "plan": normalized_plan,
+                    "trial_days": int(STUDIO_FREE_TRIAL_DAYS or 0),
+                    "source_id": str(source_id or ""),
+                },
+                idempotency_key=f"stripe_trial:{uid}",
+            )
+            uc.activate_trial(
+                uid,
+                plan=normalized_plan,
+                credits=trial_credits,
+                source_id=str(source_id or ""),
+                max_provider_usd=STUDIO_TRIAL_MAX_PROVIDER_USD,
+            )
+    except Exception as uc_err:
+        log.warning(f"Unified wallet trial grant failed for {uid[:12]} plan={normalized_plan}: {uc_err}")
+
+
+TRIAL_ABUSE_FILE = TEMP_DIR / "studio_trial_abuse_registry.json"
+
+
+def _trial_registry_load() -> dict:
+    try:
+        if TRIAL_ABUSE_FILE.exists():
+            data = json.loads(TRIAL_ABUSE_FILE.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return data
+    except Exception:
+        pass
+    return {"users": {}, "emails": {}, "ips": {}, "stripe_customers": {}, "payment_methods": {}, "events": []}
+
+
+def _trial_registry_save(data: dict) -> None:
+    try:
+        TRIAL_ABUSE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        TRIAL_ABUSE_FILE.write_text(json.dumps(data, indent=2, ensure_ascii=True), encoding="utf-8")
+    except Exception as exc:
+        log.warning(f"Failed to persist trial registry: {exc}")
+
+
+def _trial_hash(value: str) -> str:
+    raw = str(value or "").strip().lower()
+    if not raw:
+        return ""
+    salt = STRIPE_WEBHOOK_SECRET or STRIPE_SECRET_KEY or SUPABASE_JWT_SECRET or SITE_URL or "studio"
+    return hashlib.sha256((salt + ":" + raw).encode("utf-8")).hexdigest()
+
+
+def _trial_ip_hash(request: Request | None) -> str:
+    ip = _client_ip_from_request(request)
+    return _trial_hash(ip)
+
+
+def _trial_cooldown_active(entry: dict | None) -> bool:
+    if not isinstance(entry, dict):
+        return False
+    if STUDIO_FREE_TRIAL_IP_COOLDOWN_DAYS <= 0:
+        return False
+    ts = float(entry.get("ts", 0) or 0)
+    return ts > 0 and (time.time() - ts) < (STUDIO_FREE_TRIAL_IP_COOLDOWN_DAYS * 86400)
+
+
+def _trial_registry_blocked(user: dict, plan: str, request: Request | None = None) -> str:
+    uid = str((user or {}).get("id") or "").strip()
+    email_hash = _trial_hash(str((user or {}).get("email") or ""))
+    ip_hash = _trial_ip_hash(request)
+    data = _trial_registry_load()
+    if uid and isinstance(data.get("users"), dict) and uid in data["users"]:
+        return "This account has already used a Studio free trial."
+    if email_hash and isinstance(data.get("emails"), dict) and email_hash in data["emails"]:
+        return "This email has already used a Studio free trial."
+    if ip_hash and isinstance(data.get("ips"), dict) and _trial_cooldown_active(data["ips"].get(ip_hash)):
+        return "A Studio free trial was already started from this network. Choose a paid plan or top up credits."
+    return ""
+
+
+def _before_trial_checkout(user: dict, plan: str, request: Request | None = None) -> None:
+    if not STUDIO_FREE_TRIAL_CREDITS or STUDIO_FREE_TRIAL_CREDITS <= 0:
+        raise HTTPException(400, "Free trial credits are not configured.")
+    blocked = _trial_registry_blocked(user, plan, request)
+    if blocked:
+        raise HTTPException(409, blocked)
+
+
+def _record_trial_checkout(
+    *,
+    user_id: str,
+    email: str = "",
+    plan: str = "",
+    source_id: str = "",
+    request_ip_hash: str = "",
+    stripe_customer_id: str = "",
+    stripe_payment_method_id: str = "",
+) -> None:
+    uid = str(user_id or "").strip()
+    email_hash = _trial_hash(email)
+    ip_hash = str(request_ip_hash or "").strip()
+    customer_hash = _trial_hash(stripe_customer_id)
+    payment_hash = _trial_hash(stripe_payment_method_id)
+    now = time.time()
+    entry = {
+        "ts": now,
+        "plan": str(plan or "").strip().lower(),
+        "source_id": str(source_id or "").strip(),
+    }
+    data = _trial_registry_load()
+    data.setdefault("users", {})
+    data.setdefault("emails", {})
+    data.setdefault("ips", {})
+    data.setdefault("stripe_customers", {})
+    data.setdefault("payment_methods", {})
+    data.setdefault("events", [])
+    if uid:
+        data["users"][uid] = entry
+    if email_hash:
+        data["emails"][email_hash] = entry
+    if ip_hash:
+        data["ips"][ip_hash] = entry
+    if customer_hash:
+        data["stripe_customers"][customer_hash] = entry
+    if payment_hash:
+        data["payment_methods"][payment_hash] = entry
+    events = list(data.get("events") or [])
+    events.append({**entry, "user_id": uid, "email_hash": email_hash[:12], "ip_hash": ip_hash[:12]})
+    data["events"] = events[-500:]
+    _trial_registry_save(data)
+
+
+async def _create_stripe_membership_checkout(
+    user: dict,
+    plan: str,
+    price_usd: float,
+    trial: bool = False,
+    request: Request | None = None,
+) -> str:
     if not STRIPE_SECRET_KEY:
         raise HTTPException(500, "Stripe not configured")
     normalized_plan = str(plan or "").strip().lower()
@@ -19747,17 +20193,42 @@ async def _create_stripe_membership_checkout(user: dict, plan: str, price_usd: f
             },
             "quantity": 1,
         }
+    trial_ip_hash = _trial_ip_hash(request) if trial else ""
+    subscription_data = {
+        "metadata": {
+            "user_id": user["id"],
+            "plan": normalized_plan,
+            "trial": "1" if trial else "0",
+            "trial_credits": str(max(0, int(STUDIO_FREE_TRIAL_CREDITS or 0))) if trial else "0",
+            "trial_ip_hash": trial_ip_hash,
+        }
+    }
+    trial_days = int(STUDIO_FREE_TRIAL_DAYS or 0)
+    if trial:
+        if trial_days <= 0:
+            raise HTTPException(400, "Free trial is not configured.")
+        subscription_data["trial_period_days"] = trial_days
+        subscription_data["trial_settings"] = {"end_behavior": {"missing_payment_method": "cancel"}}
+
     checkout_payload = {
         "mode": "subscription",
         "line_items": [line_item],
         "success_url": (
             f"{_billing_site_url()}?page=subscription&subscription=success&provider=stripe&plan={quote(normalized_plan)}"
+            + ("&trial=1" if trial else "")
         ),
         "cancel_url": f"{_billing_site_url()}?page=subscription&subscription=cancelled&provider=stripe",
         "client_reference_id": user["id"],
-        "metadata": {"user_id": user["id"], "plan": normalized_plan},
-        "subscription_data": {"metadata": {"user_id": user["id"], "plan": normalized_plan}},
+        "metadata": {
+            "user_id": user["id"],
+            "plan": normalized_plan,
+            "trial": "1" if trial else "0",
+            "trial_ip_hash": trial_ip_hash,
+        },
+        "subscription_data": subscription_data,
     }
+    if trial:
+        checkout_payload["payment_method_collection"] = "always"
     checkout_payload["customer_email"] = user["email"]
     session = stripe_lib.checkout.Session.create(**checkout_payload)
     if not session.url:
@@ -19776,6 +20247,7 @@ _create_checkout = build_create_checkout_handler(
     chat_story_allowed_plans=CHAT_STORY_ALLOWED_PLANS,
     stripe_secret_key=STRIPE_SECRET_KEY,
     billing_stripe_primary=BILLING_STRIPE_PRIMARY,
+    before_trial_checkout=_before_trial_checkout,
     create_stripe_membership_checkout=_create_stripe_membership_checkout,
     paypal_enabled=_paypal_enabled,
     create_paypal_subscription_order=lambda user, price_id, plan, price_usd: _create_paypal_subscription_order(
@@ -20844,6 +21316,7 @@ async def _stripe_webhook(request: Request):
         )
         if mode == "subscription":
             plan = str(metadata.get("plan") or "creator").strip().lower()
+            requested_trial = str(metadata.get("trial", "0") or "0").strip().lower() in {"1", "true", "yes"}
             if user_id and SUPABASE_URL:
                 svc_key = SUPABASE_SERVICE_KEY or SUPABASE_ANON_KEY
                 try:
@@ -20862,11 +21335,27 @@ async def _stripe_webhook(request: Request):
                 except Exception as e:
                     log.error(f"Failed to update plan for {user_id}: {e}")
             if user_id and plan in UNIFIED_PLANS:
-                try:
-                    import unified_credits as uc
-                    uc.set_plan(user_id, plan, grant_now=True)
-                except Exception as uc_err:
-                    log.warning(f"Unified wallet plan grant failed for {user_id[:12]}: {uc_err}")
+                if requested_trial:
+                    _record_trial_checkout(
+                        user_id=user_id,
+                        email=customer_email,
+                        plan=plan,
+                        source_id=str(session_data.get("subscription") or session_data.get("id") or ""),
+                        request_ip_hash=str(metadata.get("trial_ip_hash") or ""),
+                        stripe_customer_id=str(session_data.get("customer") or ""),
+                        stripe_payment_method_id=str(session_data.get("payment_method") or ""),
+                    )
+                    _grant_stripe_trial_credits_once(
+                        user_id,
+                        plan,
+                        str(session_data.get("subscription") or session_data.get("id") or ""),
+                    )
+                else:
+                    try:
+                        import unified_credits as uc
+                        uc.set_plan(user_id, plan, grant_now=True)
+                    except Exception as uc_err:
+                        log.warning(f"Unified wallet plan grant failed for {user_id[:12]}: {uc_err}")
             await _append_landing_notification(
                 event_type="subscription",
                 plan=str(plan or "starter"),
@@ -20943,6 +21432,11 @@ async def _stripe_webhook(request: Request):
         if items:
             active_price_id = str((((items[0] or {}).get("price", {}) or {}).get("id", "") or ""))
         mapped_plan = STRIPE_PRICE_TO_PLAN.get(active_price_id, "")
+        sub_metadata = sub.get("metadata", {}) or {}
+        requested_trial = (
+            str(sub_metadata.get("trial", "0") or "0").strip().lower() in {"1", "true", "yes"}
+            or int(sub.get("trial_end", 0) or 0) > int(time.time())
+        )
 
         try:
             target_id = await _supabase_find_user_id_by_email(customer_email)
@@ -20955,11 +21449,23 @@ async def _stripe_webhook(request: Request):
             elif status in {"active", "trialing", "past_due"} and mapped_plan:
                 await _supabase_set_user_plan(target_id, mapped_plan)
                 if mapped_plan in UNIFIED_PLANS:
-                    try:
-                        import unified_credits as uc
-                        uc.set_plan(target_id, mapped_plan, grant_now=True)
-                    except Exception as uc_err:
-                        log.warning(f"Unified wallet subscription sync failed for {customer_email}: {uc_err}")
+                    if status == "trialing" and requested_trial:
+                        _record_trial_checkout(
+                            user_id=target_id,
+                            email=customer_email,
+                            plan=mapped_plan,
+                            source_id=str(sub.get("id", "") or ""),
+                            request_ip_hash=str(sub_metadata.get("trial_ip_hash") or ""),
+                            stripe_customer_id=customer_id,
+                            stripe_payment_method_id=str(sub.get("default_payment_method") or ""),
+                        )
+                        _grant_stripe_trial_credits_once(target_id, mapped_plan, str(sub.get("id", "") or ""))
+                    else:
+                        try:
+                            import unified_credits as uc
+                            uc.set_plan(target_id, mapped_plan, grant_now=True)
+                        except Exception as uc_err:
+                            log.warning(f"Unified wallet subscription sync failed for {customer_email}: {uc_err}")
                 log.info(f"Subscription lifecycle sync: {customer_email} -> {mapped_plan} ({status})")
             elif status in {"canceled", "unpaid", "incomplete_expired"}:
                 await _supabase_set_user_plan(target_id, "none")

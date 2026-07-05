@@ -257,7 +257,7 @@ def durable_state_contract(tool_name: str, args: dict[str, Any] | None = None) -
 
 
 def _estimate_shortform_start(args: dict[str, Any]) -> tuple[float, dict[str, Any]]:
-    scenes = max(1, min(60, int(args.get("scene_count") or args.get("beats") or 12)))
+    scenes = 1 if bool(args.get("visual_proof_only")) else max(1, min(60, int(args.get("scene_count") or args.get("beats") or 12)))
     full_auto = bool(args.get("_full_auto") or args.get("full_auto"))
     animate = bool(args.get("animate", False)) and full_auto
     stills, still_note = _priced_unit("seedream_v45_edit", fallback_key="seedream_v45_per_image", quantity=scenes)
@@ -275,6 +275,7 @@ def _estimate_shortform_start(args: dict[str, Any]) -> tuple[float, dict[str, An
     total = (stills + video + tts) * (1.0 + cushion)
     return total, {
         "scene_count": scenes,
+        "visual_proof_only": bool(args.get("visual_proof_only")),
         "review_gate": not full_auto,
         "i2v_deferred_until_scene_approval": not full_auto,
         "seedream_v45_edit_per_image": _unit_rate(stills, scenes),
@@ -442,6 +443,19 @@ def _video_rate(video_model: str) -> float:
 
 def _video_cost(video_model: str, seconds: float) -> tuple[float, float, str]:
     model = str(video_model or "").strip().lower()
+    qty = max(0.0, seconds)
+    if model == "grok_imagine_video":
+        cost = round(0.05 * qty, 4)
+        return cost, _unit_rate(cost, qty), "xai:grok_imagine_video_per_second"
+    if model == "grok_imagine_video_15":
+        cost = round(0.14 * qty, 4)
+        return cost, _unit_rate(cost, qty), "xai:grok_imagine_video_15_per_second"
+    if model == "grok_imagine_video_15_1080p":
+        cost = round(0.25 * qty, 4)
+        return cost, _unit_rate(cost, qty), "xai:grok_imagine_video_15_1080p_per_second"
+    if model == "kling21_master":
+        cost = round(0.28 * qty, 4)
+        return cost, _unit_rate(cost, qty), "fallback:kling21_master_per_second"
     if model in {"kling_pro", "premium"} or ("kling" in model and "pro" in model):
         cost, note = _priced_unit("kling_v21_pro", fallback_key="kling_v21_pro_per_second", quantity=max(0.0, seconds))
         return cost, _unit_rate(cost, max(0.0, seconds)), note

@@ -53,6 +53,8 @@ export const FLY_DIRECT_API_PREFIXES = [
     '/api/studio-hub',
     '/api/youtube',
     '/api/studio/analytics',
+    '/api/cliplab',
+    '/api/status',
     '/api/checkout',
     '/api/billing-portal',
     '/api/paypal',
@@ -650,7 +652,7 @@ export interface AuthContextType {
     signInWithGoogle: () => Promise<string | null>;
     signUp: (email: string, password: string) => Promise<string | null>;
     signOut: () => Promise<void>;
-    checkout: (plan: string) => Promise<string | null>;
+    checkout: (plan: string, options?: { trial?: boolean }) => Promise<string | null>;
     checkoutTopup: (priceId: string, preferredMethod?: 'card' | 'paypal') => Promise<string | null>;
     checkoutDemo: () => Promise<void>;
     manageBilling: () => Promise<string | null>;
@@ -1170,7 +1172,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         pendingAuthIntentRef.current = '';
     }, [session]);
 
-    const checkout = useCallback(async (planName: string): Promise<string | null> => {
+    const checkout = useCallback(async (planName: string, options?: { trial?: boolean }): Promise<string | null> => {
         if (!session) return "Missing membership checkout details";
         const normalizedPlanName = String(planName || '').trim().toLowerCase();
         const isMembershipCheckout = normalizedPlanName === 'membership';
@@ -1198,7 +1200,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
                     Authorization: `Bearer ${session.access_token}`,
                 },
                 body: JSON.stringify(
-                    { product: 'membership', plan: targetPlanId }
+                    { product: 'membership', plan: targetPlanId, trial: Boolean(options?.trial) }
                 ),
             });
             const { data } = await readJsonResponse<any>(res);

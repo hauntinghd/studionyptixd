@@ -32,8 +32,10 @@ export default function BillingPremiumView({
     sortedPacks,
     onSelectPack,
     onPlanAction,
+    onTrialAction,
     onPackCheckout,
     planLoadingId,
+    trialLoadingId,
     packCheckoutLoadingId,
     checkoutError,
     paypalBanner,
@@ -48,8 +50,10 @@ export default function BillingPremiumView({
     sortedPacks: Pack[];
     onSelectPack: (id: string) => void;
     onPlanAction: (id: string) => void;
+    onTrialAction: (id: string) => void;
     onPackCheckout: (method: 'stripe' | 'paypal') => void;
     planLoadingId: string;
+    trialLoadingId: string;
     packCheckoutLoadingId: string;
     checkoutError: string;
     paypalBanner: ReactNode;
@@ -152,16 +156,33 @@ export default function BillingPremiumView({
                         </label>
                         <p className="mt-3 min-h-[40px] text-sm leading-relaxed text-gray-400">{selectedPlan?.description}</p>
                         {selectedPlan && (
-                            <button
-                                type="button"
-                                disabled={planLoadingId === selectedPlan.id}
-                                onClick={() => onPlanAction(selectedPlan.id)}
-                                className={`mt-5 w-full rounded-xl py-3 text-sm font-semibold transition ${
-                                    selectedIsCurrent ? 'bg-white/10 text-white hover:bg-white/15' : 'bg-violet-600 text-white hover:bg-violet-500'
-                                } disabled:opacity-50`}
-                            >
-                                {planLoadingId === selectedPlan.id ? 'Opening...' : selectedActionLabel}
-                            </button>
+                            <div className="mt-5 grid gap-2 sm:grid-cols-2">
+                                {!billingActive && (
+                                    <button
+                                        type="button"
+                                        disabled={trialLoadingId === selectedPlan.id || Boolean(planLoadingId)}
+                                        onClick={() => onTrialAction(selectedPlan.id)}
+                                        className="rounded-xl border border-cyan-400/30 bg-cyan-500/10 py-3 text-sm font-semibold text-cyan-100 transition hover:bg-cyan-500/15 disabled:opacity-50"
+                                    >
+                                        {trialLoadingId === selectedPlan.id ? 'Opening trial...' : 'Start free trial'}
+                                    </button>
+                                )}
+                                <button
+                                    type="button"
+                                    disabled={planLoadingId === selectedPlan.id || Boolean(trialLoadingId)}
+                                    onClick={() => onPlanAction(selectedPlan.id)}
+                                    className={`rounded-xl py-3 text-sm font-semibold transition ${
+                                        selectedIsCurrent ? 'bg-white/10 text-white hover:bg-white/15' : 'bg-violet-600 text-white hover:bg-violet-500'
+                                    } disabled:opacity-50 ${billingActive ? 'sm:col-span-2' : ''}`}
+                                >
+                                    {planLoadingId === selectedPlan.id ? 'Opening...' : selectedActionLabel}
+                                </button>
+                                {!billingActive && (
+                                    <p className="sm:col-span-2 text-[11px] leading-relaxed text-gray-500">
+                                        Trial includes 1,000 credits. Stripe requires a card first; paid billing starts after the trial unless cancelled.
+                                    </p>
+                                )}
+                            </div>
                         )}
                     </div>
                     <div className="rounded-2xl border border-white/[0.08] bg-white/[0.025] p-5">

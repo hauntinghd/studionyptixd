@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 import uuid
 from pathlib import Path
@@ -12,8 +13,42 @@ ContentFormat = Literal["short", "long", "both"]
 ReasoningDepth = Literal["fast", "balanced", "deep"]
 
 DEFAULT_RENDER_STYLE = "cinematic"
+DEFAULT_IMAGE_MODEL = "ernie_image"
 DEFAULT_VIDEO_MODEL = "seedance"
-VIDEO_MODELS = {"ltx_budget", "seedance", "pixverse", "kling_pro"}
+IMAGE_MODELS = {
+    "grok_imagine",
+    "grok_imagine_standard",
+    "imagen4_fast",
+    "imagen4_preview",
+    "imagen4_ultra",
+    "recraft_v4",
+    "seedream45",
+    "ernie_image",
+    "flux_2_pro",
+    "nano_banana_pro",
+    "recraft_v4_pro",
+    "flux_lora_skeleton",
+}
+VIDEO_MODELS = {
+    "ltx_budget",
+    "seedance",
+    "pixverse",
+    "kling_pro",
+    "kling21_standard",
+    "pixverse_v6",
+    "pixverse_c1",
+    "kling21_pro",
+    "veo3_fast",
+    "kling21_master",
+    "grok_imagine_video",
+    "grok_imagine_video_15",
+    "grok_imagine_video_15_1080p",
+}
+
+
+def normalize_image_model(value: Any) -> str:
+    model = str(value or "").strip().lower()
+    return model if model in IMAGE_MODELS else DEFAULT_IMAGE_MODEL
 
 
 def normalize_video_model(value: Any) -> str:
@@ -27,6 +62,11 @@ MAX_SYNC_PENDING_SCAN = 400
 MAX_RUN_EVENTS = 120
 ACTIVE_RUN_STATUSES = {"queued", "running", "stream_disconnected"}
 STALE_RUN_AFTER_SEC = int(__import__("os").environ.get("STUDIO_AGENT_STALE_RUN_SEC", "180") or "180")
+_TITLE_STOPWORDS = {
+    "the", "and", "for", "with", "that", "this", "when", "they", "them", "you", "your",
+    "into", "from", "short", "video", "scene", "test", "make", "making", "going", "title",
+    "lets", "let", "will", "we", "one", "exactly",
+}
 
 ROOT = Path(__file__).resolve().parents[1]
 _DEFAULT_SESSIONS = ROOT / "data" / "studio_agent_sessions"
@@ -60,6 +100,87 @@ def _message_text(message: dict[str, Any], *, limit: int = 900) -> str:
                 chunks.append(str(item))
         content = " ".join(chunks)
     return " ".join(str(content).split())[:limit]
+
+
+def _title_keywords(value: str) -> set[str]:
+    words = re.findall(r"[a-z0-9]+", str(value or "").lower())
+    return {w for w in words if len(w) > 2 and w not in _TITLE_STOPWORDS}
+
+
+def _explicit_title_candidate(text: str) -> str:
+    value = str(text or "")
+
+    def _clean_candidate(candidate: str) -> str:
+        cleaned = str(candidate or "").strip(" -:,.")
+        cleaned = re.sub(r"^(?:let'?s\s+see|let\s+us\s+see|maybe|okay|ok)\s*,?\s*", "", cleaned, flags=re.IGNORECASE)
+        return cleaned.strip(" -:,.")
+
+    quoted = [
+        _clean_candidate(q)
+        for q in re.findall(r'"([^"\n]{8,140})"', value)
+        if len(_title_keywords(q)) >= 2
+    ]
+    if quoted:
+        return quoted[-1]
+    patterns = [
+        r"(?:title\s+(?:we'?re\s+going\s+to\s+go\s+with|is|it)\s*[:,]?\s*)([^.\n]{8,140})",
+        r"(?:we\s+will\s+do|we'?ll\s+do|let'?s\s+do|lets\s+do)\s+([^.\n]{8,140})",
+    ]
+    for pattern in patterns:
+        matches = [_clean_candidate(m) for m in re.findall(pattern, value, flags=re.IGNORECASE)]
+        matches = [m for m in matches if len(_title_keywords(m)) >= 2]
+        if matches:
+            return matches[-1]
+    return ""
+
+
+def _latest_user_text(messages: list[dict[str, Any]], *, limit: int = 4) -> str:
+    rows = [
+        str(m.get("content") or "")
+        for m in messages
+        if str(m.get("role") or "") == "user"
+    ]
+    return "\n".join(rows[-limit:])
+
+
+def _is_production_diagnostic_text(text: str) -> bool:
+    value = str(text or "").lower()
+    if re.search(r"\b(?:let'?s|lets)\s+(?:do|make|produce|create|start|generate|render)\b", value):
+        return False
+    if re.search(r"\b(?:start|go ahead|do it|render|generate|make|begin)\b.*\b(?:it|this|video|render|production)\b", value):
+        return False
+    diagnostic_terms = (
+        "wrong short", "wrong video", "wrong one", "previous short", "previous video",
+        "old short", "old video", "same video", "same short", "already made",
+        "already been made", "why are you", "why is it", "what is causing",
+        "what's causing", "causing it", "stuck", "do i need to start a new chat",
+        "need to start a new chat", "trying to build", "keeps trying", "keep getting stuck",
+    )
+    return any(term in value for term in diagnostic_terms)
+
+
+def _shortform_action_stale_for_latest_user(action: dict[str, Any], messages: list[dict[str, Any]]) -> bool:
+    if str(action.get("tool") or "") != "start_shortform_generate":
+        return False
+    latest_text = _latest_user_text(messages)
+    if _is_production_diagnostic_text(latest_text):
+        return True
+    args = action.get("arguments") if isinstance(action.get("arguments"), dict) else {}
+    action_title = str(
+        args.get("title")
+        or args.get("video_title")
+        or args.get("topic")
+        or ""
+    ).strip()
+    requested_title = _explicit_title_candidate(latest_text)
+    if not action_title or not requested_title:
+        return False
+    action_words = _title_keywords(action_title)
+    requested_words = _title_keywords(requested_title)
+    if not action_words or not requested_words:
+        return False
+    overlap = len(action_words & requested_words) / max(1, min(len(action_words), len(requested_words)))
+    return overlap < 0.34
 
 
 def _compact_transcript(messages: list[dict[str, Any]], *, omitted_count: int) -> str:
@@ -250,6 +371,7 @@ def rollover_session(session_id: str, *, user_id: str) -> dict[str, Any] | None:
         content_format=old.get("content_format") or "both",
         reasoning_depth=old.get("reasoning_depth") or "balanced",
         render_style=old.get("render_style") or DEFAULT_RENDER_STYLE,
+        image_model=normalize_image_model(old.get("image_model")),
         video_model=normalize_video_model(old.get("video_model")),
         web_search=bool(old.get("web_search", True)),
         animate=bool(old.get("animate", True)),
@@ -283,6 +405,7 @@ def create_session(
     content_format: ContentFormat = "both",
     reasoning_depth: ReasoningDepth = "balanced",
     render_style: str = DEFAULT_RENDER_STYLE,
+    image_model: str = DEFAULT_IMAGE_MODEL,
     video_model: str = DEFAULT_VIDEO_MODEL,
     web_search: bool = True,
     animate: bool = True,
@@ -303,6 +426,7 @@ def create_session(
         "content_format": content_format,
         "reasoning_depth": reasoning_depth,
         "render_style": render_style or DEFAULT_RENDER_STYLE,
+        "image_model": normalize_image_model(image_model),
         "video_model": normalize_video_model(video_model),
         "channel_id": str(channel_id or "").strip(),
         "registry_key": str(registry_key or "").strip(),
@@ -498,6 +622,8 @@ def update_session(session_id: str, **fields: Any) -> dict[str, Any]:
         raise KeyError(session_id)
     if "video_model" in fields:
         fields["video_model"] = normalize_video_model(fields.get("video_model"))
+    if "image_model" in fields:
+        fields["image_model"] = normalize_image_model(fields.get("image_model"))
     session.update(fields)
     _save(session)
     return session
@@ -549,9 +675,29 @@ def _action_already_approved(messages: list[dict[str, Any]], tool_index: int) ->
         content = str(later.get("content") or "")
         if role == "user" and (
             content.startswith("[User approved ")
+            or content.startswith("[User retried ")
             or content.startswith("[Rejected ")
         ):
             return True
+        if role == "system" and content.startswith("[Studio Agent preflight tool result:"):
+            return True
+    return False
+
+
+def _action_superseded_by_user_message(messages: list[dict[str, Any]], tool_index: int) -> bool:
+    """True when a normal user message arrived after an approval was prepared.
+
+    Approval cards are intentionally turn-local. If the user keeps chatting,
+    asks a diagnostic question, or gives a new title, the old pending action is
+    no longer safe to run.
+    """
+    for later in messages[tool_index + 1 :]:
+        if later.get("role") != "user":
+            continue
+        content = str(later.get("content") or "")
+        if content.startswith("[User approved ") or content.startswith("[User retried ") or content.startswith("[Rejected "):
+            continue
+        return True
     return False
 
 
@@ -581,6 +727,8 @@ def recover_pending_action_from_messages(
             continue
         if body.get("status") != "awaiting_user_approval":
             continue
+        if _action_superseded_by_user_message(messages, i):
+            return None
         if _action_already_approved(messages, i):
             return None
 
@@ -614,9 +762,12 @@ def recover_pending_action_from_messages(
 
 
 def recover_last_production(session: dict[str, Any]) -> dict[str, Any] | None:
-    """Return last_production or rebuild from approved/retried tool rows in the transcript."""
-    import json
+    """Return durable last_production.
 
+    Do not rebuild production starts from visible transcript logs. Older sessions
+    may contain raw approved-tool JSON as chat messages, and reusing those rows
+    can resurrect an already-finished or wrong-title production.
+    """
     from studio_agent.jobs import JOB_START_TOOLS
 
     lp = session.get("last_production")
@@ -625,77 +776,6 @@ def recover_last_production(session: dict[str, Any]) -> dict[str, Any] | None:
         args = lp.get("arguments")
         if tool in JOB_START_TOOLS and isinstance(args, dict) and args:
             return lp
-
-    messages = list(session.get("messages") or [])
-    for i in range(len(messages) - 1, -1, -1):
-        msg = messages[i]
-        if msg.get("role") != "user":
-            continue
-        content = str(msg.get("content") or "")
-        matched_tool = ""
-        for tool in JOB_START_TOOLS:
-            if content.startswith(f"[User approved {tool}]") or content.startswith(f"[User retried {tool}]"):
-                matched_tool = tool
-                break
-        if not matched_tool:
-            continue
-
-        for j in range(i - 1, -1, -1):
-            am = messages[j]
-            if am.get("role") != "assistant":
-                continue
-            for tc in am.get("tool_calls") or []:
-                fn = tc.get("function") or {}
-                if str(fn.get("name") or "").strip() != matched_tool:
-                    continue
-                raw_args = fn.get("arguments") or "{}"
-                try:
-                    args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
-                except json.JSONDecodeError:
-                    args = {}
-                if isinstance(args, dict) and args:
-                    return {
-                        "tool": matched_tool,
-                        "arguments": args,
-                        "recovered": True,
-                        "updated_at": _now(),
-                    }
-
-        if "Tool result:" in content:
-            blob = content.split("Tool result:", 1)[1].strip()
-            for tail in ("\nSummarize", "\n[Session"):
-                if tail in blob:
-                    blob = blob.split(tail, 1)[0].strip()
-            try:
-                parsed = json.loads(blob)
-            except json.JSONDecodeError:
-                parsed = {}
-            if isinstance(parsed, dict) and parsed:
-                args: dict[str, Any] = {}
-                if matched_tool == "start_shortform_generate":
-                    args = {
-                        "category_key": parsed.get("category_key") or "outcast",
-                        "topic": parsed.get("topic"),
-                        "visual_brief": parsed.get("visual_brief"),
-                        "video_model": parsed.get("video_model") or "seedance",
-                        "render_style": parsed.get("render_style"),
-                    }
-                    if parsed.get("script"):
-                        args["script"] = parsed.get("script")
-                elif matched_tool == "start_longform_render":
-                    for key in (
-                        "channel_key", "topic", "outline_title", "beats",
-                        "script_override", "registry_key",
-                    ):
-                        if parsed.get(key) is not None:
-                            args[key] = parsed.get(key)
-                if args:
-                    return {
-                        "tool": matched_tool,
-                        "arguments": args,
-                        "recovered": True,
-                        "updated_at": _now(),
-                    }
     return None
 
 
@@ -703,6 +783,10 @@ def _production_already_approved(messages: list[dict[str, Any]]) -> bool:
     """True once the user approved a job-start tool (shortform/longform spawn)."""
     for msg in messages:
         if msg.get("role") != "user":
+            if msg.get("role") == "system" and str(msg.get("content") or "").startswith("[Studio Agent preflight tool result: start_shortform_generate]"):
+                return True
+            if msg.get("role") == "system" and str(msg.get("content") or "").startswith("[Studio Agent preflight tool result: start_longform_render]"):
+                return True
             continue
         content = str(msg.get("content") or "")
         if content.startswith("[User approved start_shortform_generate]"):
@@ -719,7 +803,12 @@ def sync_pending_from_messages(session_id: str) -> list[dict[str, Any]]:
         return []
     pending = list(session.get("pending_actions") or [])
     if pending:
-        return pending
+        messages = list(session.get("messages") or [])
+        kept = [action for action in pending if not _shortform_action_stale_for_latest_user(action, messages)]
+        if len(kept) != len(pending):
+            session["pending_actions"] = kept
+            _save(session)
+        return kept
 
     import json
 
@@ -744,10 +833,16 @@ def sync_pending_from_messages(session_id: str) -> list[dict[str, Any]]:
         aid = str(body.get("action_id") or "").strip()
         if not aid or aid in seen:
             continue
+        if _action_superseded_by_user_message(messages, i):
+            seen.add(aid)
+            continue
         if _action_already_approved(messages, i):
             continue
         rec = recover_pending_action_from_messages(session, aid)
         if rec:
+            if _shortform_action_stale_for_latest_user(rec, messages):
+                seen.add(aid)
+                continue
             rebuilt.append(rec)
             seen.add(aid)
 

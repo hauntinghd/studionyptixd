@@ -12,8 +12,8 @@ export interface StudioNotification {
     href?: string;
 }
 
-const STORAGE_KEY = 'nyptid_studio_notifications_v1';
-const RETIRED_IDS = new Set(['studio-campus-live', 'studio-hub-simplified']);
+const STORAGE_KEY = 'nyptid_studio_notifications_v2';
+const RETIRED_IDS = new Set(['studio-campus-live', 'studio-hub-simplified', 'welcome', 'refund-policy']);
 
 function load(): StudioNotification[] {
     if (typeof window === 'undefined') return [];
@@ -42,19 +42,61 @@ function seedDefaults(): StudioNotification[] {
     const now = Date.now();
     return [
         {
-            id: 'welcome',
-            kind: 'info',
-            title: 'Studio v2 is live',
-            body: 'Pick a niche, choose Draft or Ship tier, connect YouTube in Settings for outcome insights.',
+            id: 'trial-plan-card-live',
+            kind: 'billing',
+            title: 'Free trial checkout is live',
+            body: 'New users can start a 1,000-credit trial from Billing after adding a card in Stripe.',
             createdAt: now,
+            read: false,
+            href: '?page=billing',
+        },
+        {
+            id: 'grok-model-picker-live',
+            kind: 'render',
+            title: 'Grok image and video models added',
+            body: 'Studio Agent now lets you choose image and video models from the composer for visual testing.',
+            createdAt: now - 60_000,
             read: false,
         },
         {
-            id: 'refund-policy',
+            id: 'trial-cost-guards-live',
+            kind: 'warn',
+            title: 'Trial spend guards are active',
+            body: 'Trial renders now reserve credits before provider calls and enforce a provider-cost cap.',
+            createdAt: now - 120_000,
+            read: false,
+        },
+        {
+            id: 'owner-blog-editor-live',
+            kind: 'info',
+            title: 'Owner update log is being added',
+            body: 'Studio now has an owner-only blog/update editor for public product notes on the landing page.',
+            createdAt: now - 180_000,
+            read: false,
+        },
+        {
+            id: 'studio-agent-visibility',
+            kind: 'render',
+            title: 'Studio Agent progress is visible',
+            body: 'Production jobs now show stage, progress, errors, and retry guidance instead of failing silently.',
+            createdAt: now - 240_000,
+            read: false,
+        },
+        {
+            id: 'billing-unified-credits',
             kind: 'billing',
-            title: 'Failed renders refund automatically',
-            body: 'If a render fails after charging credits, your wallet is refunded — no Discord ticket needed.',
-            createdAt: now - 60_000,
+            title: 'Unified credits are live',
+            body: 'Plans and top-ups now feed one wallet for OpenRouter, fal.ai, ElevenLabs, and production usage.',
+            createdAt: now - 300_000,
+            read: false,
+            href: '?page=billing',
+        },
+        {
+            id: 'landing-proof-wall',
+            kind: 'success',
+            title: 'Landing page proof wall added',
+            body: 'The public page now shows real creator outputs with lazy YouTube playback for faster first load.',
+            createdAt: now - 360_000,
             read: true,
         },
     ];

@@ -17,6 +17,7 @@ import CreatePanel from '../panels/CreatePanel';
 
 const AdminAnalyticsPanel = lazy(() => import('../panels/AdminAnalyticsPanel'));
 const CatalystPanel = lazy(() => import('../panels/CatalystPanel'));
+const BlogPanel = lazy(() => import('../panels/BlogPanel'));
 const LongFormPanel = lazy(() => import('../panels/LongFormPanel'));
 const AgentPanel = lazy(() => import('../panels/AgentPanel'));
 const ThumbnailPanel = lazy(() => import('../panels/ThumbnailPanel'));
@@ -41,6 +42,7 @@ const OWNER_ALL_ACCESS: Record<string, boolean> = {
     cliplab: true,
     analytics: true,
     catalyst: true,
+    blog: true,
     refunds: true,
     waitlist: true,
     campus: true,
@@ -54,7 +56,7 @@ function tabFromUrl(): DashboardTab {
             return 'agent';
         }
         const allowed: DashboardTab[] = [
-            'create', 'agent', 'longform', 'thumbnails', 'cliplab', 'analytics', 'catalyst', 'refunds', 'waitlist',
+            'create', 'agent', 'longform', 'thumbnails', 'cliplab', 'analytics', 'catalyst', 'blog', 'refunds', 'waitlist',
         ];
         if (t && allowed.includes(t as DashboardTab)) return t as DashboardTab;
     } catch {
@@ -97,8 +99,8 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
             if (nextTab === 'campus' || nextTab === 'network' || nextTab === 'wins' || nextTab === 'leaderboard') return canUseAgent;
             if (nextTab === 'agent') return canUseAgent;
             if (nextTab === 'thumbnails') return isAdmin || Boolean((laneAccess as Record<string, boolean>).thumbnails);
-            if (nextTab === 'cliplab') return isAdmin || Boolean((laneAccess as Record<string, boolean>).cliplab);
-            if (['analytics', 'catalyst', 'refunds', 'waitlist'].includes(nextTab)) return isAdmin;
+            if (nextTab === 'cliplab') return isAdmin;
+            if (['analytics', 'catalyst', 'blog', 'refunds', 'waitlist'].includes(nextTab)) return isAdmin;
             return Boolean((laneAccess as Record<string, boolean>)[nextTab]);
         },
         [isAdmin, canUseAgent, laneAccess],
@@ -153,6 +155,12 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
         }
         if (urlTab === 'thumbnails' && (isAdmin || laneAccess.thumbnails)) {
             setTab('thumbnails');
+            setCreateOpen(false);
+            setSelectedNiche(null);
+            return;
+        }
+        if (urlTab === 'cliplab' && isAdmin) {
+            setTab('cliplab');
             setCreateOpen(false);
             setSelectedNiche(null);
             return;
@@ -231,7 +239,7 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
             selectTab('thumbnails');
             return;
         }
-        if (action === 'cliplab' && (isAdmin || (laneAccess as Record<string, boolean>).cliplab)) {
+        if (action === 'cliplab' && isAdmin) {
             selectTab('cliplab');
             return;
         }
@@ -246,7 +254,7 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
     const panel = (() => {
         if (tab === 'longform' && isAdmin) return lazyPanel(<LongFormPanel />);
         if (tab === 'thumbnails' && (isAdmin || laneAccess.thumbnails)) return lazyPanel(<ThumbnailPanel />);
-        if (tab === 'cliplab' && (isAdmin || (laneAccess as Record<string, boolean>).cliplab)) {
+        if (tab === 'cliplab' && isAdmin) {
             return lazyPanel(<ClipLabPanel />);
         }
         if (tab === 'agent' && canUseAgent) {
@@ -254,6 +262,7 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
         }
         if (tab === 'analytics' && isAdmin) return lazyPanel(<AdminAnalyticsPanel />);
         if (tab === 'catalyst' && isAdmin) return lazyPanel(<CatalystPanel />);
+        if (tab === 'blog' && isAdmin) return lazyPanel(<BlogPanel />);
         if (tab === 'refunds' && isAdmin) return lazyPanel(<RefundsPanel />);
         if (tab === 'waitlist' && isAdmin) return lazyPanel(<WaitlistPanel />);
         if (selectedNiche === 'zerotier_private' && isAdmin) return lazyPanel(<ZeroTierPrivatePanel />);

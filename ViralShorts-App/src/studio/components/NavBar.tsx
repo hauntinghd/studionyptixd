@@ -20,8 +20,10 @@ export default function NavBar({ onNavigate, active }: { onNavigate: PageNav; ac
     const billingHost = isBillingHost;
     const discordUrl = 'https://discord.gg/zMZxRRu7BS';
     const [menuOpen, setMenuOpen] = useState(false);
+    const [navHidden, setNavHidden] = useState(false);
     const [googleLoading, setGoogleLoading] = useState(false);
     const menuRef = useRef<HTMLDivElement | null>(null);
+    const lastScrollYRef = useRef(0);
     const accountLabel = useMemo(() => {
         const email = String(session?.user?.email || '').trim();
         if (!email) return 'Account';
@@ -36,6 +38,36 @@ export default function NavBar({ onNavigate, active }: { onNavigate: PageNav; ac
         window.addEventListener('mousedown', onPointerDown);
         return () => window.removeEventListener('mousedown', onPointerDown);
     }, []);
+
+    useEffect(() => {
+        if (session) {
+            setNavHidden(false);
+            return;
+        }
+        lastScrollYRef.current = window.scrollY || 0;
+        let ticking = false;
+        const onScroll = () => {
+            if (ticking) return;
+            ticking = true;
+            window.requestAnimationFrame(() => {
+                const currentY = window.scrollY || 0;
+                const previousY = lastScrollYRef.current;
+                const scrollingDown = currentY > previousY + 8;
+                const scrollingUp = currentY < previousY - 8;
+                if (currentY < 72 || menuOpen || googleLoading) {
+                    setNavHidden(false);
+                } else if (scrollingDown) {
+                    setNavHidden(true);
+                } else if (scrollingUp) {
+                    setNavHidden(false);
+                }
+                lastScrollYRef.current = currentY;
+                ticking = false;
+            });
+        };
+        window.addEventListener('scroll', onScroll, { passive: true });
+        return () => window.removeEventListener('scroll', onScroll);
+    }, [googleLoading, menuOpen, session]);
 
     // Build hrefs that work with middle-click / cmd-click / ctrl-click to open in a new tab.
     // The onClick handler only intercepts plain left-click (no modifiers) for SPA routing.
@@ -170,17 +202,17 @@ export default function NavBar({ onNavigate, active }: { onNavigate: PageNav; ac
     };
 
     return (
-        <nav className="fixed top-0 left-0 right-0 z-50 border-b border-white/[0.06] bg-[#09090b]/88 backdrop-blur-xl">
-            <div className="h-16 px-4 sm:px-6 lg:px-8 flex items-center justify-between gap-4">
-                <div className="flex items-center gap-4 min-w-0">
-                    <a href={brandHref} onClick={handleBrandClick} className="flex items-center gap-2 font-bold text-white min-w-0">
-                        <Logo size={24} />
-                        <span className="truncate">NYPTID Studio</span>
+        <nav className={`fixed left-0 right-0 top-0 z-50 border-b border-white/[0.06] bg-[#09090b]/95 backdrop-blur-xl transition-transform duration-200 ease-out ${navHidden ? '-translate-y-full' : 'translate-y-0'}`}>
+            <div className="flex h-14 items-center justify-between gap-2 px-3 sm:h-16 sm:gap-4 sm:px-6 lg:px-8">
+                <div className="flex min-w-0 items-center gap-3">
+                    <a href={brandHref} onClick={handleBrandClick} className="flex min-w-0 items-center gap-2 font-bold text-white">
+                        <Logo size={22} />
+                        <span className="max-w-[7.5rem] truncate text-sm sm:max-w-none sm:text-base">NYPTID Studio</span>
                     </a>
                 </div>
 
                 {!session ? (
-                    <div className="flex items-center gap-3">
+                    <div className="flex shrink-0 items-center gap-2 sm:gap-3">
                         <a
                             href={discordUrl}
                             target="_blank"
@@ -193,16 +225,24 @@ export default function NavBar({ onNavigate, active }: { onNavigate: PageNav; ac
                         <button
                             type="button"
                             onClick={() => onNavigate('auth')}
-                            className="rounded-lg border border-white/[0.08] bg-white/[0.02] px-4 py-2 text-sm font-medium text-gray-200 transition hover:border-white/[0.14] hover:bg-white/[0.06]"
+                            className="rounded-lg border border-white/[0.08] bg-white/[0.02] px-3 py-2 text-xs font-medium text-gray-200 transition hover:border-white/[0.14] hover:bg-white/[0.06] sm:px-4 sm:text-sm"
                         >
-                            Email Sign In
+                            <span className="sm:hidden">Email</span>
+                            <span className="hidden sm:inline">Email Sign In</span>
                         </button>
                         <button
                             onClick={() => void handleGoogleAuth()}
                             disabled={googleLoading}
-                            className="rounded-lg bg-violet-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-violet-500"
+                            className="rounded-lg bg-violet-600 px-3 py-2 text-xs font-medium text-white transition hover:bg-violet-500 disabled:opacity-60 sm:px-4 sm:text-sm"
                         >
-                            {googleLoading ? 'Opening Google...' : 'Continue with Google'}
+                            {googleLoading ? (
+                                'Opening...'
+                            ) : (
+                                <>
+                                    <span className="sm:hidden">Google</span>
+                                    <span className="hidden sm:inline">Continue with Google</span>
+                                </>
+                            )}
                         </button>
                     </div>
                 ) : (

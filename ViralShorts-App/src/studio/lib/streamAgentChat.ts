@@ -64,6 +64,8 @@ export async function streamAgentChat(
         } | null;
         captions_enabled?: boolean;
         caption_mode?: 'word' | 'off';
+        image_model?: string;
+        video_model?: string;
     },
 ): Promise<AgentChatResult> {
     const url = resolveStudioBackendUrl(`/api/studio-agent/sessions/${sessionId}/chat/stream`);
@@ -85,6 +87,8 @@ export async function streamAgentChat(
                 channel_title: handlers.channel?.channel_title || undefined,
                 captions_enabled: typeof handlers.captions_enabled === 'boolean' ? handlers.captions_enabled : undefined,
                 caption_mode: handlers.caption_mode || undefined,
+                image_model: handlers.image_model || undefined,
+                video_model: handlers.video_model || undefined,
             }),
         });
     } catch (e) {

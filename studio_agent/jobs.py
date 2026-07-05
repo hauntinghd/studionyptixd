@@ -26,6 +26,10 @@ JOB_START_TOOLS = frozenset({
     "start_longform_render",
     "start_shortform_generate",
     "analyze_reference_video",
+    "ingest_cliplab_attachment",
+    "analyze_cliplab_video",
+    "render_cliplab_segments",
+    "remix_cliplab_short",
     "finalize_production",
     "finalize_longform_render",
     "re_edit_production",
@@ -65,6 +69,9 @@ def extract_jobs_from_tool(tool_name: str, result_text: str) -> list[dict[str, A
     elif tool_name == "analyze_reference_video":
         kind = "competitor"
         title = "Reference video analysis"
+    elif tool_name in {"ingest_cliplab_attachment", "analyze_cliplab_video", "render_cliplab_segments", "remix_cliplab_short"}:
+        kind = "cliplab"
+        title = str(data.get("video_id") or data.get("style_preset") or "ClipLab job")
     elif tool_name == "finalize_longform_render":
         kind = "longform"
         title = "Long-form finalize"
@@ -327,8 +334,10 @@ def _start_shortform_reclaim_job(workspace: Path, job_id: str) -> bool:
                 workspace=workspace,
                 render_style=str(spec.get("render_style") or "cinematic"),
                 tier=str(spec.get("tier") or "standard"),
+                image_model_id=spec.get("image_model_id"),
                 video_model=spec.get("video_model"),
                 visual_brief=spec.get("visual_brief"),
+                beats_target=1 if bool(spec.get("visual_proof_only")) else int(spec.get("scene_count") or 12),
                 script_override=spec.get("script"),
                 user_id=spec.get("user_id"),
                 default_animate=False,
@@ -708,6 +717,61 @@ def _competitor_status(job_id: str) -> dict[str, Any]:
     return snap
 
 
+def _cliplab_status(job_id: str) -> dict[str, Any]:
+    try:
+        from cliplab.pipeline import load_job_state
+
+        raw = load_job_state(job_id)
+    except Exception as exc:
+        raw = {"status": "error", "error": str(exc)}
+    status = str(raw.get("status") or "").strip().lower()
+    if not status:
+        status = "complete" if (raw.get("segments") or raw.get("clips") or raw.get("remix")) else "running"
+    job_type = str(raw.get("type") or "").strip()
+    if not job_type:
+        if str(job_id).startswith("clipi_"):
+            job_type = "cliplab_ingest"
+        elif str(job_id).startswith("clipa_"):
+            job_type = "cliplab_analyze"
+        elif str(job_id).startswith("clipr_"):
+            job_type = "cliplab_render"
+        elif str(job_id).startswith("remix_"):
+            job_type = "cliplab_remix"
+    failed = status in {"error", "failed"}
+    complete = status == "complete"
+    progress = int(raw.get("progress") or (100 if complete else 30 if raw else 0))
+    snap: dict[str, Any] = {
+        "job_id": job_id,
+        "kind": "cliplab",
+        "status": "failed" if failed else "complete" if complete else "running",
+        "progress": max(0, min(100, progress)),
+        "stage": str(raw.get("stage") or job_type or status or "queued"),
+        "stage_label": str(raw.get("stage") or job_type or status or "queued").replace("_", " ").title(),
+        "error": raw.get("error"),
+        "running": not complete and not failed,
+        "title": str(raw.get("video_id") or "ClipLab")[:120],
+        "video_id": raw.get("video_id"),
+        "job_type": job_type,
+        "provider": raw.get("provider"),
+        "next_action": raw.get("next_action"),
+        "cue_count": raw.get("cue_count"),
+        "signal_summary": raw.get("signal_summary"),
+    }
+    if raw.get("segments"):
+        snap["segments"] = raw.get("segments")
+        snap["segment_count"] = len(raw.get("segments") or [])
+        snap["next_action"] = "Choose segment_indices and call render_cliplab_segments."
+    if raw.get("clips"):
+        snap["clips"] = raw.get("clips")
+        snap["clip_count"] = len(raw.get("clips") or [])
+    if raw.get("upload_packages"):
+        snap["upload_packages"] = raw.get("upload_packages")
+        snap["upload_package_count"] = len(raw.get("upload_packages") or [])
+    if raw.get("remix"):
+        snap["remix"] = raw.get("remix")
+    return snap
+
+
 def prune_session_job(session_id: str, job_id: str, *, user_id: str | None = None) -> None:
     """Remove a terminal job from session active_jobs so the UI stops polling."""
     from studio_agent import store
@@ -731,6 +795,8 @@ def get_job_snapshot(job_id: str, kind: str) -> dict[str, Any]:
         snap = _shortform_status(job_id)
     elif kind == "competitor":
         snap = _competitor_status(job_id)
+    elif kind == "cliplab":
+        snap = _cliplab_status(job_id)
     else:
         snap = _longform_status(job_id)
     if snap.get("status") == "complete" and kind in {"shortform", "longform"}:

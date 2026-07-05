@@ -82,6 +82,24 @@ def _resolve_frontend_asset_path(filename: str) -> Path:
     return dist_root / "assets" / filename
 
 
+def _frontend_asset_media_type(filename: str) -> str:
+    if filename.endswith(".js"):
+        return "text/javascript"
+    if filename.endswith(".css"):
+        return "text/css"
+    if filename.endswith(".png"):
+        return "image/png"
+    if filename.endswith(".jpg") or filename.endswith(".jpeg"):
+        return "image/jpeg"
+    if filename.endswith(".webp"):
+        return "image/webp"
+    if filename.endswith(".svg"):
+        return "image/svg+xml"
+    if filename.endswith(".woff2"):
+        return "font/woff2"
+    return "application/octet-stream"
+
+
 def _apply_runtime_js_text_hotfix(js: str) -> str:
     """Patch legacy pricing strings in stale frontend bundles."""
     if not js:
@@ -173,7 +191,13 @@ async def _disable_html_cache(request: Request, call_next):
                 async for chunk in response.body_iterator:
                     body += chunk
                 html = body.decode("utf-8", errors="ignore")
-                _, latest_css = _resolve_latest_frontend_assets()
+                latest_js, latest_css = _resolve_latest_frontend_assets()
+                if latest_js:
+                    html = re.sub(
+                        r"/assets/index-[^\"']+\.js(\?[^\"']*)?",
+                        f"/assets/{latest_js}?v={_frontend_cache_buster}",
+                        html,
+                    )
                 if latest_css:
                     html = re.sub(
                         r"/assets/index-[^\"']+\.css(\?[^\"']*)?",
@@ -223,6 +247,25 @@ async def serve_runtime_hotfix_js():
     return resp
 
 
+async def serve_frontend_asset(asset_name: str):
+    """Serve Vite assets explicitly so SPA fallback never returns HTML for JS/CSS."""
+    safe_name = Path(str(asset_name or "")).name
+    if not safe_name or safe_name != str(asset_name or ""):
+        raise HTTPException(status_code=404, detail="Asset not found")
+
+    target = _resolve_frontend_asset_path(safe_name)
+    if not target.exists() and safe_name.startswith("index-") and safe_name.endswith((".js", ".css")):
+        latest_js, latest_css = _resolve_latest_frontend_assets()
+        alias_name = latest_js if safe_name.endswith(".js") else latest_css
+        if alias_name:
+            target = _resolve_frontend_asset_path(alias_name)
+
+    if not target.exists() or not target.is_file():
+        raise HTTPException(status_code=404, detail="Asset not found")
+
+    return FileResponse(str(target), media_type=_frontend_asset_media_type(target.name))
+
+
 async def serve_legacy_firefox_bundle_alias():
     """Alias stale cached bundle URL to the latest built JS asset."""
     latest_js, _ = _resolve_latest_frontend_assets()
@@ -249,3 +292,4 @@ def configure_backend_runtime(app: FastAPI) -> None:
     app.middleware("http")(_disable_html_cache)
     app.add_api_route("/assets/runtime-hotfix.js", serve_runtime_hotfix_js, methods=["GET"])
     app.add_api_route("/assets/index-BlMPK7KO.js", serve_legacy_firefox_bundle_alias, methods=["GET"])
+    app.add_api_route("/assets/{asset_name}", serve_frontend_asset, methods=["GET"])

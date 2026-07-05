@@ -139,6 +139,18 @@ CHANNEL_ALIASES: dict[str, tuple[str, ...]] = {
         "skellywelly",
         "skelewelly",
     ),
+    "lexi_manhwa": (
+        "lexi_manhwa",
+        "lexi_manhua",
+        "lexi manhwa",
+        "lexi manhua",
+        "mlexi manhua",
+        "m-lexi manhua",
+        "leximanhwa",
+        "leximanhua",
+        "@leximanhwa",
+        "@leximanhua",
+    ),
 }
 
 
@@ -178,6 +190,11 @@ def _needs_channel_data_preflight(user_text: str) -> bool:
         "failed",
         "performance",
         "source of truth",
+        "title",
+        "titles",
+        "seo",
+        "package",
+        "packaging",
         "grounded recommendation",
         "selected the channel",
         "properly selected the channel",
@@ -407,8 +424,147 @@ def _is_continue_production_request(user_text: str) -> bool:
     )
 
 
-def _recover_poll_target(session: dict[str, Any]) -> tuple[str, str] | None:
-    """Find the most recent durable production job even if active_jobs was cleared."""
+def _is_production_diagnostic_turn(user_text: str) -> bool:
+    """True when the user is debugging/correcting a production, not approving a new one."""
+    compact = str(user_text or "").strip().lower()
+    if not compact:
+        return False
+    if _wants_production_execution(compact):
+        return False
+    diagnostic_terms = (
+        "wrong short",
+        "wrong video",
+        "wrong one",
+        "previous short",
+        "previous video",
+        "old short",
+        "old video",
+        "same video",
+        "same short",
+        "already made",
+        "already been made",
+        "why are you",
+        "why is it",
+        "what is causing",
+        "what's causing",
+        "causing it",
+        "stuck",
+        "do i need to start a new chat",
+        "need to start a new chat",
+        "trying to build",
+        "keeps trying",
+        "keep getting stuck",
+    )
+    return any(term in compact for term in diagnostic_terms)
+
+
+_TITLE_STOPWORDS = {
+    "the", "and", "for", "with", "that", "this", "when", "they", "them", "you", "your",
+    "into", "from", "short", "video", "scene", "test", "make", "making", "going", "title",
+    "lets", "let", "will", "we", "one", "exactly",
+}
+
+
+def _title_keywords(value: str) -> set[str]:
+    words = re.findall(r"[a-z0-9]+", str(value or "").lower())
+    return {w for w in words if len(w) > 2 and w not in _TITLE_STOPWORDS}
+
+
+def _latest_user_text(session: dict[str, Any], *, limit: int = 4) -> str:
+    fresh = session if session.get("messages") else (store.get_session(str(session.get("session_id") or "")) or session)
+    rows = [
+        str(m.get("content") or "")
+        for m in list(fresh.get("messages") or [])
+        if str(m.get("role") or "") == "user"
+    ]
+    return "\n".join(rows[-limit:])
+
+
+def _explicit_title_candidate(text: str) -> str:
+    value = str(text or "")
+    def _clean_candidate(candidate: str) -> str:
+        cleaned = str(candidate or "").strip(" -:,.")
+        cleaned = re.sub(r"^(?:let'?s\s+see|let\s+us\s+see|maybe|okay|ok)\s*,?\s*", "", cleaned, flags=re.IGNORECASE)
+        return cleaned.strip(" -:,.")
+
+    quoted = [
+        _clean_candidate(q)
+        for q in re.findall(r'"([^"\n]{8,140})"', value)
+        if len(_title_keywords(q)) >= 2
+    ]
+    if quoted:
+        return quoted[-1]
+    patterns = [
+        r"(?:title\s+(?:we'?re\s+going\s+to\s+go\s+with|is|it)\s*[:,]?\s*)([^.\n]{8,140})",
+        r"(?:we\s+will\s+do|we'?ll\s+do|let'?s\s+do|lets\s+do)\s+([^.\n]{8,140})",
+    ]
+    for pattern in patterns:
+        matches = [_clean_candidate(m) for m in re.findall(pattern, value, flags=re.IGNORECASE)]
+        matches = [m for m in matches if len(_title_keywords(m)) >= 2]
+        if matches:
+            return matches[-1]
+    return ""
+
+
+def _shortform_action_conflicts_with_latest_user(action_args: dict[str, Any], session: dict[str, Any]) -> str:
+    action_title = str(
+        action_args.get("title")
+        or action_args.get("video_title")
+        or action_args.get("topic")
+        or ""
+    ).strip()
+    latest_text = _latest_user_text(session)
+    requested_title = _explicit_title_candidate(latest_text)
+    if not action_title or not requested_title:
+        return ""
+    action_words = _title_keywords(action_title)
+    requested_words = _title_keywords(requested_title)
+    if not action_words or not requested_words:
+        return ""
+    overlap = len(action_words & requested_words) / max(1, min(len(action_words), len(requested_words)))
+    if overlap < 0.34:
+        return (
+            f"Blocked stale production approval. Pending title/topic was '{action_title}', "
+            f"but the latest user request appears to be '{requested_title}'."
+        )
+    return ""
+
+
+def _filter_stale_pending_actions(actions: list[dict[str, Any]], session: dict[str, Any]) -> tuple[list[dict[str, Any]], list[str]]:
+    kept: list[dict[str, Any]] = []
+    blocked: list[str] = []
+    for action in actions:
+        if str(action.get("tool") or "") != "start_shortform_generate":
+            kept.append(action)
+            continue
+        args = action.get("arguments") if isinstance(action.get("arguments"), dict) else {}
+        conflict = _shortform_action_conflicts_with_latest_user(args, session)
+        if conflict:
+            blocked.append(conflict)
+            continue
+        kept.append(action)
+    return kept, blocked
+
+
+def _production_conflict_with_latest_user(
+    recovered: tuple[str, dict[str, Any]] | None,
+    session: dict[str, Any],
+) -> str:
+    if not recovered:
+        return ""
+    name, args = recovered
+    if name != "start_shortform_generate":
+        return ""
+    return _shortform_action_conflicts_with_latest_user(args, session)
+
+
+def _recover_poll_target(session: dict[str, Any], *, allow_transcript_fallback: bool = False) -> tuple[str, str] | None:
+    """Find the active durable production job.
+
+    Transcript fallback is intentionally opt-in. Old visible tool logs can
+    contain completed or failed job IDs, and treating those as active work can
+    resurrect an already-made short when the user simply says "continue".
+    """
     def _infer_kind(job_id: str, candidate: str = "") -> str:
         try:
             from studio_agent.jobs import ROOT as _JOBS_ROOT, SKELETON_OUTPUT as _SKELETON_OUTPUT
@@ -418,8 +574,10 @@ def _recover_poll_target(session: dict[str, Any]) -> tuple[str, str] | None:
         except Exception:
             pass
         kind = str(candidate or "").strip().lower()
-        if kind in {"shortform", "longform", "competitor"}:
+        if kind in {"shortform", "longform", "competitor", "cliplab"}:
             return kind
+        if job_id.startswith(("clipi_", "clipa_", "clipr_", "remix_")):
+            return "cliplab"
         try:
             from studio_agent import competitor
 
@@ -436,7 +594,10 @@ def _recover_poll_target(session: dict[str, Any]) -> tuple[str, str] | None:
         if job_id:
             return job_id, _infer_kind(job_id, str(job.get("kind") or ""))
 
-    messages = list(fresh.get("messages") or [])
+    if not allow_transcript_fallback:
+        return None
+
+    messages = list(fresh.get("messages") or [])[-12:]
     for msg in reversed(messages):
         text = str(msg.get("content") or "")
         if "job_id" not in text:
@@ -450,6 +611,8 @@ def _recover_poll_target(session: dict[str, Any]) -> tuple[str, str] | None:
                 kind = "longform"
             elif re.search(r'"kind"\s*:\s*"competitor"', text, re.IGNORECASE):
                 kind = "competitor"
+            elif re.search(r'"kind"\s*:\s*"cliplab"', text, re.IGNORECASE):
+                kind = "cliplab"
             job_id = match.group(1)
             return job_id, _infer_kind(job_id, kind)
     return None
@@ -541,42 +704,28 @@ async def _continue_active_production(
         }
 
     if status in {"failed", "error", "cancelled"}:
-        try:
-            retry_out = await retry_last_production(
-                session,
-                membership_plan=membership_plan,
-                billing_profile=billing_profile,
-            )
-            assistant_text = "That short had stopped, so I restarted it from the saved production state instead of starting from scratch."
-            retry_jobs = list(retry_out.get("active_jobs") or [])
-            active_jobs = merge_active_jobs(active_jobs, retry_jobs)
-            messages.append({"role": "assistant", "content": assistant_text})
-            store.update_session(sid, messages=messages, active_jobs=active_jobs)
-            await _fire_event(emit, "active_jobs", jobs=active_jobs)
-            return {
-                "session_id": sid,
-                "assistant_message": assistant_text,
-                "pending_actions": [],
-                "active_jobs": active_jobs,
-                "approval_mode": str(session.get("approval_mode") or "confirm"),
-                "reasoning_depth": str(session.get("reasoning_depth") or "balanced"),
-                "usage": {},
-                "billing": {"credits_charged": 0, "provider_usd": 0.0, "prompt_tokens": 0, "completion_tokens": 0},
-            }
-        except Exception as exc:
-            assistant_text = f"I tried to resume that short from saved state, but the restart failed: {str(exc)[:500]}"
-            messages.append({"role": "assistant", "content": assistant_text})
-            store.update_session(sid, messages=messages, active_jobs=active_jobs)
-            return {
-                "session_id": sid,
-                "assistant_message": assistant_text,
-                "pending_actions": [],
-                "active_jobs": active_jobs,
-                "approval_mode": str(session.get("approval_mode") or "confirm"),
-                "reasoning_depth": str(session.get("reasoning_depth") or "balanced"),
-                "usage": {},
-                "billing": {"credits_charged": 0, "provider_usd": 0.0, "prompt_tokens": 0, "completion_tokens": 0},
-            }
+        detail = str(snapshot.get("error") or snapshot.get("message") or snapshot.get("note") or "").strip()
+        assistant_text = (
+            f"That production is {status}. I did not restart it automatically, so no new provider spend was triggered."
+        )
+        if detail:
+            assistant_text += f" Last error: {detail[:500]}"
+        assistant_text += " Ask me to retry that exact job if you want me to spend again."
+        messages.append(_tool_observation_message("poll_render_job", json.dumps(snapshot)))
+        messages.append({"role": "assistant", "content": assistant_text})
+        store.update_session(sid, messages=messages, active_jobs=active_jobs)
+        await _fire_event(emit, "active_jobs", jobs=active_jobs)
+        await _fire_event(emit, "tool_end", tool="poll_render_job", status=status)
+        return {
+            "session_id": sid,
+            "assistant_message": assistant_text,
+            "pending_actions": [],
+            "active_jobs": active_jobs,
+            "approval_mode": str(session.get("approval_mode") or "confirm"),
+            "reasoning_depth": str(session.get("reasoning_depth") or "balanced"),
+            "usage": {},
+            "billing": {"credits_charged": 0, "provider_usd": 0.0, "prompt_tokens": 0, "completion_tokens": 0},
+        }
 
     plan = _shortform_continue_plan(snapshot)
     if not plan:
@@ -666,6 +815,190 @@ async def _continue_active_production(
     }
 
 
+async def _continue_active_cliplab(
+    *,
+    session: dict[str, Any],
+    user_id: str,
+    user_text: str,
+    content_format: str,
+    emit: EventEmitter | None,
+    approval_mode: str,
+    reasoning_depth: str,
+) -> dict[str, Any] | None:
+    target = _recover_poll_target(session)
+    if not target:
+        return None
+    job_id, kind = target
+    if kind != "cliplab":
+        return None
+
+    sid = str(session.get("session_id") or "")
+    fresh = store.get_session(sid) or session
+    messages = list(fresh.get("messages") or [])
+    snapshot = get_job_snapshot(job_id, "cliplab")
+    status = str(snapshot.get("status") or "").lower()
+    job_type = str(snapshot.get("job_type") or snapshot.get("stage") or "").lower()
+    video_id = str(snapshot.get("video_id") or "").strip()
+    active_jobs = list(fresh.get("active_jobs") or [])
+
+    await _fire_event(emit, "tool_start", tool="poll_cliplab_job", round=0, awaiting_approval=False)
+    await _fire_event(emit, "tool_end", tool="poll_cliplab_job", status="ok")
+
+    if status not in {"complete", "failed", "error"}:
+        assistant_text = _format_polled_job_status(json.dumps(snapshot))
+        messages.append(_tool_observation_message("poll_cliplab_job", json.dumps(snapshot)))
+        messages.append({"role": "assistant", "content": assistant_text})
+        store.update_session(sid, messages=messages, active_jobs=active_jobs)
+        return {
+            "session_id": sid,
+            "assistant_message": assistant_text,
+            "pending_actions": list(fresh.get("pending_actions") or []),
+            "active_jobs": active_jobs,
+            "approval_mode": approval_mode,
+            "reasoning_depth": reasoning_depth,
+            "usage": {},
+            "billing": {"credits_charged": 0, "provider_usd": 0.0, "prompt_tokens": 0, "completion_tokens": 0},
+        }
+    if status in {"failed", "error"}:
+        assistant_text = _format_polled_job_status(json.dumps(snapshot))
+        messages.append(_tool_observation_message("poll_cliplab_job", json.dumps(snapshot)))
+        messages.append({"role": "assistant", "content": assistant_text})
+        active_jobs = [j for j in active_jobs if str(j.get("job_id") or "") != job_id]
+        store.update_session(sid, messages=messages, active_jobs=active_jobs)
+        return {
+            "session_id": sid,
+            "assistant_message": assistant_text,
+            "pending_actions": [],
+            "active_jobs": active_jobs,
+            "approval_mode": approval_mode,
+            "reasoning_depth": reasoning_depth,
+            "usage": {},
+            "billing": {"credits_charged": 0, "provider_usd": 0.0, "prompt_tokens": 0, "completion_tokens": 0},
+        }
+
+    channel_id = str(fresh.get("channel_id") or "").strip()
+    registry_key = _active_registry_key(fresh, user_text)
+    if job_type == "cliplab_ingest" or job_id.startswith("clipi_"):
+        prompt = (
+            str(user_text or "").strip()
+            or "Find the strongest hooks, highest tension moments, character reveals, emotional peaks, pacing breaks, and dialogue hooks for 9:16 YouTube Shorts."
+        )
+        args = {
+            "video_id": video_id,
+            "prompt": prompt,
+            "max_segments": 12,
+            "channel_id": channel_id,
+            "registry_key": registry_key,
+        }
+        await _fire_event(emit, "tool_start", tool="analyze_cliplab_video", round=0, awaiting_approval=False, deterministic_continue=True)
+        try:
+            result = execute_tool_logged(
+                "analyze_cliplab_video",
+                args,
+                user_id=user_id,
+                content_format=content_format,
+                session_id=sid,
+            )
+            await _fire_event(emit, "tool_end", tool="analyze_cliplab_video", status="ok")
+        except Exception as exc:
+            result = json.dumps({"error": str(exc), "status": "failed"})
+            await _fire_event(emit, "tool_end", tool="analyze_cliplab_video", status="error", error=str(exc)[:160])
+        messages.append(_tool_observation_message("analyze_cliplab_video", result))
+        started = extract_jobs_from_tool("analyze_cliplab_video", result)
+        active_jobs = merge_active_jobs([j for j in active_jobs if str(j.get("job_id") or "") != job_id], started)
+        assistant_text = "ClipLab ingest is done, so I started analyzing the uploaded video for the strongest 9:16 clip candidates."
+        messages.append({"role": "assistant", "content": assistant_text})
+        store.update_session(sid, messages=messages, active_jobs=active_jobs)
+        await _fire_event(emit, "active_jobs", jobs=active_jobs)
+        return {
+            "session_id": sid,
+            "assistant_message": assistant_text,
+            "pending_actions": [],
+            "active_jobs": active_jobs,
+            "approval_mode": approval_mode,
+            "reasoning_depth": reasoning_depth,
+            "usage": {},
+            "billing": {"credits_charged": 0, "provider_usd": 0.0, "prompt_tokens": 0, "completion_tokens": 0},
+        }
+
+    if job_type == "cliplab_analyze" or job_id.startswith("clipa_"):
+        segments = list(snapshot.get("segments") or [])
+        ranked = sorted(
+            enumerate(segments),
+            key=lambda row: (
+                -float((row[1] or {}).get("virality_score") or 0),
+                -float((row[1] or {}).get("confidence") or 0),
+                float((row[1] or {}).get("start") or 0),
+            ),
+        )
+        indices = [idx for idx, _seg in ranked[: min(5, len(ranked))]]
+        if not indices:
+            assistant_text = "ClipLab analysis finished, but it returned no usable segments to render. Re-run analysis with a sharper prompt."
+            messages.append(_tool_observation_message("poll_cliplab_job", json.dumps(snapshot)))
+            messages.append({"role": "assistant", "content": assistant_text})
+            store.update_session(sid, messages=messages, active_jobs=[j for j in active_jobs if str(j.get("job_id") or "") != job_id])
+            return {
+                "session_id": sid,
+                "assistant_message": assistant_text,
+                "pending_actions": [],
+                "active_jobs": [],
+                "approval_mode": approval_mode,
+                "reasoning_depth": reasoning_depth,
+                "usage": {},
+                "billing": {"credits_charged": 0, "provider_usd": 0.0, "prompt_tokens": 0, "completion_tokens": 0},
+            }
+        action_id = f"act_{uuid.uuid4().hex[:12]}"
+        action = {
+            "id": action_id,
+            "tool": "render_cliplab_segments",
+            "arguments": {
+                "video_id": video_id,
+                "analyze_job_id": job_id,
+                "segment_indices": indices,
+                "burn_captions": True,
+                "channel_id": channel_id,
+                "registry_key": registry_key,
+            },
+            "summary": f"render_cliplab_segments(video_id={video_id}, segment_indices={indices})",
+        }
+        assistant_text = (
+            f"ClipLab analysis found {len(segments)} candidate segments. "
+            f"I selected the top {len(indices)} for rendering: {indices}. Approve the render action to cut the 9:16 clips and build upload packages."
+        )
+        messages.append(_tool_observation_message("poll_cliplab_job", json.dumps(snapshot)))
+        messages.append({"role": "assistant", "content": assistant_text})
+        active_jobs = [j for j in active_jobs if str(j.get("job_id") or "") != job_id]
+        store.update_session(sid, messages=messages, pending_actions=[action], active_jobs=active_jobs)
+        await _fire_event(emit, "pending_actions", actions=[action])
+        await _fire_event(emit, "active_jobs", jobs=active_jobs)
+        return {
+            "session_id": sid,
+            "assistant_message": assistant_text,
+            "pending_actions": [action],
+            "active_jobs": active_jobs,
+            "approval_mode": approval_mode,
+            "reasoning_depth": reasoning_depth,
+            "usage": {},
+            "billing": {"credits_charged": 0, "provider_usd": 0.0, "prompt_tokens": 0, "completion_tokens": 0},
+        }
+
+    assistant_text = _format_polled_job_status(json.dumps(snapshot))
+    messages.append(_tool_observation_message("poll_cliplab_job", json.dumps(snapshot)))
+    messages.append({"role": "assistant", "content": assistant_text})
+    active_jobs = [j for j in active_jobs if str(j.get("job_id") or "") != job_id]
+    store.update_session(sid, messages=messages, active_jobs=active_jobs)
+    return {
+        "session_id": sid,
+        "assistant_message": assistant_text,
+        "pending_actions": [],
+        "active_jobs": active_jobs,
+        "approval_mode": approval_mode,
+        "reasoning_depth": reasoning_depth,
+        "usage": {},
+        "billing": {"credits_charged": 0, "provider_usd": 0.0, "prompt_tokens": 0, "completion_tokens": 0},
+    }
+
+
 def _format_polled_job_status(result: str) -> str:
     try:
         data = json.loads(result or "{}")
@@ -695,6 +1028,32 @@ def _format_polled_job_status(result: str) -> str:
         if status == "failed":
             return f"The reference analysis failed during {stage}: {data.get('error') or 'unknown error'}"
         return f"The reference analysis is still running: {stage}{suffix}."
+    if kind == "cliplab":
+        job_type = str(data.get("job_type") or data.get("stage") or "").strip().lower()
+        percent = data.get("percent", data.get("progress"))
+        suffix = f" ({percent}%)" if percent is not None else ""
+        if status in {"failed", "error"}:
+            return f"ClipLab failed during {job_type.replace('_', ' ') or 'processing'}: {data.get('error') or 'unknown error'}"
+        if status != "complete":
+            return f"ClipLab is still running: {(job_type or status).replace('_', ' ')}{suffix}."
+        if job_type == "cliplab_ingest" or str(job_id).startswith("clipi_"):
+            cues = data.get("cue_count")
+            cue_text = f" with {cues} transcript cues" if cues is not None else ""
+            return (
+                f"ClipLab ingest is complete{cue_text}. The uploaded video is ready for analysis, "
+                "but clips have not been selected or rendered yet. Next step: analyze_cliplab_video."
+            )
+        if job_type == "cliplab_analyze" or str(job_id).startswith("clipa_"):
+            count = int(data.get("segment_count") or len(data.get("segments") or []) or 0)
+            return (
+                f"ClipLab analysis found {count} candidate segment{'s' if count != 1 else ''}. "
+                "Next step: approve rendering the strongest segment_indices with render_cliplab_segments."
+            )
+        if job_type == "cliplab_render" or str(job_id).startswith("clipr_"):
+            clips = int(data.get("clip_count") or len(data.get("clips") or []) or 0)
+            packages = int(data.get("upload_package_count") or len(data.get("upload_packages") or []) or 0)
+            return f"ClipLab render is complete: {clips} clip{'s' if clips != 1 else ''} and {packages} upload package{'s' if packages != 1 else ''} are ready."
+        return "ClipLab step is complete. Continue to the next ClipLab step if clips are not rendered yet."
     if status in {"awaiting_scene_review", "awaiting_approval"}:
         approved = int(data.get("approved_scene_count") or 0)
         total = int(data.get("total_scenes") or data.get("scene_count") or 0)
@@ -915,6 +1274,9 @@ def _channel_guard_tool_args(
         "get_channel_analytics",
         "recommend_video_topics",
         "get_public_search_trends",
+        "analyze_cliplab_video",
+        "render_cliplab_segments",
+        "remix_cliplab_short",
         "fetch_archival_for_video",
         "build_scene_blueprint_from_reference",
         "remember_channel_preference",
@@ -936,6 +1298,9 @@ def _channel_guard_tool_args(
         "get_channel_analytics",
         "recommend_video_topics",
         "get_public_search_trends",
+        "analyze_cliplab_video",
+        "render_cliplab_segments",
+        "remix_cliplab_short",
         "fetch_archival_for_video",
         "remember_channel_preference",
         "get_perpetual_memory",
@@ -1146,7 +1511,7 @@ def _build_requested_topic_production(
     active_channel_id: str = "",
     messages: list[dict[str, Any]] | None = None,
 ) -> tuple[str, dict[str, Any]] | None:
-    topic = _chosen_topic_from_user_text(user_text) or _last_recommended_topic(messages or [])
+    topic = _explicit_title_candidate(user_text) or _chosen_topic_from_user_text(user_text) or _last_recommended_topic(messages or [])
     if not topic:
         return None
     low = str(user_text or "").lower()
@@ -1176,6 +1541,25 @@ def _build_requested_topic_production(
         "use clear visual metaphors for hidden behavior, fast hook pacing, high-contrast captions, "
         "and no unsupported analytics claims in on-screen text."
     )
+    visual_proof_only = (
+        bool(re.search(r"\b(?:exactly\s+)?(?:one|1|single)\s+scene\b", low))
+        or "first image" in low
+        or "first still" in low
+        or "visual proof" in low
+        or "proof image" in low
+    ) and any(
+        marker in low
+        for marker in (
+            "test",
+            "try",
+            "visual",
+            "consistency",
+            "grok",
+            "approve",
+            "quality",
+            "prompt",
+        )
+    )
     args = {
         "render_style": render_style,
         "category_key": category_key,
@@ -1187,7 +1571,11 @@ def _build_requested_topic_production(
         "caption_mode": "word",
         "sfx_enabled": True,
         "background_music": "auto",
+        "user_request": user_text,
     }
+    if visual_proof_only:
+        args["scene_count"] = 1
+        args["visual_proof_only"] = True
     if active_channel_id:
         args["_selected_channel_id"] = active_channel_id
     if active_registry:
@@ -1273,6 +1661,8 @@ def _public_search_query_for_channel(active_label: str, user_text: str) -> str:
         return "comic book mystery shorts YouTube"
     if "cryptic" in label:
         return "science mystery deep science YouTube Shorts"
+    if "lexi" in label or "manhwa" in label or "manhua" in label:
+        return "anime manhwa shorts dramatic reveal betrayal revenge YouTube Shorts"
     cleaned = " ".join(str(user_text or "").split())
     return cleaned[:180] or "YouTube Shorts topic demand"
 
@@ -1302,6 +1692,7 @@ def _grounded_channel_status_from_tools(
         metrics = data.get("video_metrics") if isinstance(data.get("video_metrics"), dict) else {}
         live = data.get("youtube_analytics_live") if isinstance(data.get("youtube_analytics_live"), dict) else {}
         latest_upload = data.get("latest_upload") if isinstance(data.get("latest_upload"), dict) else {}
+        shortform_compare = data.get("shortform_performance_comparison") if isinstance(data.get("shortform_performance_comparison"), dict) else {}
         source = str(quality.get("effective_source") or "unknown").strip()
         reported_title = str(data.get("channel_title") or "").strip()
         title = str(active_label or reported_title or "selected channel").strip()
@@ -1329,6 +1720,28 @@ def _grounded_channel_status_from_tools(
             lines.append(f"- Tool-reported channel title ignored: {reported_title} (selected chat channel is {title})")
         if latest_upload:
             lines.append(f"- Latest upload: {_metric_row_line(latest_upload).lstrip('- ')}")
+        if shortform_compare:
+            best_prior = shortform_compare.get("best_prior_short") if isinstance(shortform_compare.get("best_prior_short"), dict) else {}
+            latest_short = shortform_compare.get("latest_short") if isinstance(shortform_compare.get("latest_short"), dict) else {}
+            available_short_metrics = [
+                str(v).strip()
+                for v in list(shortform_compare.get("available_short_metrics") or [])
+                if str(v).strip()
+            ]
+            missing_short_metrics = [
+                str(v).strip()
+                for v in list(shortform_compare.get("missing_short_metrics") or [])
+                if str(v).strip()
+            ]
+            lines.append(f"- Shorts comparison rows: {int(shortform_compare.get('prior_short_count') or 0)} prior Shorts")
+            if latest_short:
+                lines.append(f"- Latest Short baseline: {_metric_row_line(latest_short).lstrip('- ')}")
+            if best_prior:
+                lines.append(f"- Best prior Short control: {_metric_row_line(best_prior).lstrip('- ')}")
+            if available_short_metrics:
+                lines.append(f"- Shorts metrics available: {', '.join(available_short_metrics)}")
+            if missing_short_metrics:
+                lines.append(f"- Shorts metrics missing: {', '.join(missing_short_metrics)}")
         if limitation:
             lines.extend(["", f"Limitation: {limitation}"])
         lines.append("")
@@ -1444,6 +1857,7 @@ def _latest_channel_analytics_evidence(tool_fires: list[ToolFire]) -> dict[str, 
             continue
         quality = data.get("analytics_data_quality") if isinstance(data.get("analytics_data_quality"), dict) else {}
         metrics = data.get("video_metrics") if isinstance(data.get("video_metrics"), dict) else {}
+        shortform_compare = data.get("shortform_performance_comparison") if isinstance(data.get("shortform_performance_comparison"), dict) else {}
         video_rows = _channel_video_rows_from_metrics(metrics)
         return {
             "video_rows_available": int(quality.get("video_rows_available") or metrics.get("video_rows_available") or 0),
@@ -1453,6 +1867,7 @@ def _latest_channel_analytics_evidence(tool_fires: list[ToolFire]) -> dict[str, 
             "source": str(quality.get("effective_source") or "unknown").strip(),
             "oauth_connected": bool(quality.get("oauth_connected")),
             "video_rows": video_rows,
+            "shortform_performance_comparison": shortform_compare,
         }
     return {
         "video_rows_available": 0,
@@ -1460,6 +1875,7 @@ def _latest_channel_analytics_evidence(tool_fires: list[ToolFire]) -> dict[str, 
         "source": "unknown",
         "oauth_connected": False,
         "video_rows": [],
+        "shortform_performance_comparison": {},
     }
 
 
@@ -1855,6 +2271,18 @@ def _inject_shortform_video_model(args: dict[str, Any], session: dict[str, Any])
     return merged
 
 
+def _inject_shortform_image_model(args: dict[str, Any], session: dict[str, Any]) -> dict[str, Any]:
+    """Ensure shortform jobs inherit the session image model when the model omits it."""
+    merged = dict(args or {})
+    selected = str(merged.get("image_model_id") or merged.get("image_model") or "").strip()
+    if not selected:
+        merged["image_model_id"] = store.normalize_image_model(session.get("image_model"))
+    else:
+        merged["image_model_id"] = store.normalize_image_model(selected)
+    merged.pop("image_model", None)
+    return merged
+
+
 def _inject_shortform_caption_options(args: dict[str, Any], session: dict[str, Any]) -> dict[str, Any]:
     """Ensure shortform jobs inherit session caption preferences when omitted."""
     merged = dict(args or {})
@@ -2029,6 +2457,7 @@ def system_prompt(
     reasoning_depth: str = "balanced",
     billing_profile: dict[str, Any] | None = None,
     render_style: str = "cinematic",
+    image_model: str = "ernie_image",
     video_model: str = "seedance",
     memory_summary: str = "",
     active_registry: str = "",
@@ -2074,19 +2503,45 @@ def system_prompt(
             "USER RENDER STYLE: cinematic (default). Call list_render_styles; pass render_style on "
             "start_shortform_generate. Use skeleton_host only when the Art Style picker is set to Skeleton."
         )
+    selected_image_model = store.normalize_image_model(image_model)
+    image_model_labels = {
+        "grok_imagine": "Grok Imagine Quality",
+        "grok_imagine_standard": "Grok Imagine",
+        "ernie_image": "ERNIE-Image",
+        "seedream45": "Seedream 4.5",
+        "imagen4_fast": "Imagen 4 Fast",
+        "imagen4_preview": "Imagen 4 Preview",
+        "imagen4_ultra": "Imagen 4 Ultra",
+        "flux_lora_skeleton": "NYPTID Skeleton LoRA",
+    }
+    image_model_hint = (
+        "USER IMAGE MODEL (session picker): "
+        f"{image_model_labels.get(selected_image_model, selected_image_model)} (`{selected_image_model}`). "
+        "Pass this as image_model_id on start_shortform_generate unless the user changes it in chat. "
+        "Use the selected Grok model for image/still testing when the picker is set to Grok."
+    )
+
     selected_video_model = store.normalize_video_model(video_model)
     video_model_labels = {
         "ltx_budget": "LTX Budget (cheapest full animation)",
         "seedance": "Seedance 2.0 (default balanced motion)",
         "pixverse": "Pixverse V6 (permissive moderation)",
         "kling_pro": "Kling 2.1 Pro (premium motion, highest cost)",
+        "grok_imagine_video": "Grok Imagine Video (low-cost xAI I2V)",
+        "grok_imagine_video_15": "Grok Imagine Video 1.5 (higher-quality xAI I2V)",
+        "grok_imagine_video_15_1080p": "Grok Imagine Video 1.5 1080p (expensive final xAI I2V)",
+        "kling21_standard": "Kling 2.1 Standard",
+        "pixverse_v6": "PixVerse V6",
+        "pixverse_c1": "PixVerse C1",
+        "kling21_pro": "Kling 2.1 Pro",
+        "veo3_fast": "Veo 3 Fast",
+        "kling21_master": "Kling 2.1 Master",
     }
     video_model_hint = (
         "USER IMAGE-TO-VIDEO MODEL (session picker): "
         f"{video_model_labels.get(selected_video_model, selected_video_model)} (`{selected_video_model}`). "
         "Pass this as video_model on start_shortform_generate unless the user changes it in chat. "
-        "Do not offer image model choices: stills are locked to Seedream 4.5 edit/text-to-image for consistency. "
-        "Only I2V is user-selectable; better motion costs more credits."
+        "Better motion costs more credits."
     )
 
     color_accessibility_hint = (
@@ -2129,6 +2584,8 @@ format-specific, channel-specific pacing, packaging, and delivery.
 
 {style_hint}
 
+{image_model_hint}
+
 {video_model_hint}
 
 {color_accessibility_hint}
@@ -2157,6 +2614,10 @@ ANTI-HALLUCINATION / CHANNEL FACT RULES:
   video_level_retention_available is true and video_metrics.top_by_retention/top_shorts_by_retention contains
   that row. If false, state the missing data and the required next step: reconnect/refresh YouTube Analytics
   OAuth or use a Studio screenshot/export.
+- If a latest upload row has view_count_source=public_inventory_fresher_than_analytics or
+  view_count_source=existing_public_or_inventory_fresher_than_velocity, use that higher public view count as
+  the current view count and say private Analytics/velocity rows may be lagging. Do not call the channel
+  brand-new or low-performing from stale lower private counts when public inventory shows higher views.
 - Do not say "complete", "ready", or "fixed" for a render/re-edit until a production tool result proves it is complete.
   If a job is running, say it is running and show/poll progress.
 - If the user says a video/topic is already posted, treat it as locked history. Never recommend it as the next new video.
@@ -2177,6 +2638,16 @@ WORLD-CLASS YOUTUBE PRODUCTION STANDARD:
 - If the user provides reference channels/videos, analyze them as evidence first; extract specific choices, not generic advice.
 - Treat long-form and short-form differently: shorts need immediate clarity and visual lockstep; long-form needs durable
   narrative tension, chapter pacing, and frame-accurate timestamps.
+- Short-form analytics rule: when the user asks about a Short's performance, next upload, title, SEO, package, or what
+  will work for a Shorts channel, use `get_channel_analytics` and read `shortform_performance_comparison`. Compare the
+  latest Short against `best_prior_short` using Shorts metrics: views, engaged views when present, stayed-to-watch/swipe
+  signals when present, average percentage viewed, average view duration, and interactions per view. Never substitute
+  long-form CTR/chapter logic for Shorts packaging. If engaged views or swipe/stayed-to-watch are missing from the API,
+  say they are missing and use the measured rows that are present.
+- Lexi Manhwa / Lexi Manhua packaging rule: titles should sound like a professional anime/manhwa Shorts SEO strategist:
+  character conflict, betrayal, revenge, impossible comeback, secret identity, power reveal, or emotional cliffhanger in
+  plain language. Avoid generic labels like "anime edit", "manhwa recap", or broad genre-only titles unless the data
+  explicitly proves they work for the selected channel.
 
 ═══ "I don't know what to make" (topic + niche discovery) ═══
 - Start with `recommend_video_topics` (registry_key if connected, else niche_query).
@@ -2208,6 +2679,8 @@ This is how the agent (and you) learn what actually makes videos perform — use
 3. `get_channel_analytics` - Catalyst + live YouTube Analytics (90d Reporting API: views, CTR, AVD,
    per-video retention rows when available, top titles, series arcs) when OAuth is connected. First read
    `analytics_data_quality`. Use `growth_playbook` for brand_new / early / growing / established.
+   For Shorts, also read `shortform_performance_comparison` before recommending a title/package. The latest Short and
+   best prior Short are the control pair; public trend data is supporting context only.
    For 0-sub channels: positioning + competitor homework, NOT "why X failed."
 4. `get_public_search_trends` — demand when harvest is thin or channel is new.
    Public trend evidence contract:
@@ -2233,7 +2706,7 @@ Quality target: feels like a $5k+ edit — NOT "good enough AI."
 - `start_longform_render` after outline approval; poll until complete.
 
 ═══ SHORTFORM RENDER (start_shortform_generate + poll_render_job kind=shortform) ═══
-REQUIRED on every short render: `render_style` from list_render_styles OR the user's session Art Style picker, and `video_model` from the user's session I2V picker unless they override it in chat.
+REQUIRED on every short render: `render_style` from list_render_styles OR the user's session Art Style picker, `image_model_id` from the user's session Image picker, and `video_model` from the user's session I2V picker unless they override it in chat.
 - Shorts quality target: benchmark against the selected channel's own Shorts outliers and niche-specific
   high-retention Shorts. Optimize viewed-vs-swiped, first-1-to-3-second retention, completion/APV, rewatches,
   engaged views, and interactions per view. Do not use long-form CTR/AVD/chapter benchmarks as substitutes.
@@ -2253,6 +2726,9 @@ REQUIRED on every short render: `render_style` from list_render_styles OR the us
 - `start_shortform_generate` is a still-review gate, not a final render. Never claim the video is complete from that tool.
   After it reaches awaiting_scene_review, show/list the stills, edit bad stills, then wait for explicit scene approval before
   calling `animate_production_scenes` or `finalize_production`.
+- If the user asks for a visual test, one scene, first image, first still, proof image, or wants to approve the look before the
+  full short, pass `visual_proof_only=true` and `scene_count=1` on `start_shortform_generate`. This is mandatory to avoid
+  spending credits on every scene before the first image is approved.
 
 FULL CREATIVE CONTROL (the massive per-scene iteration system):
 After start_shortform_generate (non-skeleton styles land at a review gate with stills):
@@ -2334,6 +2810,20 @@ when the user reports performance (internal training, never sold).
 Progress reporting (important): long-running tools run in the background and return a job_id.
 - analyze_reference_video / analyze_competitor_video: poll kind=competitor through pacing + audio.
 - Never go silent between start and finish. Summarize pacing (avg shot length) + hook window.
+
+Internal ClipLab workflow (owner/admin only):
+- If the user uploads a long recording and asks for clips, do not start a normal shortform render.
+- ClipLab cuts/reframes existing footage. Ignore the session short-form style, image style, and image-to-video style picker.
+- Do not say "comic book style", "cinematic style", or any generated-scene style for ClipLab unless the user explicitly asks for a Remix Lab visual treatment on an already-cut clip.
+- For long-form-to-shorts ClipLab, use clip selection, hook/pacing analysis, 9:16 reframe, captions, light edit treatment, and upload packaging only.
+- Never call `start_shortform_generate` or `start_longform_render` to satisfy a ClipLab long-video-to-clips request; those create generated videos, not clips from the uploaded source.
+- First use `ingest_cliplab_attachment` to create a ClipLab video_id from the latest uploaded video attachment.
+- Poll `poll_cliplab_job` until ingest is complete.
+- Use `get_channel_analytics` for the selected channel when available and `get_public_search_trends` for public demand before choosing what clips should be cut.
+- Then call `analyze_cliplab_video(video_id, prompt, channel_id, registry_key)` with a prompt that names the target channel, niche, desired hooks, pacing, and emotional/tension moments.
+- If the user explicitly asks to test OpusClip or use Opus as the temporary clipping provider, include `provider: "opus"` in `analyze_cliplab_video`. Opus results are already rendered external clips; do not call `render_cliplab_segments` after Opus returns clips.
+- Poll until segments or clips are ready. If local segments are returned, pick the strongest segment_indices, then call `render_cliplab_segments`. If Opus clips are returned, review those clips and upload packages directly.
+- When render completes, summarize each clip with its upload package: title, description, tags, hook, and why it fits the selected channel. Do not claim a clip will go viral; explain the evidence behind the selection.
 
 Data: every turn and tool call is logged for product improvement and future custom model training
 (previews only; no secrets). Encourage users to connect YouTube and paste reference URLs — richer signal.
@@ -2594,6 +3084,42 @@ async def _run_turn_impl(
 
     messages: list[dict[str, Any]] = list(session.get("messages") or [])
     messages.append({"role": "user", "content": _build_user_content(user_text, attachments)})
+    had_pending_actions = bool(session.get("pending_actions"))
+    if had_pending_actions:
+        messages.append({
+            "role": "system",
+            "content": (
+                "[Studio Agent cleared pending approval because the user sent a new message.]\n"
+                "Pending approvals apply only to the assistant turn that created them. Prepare a fresh "
+                "action from the latest user message instead of reusing the previous approval."
+            ),
+        })
+        session = store.update_session(
+            sid,
+            messages=messages,
+            pending_actions=[],
+        ) or session
+        await _fire_event(emit, "pending_actions", actions=[])
+    production_diagnostic_turn = _is_production_diagnostic_turn(user_text)
+    if production_diagnostic_turn:
+        messages.append({
+            "role": "system",
+            "content": (
+                "[Studio Agent production diagnostic mode]\n"
+                "The latest user message is asking why the wrong/stale production is being prepared. "
+                "Clear pending production approvals and answer the diagnostic question. Do not call "
+                "start_shortform_generate or start_longform_render unless the same user message explicitly "
+                "asks to start a new production with a current title."
+            ),
+        })
+        if had_pending_actions:
+            session = store.update_session(
+                sid,
+                messages=messages,
+                pending_actions=[],
+                last_production={},
+            ) or session
+            await _fire_event(emit, "pending_actions", actions=[])
     store.touch_title_from_user_message(sid, user_text)
     try:
         memory.observe_user_message(str(user_id), user_text, session=session)
@@ -2611,6 +3137,17 @@ async def _run_turn_impl(
         )
         if continued is not None:
             return continued
+        continued_cliplab = await _continue_active_cliplab(
+            session=session,
+            user_id=user_id,
+            user_text=user_text,
+            content_format=content_format,
+            emit=emit,
+            approval_mode=approval_mode,
+            reasoning_depth=reasoning_depth,
+        )
+        if continued_cliplab is not None:
+            return continued_cliplab
 
     if not reply_to and _is_job_status_followup(user_text):
         poll_target = _recover_poll_target(session)
@@ -2668,26 +3205,59 @@ async def _run_turn_impl(
     if not reply_to and _wants_production_execution(user_text):
         existing_pending = list(session.get("pending_actions") or [])
         if existing_pending:
-            assistant_text = "The production is already prepared and waiting for your approval."
-            messages.append({"role": "assistant", "content": assistant_text})
-            store.update_session(sid, messages=messages, pending_actions=existing_pending)
-            await _fire_event(emit, "pending_actions", actions=existing_pending)
-            return {
-                "session_id": sid,
-                "assistant_message": assistant_text,
-                "pending_actions": existing_pending,
-                "active_jobs": list(session.get("active_jobs") or []),
-                "approval_mode": approval_mode,
-                "reasoning_depth": reasoning_depth,
-                "usage": {},
-                "billing": {
-                    "credits_charged": 0,
-                    "provider_usd": 0.0,
-                    "prompt_tokens": 0,
-                    "completion_tokens": 0,
-                },
-            }
+            turn_session = dict(session)
+            turn_session["messages"] = messages
+            existing_pending, blocked_pending = _filter_stale_pending_actions(existing_pending, turn_session)
+            if blocked_pending:
+                messages.append({
+                    "role": "system",
+                    "content": (
+                        "[Studio Agent cleared stale pending production action before continuing.]\n"
+                        + "\n".join(blocked_pending)
+                        + "\nPrepare a new action for the user's latest request instead of reusing the stale one."
+                    ),
+                })
+                session = store.update_session(sid, messages=messages, pending_actions=existing_pending)
+            if not existing_pending:
+                await _fire_event(emit, "pending_actions", actions=[])
+            else:
+                assistant_text = "The production is already prepared and waiting for your approval."
+                messages.append({"role": "assistant", "content": assistant_text})
+                store.update_session(sid, messages=messages, pending_actions=existing_pending)
+                await _fire_event(emit, "pending_actions", actions=existing_pending)
+                return {
+                    "session_id": sid,
+                    "assistant_message": assistant_text,
+                    "pending_actions": existing_pending,
+                    "active_jobs": list(session.get("active_jobs") or []),
+                    "approval_mode": approval_mode,
+                    "reasoning_depth": reasoning_depth,
+                    "usage": {},
+                    "billing": {
+                        "credits_charged": 0,
+                        "provider_usd": 0.0,
+                        "prompt_tokens": 0,
+                        "completion_tokens": 0,
+                    },
+                }
         recovered = _recover_requested_production(session, user_text)
+        conflict = _production_conflict_with_latest_user(recovered, {"session_id": sid, "messages": messages})
+        if conflict:
+            messages.append({
+                "role": "system",
+                "content": (
+                    "[Studio Agent rejected recovered stale production.]\n"
+                    f"{conflict}\n"
+                    "Build a fresh production from the latest user request instead."
+                ),
+            })
+            session = store.update_session(
+                sid,
+                messages=messages,
+                pending_actions=[],
+                last_production=None,
+            )
+            recovered = None
         if not recovered:
             recovered = _build_requested_topic_production(
                 session,
@@ -2701,6 +3271,7 @@ async def _run_turn_impl(
             name, args = recovered
             if name == "start_shortform_generate":
                 args = _inject_shortform_render_style(args, session)
+                args = _inject_shortform_image_model(args, session)
                 args = _inject_shortform_video_model(args, session)
                 args = _inject_shortform_caption_options(args, session)
                 args = _normalize_shortform_category_args(args)
@@ -2907,6 +3478,7 @@ async def _run_turn_impl(
         reasoning_depth=reasoning_depth,
         billing_profile=profile,
         render_style=str(session.get("render_style") or "cinematic"),
+        image_model=str(session.get("image_model") or store.DEFAULT_IMAGE_MODEL),
         video_model=str(session.get("video_model") or "seedance"),
         memory_summary=memory_summary,
         active_registry=active_registry,
@@ -3297,10 +3869,57 @@ async def _run_turn_impl(
                     args = {}
                 if name == "start_shortform_generate":
                     args = _inject_shortform_render_style(args, session)
+                    args = _inject_shortform_image_model(args, session)
                     args = _inject_shortform_video_model(args, session)
                     args = _inject_shortform_caption_options(args, session)
                     args = _normalize_shortform_category_args(args)
+                    turn_session = dict(session)
+                    turn_session["messages"] = messages
+                    conflict = _shortform_action_conflicts_with_latest_user(args, turn_session)
+                    if conflict:
+                        assistant_text = conflict
+                        result = json.dumps({
+                            "status": "blocked_stale_pending_action",
+                            "message": conflict,
+                        })
+                        tool_fires.append(ToolFire(str(name), dict(args or {}), result))
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tc.get("id"),
+                            "content": result,
+                        })
+                        await _fire_event(
+                            emit,
+                            "tool_end",
+                            tool=name,
+                            status="error",
+                            error="blocked_stale_pending_action",
+                        )
+                        continue
                 args = _channel_guard_tool_args(name, args, active_registry, active_channel_id)
+
+                if production_diagnostic_turn and name in JOB_START_TOOLS:
+                    result = json.dumps({
+                        "status": "blocked_diagnostic_turn",
+                        "message": (
+                            "The latest user message is asking about a wrong/stale production. "
+                            "No render was prepared or started."
+                        ),
+                    })
+                    tool_fires.append(ToolFire(str(name), dict(args or {}), result))
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc.get("id"),
+                        "content": result,
+                    })
+                    await _fire_event(
+                        emit,
+                        "tool_end",
+                        tool=name,
+                        status="error",
+                        error="blocked_diagnostic_turn",
+                    )
+                    continue
 
                 # HARD GUARD for reply-to re-edit: never allow a full new production start when the user
                 # explicitly clicked "Reply & re-edit" on an existing video card. Force the surgical path
@@ -3351,6 +3970,29 @@ async def _run_turn_impl(
                         continue
 
                 if approval_mode == "confirm" and requires_approval(name):
+                    if name == "start_shortform_generate":
+                        turn_session = dict(session)
+                        turn_session["messages"] = messages
+                        conflict = _shortform_action_conflicts_with_latest_user(args, turn_session)
+                        if conflict:
+                            result = json.dumps({
+                                "status": "blocked_stale_pending_action",
+                                "message": conflict,
+                            })
+                            tool_fires.append(ToolFire(str(name), dict(args or {}), result))
+                            messages.append({
+                                "role": "tool",
+                                "tool_call_id": tc.get("id"),
+                                "content": result,
+                            })
+                            await _fire_event(
+                                emit,
+                                "tool_end",
+                                tool=name,
+                                status="error",
+                                error="blocked_stale_pending_action",
+                            )
+                            continue
                     action_id = f"act_{uuid.uuid4().hex[:12]}"
                     budget_summary = ""
                     budget_payload = None
@@ -3517,8 +4159,25 @@ async def _run_turn_impl(
             user_text=user_text,
             tool_fires=tool_fires,
         )
-        if audit.has_issues and _promised_execution_blocked(audit):
+        if audit.has_issues and _promised_execution_blocked(audit) and not production_diagnostic_turn:
             recovered = _recover_requested_production(session, user_text)
+            conflict = _production_conflict_with_latest_user(recovered, {"session_id": sid, "messages": messages})
+            if conflict:
+                messages.append({
+                    "role": "system",
+                    "content": (
+                        "[Studio Agent rejected recovered stale production.]\n"
+                        f"{conflict}\n"
+                        "Build a fresh production from the latest user request instead."
+                    ),
+                })
+                session = store.update_session(
+                    sid,
+                    messages=messages,
+                    pending_actions=[],
+                    last_production=None,
+                )
+                recovered = None
             if not recovered:
                 recovered = _build_requested_topic_production(
                     session,
@@ -3532,6 +4191,7 @@ async def _run_turn_impl(
                 name, args = recovered
                 if name == "start_shortform_generate":
                     args = _inject_shortform_render_style(args, session)
+                    args = _inject_shortform_image_model(args, session)
                     args = _inject_shortform_video_model(args, session)
                     args = _inject_shortform_caption_options(args, session)
                     args = _normalize_shortform_category_args(args)
@@ -3940,9 +4600,25 @@ async def _approve_action_impl(
     args = action.get("arguments") or {}
     if name == "start_shortform_generate":
         args = _inject_shortform_render_style(args, session)
+        args = _inject_shortform_image_model(args, session)
         args = _inject_shortform_video_model(args, session)
         args = _inject_shortform_caption_options(args, session)
         args = _normalize_shortform_category_args(args)
+        conflict = _shortform_action_conflicts_with_latest_user(args, session)
+        if conflict:
+            messages = list((store.get_session(sid) or fresh).get("messages") or [])
+            messages.append({"role": "assistant", "content": conflict})
+            store.update_session(sid, messages=messages, pending_actions=[])
+            return {
+                "session_id": sid,
+                "assistant_message": conflict,
+                "pending_actions": [],
+                "active_jobs": list((store.get_session(sid) or fresh).get("active_jobs") or []),
+                "approval_mode": str((store.get_session(sid) or fresh).get("approval_mode") or "confirm"),
+                "reasoning_depth": str((store.get_session(sid) or fresh).get("reasoning_depth") or "balanced"),
+                "usage": {},
+                "billing": {"credits_charged": 0, "provider_usd": 0.0, "prompt_tokens": 0, "completion_tokens": 0},
+            }
 
     # Defense for re-edit threads: if this pending action is a start tool but the conversation
     # has an active reply-to re-edit context in recent messages, redirect to surgical re-edit
@@ -3983,13 +4659,7 @@ async def _approve_action_impl(
     started = extract_jobs_from_tool(name, result)
     fresh = store.get_session(sid) or session
     messages: list[dict[str, Any]] = list(fresh.get("messages") or [])
-    messages.append({
-        "role": "user",
-        "content": (
-            f"[User approved {name}]\nTool result:\n{result[:12000]}\n"
-            "Summarize what happened and propose the next production step."
-        ),
-    })
+    messages.append(_tool_observation_message(name, result))
     store.update_session(sid, messages=messages)
 
     if tool_error:
@@ -4078,6 +4748,7 @@ async def retry_last_production(
         raise KeyError("no production to retry — approve or run start_shortform_generate first")
     if name == "start_shortform_generate":
         args = _inject_shortform_render_style(args, fresh)
+        args = _inject_shortform_image_model(args, fresh)
         args = _inject_shortform_video_model(args, fresh)
         args = _inject_shortform_caption_options(args, fresh)
         args = _normalize_shortform_category_args(args)
@@ -4113,10 +4784,7 @@ async def retry_last_production(
 
     started = extract_jobs_from_tool(name, result)
     messages = list((store.get_session(sid) or fresh).get("messages") or [])
-    messages.append({
-        "role": "user",
-        "content": f"[User retried {name}]\nTool result:\n{result[:8000]}",
-    })
+    messages.append(_tool_observation_message(name, result))
     messages.append({
         "role": "assistant",
         "content": f"Retrying {name} — track the new job in the render dock.",

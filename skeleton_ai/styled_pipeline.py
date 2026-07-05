@@ -460,6 +460,7 @@ def plan_scenes(
     *,
     render_style: str,
     tier: str = "standard",
+    image_model_id: str | None = None,
     video_model: str | None = None,
     visual_brief: str | None = None,
     beats_target: int = 12,
@@ -519,6 +520,7 @@ def plan_scenes(
         raise RuntimeError("Grok returned empty script")
 
     _, resolved_default_vm = resolve_video_model_chain(video_model=video_model, tier=tier)
+    selected_image_model = str(image_model_id or "").strip().lower()
     existing = {s.get("index"): s for s in load_scenes(workspace)}
     scenes: list[dict[str, Any]] = []
     total = max(len(sentences), 1)
@@ -574,7 +576,18 @@ def plan_scenes(
                 "stills",
                 on_wait=_slot_wait_progress(workspace, "stills_queue", f"Scene {i + 1} still"),
             ):
-                if is_skeleton:
+                if is_skeleton and selected_image_model in {"grok_imagine", "grok_imagine_standard"}:
+                    generate_still_t2i(
+                        prompt,
+                        still_target,
+                        negative_prompt="human skin, muscle tissue, nudity, gore, deformed anatomy, extra limbs, text, watermark",
+                        seed=420042 + i,
+                        image_model_id=selected_image_model,
+                    )
+                    amount, note, key = production_costs.price_fal_image(edit=False)
+                    note = f"xAI {selected_image_model} still generation"
+                    key = selected_image_model
+                elif is_skeleton:
                     from .canonical_edit import generate_still_edit
 
                     generate_still_edit(prompt, still_target, seed=420042 + i)
@@ -597,6 +610,7 @@ def plan_scenes(
                             still_target,
                             negative_prompt=style.negative_prompt,
                             seed=420042 + i,
+                            image_model_id=selected_image_model,
                         )
                         amount, note, key = production_costs.price_fal_image(edit=False)
             provider, amount, note = _metered_provider_values("fal", amount, note)
@@ -621,6 +635,7 @@ def plan_scenes(
             "approved_for_video": bool(prev.get("approved_for_video", False)),
             "approved_for_animation": bool(prev.get("approved_for_animation", False)),
             "video_model": prev.get("video_model") or resolved_default_vm,
+            "image_model_id": selected_image_model or prev.get("image_model_id") or "",
             "status": "still_ready", "duration_sec": float(prev.get("duration_sec", 5.0)),
         })
     save_scenes(workspace, scenes)
@@ -629,13 +644,20 @@ def plan_scenes(
     _write_result(workspace, {
         "status": "awaiting_scene_review", "job_id": workspace.name,
         "render_style": style.key, "render_style_label": style.label,
-        "stills_model": "seedream_v45_edit_canonical" if is_skeleton else f"seedream_v45_t2i_{style.key}",
+        "stills_model": selected_image_model or ("seedream_v45_edit_canonical" if is_skeleton else f"seedream_v45_t2i_{style.key}"),
+        "image_model_id": selected_image_model or "",
         "category": category_key, "topic": topic, "tier": tier,
         "scene_count": len(scenes),
+        "visual_proof_only": len(scenes) == 1,
         "product_reference_count": len(reference_images or []),
         "sound_design_brief": sound_design_brief or "",
     })
-    return {"status": "awaiting_scene_review", "scene_count": len(scenes), "job_id": workspace.name}
+    return {
+        "status": "awaiting_scene_review",
+        "scene_count": len(scenes),
+        "visual_proof_only": len(scenes) == 1,
+        "job_id": workspace.name,
+    }
 
 
 # ─── Per-scene edit / regenerate (Seedream v4.5 + v4.5 edit) ───────────────────

@@ -1,6 +1,8 @@
 import { defineConfig, type Plugin } from 'vite'
 import react from '@vitejs/plugin-react'
 
+declare const process: { env: Record<string, string | undefined> }
+
 /** Injects Search Console HTML-tag verification when VITE_GOOGLE_SITE_VERIFICATION is set. */
 function googleSiteVerificationPlugin(): Plugin {
     return {
