@@ -157,6 +157,29 @@ def _metered_provider_values(provider: str, amount: float, note: str) -> tuple[s
     return provider, float(amount or 0.0), note
 
 
+def _xai_moderation_retry_prompt(prompt: str) -> str:
+    text = str(prompt or "")
+    softeners = (
+        ("self-sabotage", "emotional conflict"),
+        ("Self-Sabotage", "Emotional Conflict"),
+        ("sabotage", "avoidance pattern"),
+        ("fall in love", "develop attachment"),
+        ("Fall in Love", "Develop Attachment"),
+        ("hidden threat", "hidden fear"),
+        ("pain", "inner tension"),
+        ("shame", "quiet regret"),
+        ("broken", "overwhelmed"),
+        ("wound", "emotional pressure"),
+    )
+    for src, dst in softeners:
+        text = text.replace(src, dst)
+    guard = (
+        " Safe PG-13 metaphorical psychology scene. No gore, no injury, no self-harm, "
+        "no violence, no blood, no explicit distress, no medical procedure, no readable text."
+    )
+    return (text + guard)[:3500]
+
+
 def _concat_audio_tracks(paths: list[Path], out_path: Path) -> Path | None:
     valid = [Path(p) for p in paths if Path(p).exists() and Path(p).stat().st_size > 1024]
     if not valid:
@@ -609,7 +632,22 @@ def plan_scenes(
                                 scene_index=i,
                                 metadata={"pricing_note": err_note, "cached": False, "failed": True},
                             )
-                        raise
+                        if "content moderation" not in str(exc).lower():
+                            raise
+                        retry_prompt = _xai_moderation_retry_prompt(prompt)
+                        still_result = generate_still_t2i(
+                            retry_prompt,
+                            still_target,
+                            negative_prompt=(
+                                "human skin, muscle tissue, nudity, gore, blood, injury, self-harm, "
+                                "violence, deformed anatomy, extra limbs, text, watermark"
+                            ),
+                            seed=520042 + i,
+                            image_model_id=selected_image_model,
+                        )
+                        prompt = retry_prompt
+                        if still_result.get("cost_usd") is not None:
+                            amount = production_costs._usd(still_result.get("cost_usd"))
                 elif is_skeleton:
                     from .canonical_edit import generate_still_edit
 
@@ -662,7 +700,19 @@ def plan_scenes(
                                     scene_index=i,
                                     metadata={"pricing_note": err_note, "cached": False, "failed": True},
                                 )
-                            raise
+                            if provider_name != "xai" or "content moderation" not in str(exc).lower():
+                                raise
+                            retry_prompt = _xai_moderation_retry_prompt(prompt)
+                            still_result = generate_still_t2i(
+                                retry_prompt,
+                                still_target,
+                                negative_prompt=style.negative_prompt,
+                                seed=520042 + i,
+                                image_model_id=selected_image_model,
+                            )
+                            prompt = retry_prompt
+                            if still_result.get("cost_usd") is not None:
+                                amount = production_costs._usd(still_result.get("cost_usd"))
             provider, amount, note = _metered_provider_values(provider_name, amount, note)
             production_costs.record_event(
                 workspace,

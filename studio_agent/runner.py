@@ -67,6 +67,68 @@ def _llm_pricing_for_provider(provider: str, model: str, fallback_model: str) ->
     return None, None, "studio_agent_openrouter", model
 
 
+def _matching_shortform_resume_job_id(
+    session: dict[str, Any],
+    args: dict[str, Any],
+) -> str | None:
+    """Find the newest durable shortform workspace matching this user/topic.
+
+    The chat's in-memory active_jobs list can disappear after refresh, fail, or
+    deploy. The media workspace on the Fly volume is the real source of truth,
+    so retry/resume should reattach to it instead of starting a new render.
+    """
+    try:
+        from studio_agent.jobs import ROOT as _JOBS_ROOT, SKELETON_OUTPUT as _SKELETON_OUTPUT
+        root = (_JOBS_ROOT / _SKELETON_OUTPUT).resolve()
+        if not root.is_dir():
+            return None
+    except Exception:
+        return None
+
+    wanted_user = str(session.get("user_id") or "").strip()
+    wanted_topic = str(args.get("topic") or "").strip().lower()
+    wanted_category = str(args.get("category_key") or "").strip().lower()
+    candidates: list[tuple[float, int, str]] = []
+    for spec_path in root.glob("*/job_spec.json"):
+        ws = spec_path.parent
+        try:
+            spec = json.loads(spec_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if wanted_user and str(spec.get("user_id") or "").strip() != wanted_user:
+            continue
+        spec_topic = str(spec.get("topic") or "").strip().lower()
+        spec_category = str(spec.get("category_key") or "").strip().lower()
+        if wanted_topic and spec_topic != wanted_topic:
+            continue
+        if not wanted_topic and wanted_category and spec_category != wanted_category:
+            continue
+        still_count = 0
+        scenes_path = ws / "scenes.json"
+        if scenes_path.is_file():
+            try:
+                scenes = json.loads(scenes_path.read_text(encoding="utf-8"))
+                if isinstance(scenes, list):
+                    still_count = len([s for s in scenes if isinstance(s, dict)])
+            except Exception:
+                still_count = 0
+        if still_count <= 0:
+            stills_dir = ws / "stills"
+            if stills_dir.is_dir():
+                still_count = len([p for p in stills_dir.glob("*.png") if p.is_file()])
+        if still_count <= 0:
+            continue
+        newest = max(
+            (p.stat().st_mtime for p in [spec_path, ws / "progress.json", ws / "result.json", scenes_path] if p.is_file()),
+            default=ws.stat().st_mtime,
+        )
+        candidates.append((newest, still_count, ws.name))
+    if not candidates:
+        return None
+    candidates.sort(reverse=True)
+    return candidates[0][2]
+
+
 def _is_model_credit_error(exc: Exception) -> bool:
     msg = str(exc or "").lower()
     return (
@@ -4754,12 +4816,27 @@ async def retry_last_production(
         args = _normalize_shortform_category_args(args)
         # Resume the last shortform job's workspace so finished stills/clips/VO
         # are reused instead of re-rendered (and re-billed) from scratch.
+        resume_job_id = None
         prev = [
             j for j in (fresh.get("active_jobs") or [])
             if j.get("kind") == "shortform" and j.get("job_id")
         ]
         if prev:
-            args = {**args, "_resume_job_id": str(prev[-1]["job_id"])}
+            candidate = str(prev[-1]["job_id"])
+            try:
+                from studio_agent.jobs import ROOT as _JOBS_ROOT, SKELETON_OUTPUT as _SKELETON_OUTPUT
+
+                spec_path = (_JOBS_ROOT / _SKELETON_OUTPUT / candidate / "job_spec.json").resolve()
+                spec = json.loads(spec_path.read_text(encoding="utf-8")) if spec_path.is_file() else {}
+                wanted_topic = str(args.get("topic") or "").strip().lower()
+                candidate_topic = str(spec.get("topic") or "").strip().lower()
+                if not wanted_topic or wanted_topic == candidate_topic:
+                    resume_job_id = candidate
+            except Exception:
+                resume_job_id = None
+        resume_job_id = resume_job_id or _matching_shortform_resume_job_id(fresh, args)
+        if resume_job_id:
+            args = {**args, "_resume_job_id": str(resume_job_id)}
     if lp.get("recovered"):
         store.update_session(sid, last_production=lp)
 
