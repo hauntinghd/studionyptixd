@@ -9960,6 +9960,43 @@ async def stream_turn(
                 pass
 
 
+_TURN_SCOPED_SYSTEM_PREFIXES = (
+    "[Studio Agent mode:",
+    "[Studio Agent approved research execution mode]",
+    "[Studio Agent conversational planning mode]",
+    "[Studio Agent reference correction]",
+    "[Studio Agent public-search DAG gate]",
+    "[Studio Agent required data preflight",
+    "[Studio Agent approved research preflight",
+    "[Studio Agent ideation preflight",
+    "[Studio Agent fresh production context",
+    "[Studio Agent cleared pending approval",
+    "[TITLE CORRECTION",
+    "ANTI-HALLUCINATION AUDIT",
+)
+
+
+def _without_stale_turn_scoped_system_messages(
+    messages: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Keep prior conversation while dropping control instructions from older turns.
+
+    Runner-added system directives describe one specific turn. Persisting them into
+    later turns gives models contradictory high-priority instructions (for example,
+    an old research-only gate beside a new request to animate scenes). Tool evidence
+    and the canonical leading system prompt remain available for recovery and
+    grounding; only ephemeral control-plane rows are removed.
+    """
+    cleaned: list[dict[str, Any]] = []
+    for message in messages:
+        if str(message.get("role") or "") == "system":
+            content = str(message.get("content") or "").lstrip()
+            if any(content.startswith(prefix) for prefix in _TURN_SCOPED_SYSTEM_PREFIXES):
+                continue
+        cleaned.append(message)
+    return cleaned
+
+
 async def _run_turn_impl(
     session: dict[str, Any],
     user_text: str,
@@ -10039,7 +10076,9 @@ async def _run_turn_impl(
             turn_id=turn_id,
         )
 
-    messages: list[dict[str, Any]] = list(session.get("messages") or [])
+    messages: list[dict[str, Any]] = _without_stale_turn_scoped_system_messages(
+        list(session.get("messages") or [])
+    )
     ideation_turn = store.is_ideation_request(intent_text or user_text)
     reference_correction_turn = store.is_reference_description_correction(intent_text or user_text)
     reference_context = _uploaded_reference_context(

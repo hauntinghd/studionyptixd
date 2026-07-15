@@ -233,9 +233,13 @@ def validate_studio_command(
         )
 
     auth = command.authorization
+    approval_evidence = approval_authorization_evidence(
+        user_text,
+        contextual_scene_review=bool(job.expandable_proof and job.ownership_verified),
+    )
     approval_grounded = bool(
         auth.existing_work_approved
-        and approval_authorization_evidence(user_text)
+        and approval_evidence
         and normalized_text_contains(user_text, auth.approval_quote)
     )
     execution_grounded = bool(

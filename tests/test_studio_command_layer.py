@@ -44,7 +44,7 @@ def _snapshot(*, stage: str = "awaiting_scene_review", scene_count: int = 1, cli
     }
 
 
-def _state(snapshot=None):
+def _state(snapshot=None, *, session_updates=None):
     snap = snapshot or _snapshot()
     session = {
         "session_id": "sa_test_command_layer",
@@ -57,6 +57,7 @@ def _state(snapshot=None):
             {"job_id": JOB_ID, "kind": "shortform", "title": "Skeleton psychology short"}
         ],
     }
+    session.update(session_updates or {})
     return build_studio_state_context(
         session,
         expandable_job_id=JOB_ID,
@@ -113,7 +114,7 @@ def _tool_response(payload):
     }
 
 
-def _plan(text: str, response, *, capture=None):
+def _plan(text: str, response, *, capture=None, state=None):
     async def fake_chat_completion(**kwargs):
         if capture is not None:
             capture.update(kwargs)
@@ -122,7 +123,7 @@ def _plan(text: str, response, *, capture=None):
     return asyncio.run(
         plan_studio_command(
             text,
-            _state(),
+            state or _state(),
             model="claude-haiku-test",
             chat_completion=fake_chat_completion,
         )
@@ -157,6 +158,72 @@ def test_exact_prompt_is_grounded_to_same_job_plus_five_and_new_scene_animation(
     assert validation.resolved_action.arguments.animate_scene_indices == [1, 2, 3, 4, 5]
     assert validation.resolved_action.arguments.animate_policy == "all"
     assert validation.resolved_action.expected.expected_animated_scene_numbers == [2, 3, 4, 5, 6]
+
+
+def test_contextual_good_now_make_rest_reuses_prior_grounded_count_and_executes():
+    prior = "I like scene one. Let's go ahead and make the other five scenes and animate them."
+    state = _state(session_updates={
+        "production_state": {"advanced_at": 100.0},
+        "runs": [{"created_at": 101.0, "message_preview": prior}],
+    })
+    text = "good, now make the rest of the scenes and animate them"
+    model_payload = _proposal(
+        action="expand_existing_short",
+        target_source="active_job",
+        additional_scene_count=12,
+        target_total_scene_count=13,
+        preserve_scene_numbers=[1],
+        animation_scope="all_scenes",
+        existing_work_approved=False,
+        execution_requested=False,
+    )
+
+    command = _plan(text, _tool_response(model_payload), state=state)
+
+    assert state.recent_expansion_additional_scene_count == 5
+    assert state.recent_expansion_total_scene_count == 6
+    assert command.expand is not None
+    assert command.expand.additional_scene_count == 5
+    assert command.expand.target_total_scene_count == 6
+    assert command.expand.animation.scope == "new_scenes"
+    assert command.authorization.existing_work_approved is True
+    assert command.authorization.approval_quote.lower() == "good"
+    assert command.authorization.execution_requested is True
+    assert "now make" in command.authorization.execution_quote.lower()
+
+    validation = validate_studio_command(command, state, user_text=text)
+    assert validation.can_execute
+    assert validation.resolved_action is not None
+    assert validation.resolved_action.tool_name == "expand_visual_proof_shortform"
+    assert validation.resolved_action.arguments.scene_count == 6
+    assert validation.resolved_action.arguments.animate_scene_indices == [1, 2, 3, 4, 5]
+
+
+def test_contextual_rest_without_prior_count_never_trusts_model_cardinality():
+    state = _state()
+    text = "good, now make the rest of the scenes and animate them"
+    model_payload = _proposal(
+        action="expand_existing_short",
+        target_source="active_job",
+        additional_scene_count=5,
+        target_total_scene_count=6,
+        preserve_scene_numbers=[1],
+        animation_scope="all_scenes",
+        existing_work_approved=True,
+        approval_evidence="good",
+        execution_requested=True,
+        execution_evidence="now make",
+    )
+
+    command = _plan(text, _tool_response(model_payload), state=state)
+
+    assert command.expand is not None
+    assert command.expand.additional_scene_count is None
+    assert command.expand.target_total_scene_count is None
+    validation = validate_studio_command(command, state, user_text=text)
+    assert not validation.can_execute
+    assert validation.clarification is not None
+    assert validation.clarification.code == "missing_scene_count"
 
 
 def test_high_confidence_grounding_removes_model_invented_duration_and_echoed_command():

@@ -16,6 +16,7 @@ from studio_agent.command_contract import (
     approval_authorization_evidence,
     compiler_tool_schema,
     execution_authorization_evidence,
+    extract_scene_count_request,
     make_turn_id,
     normalize_proposal,
 )
@@ -86,34 +87,7 @@ def _parse_number(token: str) -> int | None:
 
 
 def _extract_scene_counts(text: str, *, existing_count: int) -> tuple[int | None, int | None]:
-    low = str(text or "").lower()
-    total: int | None = None
-    additional: int | None = None
-    total_patterns = (
-        rf"\b({_NUMBER_TOKEN})\s+scenes?\s+(?:in\s+)?total\b",
-        rf"\btotal\s+(?:of\s+)?({_NUMBER_TOKEN})\s+scenes?\b",
-        rf"\b({_NUMBER_TOKEN})[-\s]scene\s+short\b",
-    )
-    for pattern in total_patterns:
-        match = re.search(pattern, low, re.IGNORECASE)
-        if match:
-            total = _parse_number(match.group(1))
-            break
-    additional_patterns = (
-        rf"\b(?:the\s+)?(?:other|remaining|next)\s+({_NUMBER_TOKEN})\s+scenes?\b",
-        rf"\b({_NUMBER_TOKEN})\s+(?:other|more|additional|remaining|new)\s+scenes?\b",
-        rf"\b(?:add|make|create|build|finish)\s+({_NUMBER_TOKEN})\s+more\s+scenes?\b",
-    )
-    for pattern in additional_patterns:
-        match = re.search(pattern, low, re.IGNORECASE)
-        if match:
-            additional = _parse_number(match.group(1))
-            break
-    if total is not None and additional is None and total > existing_count:
-        additional = total - existing_count
-    if additional is not None and total is None:
-        total = existing_count + additional
-    return additional, total
+    return extract_scene_count_request(text, existing_count=existing_count)
 
 
 def _animation_scope(text: str, *, has_additional_scenes: bool) -> str | None:
@@ -185,7 +159,10 @@ def _high_confidence_expand(text: str, state: StudioStateContext) -> bool:
     )
     scene_context = bool(re.search(r"\bscenes?\b", low))
     return bool(
-        approval_authorization_evidence(text)
+        approval_authorization_evidence(
+            text,
+            contextual_scene_review=len(state.expandable_short_jobs()) == 1,
+        )
         and execution_authorization_evidence(text)
         and continuity
         and scene_context
@@ -333,9 +310,24 @@ def _ground_proposal(
     existing_count = eligible[0].scene_count if len(eligible) == 1 else 1
     existing_count = max(1, int(existing_count or 1))
     additional, total = _extract_scene_counts(user_text, existing_count=existing_count)
+    continuity_reference = bool(
+        re.search(
+            r"\b(?:other|remaining|rest(?:\s+of)?|more|finish\s+the\s+(?:short|video))\b",
+            str(user_text or ""),
+            re.IGNORECASE,
+        )
+    )
+    if additional is None and total is None and continuity_reference:
+        recent_additional = int(state.recent_expansion_additional_scene_count or 0)
+        recent_total = int(state.recent_expansion_total_scene_count or 0)
+        if recent_additional > 0 and recent_total > existing_count:
+            additional, total = recent_additional, recent_total
     scope = _animation_scope(user_text, has_additional_scenes=bool(additional))
     duration = _duration_seconds(user_text)
-    approval_quote = approval_authorization_evidence(user_text)
+    approval_quote = approval_authorization_evidence(
+        user_text,
+        contextual_scene_review=len(eligible) == 1,
+    )
     execution_quote = execution_authorization_evidence(user_text)
     updates: dict[str, Any] = {}
     if high_confidence or expand_candidate:
@@ -356,6 +348,11 @@ def _ground_proposal(
             duration_seconds=duration or 0,
             creative_direction=_grounded_creative_direction(user_text, proposal.creative_direction),
         )
+    if proposal.action == "expand_existing_short" or expand_candidate or high_confidence:
+        # A model may not invent cardinality. Resolve it from this turn or the
+        # latest explicit, non-negated request stored on the same session.
+        updates["additional_scene_count"] = additional or 0
+        updates["target_total_scene_count"] = total or 0
     if additional is not None:
         updates["additional_scene_count"] = additional
     if total is not None:

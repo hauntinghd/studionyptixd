@@ -9,7 +9,12 @@ from typing import Any, Literal
 
 from pydantic import Field
 
-from studio_agent.command_contract import CommandAction, ContractModel
+from studio_agent.command_contract import (
+    CommandAction,
+    ContractModel,
+    execution_block_reason,
+    extract_scene_count_request,
+)
 
 
 JobKind = Literal["shortform", "longform", "competitor", "cliplab"]
@@ -58,6 +63,9 @@ class StudioStateContext(ContractModel):
     reply_target_scene_number: int | None = Field(default=None, ge=1)
     jobs: list[CompactJobState] = Field(default_factory=list, max_length=8)
     pending_command: PendingCommandState | None = None
+    recent_expansion_additional_scene_count: int = Field(default=0, ge=0, le=60)
+    recent_expansion_total_scene_count: int = Field(default=0, ge=0, le=60)
+    recent_expansion_evidence: str = Field(default="", max_length=300)
     available_actions: list[CommandAction] = Field(default_factory=list)
 
     def model_payload(self) -> dict[str, Any]:
@@ -178,6 +186,41 @@ def _legacy_pending_command(session: dict[str, Any]) -> PendingCommandState | No
     )
 
 
+def _recent_expansion_cardinality(
+    session: dict[str, Any],
+    *,
+    existing_count: int,
+) -> tuple[int, int, str]:
+    """Carry forward the latest explicit, non-negated scene count on this job."""
+
+    production_state = session.get("production_state")
+    try:
+        cutoff = float(production_state.get("advanced_at") or 0.0) if isinstance(production_state, dict) else 0.0
+    except (TypeError, ValueError):
+        cutoff = 0.0
+    seen: set[str] = set()
+    for run in reversed(list(session.get("runs") or [])[-48:]):
+        if not isinstance(run, dict):
+            continue
+        try:
+            created_at = float(run.get("created_at") or 0.0)
+        except (TypeError, ValueError):
+            created_at = 0.0
+        if cutoff and created_at and created_at < cutoff:
+            continue
+        text = str(run.get("message_preview") or "").strip()
+        normalized = " ".join(text.casefold().split())
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        if execution_block_reason(text):
+            continue
+        additional, total = extract_scene_count_request(text, existing_count=existing_count)
+        if additional and total and total > existing_count:
+            return int(additional), int(total), text[:300]
+    return 0, 0, ""
+
+
 def build_studio_state_context(
     session: dict[str, Any],
     *,
@@ -260,11 +303,27 @@ def build_studio_state_context(
     except (TypeError, ValueError):
         reply_scene = None
 
+    expandable_jobs = [job for job in jobs if job.expandable_proof and job.ownership_verified]
+    context_existing_count = (
+        max(1, int(expandable_jobs[0].scene_count or len(expandable_jobs[0].scenes) or 1))
+        if len(expandable_jobs) == 1
+        else 1
+    )
+    recent_additional, recent_total, recent_evidence = _recent_expansion_cardinality(
+        session,
+        existing_count=context_existing_count,
+    )
+
     revision_payload = {
         "updated_at": session.get("updated_at"),
         "reply_job_id": reply_job_id,
         "jobs": [job.model_dump(mode="json") for job in jobs],
         "pending": session.get("short_expansion_intake") or {},
+        "recent_expansion": {
+            "additional": recent_additional,
+            "total": recent_total,
+            "evidence": recent_evidence,
+        },
     }
     revision = hashlib.sha256(
         json.dumps(revision_payload, sort_keys=True, default=str).encode("utf-8")
@@ -291,5 +350,8 @@ def build_studio_state_context(
         reply_target_scene_number=reply_scene,
         jobs=jobs,
         pending_command=_legacy_pending_command(session),
+        recent_expansion_additional_scene_count=recent_additional,
+        recent_expansion_total_scene_count=recent_total,
+        recent_expansion_evidence=recent_evidence,
         available_actions=actions,
     )
