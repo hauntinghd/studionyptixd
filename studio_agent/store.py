@@ -1298,13 +1298,29 @@ def is_public_youtube_research_request(text: str) -> bool:
         return False
     if is_explicit_production_request(low):
         return False
+    # A natural-language request can be phrased as a capability question while
+    # still clearly asking for execution now (for example: "can you pull the
+    # most recent public YouTube data in this channel's niche so we can see what
+    # works?").  Do not let the leading "can you" downgrade that compound
+    # request into conversation-only mode.  Pure capability questions without
+    # a concrete target, timeframe, or purpose still wait for a go-ahead.
+    concrete_pull_request = bool(
+        re.search(r"\b(?:pull|search|find|get|fetch|look up|check|run|grab|show me)\b", low)
+        and re.search(r"\b(?:youtube|public|niche|market|trend|performance|data)\b", low)
+        and (
+            re.search(r"\b(?:most recent|recent|latest|current|fresh|live|today|right now)\b", low)
+            or re.search(r"\b(?:this|that|my|the)\s+(?:channel|niche|market|topic|space)\b", low)
+            or re.search(r"\b(?:so|to)\s+(?:we|i)\s+can\b", low)
+            or re.search(r"\bwhat\b.+\b(?:work|works|working|perform|performs|performing)\b", low)
+        )
+    )
     # Live Demand phrases always count as research intent (even with ?)
     try:
         from studio_agent.live_demand import has_demand_signal, is_research_execution_request
 
         if is_research_execution_request(text) or has_demand_signal(text):
             # Soft "can you eventually..." without demand/urgency still waits
-            if re.search(r"\b(?:can|could|would)\s+you\b", low) and not re.search(
+            if re.search(r"\b(?:can|could|would)\s+you\b", low) and not concrete_pull_request and not re.search(
                 r"\b(?:now|right now|please|what(?:'s| is)|working|performing|viral|trending|research)\b",
                 low,
             ):
@@ -1314,7 +1330,7 @@ def is_public_youtube_research_request(text: str) -> bool:
         pass
     has_question = "?" in low
     # Polite capability-only questions wait for go-ahead unless urgent.
-    if has_question and not is_explicit_tool_go_ahead(text):
+    if has_question and not is_explicit_tool_go_ahead(text) and not concrete_pull_request:
         if not re.search(
             r"\b(?:now|right now|immediately|go ahead|please pull|please run|"
             r"what(?:'s| is)|working|performing|viral|trending)\b",
