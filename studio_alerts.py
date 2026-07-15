@@ -50,7 +50,7 @@ def _signature(title: str, description: str) -> str:
     # Use first 200 chars; that's enough to pin down the call site but not every
     # per-request variable.
     raw = (title + "\n" + description)[:200]
-    return hashlib.sha1(raw.encode("utf-8", errors="ignore")).hexdigest()[:12]
+    return hashlib.sha256(raw.encode("utf-8", errors="ignore")).hexdigest()[:12]
 
 
 def _should_fire(kind: str, title: str, description: str) -> bool:

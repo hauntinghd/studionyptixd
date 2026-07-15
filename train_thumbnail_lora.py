@@ -31,10 +31,11 @@ LORA_RANK = 32
 RESOLUTION = 1024
 BATCH_SIZE = 1
 GRADIENT_ACCUMULATION = 4
+MODEL_REVISION_ENV = "THUMBNAIL_LORA_MODEL_REVISION"
 
 
 def get_image_hash(path):
-    h = hashlib.md5()
+    h = hashlib.sha256()
     with open(path, "rb") as f:
         for chunk in iter(lambda: f.read(8192), b""):
             h.update(chunk)
@@ -128,25 +129,58 @@ def run_training(images):
 
     try:
         model_id = "stabilityai/stable-diffusion-xl-base-1.0"
+        model_revision = (os.environ.get(MODEL_REVISION_ENV) or "").strip()
+        if not model_revision:
+            raise RuntimeError(
+                f"{MODEL_REVISION_ENV} must pin the exact Hugging Face model revision"
+            )
 
         print("Loading VAE...")
-        vae = AutoencoderKL.from_pretrained(model_id, subfolder="vae", torch_dtype=torch.float16)
+        vae = AutoencoderKL.from_pretrained(
+            model_id,
+            revision=model_revision,
+            subfolder="vae",
+            torch_dtype=torch.float16,
+        )
         vae.to("cuda")
         vae.eval()
 
         print("Loading tokenizers...")
-        tokenizer_1 = CLIPTokenizer.from_pretrained(model_id, subfolder="tokenizer")
-        tokenizer_2 = CLIPTokenizer.from_pretrained(model_id, subfolder="tokenizer_2")
+        tokenizer_1 = CLIPTokenizer.from_pretrained(
+            model_id,
+            revision=model_revision,
+            subfolder="tokenizer",
+        )
+        tokenizer_2 = CLIPTokenizer.from_pretrained(
+            model_id,
+            revision=model_revision,
+            subfolder="tokenizer_2",
+        )
 
         print("Loading UNet...")
         from diffusers import UNet2DConditionModel
-        unet = UNet2DConditionModel.from_pretrained(model_id, subfolder="unet", torch_dtype=torch.float16)
+        unet = UNet2DConditionModel.from_pretrained(
+            model_id,
+            revision=model_revision,
+            subfolder="unet",
+            torch_dtype=torch.float16,
+        )
         unet.to("cuda")
 
         print("Loading text encoders...")
         from transformers import CLIPTextModel, CLIPTextModelWithProjection
-        text_encoder_1 = CLIPTextModel.from_pretrained(model_id, subfolder="text_encoder", torch_dtype=torch.float16)
-        text_encoder_2 = CLIPTextModelWithProjection.from_pretrained(model_id, subfolder="text_encoder_2", torch_dtype=torch.float16)
+        text_encoder_1 = CLIPTextModel.from_pretrained(
+            model_id,
+            revision=model_revision,
+            subfolder="text_encoder",
+            torch_dtype=torch.float16,
+        )
+        text_encoder_2 = CLIPTextModelWithProjection.from_pretrained(
+            model_id,
+            revision=model_revision,
+            subfolder="text_encoder_2",
+            torch_dtype=torch.float16,
+        )
         text_encoder_1.to("cuda")
         text_encoder_2.to("cuda")
         text_encoder_1.eval()

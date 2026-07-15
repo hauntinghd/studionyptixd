@@ -20,9 +20,9 @@ Routes:
   GET  /api/long-form/jobs/{job_id}                  Full state.json + status snapshot
   GET  /api/long-form/jobs/{job_id}/state            Same as above (alias for resume flow)
   GET  /api/long-form/jobs/{job_id}/status           Lightweight phase + percent poll
-  GET  /api/long-form/jobs/{job_id}/mp4              Stream final MP4 (capability via job_id)
-  GET  /api/long-form/jobs/{job_id}/thumbnail/{idx}  Serve thumbnail PNG (capability)
-  GET  /api/long-form/jobs/{job_id}/still/{scene}    Serve scene PNG (capability)
+  GET  /api/long-form/jobs/{job_id}/mp4              Stream final MP4 (owner auth)
+  GET  /api/long-form/jobs/{job_id}/thumbnail/{idx}  Serve thumbnail PNG (owner auth)
+  GET  /api/long-form/jobs/{job_id}/still/{scene}    Serve scene PNG (owner auth)
 
 The legacy /api/longform/* + /api/creative/* routes (28 endpoints) remain
 mounted alongside this — they back the older v5 sessions that shipped
@@ -618,12 +618,13 @@ def build_long_form_router(
             "updated_at": float(live.get("updated_at", 0) or 0),
         }
 
-    # Capability-token serving (no auth header required — gating is by knowledge
-    # of the random 12-hex job_id). Same pattern as ZT private's media endpoints.
-    # This is REQUIRED for <video> + <img> tags which can't send Authorization.
+    # Private media serving. Native media elements cannot attach a Bearer
+    # header, so the frontend fetches these routes with auth and uses temporary
+    # object URLs. A job id is an identifier, never an authorization secret.
 
     @router.get("/jobs/{job_id}/mp4")
-    async def job_mp4_route(job_id: str):
+    async def job_mp4_route(job_id: str, user: dict = auth_dep):
+        _gate_admin(user)
         _validate_job_id(job_id)
         path = lf_pipeline.job_mp4_path(job_id)
         if not path or not path.exists():
@@ -636,7 +637,8 @@ def build_long_form_router(
         )
 
     @router.get("/jobs/{job_id}/thumbnail/{idx}")
-    async def job_thumbnail_route(job_id: str, idx: int):
+    async def job_thumbnail_route(job_id: str, idx: int, user: dict = auth_dep):
+        _gate_admin(user)
         _validate_job_id(job_id)
         if idx < 1 or idx > 12:
             raise HTTPException(400, "bad_index")
@@ -650,7 +652,8 @@ def build_long_form_router(
         )
 
     @router.get("/jobs/{job_id}/still/{scene_idx}")
-    async def job_still_route(job_id: str, scene_idx: int):
+    async def job_still_route(job_id: str, scene_idx: int, user: dict = auth_dep):
+        _gate_admin(user)
         _validate_job_id(job_id)
         if scene_idx < 0 or scene_idx > 9999:
             raise HTTPException(400, "bad_scene_index")

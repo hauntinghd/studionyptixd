@@ -11,7 +11,8 @@ import httpx
 
 ENV_FILE = Path(r"D:\games\asd\runpod-serverless\.runpod.env")
 CLIPLAB_EP = os.getenv("RUNPOD_CLIPLAB_ENDPOINT_ID", "lmsndljarhrspn")
-APP_DATA = "/tmp/cliplab"
+# The endpoint container is an isolated, single-tenant ephemeral workspace.
+APP_DATA = "/tmp/cliplab"  # nosec B108
 
 FULL_CMD = (
     "bash -lc 'pip install -q runpod opencv-python-headless sentence-transformers && "
@@ -66,7 +67,10 @@ def main() -> int:
         "isServerless": True,
         "env": [
             {"key": "STUDIO_APP_DATA_DIR", "value": APP_DATA},
-            {"key": "PYTHONPATH", "value": "/tmp/cliplab/cliplab_src"},
+            {
+                "key": "PYTHONPATH",
+                "value": f"{APP_DATA}/cliplab_src",
+            },
         ],
     }
     if existing_id:

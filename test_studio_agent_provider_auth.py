@@ -19,14 +19,14 @@ class StudioAgentProviderAuthTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(RuntimeError, "FAL_AI_KEY or FAL_KEY"):
                 require_fal_key("test generation")
 
-    def test_anthropic_aliases_normalize_to_supported_ids(self):
+    def test_anthropic_model_normalization_preserves_selected_versions(self):
         self.assertEqual(
             openrouter._normalize_anthropic_model("anthropic/claude-3-5-haiku-latest"),
-            "claude-haiku-4-5-20251001",
+            "anthropic/claude-3-5-haiku-latest",
         )
         self.assertEqual(
             openrouter._normalize_anthropic_model("anthropic/claude-sonnet-4"),
-            "claude-sonnet-4-6",
+            "anthropic/claude-sonnet-4",
         )
 
     def test_oversized_anthropic_tool_set_keeps_relevant_callable_tools(self):
@@ -91,7 +91,7 @@ class StudioAgentProviderAuthTests(unittest.IsolatedAsyncioTestCase):
         direct.assert_awaited_once()
         kwargs = direct.await_args.kwargs
         self.assertEqual(kwargs["provider_label"], "anthropic_direct")
-        self.assertEqual(kwargs["model_override"], "anthropic/claude-sonnet-4")
+        self.assertEqual(kwargs["model_override"], "claude-sonnet-4")
 
 
 if __name__ == "__main__":

@@ -69,15 +69,14 @@ def _membership_plan_for_user(user: dict) -> str:
 
 
 def _direct_production_command_id(request: Request, *, runpod_enabled: bool) -> str:
-    """Return the caller's stable mutation id; never invent one for RunPod."""
+    """Return the caller's stable mutation id for every billable backend."""
 
-    if not runpod_enabled:
-        return ""
+    _ = runpod_enabled
     command_id = str(request.headers.get("x-idempotency-key") or "").strip()
     if not command_id:
         raise HTTPException(
             400,
-            "X-Idempotency-Key is required for RunPod production mutations.",
+            "X-Idempotency-Key is required for production mutations.",
         )
     if len(command_id) > 512:
         raise HTTPException(400, "X-Idempotency-Key is too long.")
@@ -249,6 +248,22 @@ def build_studio_agent_router(
     def _billing_profile(user: dict) -> dict:
         return account_profile(user, is_admin_check=is_admin_check)
 
+    def _require_job_access(job_id: str, kind: str, user: dict) -> dict[str, Any]:
+        """Enforce per-user production ownership without leaking job existence."""
+        access = agent_jobs.job_access_metadata(job_id, kind)
+        uid = _user_id(user).strip()
+        owner_id = str(access.get("owner_id") or "").strip()
+        owner_or_admin = is_owner(user, is_admin_check)
+        if not access.get("exists"):
+            raise HTTPException(404, "job_not_found")
+        if owner_id and uid and hmac.compare_digest(owner_id, uid):
+            return access
+        if owner_or_admin:
+            return access
+        # Ownerless workspaces predate ownership metadata and are intentionally
+        # admin-only. A 404 avoids disclosing another creator's job id.
+        raise HTTPException(404, "job_not_found")
+
     @router.get("/training-consent")
     async def get_training_consent(user: dict = Depends(_agent_user)):
         return {"consent": training_capture.get_consent(_user_id(user))}
@@ -409,7 +424,8 @@ def build_studio_agent_router(
         user: dict = Depends(_agent_user),
     ):
         """Unified poll surface for agent-started renders (longform, shortform, reference)."""
-        snap = agent_jobs.get_job_snapshot(job_id, kind)
+        access = _require_job_access(job_id, kind, user)
+        snap = agent_jobs.get_job_snapshot(job_id, str(access.get("kind") or kind))
         uid = _user_id(user)
         if snap.get("status") == "complete":
             agent_jobs.record_production_complete_telemetry(
@@ -435,7 +451,8 @@ def build_studio_agent_router(
         from studio_agent import runpod_bridge
         from studio_agent.tools import cancel_shortform_job
 
-        if kind != "shortform":
+        access = _require_job_access(job_id, kind, user)
+        if str(access.get("kind") or kind) != "shortform":
             raise HTTPException(400, "cancel is currently supported for shortform renders only")
         try:
             runpod_receipt = runpod_bridge.get_dispatch_receipt_by_studio_job_id(job_id)
@@ -480,8 +497,8 @@ def build_studio_agent_router(
         kind: str = Query("longform"),
         user: dict = Depends(_agent_user),
     ):
-        _ = user
-        path = agent_jobs.resolve_media_path(job_id, kind)
+        access = _require_job_access(job_id, kind, user)
+        path = agent_jobs.resolve_media_path(job_id, str(access.get("kind") or kind))
         if not path:
             raise HTTPException(404, "media_not_ready")
         return FileResponse(
@@ -497,8 +514,8 @@ def build_studio_agent_router(
         kind: str = Query("longform"),
         user: dict = Depends(_agent_user),
     ):
-        _ = user
-        path = agent_jobs.resolve_package_path(job_id, kind)
+        access = _require_job_access(job_id, kind, user)
+        path = agent_jobs.resolve_package_path(job_id, str(access.get("kind") or kind))
         if not path:
             raise HTTPException(404, "package_not_ready")
         return FileResponse(
@@ -514,7 +531,7 @@ def build_studio_agent_router(
         scene_idx: int,
         user: dict = Depends(_agent_user),
     ):
-        _ = user
+        _require_job_access(job_id, "", user)
         if scene_idx < 0 or scene_idx > 999:
             raise HTTPException(400, "bad_scene_index")
         path = agent_jobs.resolve_still_path(job_id, scene_idx)
@@ -532,7 +549,9 @@ def build_studio_agent_router(
         scene_idx: int,
         user: dict = Depends(_agent_user),
     ):
-        _ = user
+        access = _require_job_access(job_id, "shortform", user)
+        if str(access.get("kind") or "") != "shortform":
+            raise HTTPException(404, "clip_not_found")
         if scene_idx < 0 or scene_idx > 999:
             raise HTTPException(400, "bad_scene_index")
         path = agent_jobs.resolve_clip_path(job_id, scene_idx)
@@ -551,7 +570,9 @@ def build_studio_agent_router(
         user: dict = Depends(_agent_user),
     ):
         """Serve a Plan-mode long-form thumbnail candidate inside Agent chat."""
-        _ = user
+        access = _require_job_access(job_id, "longform", user)
+        if str(access.get("kind") or "") != "longform":
+            raise HTTPException(404, "thumbnail_not_found")
         if thumbnail_idx < 1 or thumbnail_idx > 12:
             raise HTTPException(400, "bad_thumbnail_index")
         path = agent_jobs.resolve_longform_thumbnail_path(job_id, thumbnail_idx)
@@ -582,48 +603,36 @@ def build_studio_agent_router(
         user: dict = Depends(_agent_user),
     ):
         """Catalyst-audited scene regenerate — preserves style, fixes artifacting."""
+        access = _require_job_access(job_id, "", user)
         if scene_idx < 0 or scene_idx > 999:
             raise HTTPException(400, "bad_scene_index")
         try:
             from long_form import pipeline as lf_pipeline
             from studio_agent import tools as agent_tools
 
-            is_longform = bool(lf_pipeline.load_state(job_id))
+            is_longform = str(access.get("kind") or "") == "longform"
             runpod_enabled = agent_tools._runpod_production_enabled()
             command_id = _direct_production_command_id(
                 request,
                 runpod_enabled=runpod_enabled,
             )
-            if runpod_enabled:
-                tool_name = (
-                    "regenerate_longform_still"
-                    if is_longform
-                    else "regenerate_production_scene"
-                )
-                scene_key = "scene_idx" if is_longform else "scene_index"
-                tool_result = await run_in_threadpool(
-                    agent_tools.execute_tool_logged,
-                    tool_name,
-                    {
-                        "job_id": job_id,
-                        scene_key: scene_idx,
-                        "_runpod_command_id": command_id,
-                    },
-                    user_id=_user_id(user),
-                    content_format="long" if is_longform else "short",
-                )
-            elif is_longform:
-                tool_result = await run_in_threadpool(
-                    agent_tools.regenerate_longform_still,
-                    job_id,
-                    scene_idx,
-                )
-            else:
-                tool_result = await run_in_threadpool(
-                    agent_tools.regenerate_production_scene,
-                    job_id,
-                    scene_idx,
-                )
+            tool_name = (
+                "regenerate_longform_still"
+                if is_longform
+                else "regenerate_production_scene"
+            )
+            scene_key = "scene_idx" if is_longform else "scene_index"
+            tool_result = await run_in_threadpool(
+                agent_tools.execute_tool_logged,
+                tool_name,
+                {
+                    "job_id": job_id,
+                    scene_key: scene_idx,
+                    "_runpod_command_id": command_id,
+                },
+                user_id=_user_id(user),
+                content_format="long" if is_longform else "short",
+            )
 
             if is_longform:
                 snapshot = agent_jobs.get_job_snapshot(job_id, "longform")
@@ -648,7 +657,9 @@ def build_studio_agent_router(
         user: dict = Depends(_agent_user),
     ):
         """Persist the creator's exact provider prompt for the next regeneration."""
-        _ = user
+        access = _require_job_access(job_id, "shortform", user)
+        if str(access.get("kind") or "") != "shortform":
+            raise HTTPException(404, "job_not_found")
         if scene_idx < 0 or scene_idx > 999:
             raise HTTPException(400, "bad_scene_index")
         try:
@@ -673,6 +684,9 @@ def build_studio_agent_router(
     ):
         import time as _time
 
+        access = _require_job_access(job_id, "shortform", user)
+        if str(access.get("kind") or "") != "shortform":
+            raise HTTPException(404, "job_not_found")
         if scene_idx < 0 or scene_idx > 999:
             raise HTTPException(400, "bad_scene_index")
         try:
@@ -708,6 +722,8 @@ def build_studio_agent_router(
                         agent_tools.spawn_animate_production_scenes,
                         job_id,
                         [scene_idx],
+                        user_id=_user_id(user),
+                        command_id=command_id,
                     )
                 try:
                     spawn_parsed = __import__("json").loads(raw_spawn or "{}")
@@ -744,6 +760,9 @@ def build_studio_agent_router(
     ):
         import time as _time
 
+        access = _require_job_access(job_id, "shortform", user)
+        if str(access.get("kind") or "") != "shortform":
+            raise HTTPException(404, "job_not_found")
         indices = body.scene_indices
         if indices is not None and any(idx < 0 or idx > 999 for idx in indices):
             raise HTTPException(400, "bad_scene_index")
@@ -780,6 +799,8 @@ def build_studio_agent_router(
                         agent_tools.spawn_animate_production_scenes,
                         job_id,
                         indices,
+                        user_id=_user_id(user),
+                        command_id=command_id,
                     )
                 try:
                     spawn_parsed = __import__("json").loads(raw_spawn or "{}")
@@ -816,6 +837,9 @@ def build_studio_agent_router(
         """Run i2v for short-form scenes that were explicitly approved for animation."""
         import time as _time
 
+        access = _require_job_access(job_id, "shortform", user)
+        if str(access.get("kind") or "") != "shortform":
+            raise HTTPException(404, "job_not_found")
         try:
             from studio_agent import tools as agent_tools
 
@@ -836,7 +860,11 @@ def build_studio_agent_router(
                     content_format="short",
                 )
             else:
-                raw = agent_tools.spawn_animate_production_scenes(job_id)
+                raw = agent_tools.spawn_animate_production_scenes(
+                    job_id,
+                    user_id=_user_id(user),
+                    command_id=command_id,
+                )
             try:
                 parsed = __import__("json").loads(raw or "{}")
             except Exception:
@@ -865,6 +893,9 @@ def build_studio_agent_router(
         user: dict = Depends(_agent_user),
     ):
         """Expand an approved one-scene long-form visual proof into the full still gallery."""
+        access = _require_job_access(job_id, "longform", user)
+        if str(access.get("kind") or "") != "longform":
+            raise HTTPException(404, "job_not_found")
         try:
             from long_form import pipeline as lf_pipeline
             from studio_agent import tools as agent_tools
@@ -875,21 +906,17 @@ def build_studio_agent_router(
                 request,
                 runpod_enabled=runpod_enabled,
             )
-            tool_result = None
-            if runpod_enabled:
-                raw = await run_in_threadpool(
-                    agent_tools.execute_tool_logged,
-                    "expand_longform_visual_proof",
-                    {
-                        "job_id": job_id,
-                        "_runpod_command_id": command_id,
-                    },
-                    user_id=_user_id(user),
-                    content_format="long",
-                )
-                tool_result = json.loads(raw or "{}")
-            else:
-                lf_pipeline.expand_visual_proof(job_id)
+            raw = await run_in_threadpool(
+                agent_tools.execute_tool_logged,
+                "expand_longform_visual_proof",
+                {
+                    "job_id": job_id,
+                    "_runpod_command_id": command_id,
+                },
+                user_id=_user_id(user),
+                content_format="long",
+            )
+            tool_result = json.loads(raw or "{}")
             snapshot = agent_jobs.get_job_snapshot(job_id, "longform")
         except Exception as exc:
             raise HTTPException(400, str(exc)) from exc
@@ -910,7 +937,8 @@ def build_studio_agent_router(
         """Agent subscribers can finalize approved productions after the relevant review gate."""
         import time as _time
 
-        normalized_kind = str(kind or "longform").strip().lower()
+        access = _require_job_access(job_id, kind, user)
+        normalized_kind = str(access.get("kind") or kind or "longform").strip().lower()
         from studio_agent import tools as agent_tools
 
         runpod_enabled = agent_tools._runpod_production_enabled()
@@ -920,6 +948,9 @@ def build_studio_agent_router(
         )
         if normalized_kind == "shortform":
             try:
+                preflight = agent_tools.shortform_finalize_preflight(job_id)
+                if preflight.get("status") != "ready":
+                    raise HTTPException(409, preflight)
                 if runpod_enabled:
                     raw = await run_in_threadpool(
                         agent_tools.execute_tool_logged,
@@ -938,6 +969,8 @@ def build_studio_agent_router(
                         job_id,
                         captions_enabled=captions_enabled,
                         caption_mode=caption_mode,
+                        user_id=_user_id(user),
+                        command_id=command_id,
                     )
                 try:
                     parsed = __import__("json").loads(raw or "{}")
@@ -966,27 +999,24 @@ def build_studio_agent_router(
             }
 
         try:
-            if runpod_enabled:
-                raw = await run_in_threadpool(
-                    agent_tools.execute_tool_logged,
-                    "finalize_longform_render",
-                    {
-                        "job_id": job_id,
-                        "_runpod_command_id": command_id,
-                    },
-                    user_id=_user_id(user),
-                    content_format="long",
-                )
-                parsed = json.loads(raw or "{}")
-                out = {
-                    "ok": True,
+            raw = await run_in_threadpool(
+                agent_tools.execute_tool_logged,
+                "finalize_longform_render",
+                {
                     "job_id": job_id,
-                    "kind": "longform",
-                    "tool_result": parsed,
-                    "snapshot": agent_jobs.get_job_snapshot(job_id, "longform"),
-                }
-            else:
-                out = agent_jobs.finalize_longform_job(job_id)
+                    "_runpod_command_id": command_id,
+                },
+                user_id=_user_id(user),
+                content_format="long",
+            )
+            parsed = json.loads(raw or "{}")
+            out = {
+                "ok": True,
+                "job_id": job_id,
+                "kind": "longform",
+                "tool_result": parsed,
+                "snapshot": agent_jobs.get_job_snapshot(job_id, "longform"),
+            }
         except Exception as exc:
             raise HTTPException(400, f"finalize_failed: {exc}") from exc
         return {
@@ -1006,7 +1036,16 @@ def build_studio_agent_router(
         audio: UploadFile = File(...),
     ):
         """Server STT for recorded mic audio (xAI primary, FAL fallback)."""
-        raw = await audio.read()
+        from upload_limits import MAX_DICTATION_AUDIO_BYTES, UploadTooLargeError, read_upload_limited
+
+        try:
+            raw = await read_upload_limited(
+                audio,
+                max_bytes=MAX_DICTATION_AUDIO_BYTES,
+                label="dictation audio",
+            )
+        except UploadTooLargeError as exc:
+            raise HTTPException(413, "Dictation audio exceeds 25MB") from exc
         try:
             text, provider = await transcribe_audio_bytes(
                 raw,
@@ -1024,16 +1063,13 @@ def build_studio_agent_router(
     @router.websocket("/dictation/stream")
     async def dictation_live_stream(
         websocket: WebSocket,
-        token: str = Query(""),
         language: str = Query(""),
     ):
         """Authenticated proxy to xAI streaming STT for live voice planning.
 
-        Auth (same identity as HTTP agent routes):
-        1. Query ``token`` (legacy)
-        2. First client JSON frame ``{"type":"auth","token":"…"}`` (preferred — avoids
-           long JWTs in access logs / proxy URL limits)
-        3. ``Authorization: Bearer …`` header when the client can set it
+        Browser clients authenticate with the first JSON frame; non-browser
+        clients may use an Authorization header. Tokens are never accepted in
+        the WebSocket URL.
         """
         await websocket.accept()
 
@@ -1064,17 +1100,15 @@ def build_studio_agent_router(
             return resolved if isinstance(resolved, dict) else None
 
         user: dict | None = None
-        # Header first (when present), then query token.
+        # Header first when a non-browser client can set one. Browser clients
+        # authenticate with the first JSON frame so credentials never enter a URL.
         try:
             auth_header = str(websocket.headers.get("authorization") or websocket.headers.get("Authorization") or "").strip()
         except Exception:
             auth_header = ""
         if auth_header:
             user = await _resolve_user_from_token(auth_header)
-        if not user and str(token or "").strip():
-            user = await _resolve_user_from_token(token)
-
-        # Preferred: short auth frame so JWT is not stuck in the URL forever.
+        # Short auth frame so JWT is not stuck in browser/proxy URL history.
         if not user:
             try:
                 first = await asyncio.wait_for(websocket.receive_json(), timeout=8.0)
@@ -1120,7 +1154,8 @@ def build_studio_agent_router(
         user: dict = Depends(_agent_user),
     ):
         """Persist an uploaded skeleton/product reference image for shortform still locking."""
-        from studio_agent.attachments import save_image_attachment
+        from studio_agent.attachments import MAX_IMAGE_ATTACHMENT_BYTES, save_image_attachment
+        from upload_limits import UploadTooLargeError, read_upload_limited
 
         uid = _user_id(user)
         session = store.get_session(session_id, user_id=uid)
@@ -1128,11 +1163,16 @@ def build_studio_agent_router(
             raise HTTPException(404, "session not found")
         if not file or not file.filename:
             raise HTTPException(400, "No image file")
-        raw = await file.read()
+        try:
+            raw = await read_upload_limited(
+                file,
+                max_bytes=MAX_IMAGE_ATTACHMENT_BYTES,
+                label="image attachment",
+            )
+        except UploadTooLargeError as exc:
+            raise HTTPException(413, "Image exceeds 12MB") from exc
         if not raw or len(raw) < 1024:
             raise HTTPException(400, "Image too small")
-        if len(raw) > 12 * 1024 * 1024:
-            raise HTTPException(400, "Image exceeds 12MB")
         try:
             saved = save_image_attachment(session_id, str(file.filename), raw)
         except ValueError as exc:
@@ -1158,7 +1198,8 @@ def build_studio_agent_router(
         user: dict = Depends(_agent_user),
     ):
         """Persist an uploaded Studio Agent reference video for analysis in this chat."""
-        from studio_agent.attachments import save_video_attachment
+        from studio_agent.attachments import save_video_upload_attachment
+        from upload_limits import UploadTooLargeError
 
         uid = _user_id(user)
         session = store.get_session(session_id, user_id=uid)
@@ -1166,11 +1207,14 @@ def build_studio_agent_router(
             raise HTTPException(404, "session not found")
         if not file or not file.filename:
             raise HTTPException(400, "No video file")
-        raw = await file.read()
-        if not raw:
-            raise HTTPException(400, "Empty video file")
         try:
-            saved = save_video_attachment(session_id, str(file.filename), raw)
+            saved = await save_video_upload_attachment(
+                session_id,
+                str(file.filename),
+                file,
+            )
+        except UploadTooLargeError as exc:
+            raise HTTPException(413, "Video exceeds 3GB") from exc
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
         existing = [str(p) for p in list(session.get("latest_attachment_paths") or []) if p]
@@ -1302,44 +1346,32 @@ def build_studio_agent_router(
         return evaluation_health()
 
     @router.get("/style-preview/{key}")
-    async def style_preview(key: str):
-        """Serve (generate on-demand if missing) a single cheap hero preview still for the visual style grid.
-        Uses Seedream v4.5 / edit so every style has a distinct visual thumbnail (like the reference grids).
-        Skeleton uses the glass anatomical look. Extremely cheap (one image per style).
-        """
-        from studio_agent.render_styles import get_style_preview_path
+    async def style_preview(key: str, user: dict = Depends(_agent_user)):
+        """Serve an existing private style still without starting provider work."""
+        from studio_agent.render_styles import get_cached_style_preview_path
         from fastapi.responses import FileResponse
 
-        timeout_sec = float(os.getenv("STYLE_PREVIEW_STILL_TIMEOUT_SEC", "150") or "150")
         try:
-            p = await asyncio.wait_for(
-                run_in_threadpool(get_style_preview_path, key),
-                timeout=timeout_sec,
-            )
-        except asyncio.TimeoutError:
-            raise HTTPException(504, f"style preview still generation timed out for {key}")
-        return FileResponse(str(p), media_type="image/png", headers={"Cache-Control": "public, max-age=86400"})
+            p = get_cached_style_preview_path(key)
+        except KeyError:
+            raise HTTPException(404, "style preview not found")
+        if p is None:
+            raise HTTPException(404, "style preview not found")
+        return FileResponse(str(p), media_type="image/png", headers={"Cache-Control": "private, max-age=86400"})
 
     @router.get("/style-preview/{key}/video")
-    async def style_preview_video(key: str):
-        """Serve (generate on-demand if missing) a short i2v motion preview for one visual style.
-
-        This route is public like the still preview because browser media tags do
-        not send bearer headers. It only exposes generated demo assets, not user
-        content.
-        """
-        from studio_agent.render_styles import get_style_preview_video_path
+    async def style_preview_video(key: str, user: dict = Depends(_agent_user)):
+        """Serve an existing private motion preview without provider work."""
+        from studio_agent.render_styles import get_cached_style_preview_video_path
         from fastapi.responses import FileResponse
 
-        timeout_sec = float(os.getenv("STYLE_PREVIEW_VIDEO_TIMEOUT_SEC", "600") or "600")
         try:
-            p = await asyncio.wait_for(
-                run_in_threadpool(get_style_preview_video_path, key),
-                timeout=timeout_sec,
-            )
-        except asyncio.TimeoutError:
-            raise HTTPException(504, f"style preview video generation timed out for {key}")
-        return FileResponse(str(p), media_type="video/mp4", headers={"Cache-Control": "public, max-age=86400"})
+            p = get_cached_style_preview_video_path(key)
+        except KeyError:
+            raise HTTPException(404, "style preview video not found")
+        if p is None:
+            raise HTTPException(404, "style preview video not found")
+        return FileResponse(str(p), media_type="video/mp4", headers={"Cache-Control": "private, max-age=86400"})
 
     @router.post("/sessions/{session_id}/rollover")
     async def rollover_session(session_id: str, user: dict = Depends(_agent_user)):

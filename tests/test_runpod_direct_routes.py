@@ -2,11 +2,21 @@ from __future__ import annotations
 
 import json
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 import studio_agent_router
 from studio_agent import jobs, runpod_bridge, tools
+
+
+@pytest.fixture(autouse=True)
+def _owned_test_jobs(monkeypatch):
+    def metadata(job_id: str, kind: str = "") -> dict:
+        resolved = kind or ("longform" if str(job_id).startswith("long-") else "shortform")
+        return {"exists": True, "job_id": job_id, "kind": resolved, "owner_id": "user-1"}
+
+    monkeypatch.setattr(jobs, "job_access_metadata", metadata)
 
 
 def _client() -> TestClient:
@@ -134,8 +144,8 @@ def test_enabled_scene_approve_animate_sets_state_then_dispatches_once(monkeypat
     assert order == ["set_state", "dispatch"]
 
 
-def test_flag_off_direct_animate_preserves_local_background_path(monkeypatch) -> None:
-    local_calls: list[str] = []
+def test_flag_off_direct_animate_preserves_metered_idempotent_local_background_path(monkeypatch) -> None:
+    local_calls: list[tuple[str, dict]] = []
 
     monkeypatch.setattr(tools, "_runpod_production_enabled", lambda: False)
     monkeypatch.setattr(jobs, "get_job_snapshot", _snapshot)
@@ -147,16 +157,24 @@ def test_flag_off_direct_animate_preserves_local_background_path(monkeypatch) ->
         ),
     )
 
-    def spawn(job_id: str):
-        local_calls.append(job_id)
+    def spawn(job_id: str, **kwargs):
+        local_calls.append((job_id, dict(kwargs)))
         return json.dumps({"status": "running", "job_id": job_id})
 
     monkeypatch.setattr(tools, "spawn_animate_production_scenes", spawn)
 
-    response = _client().post("/api/studio-agent/jobs/short-1/animate")
+    response = _client().post(
+        "/api/studio-agent/jobs/short-1/animate",
+        headers={"X-Idempotency-Key": "local-animate-1"},
+    )
 
     assert response.status_code == 200, response.text
-    assert local_calls == ["short-1"]
+    assert local_calls == [
+        (
+            "short-1",
+            {"user_id": "user-1", "command_id": "local-animate-1"},
+        )
+    ]
 
 
 def test_enabled_short_scene_regenerate_dispatches_full_still_and_animation(monkeypatch) -> None:
@@ -203,6 +221,7 @@ def test_enabled_short_finalize_dispatches_caption_preferences(monkeypatch) -> N
     calls: list[tuple[str, dict, dict]] = []
     monkeypatch.setattr(tools, "_runpod_production_enabled", lambda: True)
     monkeypatch.setattr(jobs, "get_job_snapshot", _snapshot)
+    monkeypatch.setattr(tools, "shortform_finalize_preflight", lambda _job_id: {"status": "ready"})
 
     def dispatch(name, arguments, **context):
         calls.append((name, dict(arguments), dict(context)))

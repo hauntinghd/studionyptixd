@@ -59,10 +59,12 @@ class ProductionBudgetControlTests(unittest.TestCase):
 
         budget = data["budget"]
 
-        self.assertFalse(budget["breakdown"]["review_gate"])
-        self.assertFalse(budget["breakdown"]["i2v_deferred_until_scene_approval"])
-        self.assertGreater(budget["breakdown"]["video_seconds"], 0.0)
-        self.assertGreater(budget["breakdown"]["video_usd"], 0.0)
+        self.assertTrue(budget["breakdown"]["review_gate"])
+        self.assertTrue(budget["breakdown"]["visual_proof_only"])
+        self.assertTrue(budget["breakdown"]["i2v_deferred_until_scene_approval"])
+        self.assertEqual(budget["breakdown"]["requested_video_seconds"], 60.0)
+        self.assertEqual(budget["breakdown"]["video_seconds"], 0.0)
+        self.assertEqual(budget["breakdown"]["video_usd"], 0.0)
 
     def test_batch_still_edits_are_render_lane_review_gated_and_persisted(self):
         data = self._metadata_for(
@@ -327,7 +329,9 @@ class ProductionBudgetControlTests(unittest.TestCase):
 
         self.assertIsNotNone(result)
         self.assertEqual(calls, ["set_production_scenes_animate", "finalize_production"])
-        self.assertIn("finished the MP4", result["assistant_message"])
+        message = result["assistant_message"].lower()
+        self.assertIn("short finished", message)
+        self.assertIn("mp4", message)
         self.assertEqual(result["active_jobs"], [])
 
     def test_continue_shortform_prunes_completed_job_instead_of_reactivating_it(self):
@@ -369,7 +373,9 @@ class ProductionBudgetControlTests(unittest.TestCase):
 
         self.assertIsNotNone(result)
         self.assertEqual(result["active_jobs"], [])
-        self.assertIn("complete", result["assistant_message"])
+        message = result["assistant_message"].lower()
+        self.assertIn("ready", message)
+        self.assertIn("preview or download", message)
         update_session.assert_called()
         self.assertEqual(update_session.call_args.kwargs["active_jobs"], [])
 
@@ -405,6 +411,7 @@ class ProductionBudgetControlTests(unittest.TestCase):
         with (
             patch.object(runner, "studio_agent_slot", fake_slot),
             patch.object(runner, "_continue_active_production", side_effect=fake_continue),
+            patch.object(runner.store, "update_session", return_value=session),
             patch.object(runner.store, "touch_title_from_user_message"),
             patch.object(runner.memory, "observe_user_message"),
         ):

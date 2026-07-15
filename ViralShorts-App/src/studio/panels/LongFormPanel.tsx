@@ -30,6 +30,8 @@ import {
     saveImageModelPref,
 } from '../lib/productionModelPrefs';
 import { productionIdempotencyKey } from '../lib/productionIdempotency';
+import { downloadStudioAsset } from '../lib/agentProduction';
+import { useAuthenticatedMediaUrl } from '../hooks/useAuthenticatedMedia';
 
 const FALLBACK_IMAGE_MODELS: AgentModelOption[] = [
     { id: 'seedream_edit', name: 'Seedream 4.5 Edit', provider: 'fal', recommended: true, intelligence: 5, speed: 4, estimated_unit_usd: 0.04, billing_unit: 'image', description: 'Canonical reference editing and high-fidelity stills.' },
@@ -1837,15 +1839,21 @@ function SceneTile({
     regenerating: boolean;
     onRegenerate: (sceneIdx: number, newPrompt?: string) => void;
 }) {
+    const { session } = useContext(AuthContext);
     const [editing, setEditing] = useState(false);
     const [draftPrompt, setDraftPrompt] = useState(scene.scene_prompt);
+    const stillMedia = useAuthenticatedMediaUrl(
+        scene.still_url,
+        session?.access_token || '',
+        Boolean(scene.still_present && scene.still_url),
+    );
 
     return (
         <div className="rounded-md border border-zinc-800 bg-zinc-950 overflow-hidden flex flex-col">
             <div className="aspect-video bg-zinc-900 relative">
-                {scene.still_present && scene.still_url ? (
+                {scene.still_present && stillMedia.url ? (
                     <img
-                        src={scene.still_url}
+                        src={stillMedia.url}
                         alt={`scene ${scene.scene_idx}`}
                         className="w-full h-full object-cover"
                         loading="lazy"
@@ -1939,22 +1947,28 @@ function ThumbnailTile({
     regenerating: boolean;
     onRegenerate: (idx: number, customPrompt?: string) => void;
 }) {
+    const { session } = useContext(AuthContext);
     const [editing, setEditing] = useState(false);
     const [draftPrompt, setDraftPrompt] = useState('');
+    const thumbnailMedia = useAuthenticatedMediaUrl(url, session?.access_token || '', Boolean(url));
     return (
         <div className="rounded-md overflow-hidden border border-zinc-800 hover:border-violet-500/60 transition-colors flex flex-col bg-zinc-950">
             <a
-                href={url}
+                href={thumbnailMedia.url || undefined}
                 target="_blank"
                 rel="noreferrer"
                 className="block relative"
             >
-                <img
-                    src={url}
-                    alt={`thumbnail ${idx}`}
-                    className="w-full aspect-video object-cover bg-zinc-900"
-                    loading="lazy"
-                />
+                {thumbnailMedia.url ? (
+                    <img
+                        src={thumbnailMedia.url}
+                        alt={`thumbnail ${idx}`}
+                        className="w-full aspect-video object-cover bg-zinc-900"
+                        loading="lazy"
+                    />
+                ) : (
+                    <div className="w-full aspect-video animate-pulse bg-zinc-900" />
+                )}
                 {regenerating && (
                     <div className="absolute inset-0 bg-black/70 flex items-center justify-center">
                         <Loader2 className="h-6 w-6 animate-spin text-violet-400" />
@@ -2040,10 +2054,14 @@ function ActiveJobCard({
     regeneratingThumbIdx: number | null;
     onStartNew: () => void;
 }) {
+    const { session } = useContext(AuthContext);
+    const [downloadBusy, setDownloadBusy] = useState(false);
+    const [downloadError, setDownloadError] = useState('');
     const phaseLabel = PHASE_LABELS[jobStatus.phase] || jobStatus.phase;
     const phaseIdx = PHASE_ORDER.indexOf(jobStatus.phase);
     const title = (jobFullState?.outline?.title) || outline?.title || '(no title)';
     const mp4Url = jobFullState?.mp4_url || '';
+    const mp4Media = useAuthenticatedMediaUrl(mp4Url, session?.access_token || '', Boolean(isDone && mp4Url));
     const thumbs = jobFullState?.thumbnail_urls || [];
     const description = jobFullState?.outline?.description || outline?.description || '';
     const isCancelled = jobStatus.phase === 'cancelled';
@@ -2151,13 +2169,19 @@ function ActiveJobCard({
                 {/* MP4 + downloads when done */}
                 {isDone && mp4Url && (
                     <div className="flex flex-col gap-3">
-                        <video
-                            src={mp4Url}
-                            controls
-                            playsInline
-                            className="w-full rounded-md bg-black"
-                            style={{ maxHeight: 480 }}
-                        />
+                        {mp4Media.url ? (
+                            <video
+                                src={mp4Media.url}
+                                controls
+                                playsInline
+                                className="w-full rounded-md bg-black"
+                                style={{ maxHeight: 480 }}
+                            />
+                        ) : (
+                            <div className="flex aspect-video w-full items-center justify-center rounded-md bg-black text-xs text-zinc-500">
+                                <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Loading protected previewâ€¦
+                            </div>
+                        )}
                         <div className="grid grid-cols-2 gap-2 text-xs">
                             <div className="rounded-md bg-zinc-900 border border-zinc-800 px-3 py-2">
                                 <div className="text-zinc-500 text-[10px] uppercase tracking-wide">Duration</div>
@@ -2173,15 +2197,24 @@ function ActiveJobCard({
                             </div>
                         </div>
                         <div className="flex gap-2">
-                            <a
-                                href={mp4Url}
-                                download
+                            <button
+                                type="button"
+                                disabled={!session?.access_token || downloadBusy}
+                                onClick={() => {
+                                    const token = session?.access_token || '';
+                                    if (!token) return;
+                                    setDownloadBusy(true);
+                                    setDownloadError('');
+                                    void downloadStudioAsset(mp4Url, token, `${jobStatus.job_id || 'longform'}.mp4`)
+                                        .catch((error) => setDownloadError(error instanceof Error ? error.message : 'Download failed'))
+                                        .finally(() => setDownloadBusy(false));
+                                }}
                                 className="flex-1 rounded-md bg-violet-500 hover:bg-violet-600 px-3 py-2 text-xs font-semibold text-white flex items-center justify-center gap-1.5"
                             >
-                                <Download className="h-3.5 w-3.5" /> Download MP4
-                            </a>
+                                <Download className="h-3.5 w-3.5" /> {downloadBusy ? 'Savingâ€¦' : 'Download MP4'}
+                            </button>
                             <a
-                                href={mp4Url}
+                                href={mp4Media.url || undefined}
                                 target="_blank"
                                 rel="noreferrer"
                                 className="rounded-md bg-zinc-800 hover:bg-zinc-700 px-3 py-2 text-xs font-semibold text-zinc-200 flex items-center justify-center gap-1.5"
@@ -2189,6 +2222,7 @@ function ActiveJobCard({
                                 <Play className="h-3.5 w-3.5" /> Open in tab
                             </a>
                         </div>
+                        {downloadError ? <p className="text-xs text-rose-300">{downloadError}</p> : null}
                     </div>
                 )}
 
@@ -2284,10 +2318,18 @@ function RecentJobCard({
     isActive: boolean;
     onResume: (jobId: string) => void;
 }) {
+    const { session } = useContext(AuthContext);
+    const [downloadBusy, setDownloadBusy] = useState(false);
+    const [downloadError, setDownloadError] = useState('');
     const phaseLabel = PHASE_LABELS[job.phase] || job.phase;
     const isDone = job.phase === 'done';
     const isFailed = job.phase === 'failed';
     const isRunning = !isDone && !isFailed;
+    const thumbnailMedia = useAuthenticatedMediaUrl(
+        job.thumbnail_url,
+        session?.access_token || '',
+        Boolean(job.thumbnail_url),
+    );
 
     return (
         <div
@@ -2298,9 +2340,9 @@ function RecentJobCard({
             } p-3 flex flex-col gap-2`}
         >
             {/* Thumbnail */}
-            {job.thumbnail_url ? (
+            {job.thumbnail_url && thumbnailMedia.url ? (
                 <img
-                    src={job.thumbnail_url}
+                    src={thumbnailMedia.url}
                     alt=""
                     className="w-full aspect-video object-cover rounded bg-zinc-900"
                     loading="lazy"
@@ -2350,15 +2392,25 @@ function RecentJobCard({
                     <RotateCcw className="h-3 w-3" /> {isRunning ? 'Resume' : 'Open'}
                 </button>
                 {isDone && job.mp4_url && (
-                    <a
-                        href={job.mp4_url}
-                        download
+                    <button
+                        type="button"
+                        disabled={!session?.access_token || downloadBusy}
+                        onClick={() => {
+                            const token = session?.access_token || '';
+                            if (!token) return;
+                            setDownloadBusy(true);
+                            setDownloadError('');
+                            void downloadStudioAsset(job.mp4_url || '', token, `${job.job_id}.mp4`)
+                                .catch((error) => setDownloadError(error instanceof Error ? error.message : 'Download failed'))
+                                .finally(() => setDownloadBusy(false));
+                        }}
                         className="rounded-md bg-violet-500 hover:bg-violet-600 px-2.5 py-1.5 text-[10px] font-semibold text-white flex items-center justify-center gap-1"
                     >
-                        <Download className="h-3 w-3" /> MP4
-                    </a>
+                        <Download className="h-3 w-3" /> {downloadBusy ? 'Savingâ€¦' : 'MP4'}
+                    </button>
                 )}
             </div>
+            {downloadError ? <p className="text-[10px] text-rose-300">{downloadError}</p> : null}
         </div>
     );
 }

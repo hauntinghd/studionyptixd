@@ -10,18 +10,16 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import re
 import time
 from pathlib import Path
 from typing import Any, Callable
 
-from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Query, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 
 from cliplab.config import (
     CLIPLAB_MAX_RENDER_CLIPS,
     CLIPLAB_UPLOAD_DIR,
-    CLIPLAB_RENDER_DIR,
 )
 from cliplab.model_registry import registry_status
 from cliplab.models import ClipLabAnalyzeRequest, ClipLabFeedbackRequest, ClipLabIngestRequest, ClipLabRenderRequest
@@ -32,11 +30,12 @@ from cliplab.pipeline import (
     run_analyze_pipeline,
     run_ingest_pipeline,
     run_render_pipeline,
-    save_job_state,
-    video_upload_path,
+    resolve_owned_clip_path,
+    user_owns_video,
     _safe_user_dir,
 )
 from cliplab.transcribe import probe_duration
+from upload_limits import MAX_CLIPLAB_VIDEO_BYTES, UploadTooLargeError, write_upload_limited
 
 _log = logging.getLogger("nyptid-studio.cliplab.router")
 
@@ -71,19 +70,30 @@ def build_cliplab_router(
         out_dir = CLIPLAB_UPLOAD_DIR / _safe_user_dir(user)
         out_dir.mkdir(parents=True, exist_ok=True)
         dest = out_dir / f"{upload_id}{ext}"
-        size = 0
-        with dest.open("wb") as fh:
-            while True:
-                chunk = await file.read(1024 * 1024)
-                if not chunk:
-                    break
-                size += len(chunk)
-                fh.write(chunk)
-        duration = probe_duration(str(dest))
+        try:
+            size = await write_upload_limited(
+                file,
+                dest,
+                max_bytes=MAX_CLIPLAB_VIDEO_BYTES,
+                label="ClipLab source video",
+            )
+        except UploadTooLargeError as exc:
+            raise HTTPException(413, "ClipLab source video exceeds 2GB") from exc
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        try:
+            duration = probe_duration(str(dest))
+        except Exception as exc:
+            dest.unlink(missing_ok=True)
+            raise HTTPException(400, "Uploaded file is not a readable video") from exc
         credit_cost = credits_for_duration(duration)
         user_id = str(user.get("id") or "")
         if debit_credits and user_id:
-            ok = debit_credits(user_id, credit_cost, "cliplab_ingest", {"upload_id": upload_id})
+            try:
+                ok = debit_credits(user_id, credit_cost, "cliplab_ingest", {"upload_id": upload_id})
+            except Exception:
+                dest.unlink(missing_ok=True)
+                raise
             if not ok:
                 dest.unlink(missing_ok=True)
                 raise HTTPException(402, f"Need {credit_cost} credits ({credit_cost} min @ 1 cr/min)")
@@ -182,16 +192,21 @@ def build_cliplab_router(
         background_tasks: BackgroundTasks,
         user: dict = Depends(require_auth),
     ):
+        user_id = str(user.get("id") or "").strip()
+        if not user_owns_video(req.video_id, user_id):
+            raise HTTPException(404, "ClipLab video not found")
         job_id = new_job_id("clipa")
         jobs[job_id] = {
             "status": "queued", "progress": 0, "type": "cliplab_analyze", "lane": "cliplab",
-            "video_id": req.video_id, "user_id": str(user.get("id") or ""),
+            "video_id": req.video_id, "user_id": user_id,
         }
         background_tasks.add_task(
             run_analyze_pipeline,
             job_id, jobs,
             video_id=req.video_id, prompt=req.prompt, max_segments=req.max_segments,
             json_completion=fal_json_completion,
+            user_id=user_id,
+            source="cliplab_api",
         )
         return {"status": "accepted", "job_id": job_id}
 
@@ -201,15 +216,25 @@ def build_cliplab_router(
         background_tasks: BackgroundTasks,
         user: dict = Depends(require_auth),
     ):
+        user_id = str(user.get("id") or "").strip()
+        if not user_owns_video(req.video_id, user_id):
+            raise HTTPException(404, "ClipLab video not found")
         indices = list(req.segment_indices or [])
         if not indices:
             raise HTTPException(400, "segment_indices required")
         if len(indices) > CLIPLAB_MAX_RENDER_CLIPS:
             raise HTTPException(400, f"Max {CLIPLAB_MAX_RENDER_CLIPS} clips per render")
+        analyze_state = load_job_state(req.prompt_run_id)
+        if (
+            not analyze_state
+            or str(analyze_state.get("video_id") or "").strip() != req.video_id
+            or str(analyze_state.get("user_id") or "").strip() != user_id
+        ):
+            raise HTTPException(404, "ClipLab analyze job not found")
         job_id = new_job_id("clipr")
         jobs[job_id] = {
             "status": "queued", "progress": 0, "type": "cliplab_render", "lane": "cliplab",
-            "video_id": req.video_id, "user_id": str(user.get("id") or ""),
+            "video_id": req.video_id, "user_id": user_id,
         }
         background_tasks.add_task(
             run_render_pipeline,
@@ -218,6 +243,8 @@ def build_cliplab_router(
             analyze_job_id=req.prompt_run_id,
             segment_indices=indices,
             burn_captions=req.burn_captions,
+            user_id=user_id,
+            source="cliplab_api",
         )
         return {"status": "accepted", "job_id": job_id}
 
@@ -241,10 +268,8 @@ def build_cliplab_router(
 
     @router.get("/api/cliplab/clips/{video_id}/{filename}")
     async def serve_clip(video_id: str, filename: str, user: dict = Depends(require_auth)):
-        safe_vid = re.sub(r"[^\w\-]", "", video_id)
-        safe_name = Path(filename).name
-        path = CLIPLAB_RENDER_DIR / safe_vid / safe_name
-        if not path.exists():
+        path = resolve_owned_clip_path(video_id, filename, str(user.get("id") or ""))
+        if not path:
             raise HTTPException(404, "Clip not found")
         return FileResponse(str(path), media_type="video/mp4")
 

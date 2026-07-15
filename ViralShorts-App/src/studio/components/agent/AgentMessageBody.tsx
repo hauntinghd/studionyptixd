@@ -1,9 +1,9 @@
 /**
  * Renders assistant markdown (headings, bold, lists) — avoids raw ** and ## in the chat UI.
  */
-import { useContext, type ReactNode } from 'react';
+import { useContext, useMemo, type ReactNode } from 'react';
 import { AuthContext } from '../../shared';
-import { mediaUrl } from '../../lib/agentProduction';
+import { useAuthenticatedMediaUrls } from '../../hooks/useAuthenticatedMedia';
 
 function parseInline(text: string, keyPrefix: string): ReactNode[] {
     const out: ReactNode[] = [];
@@ -106,10 +106,15 @@ export default function AgentMessageBody({ content }: { content: string }) {
     // Older Agent messages printed raw thumbnail routes instead of emitting a
     // visual deliverable. Render them as an actual review grid too, and map
     // the now-retired /api/long-form route onto the authenticated Agent route.
-    const thumbnailUrls = [...new Set(
+    const thumbnailUrls = useMemo(() => [...new Set(
         [...safe.matchAll(/\/api\/(?:long-form|studio-agent)\/jobs\/[^\s/)]+\/thumbnail\/\d+/g)]
             .map((match) => match[0].replace('/api/long-form/jobs/', '/api/studio-agent/jobs/')),
-    )];
+    )], [safe]);
+    const thumbnailMedia = useAuthenticatedMediaUrls(
+        thumbnailUrls,
+        session?.access_token || '',
+        thumbnailUrls.length > 0,
+    );
     return (
         <div className="space-y-2.5 text-sm leading-relaxed text-gray-100">
             {blocks.map((block, i) => {
@@ -151,18 +156,22 @@ export default function AgentMessageBody({ content }: { content: string }) {
                     {thumbnailUrls.map((url, index) => (
                         <a
                             key={url}
-                            href={mediaUrl(url, session.access_token)}
+                            href={thumbnailMedia.urls[index] || undefined}
                             target="_blank"
                             rel="noreferrer"
                             className="group overflow-hidden rounded-lg border border-violet-400/25 bg-black/30"
                             title={`Open thumbnail ${index + 1}`}
                         >
-                            <img
-                                src={mediaUrl(url, session.access_token)}
-                                alt={`Thumbnail option ${index + 1}`}
-                                className="aspect-video w-full object-cover transition group-hover:scale-[1.02]"
-                                loading="lazy"
-                            />
+                            {thumbnailMedia.urls[index] ? (
+                                <img
+                                    src={thumbnailMedia.urls[index]}
+                                    alt={`Thumbnail option ${index + 1}`}
+                                    className="aspect-video w-full object-cover transition group-hover:scale-[1.02]"
+                                    loading="lazy"
+                                />
+                            ) : (
+                                <div className="aspect-video w-full animate-pulse bg-white/5" />
+                            )}
                             <div className="px-2 py-1.5 text-[10px] font-medium text-violet-100">Thumbnail {index + 1}</div>
                         </a>
                     ))}

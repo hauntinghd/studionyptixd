@@ -415,6 +415,33 @@ export default function CatalystPanel() {
         },
         [supabase, withAuthInit]
     );
+
+    const downloadProtectedOutput = useCallback(async (url: string, filename: string) => {
+        setError('');
+        try {
+            const res = await fetchWithAuthRetry(url);
+            if (!res.ok) {
+                let detail = `Download failed (${res.status})`;
+                try {
+                    const payload = await res.json();
+                    detail = String(payload?.detail || detail);
+                } catch {
+                    // Keep the status-based message for non-JSON responses.
+                }
+                throw new Error(detail);
+            }
+            const blobUrl = URL.createObjectURL(await res.blob());
+            const anchor = document.createElement('a');
+            anchor.href = blobUrl;
+            anchor.download = filename;
+            document.body.appendChild(anchor);
+            anchor.click();
+            anchor.remove();
+            window.setTimeout(() => URL.revokeObjectURL(blobUrl), 0);
+        } catch (err: any) {
+            setError(String(err?.message || 'Download failed'));
+        }
+    }, [fetchWithAuthRetry]);
     const directApiBase = useMemo(() => {
         if (typeof window !== 'undefined') {
             const host = String(window.location.hostname || '').toLowerCase();
@@ -1461,7 +1488,7 @@ export default function CatalystPanel() {
                             const paused = s.paused_error || null;
                             const js = activeLongform.job_status || {};
                             const outputFile = String(js?.output_file || js?.package?.output_file || '');
-                            const outputUrl = outputFile ? `${API}/api/download/${outputFile}` : '';
+                            const outputUrl = outputFile ? `${API}/api/download/${encodeURIComponent(outputFile)}` : '';
                             const isDone = stage === 'rendered' || String(s.status || '') === 'rendered' || Boolean(outputFile);
                             const isError = stage === 'error' || stage === 'bootstrap_error' || Boolean(paused);
                             const stageLabel = (() => {
@@ -1529,14 +1556,14 @@ export default function CatalystPanel() {
                                         </div>
                                     )}
                                     {isDone && outputUrl && (
-                                        <a
-                                            href={outputUrl}
-                                            download
+                                        <button
+                                            type="button"
+                                            onClick={() => void downloadProtectedOutput(outputUrl, outputFile)}
                                             className="inline-flex items-center gap-2 rounded-xl bg-emerald-600 px-4 py-2 text-xs font-semibold text-white transition hover:bg-emerald-500"
                                         >
                                             <Download className="h-3.5 w-3.5" />
                                             Download MP4
-                                        </a>
+                                        </button>
                                     )}
                                     {!isDone && !isError && (
                                         <div className="text-[11px] text-gray-500">

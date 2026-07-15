@@ -208,8 +208,9 @@ async def proxy_dictation_stream(
             except Exception:
                 pass
             break
-    finally:
-        try:
-            await client_ws.close()
-        except Exception:
-            pass
+    # The loop handles connection failures itself; always close the browser
+    # socket once it exits.
+    try:
+        await client_ws.close()
+    except Exception:
+        pass

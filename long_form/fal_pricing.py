@@ -74,6 +74,16 @@ class FalPricingError(RuntimeError):
     pass
 
 
+def _require_https_url(url: str, *, expected_host: str | None = None) -> str:
+    value = str(url or "").strip()
+    parsed = urllib.parse.urlsplit(value)
+    if parsed.scheme.lower() != "https" or not parsed.hostname or parsed.username or parsed.password:
+        raise FalPricingError("refusing non-HTTPS or malformed fal pricing URL")
+    if expected_host and parsed.hostname.lower() != expected_host.lower():
+        raise FalPricingError(f"refusing unexpected fal pricing host: {parsed.hostname}")
+    return value
+
+
 def _fal_api_key() -> str:
     return (os.environ.get("FAL_AI_KEY") or os.environ.get("FAL_KEY") or "").strip()
 
@@ -112,14 +122,18 @@ def fetch_live_prices(
     ids = endpoint_ids or list(ENDPOINTS.values())
     # API accepts repeated endpoint_id query params.
     q = "&".join(f"endpoint_id={urllib.parse.quote(eid, safe='')}" for eid in ids)
-    url = f"{FAL_PLATFORM_BASE}/models/pricing?{q}"
+    url = _require_https_url(
+        f"{FAL_PLATFORM_BASE}/models/pricing?{q}",
+        expected_host="api.fal.ai",
+    )
     req = urllib.request.Request(
         url,
         headers={"Authorization": f"Key {key}", "Accept": "application/json"},
         method="GET",
     )
     try:
-        with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
+        # The request URL is HTTPS and host-validated above.
+        with urllib.request.urlopen(req, timeout=timeout_sec) as resp:  # nosec B310
             data = json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")[:400]

@@ -22,6 +22,7 @@ import os
 import re
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 from pathlib import Path
@@ -41,6 +42,7 @@ DEFAULT_CLAIM_POLL_SEC = 0.05
 _PRODUCTION_LEASE_FILENAME = "production.active.json"
 _QUEUE_ADMISSION_FILENAME = "queue-admission.active.json"
 _RUNPOD_JOB_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$")
+_RUNPOD_ENDPOINT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 
 
 class RunPodBridgeError(RuntimeError):
@@ -475,11 +477,26 @@ def _resolved_credentials(endpoint_id: str | None = None) -> tuple[str, str]:
         raise RunPodConfigurationError("RUNPOD_API_KEY is not set")
     if not resolved_endpoint:
         raise RunPodConfigurationError("RUNPOD_ENDPOINT_ID is not set")
+    if not _RUNPOD_ENDPOINT_ID_RE.fullmatch(resolved_endpoint):
+        raise RunPodConfigurationError("RUNPOD_ENDPOINT_ID contains invalid characters")
     return api_key, resolved_endpoint
 
 
 def _endpoint_base(endpoint_id: str) -> str:
     return f"https://api.runpod.ai/v2/{endpoint_id}"
+
+
+def _require_runpod_https_url(url: str) -> str:
+    value = str(url or "").strip()
+    parsed = urllib.parse.urlsplit(value)
+    if (
+        parsed.scheme.lower() != "https"
+        or (parsed.hostname or "").lower() != "api.runpod.ai"
+        or parsed.username
+        or parsed.password
+    ):
+        raise RunPodConfigurationError("refusing non-HTTPS or non-RunPod API URL")
+    return value
 
 
 def _response_detail(exc: urllib.error.HTTPError) -> str:
@@ -499,8 +516,9 @@ def _request_json(
 ) -> tuple[dict[str, Any], str]:
     api_key, resolved_endpoint = _resolved_credentials(endpoint_id)
     encoded = None if body is None else json.dumps(body, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    request_url = _require_runpod_https_url(_endpoint_base(resolved_endpoint) + path)
     request = urllib.request.Request(
-        _endpoint_base(resolved_endpoint) + path,
+        request_url,
         data=encoded,
         method=method.upper(),
         headers={
@@ -510,7 +528,8 @@ def _request_json(
         },
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout_sec) as response:
+        # The request URL is HTTPS and host-validated above.
+        with urllib.request.urlopen(request, timeout=timeout_sec) as response:  # nosec B310
             raw = response.read().decode("utf-8", errors="replace")
     except urllib.error.HTTPError as exc:
         detail = _response_detail(exc)

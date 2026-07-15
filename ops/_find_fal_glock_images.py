@@ -25,6 +25,19 @@ IMAGE_ENDPOINTS = [
 ]
 
 
+def require_fal_api_url(url: str) -> str:
+    value = str(url or "").strip()
+    parsed = urllib.parse.urlsplit(value)
+    if (
+        parsed.scheme.lower() != "https"
+        or (parsed.hostname or "").lower() != "api.fal.ai"
+        or parsed.username
+        or parsed.password
+    ):
+        raise ValueError("refusing non-HTTPS or non-fal API URL")
+    return value
+
+
 def load_env() -> None:
     for line in ENV.read_text(encoding="utf-8").splitlines():
         line = line.strip()
@@ -36,11 +49,13 @@ def load_env() -> None:
 def get(path: str, params: dict) -> dict:
     key = (os.environ.get("FAL_AI_KEY") or "").strip()
     q = urllib.parse.urlencode(params, doseq=True)
+    url = require_fal_api_url(f"{BASE}{path}?{q}")
     req = urllib.request.Request(
-        f"{BASE}{path}?{q}",
+        url,
         headers={"Authorization": f"Key {key}", "Accept": "application/json"},
     )
-    with urllib.request.urlopen(req, timeout=60) as r:
+    # The request URL is HTTPS and host-validated above.
+    with urllib.request.urlopen(req, timeout=60) as r:  # nosec B310
         return json.loads(r.read().decode())
 
 

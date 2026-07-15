@@ -570,14 +570,19 @@ def list_render_styles() -> list[dict[str, Any]]:
         if style.key not in LAUNCH_RENDER_STYLE_KEYS:
             continue
         d = style.to_dict()
-        # Include preview URL so frontend can render visual grid like the reference style galleries.
-        # Previews generated on-demand (very cheap 1x Seedream per style) and cached.
-        d["preview_url"] = f"/api/studio-agent/style-preview/{style.key}"
-        d["preview_video_url"] = f"/api/studio-agent/style-preview/{style.key}/video"
         still_path = _style_preview_path(style.key)
         video_path = _style_preview_video_path(style.key)
-        d["preview_ready"] = still_path.is_file() and still_path.stat().st_size > 1024
-        d["preview_video_ready"] = video_path.is_file() and video_path.stat().st_size > 1024
+        still_ready = still_path.is_file() and still_path.stat().st_size > 1024
+        video_ready = video_path.is_file() and video_path.stat().st_size > 1024
+        d["preview_ready"] = still_ready
+        d["preview_video_ready"] = video_ready
+        # Planning reads must never create billable provider work. Only advertise
+        # media that is already present in the cache; the GET routes are likewise
+        # cache-only and return 404 when these fields are absent.
+        if still_ready:
+            d["preview_url"] = f"/api/studio-agent/style-preview/{style.key}"
+        if video_ready:
+            d["preview_video_url"] = f"/api/studio-agent/style-preview/{style.key}/video"
         groups.setdefault(style.group, []).append(d)
     ordered = []
     for group in ("Realism", "Comic", "Animation", "Specialty", "Niche"):
@@ -642,6 +647,24 @@ def _style_preview_path(key: str) -> Path:
 
 def _style_preview_video_path(key: str) -> Path:
     return STYLE_PREVIEW_VIDEO_DIR / f"{key}-{STYLE_PREVIEW_VERSION}.mp4"
+
+
+def get_cached_style_preview_path(key: str) -> Path | None:
+    """Return a validated cached still without generating provider work."""
+    style = get_render_style(key)
+    if style.key not in LAUNCH_RENDER_STYLE_KEYS:
+        raise KeyError(f"Render style '{key}' is not available for launch")
+    path = _style_preview_path(style.key)
+    return path if path.is_file() and path.stat().st_size > 1024 else None
+
+
+def get_cached_style_preview_video_path(key: str) -> Path | None:
+    """Return a validated cached motion preview without generating work."""
+    style = get_render_style(key)
+    if style.key not in LAUNCH_RENDER_STYLE_KEYS:
+        raise KeyError(f"Render style '{key}' is not available for launch")
+    path = _style_preview_video_path(style.key)
+    return path if path.is_file() and path.stat().st_size > 1024 else None
 
 
 def _style_preview_prompt(style: RenderStyle) -> str:

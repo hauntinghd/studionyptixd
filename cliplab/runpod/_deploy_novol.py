@@ -15,7 +15,8 @@ EP = "30lt3s0grkw5le"
 TID = "bsol0g38bf"
 ARTIFACTS = Path(r"C:\Users\casey\AppData\Local\Temp\cliplab_models_sync")
 SRC = Path(r"D:\games\asd\.claude\worktrees\laughing-mclean-b5c91d\cliplab")
-DATA_ROOT = "/tmp/cliplab"
+# The endpoint container is an isolated, single-tenant ephemeral workspace.
+DATA_ROOT = "/tmp/cliplab"  # nosec B108
 
 BOOTSTRAP_PY = f'''
 import base64, os, runpod

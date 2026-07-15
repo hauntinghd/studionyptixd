@@ -30,6 +30,19 @@ ENDPOINTS_3D = [
 ]
 
 
+def require_fal_api_url(url: str) -> str:
+    value = str(url or "").strip()
+    parsed = urllib.parse.urlsplit(value)
+    if (
+        parsed.scheme.lower() != "https"
+        or (parsed.hostname or "").lower() != "api.fal.ai"
+        or parsed.username
+        or parsed.password
+    ):
+        raise ValueError("refusing non-HTTPS or non-fal API URL")
+    return value
+
+
 def load_env() -> None:
     if not ENV_PATH.exists():
         return
@@ -43,13 +56,14 @@ def load_env() -> None:
 
 def fal_get(key: str, path: str, params: dict | None = None) -> dict:
     q = urllib.parse.urlencode(params or {}, doseq=True)
-    url = f"{BASE}{path}" + (f"?{q}" if q else "")
+    url = require_fal_api_url(f"{BASE}{path}" + (f"?{q}" if q else ""))
     req = urllib.request.Request(
         url,
         headers={"Authorization": f"Key {key}", "Accept": "application/json"},
         method="GET",
     )
-    with urllib.request.urlopen(req, timeout=60) as resp:
+    # The request URL is HTTPS and host-validated above.
+    with urllib.request.urlopen(req, timeout=60) as resp:  # nosec B310
         return json.loads(resp.read().decode("utf-8"))
 
 

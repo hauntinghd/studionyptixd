@@ -1079,11 +1079,10 @@ def build_zerotier_private_router(
         return {"ok": True, "job_id": job_id, **public}
 
     @router.get("/jobs/{job_id}/stills/{filename}")
-    async def zt_job_still(job_id: str, filename: str):
-        # Auth-less by design: <img src> can't send Authorization headers, so
-        # we gate on the random 12-hex job_id (~3e14 entropy) which acts as an
-        # opaque capability token. The user already has the job_id only via
-        # the auth-gated render-stills response.
+    async def zt_job_still(job_id: str, filename: str, user: dict = auth_dep):
+        _gate_admin(user)
+        # The frontend fetches with Bearer auth and supplies an object URL to
+        # <img>. The opaque job id identifies the asset but grants no access.
         if not job_id.replace("_", "").isalnum() or len(job_id) > 32:
             raise HTTPException(400, "bad_job_id")
         if not filename.endswith(".png") or "/" in filename or ".." in filename:
@@ -1094,9 +1093,9 @@ def build_zerotier_private_router(
         return FileResponse(str(path), media_type="image/png")
 
     @router.get("/jobs/{job_id}/mp4")
-    async def zt_job_mp4(job_id: str):
-        # Auth-less for the same reason as /stills/{filename} — browsers
-        # can't send Authorization on direct media downloads / video tag.
+    async def zt_job_mp4(job_id: str, user: dict = auth_dep):
+        _gate_admin(user)
+        # The frontend performs an authenticated fetch for playback/download.
         if not job_id.replace("_", "").isalnum() or len(job_id) > 32:
             raise HTTPException(400, "bad_job_id")
         ws = ZT_OUTPUT_ROOT / job_id

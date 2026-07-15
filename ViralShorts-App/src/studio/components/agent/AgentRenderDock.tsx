@@ -1,5 +1,6 @@
 import { Download, Loader2, RefreshCw, X, Square } from 'lucide-react';
-import { mediaUrl, type AgentJobSnapshot, type AgentJobTrack } from '../../lib/agentProduction';
+import { useState } from 'react';
+import { downloadStudioAsset, type AgentJobSnapshot, type AgentJobTrack } from '../../lib/agentProduction';
 
 export default function AgentRenderDock({
     track,
@@ -20,6 +21,8 @@ export default function AgentRenderDock({
     onCancel?: () => void;
     cancelling?: boolean;
 }) {
+    const [downloadBusy, setDownloadBusy] = useState(false);
+    const [downloadError, setDownloadError] = useState('');
     if (!track || !snapshot) return null;
 
     const failed = snapshot.status === 'failed';
@@ -39,8 +42,6 @@ export default function AgentRenderDock({
     const circumference = 2 * Math.PI * radius;
     const dashOffset = circumference - (progress / 100) * circumference;
     const rawDl = snapshot.download_url || snapshot.mp4_url || '';
-    const downloadUrl =
-        rawDl.startsWith('http') ? rawDl : rawDl && accessToken ? mediaUrl(rawDl, accessToken) : rawDl;
     const actualCost = snapshot.cost?.actual_usd_decimal
         || (typeof snapshot.cost?.actual_usd === 'number' ? snapshot.cost.actual_usd.toFixed(6) : '');
     const costLabel = actualCost && Number(actualCost) > 0 ? `$${actualCost}` : '';
@@ -175,15 +176,24 @@ export default function AgentRenderDock({
                                     {retrying ? 'Retrying…' : 'Retry'}
                                 </button>
                             ) : null}
-                            {complete && downloadUrl && (!isClipLab || isClipLabRender) ? (
-                                <a
-                                    href={downloadUrl}
-                                    download
+                            {complete && rawDl && (!isClipLab || isClipLabRender) ? (
+                                <button
+                                    type="button"
+                                    disabled={!accessToken || downloadBusy}
+                                    onClick={() => {
+                                        if (!accessToken) return;
+                                        setDownloadBusy(true);
+                                        setDownloadError('');
+                                        void downloadStudioAsset(rawDl, accessToken, `${snapshot.job_id || track.job_id}.mp4`)
+                                            .catch((error) => setDownloadError(error instanceof Error ? error.message : 'Download failed'))
+                                            .finally(() => setDownloadBusy(false));
+                                    }}
                                     className="inline-flex items-center gap-1 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-2 py-1 text-[11px] font-semibold text-emerald-100 hover:bg-emerald-500/20"
                                 >
-                                    <Download className="h-3 w-3" /> Download
-                                </a>
+                                    <Download className="h-3 w-3" /> {downloadBusy ? 'Savingâ€¦' : 'Download'}
+                                </button>
                             ) : null}
+                            {downloadError ? <span className="text-[10px] text-red-300">{downloadError}</span> : null}
                         </div>
                     </div>
                     {onDismiss ? (

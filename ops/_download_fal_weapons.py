@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -15,6 +16,14 @@ WEAPON_SRC = {
     "src_10_rifle.png": "https://v3b.fal.media/files/b/0a97277a/i_Rj2IoDfohtBUTml14AO_be3d2f92f5854dd7908307dd3abe8fc6.png",
     "src_40_pdw.png": "https://v3b.fal.media/files/b/0a972b5a/nmq1cZQ7I1Uo5ziCMbAHH_dd978db4d5664dffba3f3ef67b70f5cc.png",
 }
+
+
+def require_https_url(url: str) -> str:
+    value = str(url or "").strip()
+    parsed = urllib.parse.urlsplit(value)
+    if parsed.scheme.lower() != "https" or not parsed.hostname or parsed.username or parsed.password:
+        raise ValueError("refusing non-HTTPS or malformed download URL")
+    return value
 
 
 def urls(obj) -> list[str]:
@@ -65,7 +74,9 @@ def main() -> None:
             for i, u in enumerate(glbs):
                 stem = label.replace(".png", "")
                 dest = OUT / f"{stem}_{i}.glb"
-                urllib.request.urlretrieve(u, dest)
+                safe_url = require_https_url(u)
+                # The download URL is validated as HTTPS above.
+                urllib.request.urlretrieve(safe_url, dest)  # nosec B310
                 print(f"saved {dest} ({dest.stat().st_size // 1024} KB)")
 
     (OUT / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")

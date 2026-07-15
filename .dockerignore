@@ -14,6 +14,7 @@ analysis/
 app_viral_shorts/
 build/
 datasets/
+data/
 dist/
 generated_videos/
 ref_frames/
@@ -28,3 +29,9 @@ Sniper-App/
 ViralShorts-App/node_modules/
 ViralShorts-App/dist/
 ViralShorts-App/.vercel/
+test*.py
+setup_supabase.py
+train_thumbnail_lora.py
+ultra_simple.py
+verify_cid.py
+cliplab/runpod/

@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 import ipaddress
+import http.client
 import json
 import mimetypes
 import os
 import re
 import socket
+import ssl
 import time
 import uuid
 from html.parser import HTMLParser
@@ -14,14 +16,14 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin, urlparse
 
-import httpx
-
 
 OUTPUT_ROOT = Path(os.getenv("SKELETON_AI_OUTPUT_ROOT", "skeleton_ai/output"))
 REFERENCE_ROOT = OUTPUT_ROOT / "_product_references"
 REFERENCE_ROOT.mkdir(parents=True, exist_ok=True)
 MAX_HTML_BYTES = 2 * 1024 * 1024
 MAX_IMAGE_BYTES = 12 * 1024 * 1024
+MAX_REDIRECTS = 4
+PUBLIC_WEB_PORTS = {80, 443}
 
 
 class ProductReferenceError(ValueError):
@@ -33,20 +35,180 @@ def _safe_token(value: str, fallback: str) -> str:
     return token or fallback
 
 
-def _assert_public_url(url: str) -> str:
+def _resolve_public_url(url: str) -> tuple[str, tuple[str, ...]]:
     parsed = urlparse(str(url or "").strip())
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:
         raise ProductReferenceError("product URL must be public http(s)")
-    host = parsed.hostname.lower().rstrip(".")
+    if parsed.username is not None or parsed.password is not None:
+        raise ProductReferenceError("credentials in product URLs are not allowed")
+    try:
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    except ValueError as exc:
+        raise ProductReferenceError("product URL has an invalid port") from exc
+    if port not in PUBLIC_WEB_PORTS:
+        raise ProductReferenceError("product URL must use port 80 or 443")
+    try:
+        host = parsed.hostname.lower().rstrip(".").encode("idna").decode("ascii")
+    except UnicodeError as exc:
+        raise ProductReferenceError("product URL has an invalid hostname") from exc
     if host in {"localhost", "localhost.localdomain"}:
         raise ProductReferenceError("local product URLs are not allowed")
     try:
-        addresses = {info[4][0] for info in socket.getaddrinfo(host, parsed.port or 443)}
+        resolved = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
     except OSError as exc:
         raise ProductReferenceError(f"product host could not be resolved: {host}") from exc
-    if any(not ipaddress.ip_address(address).is_global for address in addresses):
-        raise ProductReferenceError("private, loopback, and link-local product URLs are not allowed")
-    return parsed.geturl()
+    addresses: list[str] = []
+    for info in resolved:
+        address = str(info[4][0]).split("%", 1)[0]
+        try:
+            ip = ipaddress.ip_address(address)
+        except ValueError as exc:
+            raise ProductReferenceError("product host resolved to an invalid address") from exc
+        if (
+            not ip.is_global
+            or ip.is_private
+            or ip.is_loopback
+            or ip.is_link_local
+            or ip.is_reserved
+            or ip.is_unspecified
+            or ip.is_multicast
+        ):
+            raise ProductReferenceError(
+                "private, loopback, link-local, reserved, and non-public product URLs are not allowed"
+            )
+        normalized = str(ip)
+        if normalized not in addresses:
+            addresses.append(normalized)
+    if not addresses:
+        raise ProductReferenceError(f"product host could not be resolved: {host}")
+    return parsed.geturl(), tuple(addresses)
+
+
+def _assert_public_url(url: str) -> str:
+    normalized, _addresses = _resolve_public_url(url)
+    return normalized
+
+
+def _open_pinned_socket(address: str, port: int, timeout: float) -> socket.socket:
+    """Connect to an already-validated numeric address without another DNS lookup."""
+    ip = ipaddress.ip_address(address)
+    family = socket.AF_INET6 if ip.version == 6 else socket.AF_INET
+    sock = socket.socket(family, socket.SOCK_STREAM)
+    try:
+        sock.settimeout(timeout)
+        destination: tuple[Any, ...]
+        if family == socket.AF_INET6:
+            destination = (str(ip), port, 0, 0)
+        else:
+            destination = (str(ip), port)
+        sock.connect(destination)
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        return sock
+    except BaseException:
+        sock.close()
+        raise
+
+
+class _PinnedHTTPConnection(http.client.HTTPConnection):
+    def __init__(self, host: str, port: int, address: str, *, timeout: float) -> None:
+        super().__init__(host, port=port, timeout=timeout)
+        self._pinned_address = address
+
+    def connect(self) -> None:
+        self.sock = _open_pinned_socket(self._pinned_address, self.port, float(self.timeout or 20.0))
+
+
+class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+    def __init__(self, host: str, port: int, address: str, *, timeout: float) -> None:
+        super().__init__(host, port=port, timeout=timeout, context=ssl.create_default_context())
+        self._pinned_address = address
+
+    def connect(self) -> None:
+        raw = _open_pinned_socket(self._pinned_address, self.port, float(self.timeout or 20.0))
+        try:
+            self.sock = self._context.wrap_socket(raw, server_hostname=self.host)
+        except BaseException:
+            raw.close()
+            raise
+
+
+def _fetch_from_pinned_address(
+    url: str,
+    address: str,
+    *,
+    max_bytes: int,
+    accept: str,
+) -> dict[str, Any]:
+    parsed = urlparse(url)
+    host = str(parsed.hostname or "").encode("idna").decode("ascii")
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    connection_cls = _PinnedHTTPSConnection if parsed.scheme == "https" else _PinnedHTTPConnection
+    connection = connection_cls(host, port, address, timeout=30.0)
+    target = parsed.path or "/"
+    if parsed.query:
+        target = f"{target}?{parsed.query}"
+    try:
+        connection.request(
+            "GET",
+            target,
+            headers={
+                "Accept": accept,
+                "Accept-Encoding": "identity",
+                "Connection": "close",
+                "User-Agent": "NyptidStudioProductBot/1.0",
+            },
+        )
+        response = connection.getresponse()
+        headers = {str(key).lower(): str(value) for key, value in response.getheaders()}
+        try:
+            declared_size = int(headers.get("content-length", "") or 0)
+        except ValueError:
+            declared_size = 0
+        if declared_size > max_bytes:
+            raise ProductReferenceError(f"remote resource exceeds {max_bytes} bytes")
+        body = response.read(max_bytes + 1)
+        if len(body) > max_bytes:
+            raise ProductReferenceError(f"remote resource exceeds {max_bytes} bytes")
+        return {"status": int(response.status), "headers": headers, "body": body}
+    finally:
+        connection.close()
+
+
+def _fetch_public_resource(url: str, *, max_bytes: int, accept: str) -> dict[str, Any]:
+    """Fetch a public resource while pinning DNS and validating every redirect."""
+    current = str(url or "").strip()
+    for hop in range(MAX_REDIRECTS + 1):
+        current, addresses = _resolve_public_url(current)
+        result: dict[str, Any] | None = None
+        last_error: BaseException | None = None
+        for address in addresses:
+            try:
+                result = _fetch_from_pinned_address(
+                    current,
+                    address,
+                    max_bytes=max_bytes,
+                    accept=accept,
+                )
+                break
+            except (OSError, ssl.SSLError, http.client.HTTPException) as exc:
+                last_error = exc
+        if result is None:
+            raise ProductReferenceError("product resource could not be fetched") from last_error
+        status = int(result.get("status") or 0)
+        if status in {301, 302, 303, 307, 308}:
+            location = str((result.get("headers") or {}).get("location") or "").strip()
+            if not location:
+                raise ProductReferenceError("product redirect is missing a destination")
+            if hop >= MAX_REDIRECTS:
+                raise ProductReferenceError("product URL redirected too many times")
+            # The next loop resolves, validates, and pins the redirect target
+            # before any connection is attempted.
+            current = urljoin(current, location)
+            continue
+        if status < 200 or status >= 300:
+            raise ProductReferenceError(f"product resource returned HTTP {status}")
+        return {**result, "url": current}
+    raise ProductReferenceError("product URL redirected too many times")
 
 
 class _ProductHTMLParser(HTMLParser):
@@ -143,30 +305,29 @@ def _image_candidates(base_url: str, parser: _ProductHTMLParser) -> list[dict[st
     return output
 
 
-def _download_image(client: httpx.Client, url: str, target_dir: Path, index: int) -> dict[str, Any] | None:
+def _download_image(url: str, target_dir: Path, index: int) -> dict[str, Any] | None:
     try:
-        _assert_public_url(url)
-        with client.stream("GET", url, headers={"Accept": "image/*"}) as response:
-            response.raise_for_status()
-            content_type = response.headers.get("content-type", "").split(";", 1)[0].lower()
-            if not content_type.startswith("image/") or content_type == "image/svg+xml":
-                return None
-            suffix = mimetypes.guess_extension(content_type) or Path(urlparse(url).path).suffix or ".jpg"
-            if suffix.lower() not in {".jpg", ".jpeg", ".png", ".webp", ".gif", ".avif"}:
-                suffix = ".jpg"
-            path = target_dir / f"product_{index:02d}{suffix}"
-            size = 0
-            with path.open("wb") as handle:
-                for chunk in response.iter_bytes(256 * 1024):
-                    size += len(chunk)
-                    if size > MAX_IMAGE_BYTES:
-                        raise ProductReferenceError("product image exceeds 12MB")
-                    handle.write(chunk)
-            if size < 1024:
-                path.unlink(missing_ok=True)
-                return None
-            return {"path": str(path.resolve()), "source_url": url, "content_type": content_type, "bytes": size}
-    except (httpx.HTTPError, OSError, ProductReferenceError):
+        fetched = _fetch_public_resource(url, max_bytes=MAX_IMAGE_BYTES, accept="image/*")
+        headers = fetched.get("headers") if isinstance(fetched.get("headers"), dict) else {}
+        content_type = str(headers.get("content-type") or "").split(";", 1)[0].lower()
+        if not content_type.startswith("image/") or content_type == "image/svg+xml":
+            return None
+        final_url = str(fetched.get("url") or url)
+        suffix = mimetypes.guess_extension(content_type) or Path(urlparse(final_url).path).suffix or ".jpg"
+        if suffix.lower() not in {".jpg", ".jpeg", ".png", ".webp", ".gif", ".avif"}:
+            suffix = ".jpg"
+        body = bytes(fetched.get("body") or b"")
+        if len(body) < 1024:
+            return None
+        path = target_dir / f"product_{index:02d}{suffix}"
+        path.write_bytes(body)
+        return {
+            "path": str(path.resolve()),
+            "source_url": final_url,
+            "content_type": content_type,
+            "bytes": len(body),
+        }
+    except (OSError, ProductReferenceError):
         return None
 
 
@@ -195,37 +356,44 @@ def ingest(
 
     page: dict[str, Any] = {}
     if website_url:
-        website_url = _assert_public_url(website_url)
-        with httpx.Client(
-            timeout=httpx.Timeout(20.0, read=30.0),
-            follow_redirects=True,
-            headers={"User-Agent": "NyptidStudioProductBot/1.0"},
-        ) as client:
-            response = client.get(website_url, headers={"Accept": "text/html,application/xhtml+xml"})
-            response.raise_for_status()
-            if len(response.content) > MAX_HTML_BYTES:
-                raise ProductReferenceError("product page exceeds 2MB")
-            parser = _ProductHTMLParser()
-            parser.feed(response.text)
-            ad_signals = _extract_ad_signals(parser)
-            page = {
-                "url": str(response.url),
-                "title": parser.title.strip()[:240],
-                "description": (
-                    parser.meta.get("og:description")
-                    or parser.meta.get("description")
-                    or parser.meta.get("twitter:description")
-                    or ""
-                )[:1000],
-                "ad_signals": ad_signals,
-            }
-            for candidate in _image_candidates(str(response.url), parser):
-                if len(images) >= 6:
-                    break
-                downloaded = _download_image(client, candidate["url"], target_dir, len(images))
-                if downloaded:
-                    downloaded.update({"source": candidate["source"], "alt": candidate["alt"]})
-                    images.append(downloaded)
+        fetched = _fetch_public_resource(
+            website_url,
+            max_bytes=MAX_HTML_BYTES,
+            accept="text/html,application/xhtml+xml",
+        )
+        headers = fetched.get("headers") if isinstance(fetched.get("headers"), dict) else {}
+        content_type = str(headers.get("content-type") or "").split(";", 1)[0].lower()
+        if content_type and content_type not in {"text/html", "application/xhtml+xml"}:
+            raise ProductReferenceError("product URL did not return an HTML page")
+        raw_html = bytes(fetched.get("body") or b"")
+        charset_match = re.search(r"charset=([A-Za-z0-9._-]+)", str(headers.get("content-type") or ""), re.I)
+        charset = str(charset_match.group(1) if charset_match else "utf-8")
+        try:
+            html = raw_html.decode(charset, errors="replace")
+        except LookupError:
+            html = raw_html.decode("utf-8", errors="replace")
+        parser = _ProductHTMLParser()
+        parser.feed(html)
+        ad_signals = _extract_ad_signals(parser)
+        final_url = str(fetched.get("url") or website_url)
+        page = {
+            "url": final_url,
+            "title": parser.title.strip()[:240],
+            "description": (
+                parser.meta.get("og:description")
+                or parser.meta.get("description")
+                or parser.meta.get("twitter:description")
+                or ""
+            )[:1000],
+            "ad_signals": ad_signals,
+        }
+        for candidate in _image_candidates(final_url, parser):
+            if len(images) >= 6:
+                break
+            downloaded = _download_image(candidate["url"], target_dir, len(images))
+            if downloaded:
+                downloaded.update({"source": candidate["source"], "alt": candidate["alt"]})
+                images.append(downloaded)
 
     if not images:
         raise ProductReferenceError(

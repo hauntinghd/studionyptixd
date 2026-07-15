@@ -9,6 +9,7 @@ MiniMax `speech-02-hd` is the canonical narration tier across NYPTID pipelines.
 from __future__ import annotations
 
 import os
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -21,6 +22,14 @@ from . import render_simulation
 
 TTS_ENDPOINT = "fal-ai/minimax/speech-02-hd"
 DEFAULT_VOICE = "English_Trustworthy_Man"
+
+
+def _require_https_url(url: object) -> str:
+    value = str(url or "").strip()
+    parsed = urllib.parse.urlsplit(value)
+    if parsed.scheme.lower() != "https" or not parsed.hostname or parsed.username or parsed.password:
+        raise RuntimeError("fal returned a non-HTTPS or malformed audio URL")
+    return value
 
 
 def resolve_voice_id(*, skeleton: bool = False, explicit: str | None = None) -> str:
@@ -83,7 +92,9 @@ def synthesize(
         )
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    urllib.request.urlretrieve(audio_url, str(out_path))
+    safe_audio_url = _require_https_url(audio_url)
+    # The download URL is validated as HTTPS above.
+    urllib.request.urlretrieve(safe_audio_url, str(out_path))  # nosec B310
     return out_path
 
 

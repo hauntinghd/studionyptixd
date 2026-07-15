@@ -19,6 +19,8 @@
 import { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { AlertTriangle, Download, Film, Image as ImageIcon, Lightbulb, Loader2, RefreshCw, Sparkles, TrendingUp, X, Youtube, Zap } from 'lucide-react';
 import { API, AuthContext, resolveStudioBackendUrl, startYouTubeBrowserConnect } from '../shared';
+import { useAuthenticatedMediaUrl, useAuthenticatedMediaUrls } from '../hooks/useAuthenticatedMedia';
+import { downloadStudioAsset } from '../lib/agentProduction';
 
 const ZEROTIER_CHANNEL_ID = 'UC9Gth_4MVet6rdPH7MHJf-g';
 
@@ -458,6 +460,23 @@ export default function ZeroTierPrivatePanel() {
         updated_at?: number;
     }
     const [recentJobs, setRecentJobs] = useState<RecentJob[]>([]);
+    const [mediaDownloadBusy, setMediaDownloadBusy] = useState(false);
+    const [mediaDownloadError, setMediaDownloadError] = useState('');
+    const scenePreviewMedia = useAuthenticatedMediaUrls(
+        scenePreviews.map((scene) => scene.still_url),
+        accessToken,
+        scenePreviews.length > 0,
+    );
+    const finalVideoMedia = useAuthenticatedMediaUrl(
+        renderResult?.mp4_url || '',
+        accessToken,
+        Boolean(renderResult?.mp4_url),
+    );
+    const recentThumbnailMedia = useAuthenticatedMediaUrls(
+        recentJobs.map((job) => job.thumbnail_url || ''),
+        accessToken,
+        recentJobs.length > 0,
+    );
 
     const channel = useMemo(() => {
         const channels = payload?.channels || [];
@@ -1209,7 +1228,7 @@ export default function ZeroTierPrivatePanel() {
                                 <span className="text-xs text-zinc-500">— click any to resume</span>
                             </div>
                             <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-                                {recentJobs.map((j) => {
+                                {recentJobs.map((j, recentIndex) => {
                                     const stageLabel = j.stage === 'done' || j.mp4_url ? 'Final MP4 ready'
                                         : j.stage === 'stills_done' ? 'Stills ready (resume to animate)'
                                         : 'In progress';
@@ -1224,16 +1243,18 @@ export default function ZeroTierPrivatePanel() {
                                             className="text-left rounded-xl border border-white/[0.08] bg-black/30 overflow-hidden transition hover:border-emerald-500/50 hover:shadow-lg hover:shadow-emerald-900/20"
                                         >
                                             <div className="relative aspect-[9/16] bg-black">
-                                                {j.thumbnail_url ? (
+                                                {recentThumbnailMedia.urls[recentIndex] ? (
                                                     <img
-                                                        src={`${API}${j.thumbnail_url}`}
+                                                        src={recentThumbnailMedia.urls[recentIndex]}
                                                         alt={j.title || j.job_id}
                                                         loading="lazy"
                                                         className="absolute inset-0 w-full h-full object-cover"
                                                     />
                                                 ) : (
                                                     <div className="absolute inset-0 flex items-center justify-center text-xs text-zinc-600">
-                                                        no thumbnail
+                                                        {j.thumbnail_url && recentThumbnailMedia.loading ? (
+                                                            <Loader2 className="h-4 w-4 animate-spin text-emerald-300" />
+                                                        ) : 'no thumbnail'}
                                                     </div>
                                                 )}
                                                 <div className={`absolute top-1 left-1 rounded px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-[0.18em] ${stageColor}`}>
@@ -1879,15 +1900,25 @@ export default function ZeroTierPrivatePanel() {
                                     </span>
                                 </div>
                                 <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-                                    {scenePreviews.map((s) => (
+                                    {scenePreviews.map((s, sceneIndex) => (
                                         <div key={s.scene_id} className="rounded-lg border border-white/[0.08] bg-black/30 p-2">
                                             <div className="relative aspect-[9/16] rounded overflow-hidden bg-black mb-2">
-                                                <img
-                                                    src={s.still_url}
-                                                    alt={`Scene ${s.scene_index + 1}: ${s.caption}`}
-                                                    className="absolute inset-0 w-full h-full object-cover"
-                                                    loading="lazy"
-                                                />
+                                                {scenePreviewMedia.urls[sceneIndex] ? (
+                                                    <img
+                                                        src={scenePreviewMedia.urls[sceneIndex]}
+                                                        alt={`Scene ${s.scene_index + 1}: ${s.caption}`}
+                                                        className="absolute inset-0 w-full h-full object-cover"
+                                                        loading="lazy"
+                                                    />
+                                                ) : (
+                                                    <div className="absolute inset-0 flex items-center justify-center text-cyan-300">
+                                                        {scenePreviewMedia.loading ? (
+                                                            <Loader2 className="h-5 w-5 animate-spin" />
+                                                        ) : (
+                                                            <ImageIcon className="h-5 w-5 opacity-40" />
+                                                        )}
+                                                    </div>
+                                                )}
                                                 {s.regenerating && (
                                                     <div className="absolute inset-0 flex items-center justify-center bg-black/70">
                                                         <Loader2 className="h-6 w-6 animate-spin text-cyan-300" />
@@ -1944,13 +1975,37 @@ export default function ZeroTierPrivatePanel() {
                                     {typeof renderResult.fal_cost_estimate_usd === 'number' && <div><span className="text-emerald-300/80">fal cost (est):</span> ${renderResult.fal_cost_estimate_usd.toFixed(2)}</div>}
                                     <div className="pt-2">
                                         <a
-                                            href={renderResult.mp4_url}
+                                            href={finalVideoMedia.url || undefined}
                                             target="_blank"
                                             rel="noopener noreferrer"
-                                            className="inline-flex items-center gap-2 rounded-md bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-emerald-500"
+                                            aria-disabled={!finalVideoMedia.url}
+                                            className={`inline-flex items-center gap-2 rounded-md bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-emerald-500 ${!finalVideoMedia.url ? 'pointer-events-none opacity-50' : ''}`}
                                         >
+                                            {finalVideoMedia.loading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Film className="h-3.5 w-3.5" />}
                                             Open MP4 in new tab
                                         </a>
+                                        <button
+                                            type="button"
+                                            disabled={mediaDownloadBusy}
+                                            onClick={() => {
+                                                setMediaDownloadBusy(true);
+                                                setMediaDownloadError('');
+                                                void downloadStudioAsset(
+                                                    renderResult.mp4_url || '',
+                                                    accessToken,
+                                                    `ZeroTier_${renderResult.job_id}.mp4`,
+                                                ).catch((downloadError: unknown) => {
+                                                    setMediaDownloadError(downloadError instanceof Error ? downloadError.message : 'Download failed');
+                                                }).finally(() => setMediaDownloadBusy(false));
+                                            }}
+                                            className="ml-2 inline-flex items-center gap-2 rounded-md border border-emerald-400/30 bg-emerald-500/10 px-3 py-1.5 text-xs font-semibold text-emerald-100 transition hover:bg-emerald-500/20 disabled:opacity-50"
+                                        >
+                                            {mediaDownloadBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
+                                            Download MP4
+                                        </button>
+                                        {mediaDownloadError && (
+                                            <div className="mt-2 text-[10px] text-red-300">{mediaDownloadError}</div>
+                                        )}
                                     </div>
                                 </div>
                             </div>

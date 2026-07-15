@@ -1306,6 +1306,7 @@ def analyze_local_file(
 def start_analysis(
     url: str,
     *,
+    user_id: str = "",
     scene_threshold: float = 0.3,
     max_frames: int = 32,
     content_format: str = "short",
@@ -1322,6 +1323,7 @@ def start_analysis(
     _write_status(
         work,
         job_id=job_id,
+        user_id=str(user_id or "").strip(),
         url=url,
         status="running",
         stage="queued",
@@ -1348,6 +1350,7 @@ def start_analysis(
 def start_analysis_from_path(
     video_path: str,
     *,
+    user_id: str = "",
     source_name: str = "",
     scene_threshold: float = 0.3,
     max_frames: int = 32,
@@ -1361,6 +1364,7 @@ def start_analysis_from_path(
     _write_status(
         work,
         job_id=job_id,
+        user_id=str(user_id or "").strip(),
         url=str(video_path),
         status="running",
         stage="queued",

@@ -22,6 +22,14 @@ from pathlib import Path
 from urllib.parse import quote, urlparse, unquote, parse_qs, urlencode
 from fastapi import FastAPI, UploadFile, File, Form, BackgroundTasks, HTTPException, Depends, Request, Query
 from fastapi.middleware.cors import CORSMiddleware
+from upload_limits import (
+    MAX_ANALYTICS_IMAGE_BYTES,
+    MAX_LONGFORM_REFERENCE_IMAGE_BYTES,
+    MultipartContentLengthLimitMiddleware,
+    UploadTooLargeError,
+    read_upload_limited,
+    write_upload_limited,
+)
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from typing import Optional
@@ -41,8 +49,13 @@ from backend_misc_payloads import (
     build_maintenance_banner_payload,
     build_training_stats_payload,
 )
-from backend_job_payloads import build_job_status_payload, build_list_jobs_payload
-from backend_media_handlers import build_download_video_response, build_render_chat_story_handler
+from backend_job_payloads import build_job_status_payload, build_list_jobs_payload, job_access_allowed
+from backend_media_handlers import (
+    build_download_video_response,
+    build_render_chat_story_handler,
+    resolve_auto_scene_directory,
+    validate_job_id_component,
+)
 from backend_clone_handler import build_clone_video_handler
 from backend_billing_handlers import build_create_checkout_handler
 from backend_runtime import configure_backend_runtime, _ffmpeg_available, _read_deploy_meta
@@ -90,6 +103,7 @@ from routes import (
     build_studio_utility_router,
 )
 from backend_youtube_catalyst_routes import build_youtube_catalyst_app_router
+from cliplab_router import build_cliplab_router
 from studio_agent_router import build_studio_agent_router
 from studio_analytics_router import build_studio_analytics_router
 from studio_hub_router import build_studio_hub_router
@@ -721,6 +735,7 @@ configure_reference_video_audit_hooks(
 
 
 app = FastAPI(title="NYPTID Studio Engine", version="3.0")
+app.add_middleware(MultipartContentLengthLimitMiddleware)
 app.add_middleware(
     CORSMiddleware,
     # Studio is a separate frontend origin and sends Bearer-authenticated
@@ -2539,6 +2554,10 @@ def _persist_longform_character_reference(
     character_reference = {
         "character_id": character_id,
         "name": character_name,
+        # Keep the provider input private and self-contained. The authenticated
+        # public file route is for the owning Studio client, not third-party
+        # providers that cannot attach the user's Bearer token.
+        "reference_image_url": data_url,
         "reference_image_path": str(ref_path),
         "reference_image_public_url": public_url,
         "reference_lock_mode": lock_mode,
@@ -4091,7 +4110,7 @@ def _resolve_reference_for_scene(session: dict, template: str, scene_index: int)
         return _default_reference_for_template("skeleton")
     base_ref_public = str(session.get("reference_image_public_url", "") or "")
     base_ref_inline = str(session.get("reference_image_url", "") or "")
-    base_ref = base_ref_public or base_ref_inline
+    base_ref = base_ref_inline or base_ref_public
     skeleton_ref = str(session.get("skeleton_reference_image", "") or "")
     rolling_ref = str(session.get("rolling_reference_image_url", "") or "")
     lock_mode = _normalize_reference_lock_mode(session.get("reference_lock_mode"), default="strict")
@@ -4101,6 +4120,8 @@ def _resolve_reference_for_scene(session: dict, template: str, scene_index: int)
     if lock_mode == "strict":
         if rolling_ref and scene_index > 0:
             return rolling_ref
+        if base_ref_inline:
+            return base_ref_inline
         if base_ref_public:
             return base_ref_public
         if rolling_ref:
@@ -4147,10 +4168,12 @@ def _ensure_reference_public_url(session_id: str, session: dict) -> str:
         return ""
 
 
-def _auto_scene_dir(job_id: str) -> Path:
-    d = AUTO_SCENE_IMAGE_ROOT / str(job_id)
-    d.mkdir(parents=True, exist_ok=True)
-    return d
+def _validated_auto_scene_job_id(job_id: str) -> str:
+    return validate_job_id_component(job_id)
+
+
+def _auto_scene_dir(job_id: str, *, create: bool = True) -> Path:
+    return resolve_auto_scene_directory(AUTO_SCENE_IMAGE_ROOT, job_id, create=create)
 
 
 def _auto_scene_url(job_id: str, filename: str) -> str:
@@ -12896,7 +12919,7 @@ def _longform_documentary_reference_image_url(
 
 def _longform_session_subject_reference_image_url(session: dict | None, template: str = "") -> str:
     s = dict(session or {})
-    current = str(s.get("reference_image_public_url", "") or s.get("reference_image_url", "") or "").strip()
+    current = str(s.get("reference_image_url", "") or s.get("reference_image_public_url", "") or "").strip()
     if current and _bool_from_any(s.get("reference_image_uploaded"), False):
         return current
     return ""
@@ -12908,7 +12931,11 @@ def _longform_scene_reference_bundle(session: dict | None, scene: dict | None, t
     assigned_reference = _longform_scene_assigned_character_reference(session_payload, scene_payload)
     if assigned_reference:
         return {
-            "reference_image_url": str(assigned_reference.get("reference_image_public_url", "") or "").strip(),
+            "reference_image_url": str(
+                assigned_reference.get("reference_image_url", "")
+                or assigned_reference.get("reference_image_public_url", "")
+                or ""
+            ).strip(),
             "reference_lock_mode": _normalize_reference_lock_mode(
                 assigned_reference.get("reference_lock_mode"),
                 default=_normalize_reference_lock_mode(session_payload.get("reference_lock_mode"), default="strict"),
@@ -15667,11 +15694,16 @@ async def _create_longform_session_bootstrap(
     if subject_reference_image is not None and getattr(subject_reference_image, "filename", ""):
         if not subject_reference_image.content_type or not subject_reference_image.content_type.startswith("image/"):
             raise HTTPException(400, "Reference file must be an image")
-        raw_reference = await subject_reference_image.read()
+        try:
+            raw_reference = await read_upload_limited(
+                subject_reference_image,
+                max_bytes=MAX_LONGFORM_REFERENCE_IMAGE_BYTES,
+                label="long-form subject reference image",
+            )
+        except UploadTooLargeError as exc:
+            raise HTTPException(413, "Reference image must be <= 8MB") from exc
         if not raw_reference:
             raise HTTPException(400, "Reference image is empty")
-        if len(raw_reference) > 8 * 1024 * 1024:
-            raise HTTPException(400, "Reference image must be <= 8MB")
         quality = _analyze_reference_quality(raw_reference, lock_mode=normalized_reference_lock_mode)
         if not quality.get("accepted", True) and normalized_reference_lock_mode == "strict":
             raise HTTPException(400, "Reference image quality too low for Strict Reference Lock. Upload a higher-resolution image or switch to Style Inspired mode.")
@@ -15684,12 +15716,27 @@ async def _create_longform_session_bootstrap(
         ext = Path(filename).suffix.lower()
         if ext not in {".png", ".jpg", ".jpeg", ".webp"}:
             ext = ".png"
-        saved_path = upload_dir / f"lf_bootstrap_{int(time.time())}_{random.randint(1000, 9999)}_{idx}{ext}"
-        with open(saved_path, "wb") as fh:
-            while chunk := await analytics_image.read(1024 * 1024):
-                fh.write(chunk)
-        if saved_path.exists() and saved_path.stat().st_size > 0:
-            saved_image_paths.append(str(saved_path))
+        saved_path = upload_dir / f"lf_bootstrap_{int(time.time() * 1000)}_{secrets.token_hex(4)}_{idx}{ext}"
+        try:
+            await write_upload_limited(
+                analytics_image,
+                saved_path,
+                max_bytes=MAX_ANALYTICS_IMAGE_BYTES,
+                label=f"analytics image {idx + 1}",
+            )
+        except UploadTooLargeError as exc:
+            for prior_path in saved_image_paths:
+                Path(prior_path).unlink(missing_ok=True)
+            raise HTTPException(413, f"Analytics image {idx + 1} exceeds 12MB") from exc
+        except ValueError as exc:
+            for prior_path in saved_image_paths:
+                Path(prior_path).unlink(missing_ok=True)
+            raise HTTPException(400, str(exc)) from exc
+        except Exception:
+            for prior_path in saved_image_paths:
+                Path(prior_path).unlink(missing_ok=True)
+            raise
+        saved_image_paths.append(str(saved_path))
 
     placeholder_session = _create_longform_bootstrap_placeholder_session(
         user=user,
@@ -15768,7 +15815,14 @@ async def _longform_reference_image(
             raise HTTPException(403, "Not your session")
         if not reference_image.content_type or not reference_image.content_type.startswith("image/"):
             raise HTTPException(400, "Reference file must be an image")
-        raw = await reference_image.read()
+        try:
+            raw = await read_upload_limited(
+                reference_image,
+                max_bytes=MAX_LONGFORM_REFERENCE_IMAGE_BYTES,
+                label="long-form reference image",
+            )
+        except UploadTooLargeError as exc:
+            raise HTTPException(413, "Reference image exceeds 8MB") from exc
         if not raw:
             raise HTTPException(400, "Reference image is empty")
         mime = reference_image.content_type or "image/png"
@@ -15806,7 +15860,14 @@ async def _longform_character_reference(
             raise HTTPException(403, "Not your session")
         if not reference_image.content_type or not reference_image.content_type.startswith("image/"):
             raise HTTPException(400, "Reference file must be an image")
-        raw = await reference_image.read()
+        try:
+            raw = await read_upload_limited(
+                reference_image,
+                max_bytes=MAX_LONGFORM_REFERENCE_IMAGE_BYTES,
+                label="long-form character reference image",
+            )
+        except UploadTooLargeError as exc:
+            raise HTTPException(413, "Character reference image exceeds 8MB") from exc
         if not raw:
             raise HTTPException(400, "Reference image is empty")
         mime = reference_image.content_type or "image/png"
@@ -15887,10 +15948,68 @@ async def _longform_scene_assignment(
     }
 
 
-async def _longform_reference_file(filename: str):
+def _media_value_matches_filename(value: object, filename: str) -> bool:
+    text = str(value or "").strip()
+    if not text or text.startswith("data:"):
+        return False
+    try:
+        parsed = urlparse(text)
+        candidate = unquote(parsed.path or text).replace("\\", "/")
+    except Exception:
+        candidate = text.replace("\\", "/")
+    return candidate.rstrip("/").rsplit("/", 1)[-1] == filename
+
+
+def _longform_session_references_file(session: dict, filename: str) -> bool:
+    values = [
+        session.get("reference_image_path"),
+        session.get("reference_image_public_url"),
+    ]
+    for raw_reference in list(session.get("character_references") or []):
+        if not isinstance(raw_reference, dict):
+            continue
+        values.extend(
+            [
+                raw_reference.get("reference_image_path"),
+                raw_reference.get("reference_image_public_url"),
+            ]
+        )
+    return any(_media_value_matches_filename(value, filename) for value in values)
+
+
+def _longform_session_references_preview(session: dict, filename: str) -> bool:
+    for raw_chapter in list(session.get("chapters") or []):
+        if not isinstance(raw_chapter, dict):
+            continue
+        for raw_scene in list(raw_chapter.get("scenes") or []):
+            if isinstance(raw_scene, dict) and _media_value_matches_filename(raw_scene.get("image_url"), filename):
+                return True
+    return False
+
+
+async def _require_longform_media_owner(filename: str, user: dict, *, preview: bool = False) -> None:
+    uid = str((user or {}).get("id") or "").strip()
+    if not uid:
+        raise HTTPException(401, "Auth required")
+    matcher = _longform_session_references_preview if preview else _longform_session_references_file
+    async with _longform_sessions_lock:
+        _load_longform_sessions()
+        sessions = [dict(item or {}) for item in _longform_sessions.values() if isinstance(item, dict)]
+    for session in sessions:
+        if matcher(session, filename) and str(session.get("user_id") or "").strip() == uid:
+            return
+    # Missing, orphaned, and cross-account media intentionally look identical.
+    raise HTTPException(404, "Media not found")
+
+
+async def _longform_reference_file(filename: str, request: Request = None):
     safe = os.path.basename(filename)
     if not safe or safe != filename:
         raise HTTPException(400, "Invalid filename")
+    user = await get_current_user_from_request(request) if request else None
+    if not user:
+        raise HTTPException(401, "Auth required")
+    await _require_longform_media_owner(safe, user)
     path = TEMP_DIR / "longform_references" / safe
     if not path.exists():
         raise HTTPException(404, "Reference image not found")
@@ -16045,10 +16164,14 @@ async def _list_longform_sessions(request: Request = None, limit: int = 25):
     return {"sessions": sessions[:limit]}
 
 
-async def _longform_preview_file(filename: str):
+async def _longform_preview_file(filename: str, request: Request = None):
     safe = os.path.basename(filename)
     if not safe or safe != filename:
         raise HTTPException(400, "Invalid filename")
+    user = await get_current_user_from_request(request) if request else None
+    if not user:
+        raise HTTPException(401, "Auth required")
+    await _require_longform_media_owner(safe, user, preview=True)
     path = LONGFORM_PREVIEW_DIR / safe
     if not path.exists():
         raise HTTPException(404, "Preview not found")
@@ -17187,11 +17310,16 @@ async def _creative_reference_image(
     if not reference_image.content_type or not reference_image.content_type.startswith("image/"):
         raise HTTPException(400, "Reference file must be an image")
 
-    raw = await reference_image.read()
+    try:
+        raw = await read_upload_limited(
+            reference_image,
+            max_bytes=MAX_LONGFORM_REFERENCE_IMAGE_BYTES,
+            label="creative reference image",
+        )
+    except UploadTooLargeError as exc:
+        raise HTTPException(413, "Reference image must be <= 8MB") from exc
     if not raw:
         raise HTTPException(400, "Reference image is empty")
-    if len(raw) > 8 * 1024 * 1024:
-        raise HTTPException(400, "Reference image must be <= 8MB")
 
     lock_mode = _normalize_reference_lock_mode(reference_lock_mode, default=_normalize_reference_lock_mode(session.get("reference_lock_mode"), "strict"))
     quality = _analyze_reference_quality(raw, lock_mode=lock_mode)
@@ -17233,11 +17361,31 @@ async def _creative_reference_image(
     }
 
 
-async def _creative_reference_file(filename: str):
+async def _creative_reference_file(filename: str, request: Request = None):
     """Serve uploaded creative reference images over HTTPS for provider conditioning."""
     safe = os.path.basename(filename)
     if not safe or safe != filename:
         raise HTTPException(400, "Invalid filename")
+    user = await get_current_user_from_request(request) if request else None
+    if not user:
+        raise HTTPException(401, "Auth required")
+    stem = Path(safe).stem
+    if not stem.endswith("_reference"):
+        raise HTTPException(404, "Reference image not found")
+    session_id = stem[: -len("_reference")]
+    session = await _get_creative_session(session_id)
+    if (
+        not session
+        or str(session.get("user_id") or "").strip() != str(user.get("id") or "").strip()
+        or not any(
+            _media_value_matches_filename(value, safe)
+            for value in (
+                session.get("reference_image_path"),
+                session.get("reference_image_public_url"),
+            )
+        )
+    ):
+        raise HTTPException(404, "Reference image not found")
     path = TEMP_DIR / "creative_references" / safe
     if not path.exists():
         raise HTTPException(404, "Reference image not found")
@@ -18580,6 +18728,51 @@ mount_router(
     )
 )
 
+
+def _cliplab_debit_credits(user_id: str, credits: int, reason: str, metadata: dict | None = None) -> bool:
+    import unified_credits as uc
+
+    ok, _balance = uc.debit_credits(
+        str(user_id or ""),
+        int(credits or 0),
+        reason=str(reason or "cliplab"),
+        metadata=dict(metadata or {}),
+    )
+    return bool(ok)
+
+
+def _cliplab_refund_credits(user_id: str, credits: int, reason: str, metadata: dict | None = None) -> None:
+    import unified_credits as uc
+
+    details = dict(metadata or {})
+    refund_key = str(
+        details.get("job_id")
+        or details.get("upload_id")
+        or details.get("video_id")
+        or ""
+    ).strip()
+    uc.add_credits(
+        str(user_id or ""),
+        int(credits or 0),
+        reason=str(reason or "cliplab_refund"),
+        metadata=details,
+        idempotency_key=f"cliplab_refund:{refund_key}:{int(credits or 0)}" if refund_key else "",
+    )
+
+
+mount_router(
+    app,
+    build_cliplab_router(
+        require_auth=require_auth,
+        jobs=jobs,
+        fal_json_completion=_fal_any_llm_json_completion,
+        fal_ai_key=FAL_AI_KEY,
+        debit_credits=_cliplab_debit_credits,
+        refund_credits=_cliplab_refund_credits,
+    ),
+)
+
+
 mount_router(
     app,
     build_studio_analytics_router(
@@ -18631,6 +18824,7 @@ _studio_shorts_ideas, _studio_queue_status = build_studio_utility_handlers(
 mount_router(
     app,
     build_studio_utility_router(
+        require_auth=require_auth,
         shorts_ideas_endpoint=_studio_shorts_ideas,
         queue_status_endpoint=_studio_queue_status,
     ),
@@ -18783,7 +18977,12 @@ def _user_has_paid_access(user: dict | None) -> bool:
     return bool(user)
 
 
-async def _generate_short(req: GenerateRequest, background_tasks: BackgroundTasks, request: Request = None):
+async def _generate_short(
+    req: GenerateRequest,
+    background_tasks: BackgroundTasks,
+    request: Request = None,
+    user: dict = Depends(require_auth),
+):
     # All hot-path LLM + image generation runs through fal.ai now. Gate on the
     # actual credential we need. XAI_API_KEY is still in env because Catalyst
     # admin analysis hits `_xai_json_completion_multimodal` direct — non-hot,
@@ -18791,9 +18990,10 @@ async def _generate_short(req: GenerateRequest, background_tasks: BackgroundTask
     if not FAL_AI_KEY:
         raise HTTPException(500, "FAL_AI_KEY not configured")
 
-    user = await get_current_user_from_request(request) if request else None
+    if not isinstance(user, dict) or not str(user.get("id", "") or "").strip():
+        raise HTTPException(401, "Authentication required. Please sign in.")
     _assert_not_waitlist_only_for_non_owner(user)
-    if user and not _user_has_paid_access(user):
+    if not _user_has_paid_access(user):
         raise HTTPException(402, "Active subscription required. Please choose a plan.")
     _ensure_template_allowed(req.template, user)
     quality_mode = _normalize_skeleton_quality_mode(req.quality_mode, template=req.template)
@@ -18873,35 +19073,28 @@ async def _generate_short(req: GenerateRequest, background_tasks: BackgroundTask
         animation_enabled=animation_enabled,
     )
 
-    user_plan = "starter"
-    plan_limits = PLAN_LIMITS["starter"]
-    is_admin = False
-    if user:
-        user_plan, plan_limits = _resolve_user_plan_for_limits(user)
-        is_admin = user.get("email", "") in ADMIN_EMAILS
-        billing_active = _billing_active_for_user(user)
-        usage_kind = "animated" if animation_enabled else "non_animated"
-        can_render, credit_source, credit_state = await _reserve_generation_credit(
-            user,
-            user_plan if not is_admin else "pro",
-            billing_active,
-            is_admin=is_admin,
-            usage_kind=usage_kind,
-            credits_needed=credits_required,
+    user_plan, plan_limits = _resolve_user_plan_for_limits(user)
+    is_admin = user.get("email", "") in ADMIN_EMAILS
+    billing_active = _billing_active_for_user(user)
+    usage_kind = "animated" if animation_enabled else "non_animated"
+    can_render, credit_source, credit_state = await _reserve_generation_credit(
+        user,
+        user_plan if not is_admin else "pro",
+        billing_active,
+        is_admin=is_admin,
+        usage_kind=usage_kind,
+        credits_needed=credits_required,
+    )
+    if not can_render:
+        if usage_kind == "non_animated":
+            raise HTTPException(402, "Non-animated meter exhausted for this month. Please wait for renewal or upgrade plan.")
+        available_credits = int(credit_state.get("credits_total_remaining", 0) or 0)
+        required_credits = int(credit_state.get("credits_needed", credits_required) or credits_required)
+        video_profile = _creative_video_model_profile(resolved_video_model_id)
+        raise HTTPException(
+            402,
+            f"{video_profile.get('label', 'Selected video model')} needs {required_credits} Catalyst credits for this render, but only {available_credits} are available. Buy more credits or switch to slideshow.",
         )
-        if not can_render:
-            if usage_kind == "non_animated":
-                raise HTTPException(402, "Non-animated meter exhausted for this month. Please wait for renewal or upgrade plan.")
-            available_credits = int(credit_state.get("credits_total_remaining", 0) or 0)
-            required_credits = int(credit_state.get("credits_needed", credits_required) or credits_required)
-            video_profile = _creative_video_model_profile(resolved_video_model_id)
-            raise HTTPException(
-                402,
-                f"{video_profile.get('label', 'Selected video model')} needs {required_credits} Catalyst credits for this render, but only {available_credits} are available. Buy more credits or switch to slideshow.",
-            )
-    else:
-        credit_source = ""
-        credit_state = {"month_key": _month_key()}
     transition_style = _normalize_transition_style(req.transition_style)
     micro_escalation_mode = _normalize_micro_escalation_mode(req.micro_escalation_mode, template=req.template)
     cinematic_boost = _normalize_cinematic_boost(getattr(req, "cinematic_boost", False))
@@ -18918,7 +19111,7 @@ async def _generate_short(req: GenerateRequest, background_tasks: BackgroundTask
         "mode": "auto_generate",
         "resolution": resolution,
         "plan": user_plan,
-        "user_id": user.get("id") if user else None,
+        "user_id": str(user.get("id", "") or ""),
         "created_at": time.time(),
         "quality_mode": quality_mode,
         "mint_mode": mint_mode,
@@ -18942,7 +19135,7 @@ async def _generate_short(req: GenerateRequest, background_tasks: BackgroundTask
         "reference_quality": reference_quality,
         "image_model_id": resolved_image_model_id,
         "video_model_id": resolved_video_model_id,
-        "credit_charged": bool(user),
+        "credit_charged": True,
         "credit_source": credit_source,
         "credit_amount": credits_required,
         "credit_cost": credits_required if animation_enabled else 0,
@@ -18961,26 +19154,25 @@ async def _generate_short(req: GenerateRequest, background_tasks: BackgroundTask
     except Exception as _e:
         _log.error(f"[{job_id}] auto finalize: persist EXC: {type(_e).__name__}: {_e}")
     language = req.language if req.language in SUPPORTED_LANGUAGES else "en"
-    if user:
-        project_id = _new_project_id()
-        await _create_or_update_project(project_id, {
-            "user_id": user.get("id"),
-            "template": req.template,
-            "topic": req.prompt,
-            "mode": "auto",
-            "status": "rendering",
-            "resolution": resolution,
-            "language": language,
-            "art_style": art_style,
-            "cinematic_boost": cinematic_boost,
-            "voice_id": voice_id,
-            "voice_speed": voice_speed,
-            "pacing_mode": pacing_mode,
-            "animation_enabled": animation_enabled,
-            "youtube_channel_id": youtube_channel_id,
-            "job_id": job_id,
-        })
-        jobs[job_id]["project_id"] = project_id
+    project_id = _new_project_id()
+    await _create_or_update_project(project_id, {
+        "user_id": user.get("id"),
+        "template": req.template,
+        "topic": req.prompt,
+        "mode": "auto",
+        "status": "rendering",
+        "resolution": resolution,
+        "language": language,
+        "art_style": art_style,
+        "cinematic_boost": cinematic_boost,
+        "voice_id": voice_id,
+        "voice_speed": voice_speed,
+        "pacing_mode": pacing_mode,
+        "animation_enabled": animation_enabled,
+        "youtube_channel_id": youtube_channel_id,
+        "job_id": job_id,
+    })
+    jobs[job_id]["project_id"] = project_id
 
     try:
         await enqueue_generation_job(
@@ -19009,26 +19201,43 @@ async def _generate_short(req: GenerateRequest, background_tasks: BackgroundTask
 mount_router(
     app,
     build_generation_router(
+        require_auth=require_auth,
         generate_short_endpoint=_generate_short,
     )
 )
 
 
-async def _auto_scene_image(job_id: str, filename: str):
+async def _auto_scene_image(job_id: str, filename: str, *, user: dict):
+    try:
+        normalized_job_id = _validated_auto_scene_job_id(job_id)
+    except ValueError:
+        raise HTTPException(400, "Invalid job id")
     safe = Path(filename).name
-    if safe != filename:
+    if (
+        safe != filename
+        or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,180}\.(?:png|jpe?g|webp)", safe, flags=re.IGNORECASE)
+    ):
         raise HTTPException(400, "Invalid filename")
-    path = _auto_scene_dir(job_id) / safe
-    if not path.exists():
+
+    state = jobs.get(normalized_job_id)
+    if not isinstance(state, dict):
+        state = await get_persisted_job_state(normalized_job_id)
+    if not isinstance(state, dict) or not job_access_allowed(state, user, ADMIN_EMAILS):
+        raise HTTPException(404, "Image not found")
+
+    path = _auto_scene_dir(normalized_job_id, create=False) / safe
+    if not path.is_file():
         raise HTTPException(404, "Image not found")
     media_type = "image/png" if path.suffix.lower() == ".png" else "image/jpeg"
     return FileResponse(str(path), media_type=media_type, filename=safe)
 
 
-async def _auto_regenerate_scene_image(body: dict, request: Request = None):
+async def _auto_regenerate_scene_image(body: dict, request: Request = None, *, user: dict):
     job_id = str((body or {}).get("job_id", "") or "").strip()
-    if not job_id:
-        raise HTTPException(400, "job_id is required")
+    try:
+        job_id = _validated_auto_scene_job_id(job_id)
+    except ValueError:
+        raise HTTPException(400, "Invalid job id")
     try:
         scene_index = int((body or {}).get("scene_index", 0))
     except Exception:
@@ -19043,12 +19252,8 @@ async def _auto_regenerate_scene_image(body: dict, request: Request = None):
         state = dict(persisted)
         in_memory_job = False
 
-    # If the job is tied to a user, require matching auth for regeneration.
-    owner_user_id = str(state.get("user_id", "") or "")
-    if owner_user_id:
-        user = await get_current_user_from_request(request) if request else None
-        if not user or str(user.get("id", "")) != owner_user_id:
-            raise HTTPException(403, "Not authorized for this job")
+    if not job_access_allowed(state, user, ADMIN_EMAILS):
+        raise HTTPException(404, "Job not found")
 
     resolution = str(state.get("resolution", "720p") or "720p")
     if resolution != "720p":
@@ -19153,9 +19358,15 @@ _job_status_payload = build_job_status_payload(
     get_persisted_job_state=get_persisted_job_state,
     record_kpi_for_job=_record_kpi_for_job,
     persist_job_state=persist_job_state,
+    admin_emails=ADMIN_EMAILS,
 )
 
-_download_video_response = build_download_video_response(output_dir=OUTPUT_DIR)
+_download_video_response = build_download_video_response(
+    output_dir=OUTPUT_DIR,
+    jobs_ref=jobs,
+    get_persisted_job_state=get_persisted_job_state,
+    admin_emails=ADMIN_EMAILS,
+)
 
 
 _render_chat_story = build_render_chat_story_handler(
@@ -19166,6 +19377,8 @@ _render_chat_story = build_render_chat_story_handler(
     output_dir=OUTPUT_DIR,
     render_script_path=Path(__file__).resolve().parent / "ops" / "render_chat_story.py",
     log=log,
+    jobs_ref=jobs,
+    persist_job_state=persist_job_state,
 )
 
 CLONE_ANALYSIS_PROMPT = """You are a viral video reverse-engineering expert. Analyze the source video and extract its EXACT winning formula so it can be replicated on a new topic.
@@ -19705,13 +19918,25 @@ _clone_video = build_clone_video_handler(
     queue_full_error=QueueFullError,
     run_clone_pipeline=run_clone_pipeline,
     persist_job_state=persist_job_state,
+    resolve_user_plan_for_limits=_resolve_user_plan_for_limits,
+    billing_active_for_user=_billing_active_for_user,
+    is_admin_user=_is_admin_user,
+    reserve_generation_credit=_reserve_generation_credit,
+    refund_generation_credit=_refund_generation_credit,
+    clone_credit_cost=estimate_auto_short_credits(
+        scene_count=10,
+        video_per_scene=_creative_video_credit_multiplier(DEFAULT_CREATIVE_VIDEO_MODEL_ID),
+        image_per_scene=_creative_image_credit_cost(DEFAULT_CREATIVE_IMAGE_MODEL_ID),
+        animation_enabled=True,
+    ),
 )
 
-_list_jobs_payload = build_list_jobs_payload(jobs_ref=jobs)
+_list_jobs_payload = build_list_jobs_payload(jobs_ref=jobs, admin_emails=ADMIN_EMAILS)
 
 mount_router(
     app,
     build_media_router(
+        require_auth=require_auth,
         auto_scene_image_handler=_auto_scene_image,
         auto_regenerate_scene_image_handler=_auto_regenerate_scene_image,
         job_status_handler=_job_status_payload,

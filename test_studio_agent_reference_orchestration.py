@@ -79,7 +79,7 @@ class ReferenceOrchestrationTests(unittest.TestCase):
         self.assertIn("extracting audio", text.lower())
         self.assertNotIn("production", text.lower())
 
-    def test_complete_reference_status_returns_findings_and_conclusion(self):
+    def test_pacing_only_reference_status_requires_deep_stage_retry(self):
         text = runner._format_polled_job_status(json.dumps({
             "job_id": "abcdef123456",
             "kind": "competitor",
@@ -94,7 +94,11 @@ class ReferenceOrchestrationTests(unittest.TestCase):
         self.assertIn("average shot length 5.00s", text)
         self.assertIn("10 detected cuts", text)
         self.assertIn("Conclusion:", text)
-        self.assertIn("fresh channel analytics and fresh public YouTube demand", text)
+        self.assertIn("Reference analysis only reached pacing metrics", text)
+        self.assertIn("ffmpeg pacing alone is not enough", text)
+        self.assertIn("vision/transcript/story stages", text)
+        self.assertIn("try again and watch the video", text)
+        self.assertNotIn("fresh channel analytics and fresh public YouTube demand", text)
 
     def test_recover_poll_target_uses_explicit_competitor_kind_not_hex_shape(self):
         session = {

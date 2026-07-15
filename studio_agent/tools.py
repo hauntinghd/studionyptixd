@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import hashlib
+import hmac
 import json
 import os
 import re
@@ -1808,8 +1809,8 @@ def tool_schemas() -> list[dict[str, Any]]:
                         "registry_key": {"type": "string", "description": "Studio channel registry key for Catalyst learning context."},
                         "provider": {
                             "type": "string",
-                            "enum": ["auto", "local", "opus", "hybrid"],
-                            "description": "ClipLab provider. Use opus only for owner/admin OpusClip testing; local keeps Studio's native Catalyst pipeline.",
+                            "enum": ["auto", "local"],
+                            "description": "ClipLab analysis provider. Auto currently selects Studio's native, model-agnostic ClipLab pipeline.",
                         },
                     },
                     "required": ["video_id", "prompt"],
@@ -4191,13 +4192,27 @@ def _spawn_shortform_background_stage(
     """Run a long shortform stage off the HTTP thread (animate, finalize, expand)."""
     ws = _shortform_workspace(job_id)
     marker = ws / f".{stage}.running"
-    if marker.is_file() and (time.time() - marker.stat().st_mtime) < 30:
+    if marker.is_file():
+        try:
+            marker_age = time.time() - marker.stat().st_mtime
+        except OSError:
+            marker_age = 0
+        if marker_age >= 6 * 60 * 60:
+            marker.unlink(missing_ok=True)
+    try:
+        descriptor = os.open(marker, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
         return json.dumps({
             "status": "running",
             "job_id": job_id,
             "stage": stage,
+            "idempotent_replay": True,
             "note": f"{stage.replace('_', ' ').title()} is already running. Poll job status for updates.",
         }, indent=2)
+    try:
+        os.write(descriptor, str(time.time()).encode("utf-8"))
+    finally:
+        os.close(descriptor)
 
     def _run() -> None:
         import traceback as _tb
@@ -4212,7 +4227,6 @@ def _spawn_shortform_background_stage(
         )
         hb_thread.start()
         try:
-            marker.write_text(str(time.time()), encoding="utf-8")
             (ws / "progress.json").write_text(
                 json.dumps({"stage": stage, "progress": 55, "detail": detail}, indent=2),
                 encoding="utf-8",
@@ -4241,7 +4255,11 @@ def _spawn_shortform_background_stage(
             except OSError:
                 pass
 
-    threading.Thread(target=_run, daemon=False, name=f"{stage}-{job_id}").start()
+    try:
+        threading.Thread(target=_run, daemon=False, name=f"{stage}-{job_id}").start()
+    except BaseException:
+        marker.unlink(missing_ok=True)
+        raise
     return json.dumps({
         "status": "running",
         "job_id": job_id,
@@ -4254,7 +4272,29 @@ def spawn_animate_production_scenes(
     job_id: str,
     scene_indices: list[int] | None = None,
     max_budget_usd: float | None = None,
+    *,
+    user_id: str = "",
+    session_id: str | None = None,
+    command_id: str = "",
 ) -> str:
+    if str(user_id or "").strip():
+        return _spawn_shortform_background_stage(
+            job_id,
+            stage="animate",
+            detail="Animating approved scenes (i2v).",
+            work=lambda: execute_tool_logged(
+                "animate_production_scenes",
+                {
+                    "job_id": job_id,
+                    "scene_indices": scene_indices,
+                    "max_budget_usd": max_budget_usd,
+                    "command_id": command_id,
+                },
+                user_id=str(user_id).strip(),
+                content_format="short",
+                session_id=session_id,
+            ),
+        )
     return _spawn_shortform_background_stage(
         job_id,
         stage="animate",
@@ -4268,7 +4308,31 @@ def spawn_finalize_production(
     *,
     captions_enabled: bool | None = None,
     caption_mode: str | None = None,
+    user_id: str = "",
+    session_id: str | None = None,
+    command_id: str = "",
 ) -> str:
+    preflight = shortform_finalize_preflight(job_id)
+    if preflight.get("status") != "ready":
+        return json.dumps(preflight, indent=2)
+    if str(user_id or "").strip():
+        return _spawn_shortform_background_stage(
+            job_id,
+            stage="compose",
+            detail="Composing voice, captions, and final MP4.",
+            work=lambda: execute_tool_logged(
+                "finalize_production",
+                {
+                    "job_id": job_id,
+                    "captions_enabled": captions_enabled,
+                    "caption_mode": caption_mode,
+                    "command_id": command_id,
+                },
+                user_id=str(user_id).strip(),
+                content_format="short",
+                session_id=session_id,
+            ),
+        )
     return _spawn_shortform_background_stage(
         job_id,
         stage="compose",
@@ -4831,6 +4895,54 @@ def _apply_caption_instruction_to_options(ws: Path, instruction: str, opts: dict
     return opts
 
 
+def shortform_finalize_preflight(job_id: str) -> dict[str, Any]:
+    """Fail closed when a requested short-form animation is not durable yet."""
+    ws = _shortform_workspace(job_id)
+    try:
+        from skeleton_ai.styled_pipeline import load_scenes
+
+        scenes = load_scenes(ws)
+    except Exception as exc:
+        return {
+            "status": "finalize_preflight_unavailable",
+            "job_id": job_id,
+            "error": f"Studio could not inspect requested animation clips: {str(exc)[:300]}",
+            "note": "Finalize did not start. Retry after the scene workspace is readable.",
+        }
+
+    pending_animated: list[int] = []
+    workspace_root = ws.resolve()
+    for scene in scenes:
+        if not scene.get("animate"):
+            continue
+        try:
+            scene_index = int(scene.get("index", -1))
+        except (TypeError, ValueError):
+            scene_index = -1
+        clip_rel = str(scene.get("clip_rel") or f"clips/{scene.get('sid')}.mp4")
+        try:
+            clip_path = (ws / clip_rel).resolve()
+            clip_path.relative_to(workspace_root)
+            clip_ready = clip_path.is_file() and clip_path.stat().st_size > 0
+        except (OSError, ValueError):
+            clip_ready = False
+        if not clip_ready and scene_index >= 0:
+            pending_animated.append(scene_index)
+
+    if pending_animated:
+        return {
+            "status": "awaiting_animation",
+            "job_id": job_id,
+            "pending_animated_scenes": pending_animated,
+            "note": (
+                "These scenes are marked for animation but do not have i2v clips yet. "
+                "Run animate_production_scenes first, then finalize_production. "
+                "Studio will not silently downgrade requested animation into still-only video."
+            ),
+        }
+    return {"status": "ready", "job_id": job_id}
+
+
 def finalize_production(
     job_id: str,
     *,
@@ -4838,7 +4950,7 @@ def finalize_production(
     caption_mode: str | None = None,
 ) -> str:
     ws = _shortform_workspace(job_id)
-    from skeleton_ai.styled_pipeline import finalize_stage, load_scenes
+    from skeleton_ai.styled_pipeline import finalize_stage
     # Try to pick up a reedit_instruction sidecar if this finalize is part of a re-edit flow
     reedit = None
     try:
@@ -4852,29 +4964,10 @@ def finalize_production(
         captions_enabled=captions_enabled,
         caption_mode=caption_mode,
     )
+    preflight = shortform_finalize_preflight(job_id)
+    if preflight.get("status") != "ready":
+        return json.dumps(preflight, indent=2)
     try:
-        scenes = load_scenes(ws)
-        pending_animated = []
-        for sc in scenes:
-            if not sc.get("animate"):
-                continue
-            clip_rel = str(sc.get("clip_rel") or f"clips/{sc.get('sid')}.mp4")
-            clip_path = (ws / clip_rel).resolve()
-            if not clip_path.is_file() or clip_path.stat().st_size <= 0:
-                pending_animated.append(int(sc.get("index", -1)))
-        if pending_animated:
-            return json.dumps({
-                "status": "awaiting_animation",
-                "job_id": job_id,
-                "pending_animated_scenes": [
-                    idx for idx in pending_animated if idx >= 0
-                ],
-                "note": (
-                    "These scenes are marked for animation but do not have i2v clips yet. "
-                    "Run animate_production_scenes first, then finalize_production. "
-                    "Studio will not silently downgrade requested animation into still-only video."
-                ),
-            }, indent=2)
         # Visual QA gate: block only when explicitly required (fail-open for launch stability).
         qa_required = os.getenv("STUDIO_FINALIZE_QA_REQUIRED", "false").strip().lower() in {"1", "true", "yes"}
         try:
@@ -5203,6 +5296,70 @@ def cancel_shortform_job(job_id: str) -> bool:
     return True
 
 
+_SHORTFORM_EXISTING_JOB_TOOLS = frozenset({
+    "expand_visual_proof_shortform",
+    "list_production_scenes",
+    "edit_production_scene_still",
+    "edit_production_scenes_still",
+    "regenerate_production_scene_still",
+    "regenerate_production_scene",
+    "set_production_scenes_animate",
+    "set_production_scene_duration",
+    "animate_production_scenes",
+    "repair_production_scene_animation",
+    "finalize_production",
+    "re_edit_production",
+})
+_LONGFORM_EXISTING_JOB_TOOLS = frozenset({
+    "expand_longform_visual_proof",
+    "list_longform_scenes",
+    "regenerate_longform_still",
+    "finalize_longform_render",
+})
+_COMPETITOR_EXISTING_JOB_TOOLS = frozenset({
+    "retry_reference_analysis",
+    "build_scene_blueprint_from_reference",
+})
+
+
+def _enforce_tool_job_ownership(name: str, args: dict[str, Any], user_id: str) -> None:
+    """Prevent model/tool calls from crossing creator workspace boundaries."""
+    job_id = ""
+    kind = ""
+    if name in _SHORTFORM_EXISTING_JOB_TOOLS:
+        job_id, kind = str(args.get("job_id") or "").strip(), "shortform"
+    elif name in _LONGFORM_EXISTING_JOB_TOOLS:
+        job_id, kind = str(args.get("job_id") or "").strip(), "longform"
+    elif name in _COMPETITOR_EXISTING_JOB_TOOLS:
+        job_id, kind = str(args.get("job_id") or "").strip(), "competitor"
+    elif name == "poll_render_job":
+        job_id = str(args.get("job_id") or "").strip()
+        kind = str(args.get("kind") or "longform").strip().lower()
+    elif name == "poll_cliplab_job":
+        job_id, kind = str(args.get("job_id") or "").strip(), "cliplab"
+    elif name == "render_cliplab_segments":
+        job_id, kind = str(args.get("analyze_job_id") or "").strip(), "cliplab"
+    elif name == "generate_longform_thumbnails" and str(args.get("job_id") or "").strip():
+        job_id, kind = str(args.get("job_id") or "").strip(), "longform"
+    if not job_id:
+        return
+
+    from studio_agent import jobs as agent_jobs
+
+    access = agent_jobs.job_access_metadata(job_id, kind)
+    # Let the underlying tool produce its normal not-found response. Ownership
+    # checks apply as soon as a durable workspace/receipt exists.
+    if not access.get("exists"):
+        return
+    uid = str(user_id or "").strip()
+    owner_id = str(access.get("owner_id") or "").strip()
+    if owner_id and uid and hmac.compare_digest(owner_id, uid):
+        return
+    if _is_studio_admin_user(uid):
+        return
+    raise PermissionError("production job not found")
+
+
 def execute_tool(
     name: str,
     arguments: dict[str, Any],
@@ -5219,6 +5376,7 @@ def execute_tool(
             _require_cliplab_admin(user_id)
     if name in ("analyze_reference_video", "analyze_competitor_video"):
         name = "analyze_reference_video"
+    _enforce_tool_job_ownership(name, args, user_id)
 
     if name == "list_skills":
         return json.dumps({"skills": skill_loader.list_skill_slugs()}, indent=2)
@@ -5306,6 +5464,7 @@ def execute_tool(
         )
         channel["visual_style"] = f"{style_lock} {channel.get('visual_style') or ''}".strip()
         outline["render_style"] = style.key
+        outline["user_id"] = str(user_id or "").strip()
         outline["render_style_label"] = style.label
         outline["render_style_lock"] = style_lock
         outline["motion_policy"] = str(args.get("motion_policy") or outline.get("motion_policy") or "balanced")
@@ -6780,6 +6939,16 @@ def execute_tool(
         registry_key = str(args.get("registry_key") or ctx.get("registry_key") or "").strip()
         max_segments = max(1, min(int(args.get("max_segments") or 12), 40))
         provider = str(args.get("provider") or os.getenv("CLIPLAB_PROVIDER") or "auto").strip().lower()
+        analysis_session = (
+            store.get_session(
+                str(session_id),
+                user_id=str(user_id or ""),
+                reconcile_jobs=False,
+            )
+            if session_id
+            else {}
+        ) or {}
+        analysis_model = str(analysis_session.get("model") or "").strip()
         job_id = new_job_id("clipa")
         local_jobs = {
             job_id: {
@@ -6814,6 +6983,7 @@ def execute_tool(
                 registry_key=registry_key,
                 source="studio_agent_cliplab",
                 provider=provider,
+                model=analysis_model,
             ))
 
         threading.Thread(target=_worker, name=f"cliplab-analyze-{job_id}", daemon=True).start()
@@ -6833,7 +7003,7 @@ def execute_tool(
             "provider": provider,
             "prompt": prompt,
             "poll_tool": "poll_cliplab_job",
-            "next_action": "Poll poll_cliplab_job until status is complete. If provider is opusclip, review/download returned clips; otherwise choose segment_indices for render_cliplab_segments.",
+            "next_action": "Poll poll_cliplab_job until status is complete, then choose segment_indices for render_cliplab_segments.",
             "current": load_job_state(job_id),
         }, indent=2, ensure_ascii=True)
 
@@ -6919,6 +7089,7 @@ def execute_tool(
             background_mode = "blur"
         ctx = _session_channel_context(session_id)
         channel_id = str(args.get("channel_id") or ctx.get("channel_id") or "").strip()
+        registry_key = str(ctx.get("registry_key") or "").strip()
         job_id = new_job_id("remix")
         local_jobs = {
             job_id: {
@@ -6949,6 +7120,9 @@ def execute_tool(
                 burn_captions=bool(args.get("burn_captions", True)),
                 catalyst_channel_id=channel_id,
                 notes=str(args.get("notes") or "")[:500],
+                user_id=str(user_id or ""),
+                registry_key=registry_key,
+                source="studio_agent_cliplab",
             ))
 
         threading.Thread(target=_worker, name=f"cliplab-remix-{job_id}", daemon=True).start()
@@ -7072,6 +7246,7 @@ def execute_tool(
             )
             job_id = competitor.start_analysis_from_path(
                 local_path,
+                user_id=str(user_id or ""),
                 source_name=source_name,
                 scene_threshold=float(args.get("scene_threshold") or 0.3),
                 max_frames=int(args.get("max_frames") or 40),
@@ -7091,6 +7266,7 @@ def execute_tool(
             )
             job_id = competitor.start_analysis(
                 url,
+                user_id=str(user_id or ""),
                 scene_threshold=float(args.get("scene_threshold") or 0.3),
                 max_frames=int(args.get("max_frames") or 40),
                 content_format=fmt,
@@ -7395,8 +7571,23 @@ def execute_tool_logged(
     runpod_storage_stage: dict[str, Any] | None = None
     runpod_lease_dispatch_id = ""
     runpod_lease_created = False
-    command_id = _runpod_command_id(arguments) if runpod_route else ""
+    command_id = _runpod_command_id(arguments)
+    local_mutation_claim = None
     try:
+        if not runpod_route and command_id:
+            from studio_agent import idempotent_mutations
+
+            arguments = dict(arguments or {})
+            if name == "expand_visual_proof_shortform":
+                arguments.setdefault("command_id", command_id)
+            local_mutation_claim, replay = idempotent_mutations.begin(
+                tool_name=str(name or ""),
+                arguments=arguments,
+                command_id=command_id,
+                user_id=str(user_id or ""),
+            )
+            if replay is not None:
+                return json.dumps(replay, indent=2, ensure_ascii=False)
         if runpod_route and _runpod_workspace_kind(name) == "longform" and not runpod_longform_enabled():
             raise RuntimeError(
                 "RunPod long-form production is disabled by STUDIO_RUNPOD_LONGFORM_ENABLED; "
@@ -7675,6 +7866,13 @@ def execute_tool_logged(
             except Exception:
                 pass
     except Exception as exc:
+        if local_mutation_claim is not None:
+            try:
+                from studio_agent import idempotent_mutations
+
+                idempotent_mutations.fail(local_mutation_claim, exc)
+            except Exception:
+                pass
         if credit_reservation and not credit_reservation.get("unlimited"):
             try:
                 import unified_credits as uc
@@ -7771,6 +7969,17 @@ def execute_tool_logged(
         except Exception:
             pass
         raise
+    if local_mutation_claim is not None:
+        from studio_agent import idempotent_mutations
+
+        try:
+            parsed_result = json.loads(result or "{}")
+        except Exception:
+            parsed_result = {"raw_result": str(result or "")}
+        idempotent_mutations.complete(
+            local_mutation_claim,
+            parsed_result if isinstance(parsed_result, dict) else {"result": parsed_result},
+        )
     telemetry.record_tool_call(user_id, name, arguments, session_id=session_id, result_preview=result[:800])
     try:
         from studio_agent import training_capture

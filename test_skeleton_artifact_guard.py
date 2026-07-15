@@ -35,10 +35,9 @@ def test_scene_edit_prompt_puts_glass_container_ban_before_truncation():
     )
     lower = prompt.lower()
 
-    assert len(prompt) <= 1800
-    assert "glass-shell rule" in lower
-    assert "like clear skin" in lower
-    assert "bell jar" in lower
+    assert len(prompt) <= 300
+    assert lower.startswith("edit ref.")
+    assert "thin glass skin on bones only" in lower
+    assert "never dome/pod/capsule" in lower
+    assert "no human skin/text" in lower
     assert "capsule" in lower
-    assert "display case" in lower
-    assert "readable text" in lower

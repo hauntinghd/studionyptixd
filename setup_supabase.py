@@ -11,13 +11,14 @@ The service_role key has admin powers -- never expose it to the frontend.
 import os
 import sys
 import json
+import subprocess
 from pathlib import Path
 
 try:
     import httpx
 except ImportError:
     print("Installing httpx...")
-    os.system(f"{sys.executable} -m pip install httpx")
+    subprocess.run([sys.executable, "-m", "pip", "install", "httpx"], check=True)
     import httpx
 
 env_path = Path(__file__).parent / ".env"
@@ -28,34 +29,51 @@ if env_path.exists():
             key, val = line.split("=", 1)
             os.environ.setdefault(key.strip(), val.strip())
 
-SUPABASE_URL = os.getenv("SUPABASE_URL", "")
-SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "")
+REQUIRED_ENV_VARS = (
+    "SUPABASE_URL",
+    "SUPABASE_SERVICE_KEY",
+    "SUPABASE_ADMIN_EMAIL",
+    "SUPABASE_ADMIN_PASSWORD",
+    "SUPABASE_PRO_EMAIL",
+    "SUPABASE_PRO_PASSWORD",
+)
 
-if not SERVICE_KEY:
-    print("\n*** SUPABASE_SERVICE_KEY not found in .env ***")
-    print("Go to: Supabase Dashboard > Settings > API > service_role key")
-    print("Add to .env:  SUPABASE_SERVICE_KEY=eyJ...")
-    SERVICE_KEY = input("Or paste it here: ").strip()
-    if not SERVICE_KEY:
-        sys.exit(1)
 
-if not SUPABASE_URL:
-    print("SUPABASE_URL not set")
-    sys.exit(1)
-
-headers = {
-    "apikey": SERVICE_KEY,
-    "Authorization": f"Bearer {SERVICE_KEY}",
-    "Content-Type": "application/json",
-}
-
-ACCOUNTS = [
-    {"email": "omatic657@gmail.com", "password": "TheCCAS111##", "plan": "admin", "role": "admin"},
-    {"email": "alwakmyhem@gmail.com", "password": "TheCCAS113##", "plan": "pro", "role": "user"},
-]
+def _required_configuration() -> dict[str, str]:
+    config = {name: str(os.getenv(name, "") or "").strip() for name in REQUIRED_ENV_VARS}
+    missing = [name for name, value in config.items() if not value]
+    if missing:
+        # Report names only. Never echo credential values or offer an interactive
+        # paste path that can leak into a terminal transcript.
+        raise RuntimeError(f"Missing required environment variables: {', '.join(missing)}")
+    return config
 
 
 def main():
+    config = _required_configuration()
+    supabase_url = config["SUPABASE_URL"].rstrip("/")
+    service_key = config["SUPABASE_SERVICE_KEY"]
+    headers = {
+        "apikey": service_key,
+        "Authorization": f"Bearer {service_key}",
+        "Content-Type": "application/json",
+    }
+    accounts = [
+        {
+            "label": "admin",
+            "email": config["SUPABASE_ADMIN_EMAIL"],
+            "password": config["SUPABASE_ADMIN_PASSWORD"],
+            "plan": "admin",
+            "role": "admin",
+        },
+        {
+            "label": "pro",
+            "email": config["SUPABASE_PRO_EMAIL"],
+            "password": config["SUPABASE_PRO_PASSWORD"],
+            "plan": "pro",
+            "role": "user",
+        },
+    ]
     client = httpx.Client(timeout=30)
 
     print("\n=== STEP 1: Create profiles table via SQL ===")
@@ -103,7 +121,7 @@ def main():
     """
 
     resp = client.post(
-        f"{SUPABASE_URL}/rest/v1/rpc/",
+        f"{supabase_url}/rest/v1/rpc/",
         headers={**headers, "Prefer": ""},
         content=sql,
     )
@@ -118,11 +136,11 @@ def main():
         print("  Profiles table created!")
 
     print("\n=== STEP 2: Create user accounts ===")
-    for acct in ACCOUNTS:
-        print(f"\n  Creating {acct['email']}...")
+    for acct in accounts:
+        print(f"\n  Creating configured {acct['label']} account...")
 
         resp = client.get(
-            f"{SUPABASE_URL}/auth/v1/admin/users?per_page=500",
+            f"{supabase_url}/auth/v1/admin/users?per_page=500",
             headers=headers,
         )
         existing_id = None
@@ -132,12 +150,12 @@ def main():
             for u in users:
                 if u.get("email") == acct["email"]:
                     existing_id = u["id"]
-                    print(f"    Already exists (id: {existing_id})")
+                    print("    Account already exists")
                     break
 
         if not existing_id:
             resp = client.post(
-                f"{SUPABASE_URL}/auth/v1/admin/users",
+                f"{supabase_url}/auth/v1/admin/users",
                 headers=headers,
                 json={
                     "email": acct["email"],
@@ -148,26 +166,24 @@ def main():
             if resp.status_code in (200, 201):
                 user_data = resp.json()
                 existing_id = user_data.get("id")
-                print(f"    Created! (id: {existing_id})")
+                print("    Account created")
             else:
-                print(f"    ERROR creating user: {resp.status_code} {resp.text}")
+                print(f"    ERROR creating configured account (status {resp.status_code})")
                 continue
 
         print(f"    Setting plan to '{acct['plan']}'...")
         resp = client.post(
-            f"{SUPABASE_URL}/rest/v1/profiles",
+            f"{supabase_url}/rest/v1/profiles",
             headers={**headers, "Prefer": "resolution=merge-duplicates"},
             json={"id": existing_id, "plan": acct["plan"], "role": acct["role"]},
         )
         if resp.status_code in (200, 201):
             print(f"    Plan set!")
         else:
-            print(f"    Profile upsert: {resp.status_code} {resp.text}")
+            print(f"    Profile upsert failed (status {resp.status_code})")
 
     print("\n=== DONE ===")
-    print("Admin:  omatic657@gmail.com  (full admin, all features)")
-    print("Pro:    alwakmyhem@gmail.com  (pro plan, all features)")
-    print("\nBoth accounts have confirmed emails (no verification needed).")
+    print("Configured admin and pro accounts are ready with confirmed emails.")
 
     client.close()
 

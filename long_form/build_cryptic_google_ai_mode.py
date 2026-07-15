@@ -36,6 +36,16 @@ VOICE_MODEL = "eleven_multilingual_v2"
 VOICE_SPEED = 0.94
 
 
+def _require_https_url(url: str, *, expected_host: str | None = None) -> str:
+    value = str(url or "").strip()
+    parsed = urllib.parse.urlsplit(value)
+    if parsed.scheme.lower() != "https" or not parsed.hostname or parsed.username or parsed.password:
+        raise ValueError("refusing non-HTTPS or malformed URL")
+    if expected_host and parsed.hostname.lower() != expected_host.lower():
+        raise ValueError(f"refusing unexpected URL host: {parsed.hostname}")
+    return value
+
+
 def _load_env() -> None:
     try:
         from dotenv import load_dotenv
@@ -67,12 +77,16 @@ def _pexels_search(query: str, *, page: int = 1) -> list[dict]:
         "per_page": 20,
         "page": page,
     })
-    url = f"https://api.pexels.com/videos/search?{qs}"
+    url = _require_https_url(
+        f"https://api.pexels.com/videos/search?{qs}",
+        expected_host="api.pexels.com",
+    )
     req = urllib.request.Request(
         url,
         headers={"Authorization": key, "User-Agent": "CrypticScience/2.0"},
     )
-    with urllib.request.urlopen(req, timeout=60) as resp:
+    # The request URL is HTTPS and host-validated above.
+    with urllib.request.urlopen(req, timeout=60) as resp:  # nosec B310
         return (json.loads(resp.read().decode()).get("videos") or [])
 
 

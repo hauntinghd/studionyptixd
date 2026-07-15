@@ -43,6 +43,24 @@ _JOB_STATE_DIR.mkdir(parents=True, exist_ok=True)
 _background_tasks: set[asyncio.Task] = set()
 
 
+# Capacity admission and LPUSH must be one Redis operation.  A separate LLEN
+# followed by LPUSH lets concurrent API workers all observe the same free slot
+# and overfill the queue by an arbitrary amount.
+_REDIS_ENQUEUE_IF_CAPACITY_LUA = """
+local total = 0
+for index = 1, #KEYS do
+    total = total + redis.call('LLEN', KEYS[index])
+end
+local maximum = tonumber(ARGV[1])
+if total >= maximum then
+    return -1
+end
+local target = tonumber(ARGV[2])
+redis.call('LPUSH', KEYS[target], ARGV[3])
+return total + 1
+"""
+
+
 def _job_state_file(job_id: str) -> Path:
     return _JOB_STATE_DIR / f"{job_id}.json"
 
@@ -353,13 +371,12 @@ async def enqueue_generation_job(
     coro_func: Callable[..., Awaitable[Any]],
     args: tuple[Any, ...],
 ):
-    if _redis_enabled() and await _redis_available():
+    if _redis_enabled():
+        if not await _redis_available():
+            raise QueueFullError("Production queue is temporarily unavailable. Please retry shortly.")
         try:
             redis = await _get_redis()
             if redis is not None:
-                depth = await get_queue_depth()
-                if depth >= JOB_MAX_QUEUE_DEPTH:
-                    raise QueueFullError(f"Queue is full ({JOB_MAX_QUEUE_DEPTH}). Please retry shortly.")
                 priority = _plan_queue_priority(plan)
                 if _jobs_ref is not None and job_id in _jobs_ref:
                     _jobs_ref[job_id]["queue_priority"] = priority
@@ -372,12 +389,27 @@ async def enqueue_generation_job(
                     "priority": priority,
                     "queued_at": time.time(),
                 }
-                await redis.lpush(_queue_key(priority), json.dumps(payload, ensure_ascii=True))
+                admitted_depth = await redis.eval(
+                    _REDIS_ENQUEUE_IF_CAPACITY_LUA,
+                    3,
+                    _queue_key(0),
+                    _queue_key(1),
+                    _queue_key(2),
+                    JOB_MAX_QUEUE_DEPTH,
+                    priority + 1,
+                    json.dumps(payload, ensure_ascii=True),
+                )
+                if int(admitted_depth or -1) < 0:
+                    raise QueueFullError(f"Queue is full ({JOB_MAX_QUEUE_DEPTH}). Please retry shortly.")
                 return
         except QueueFullError:
             raise
         except Exception as e:
-            _log.warning(f"Redis enqueue failed; falling back to inprocess queue: {e}")
+            # A Redis timeout can be ambiguous: the atomic script may already
+            # have committed the job even when the response was lost.  Never
+            # start an in-process duplicate after that boundary.
+            _log.error(f"Redis enqueue failed closed: {e}")
+            raise QueueFullError("Production queue is temporarily unavailable. Please retry shortly.") from e
 
     # Inprocess path: production runs uvicorn under RunPod serverless workers
     # which keep a SINGLE long-lived event loop across requests for the worker's

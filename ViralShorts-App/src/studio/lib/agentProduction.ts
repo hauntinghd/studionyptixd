@@ -225,16 +225,71 @@ export async function cancelJob(
     }
 }
 
-export function mediaUrl(path: string, accessToken: string) {
-    const base = path.startsWith('http') ? path : agentApi(path.startsWith('/') ? path : `/${path}`);
-    const sep = base.includes('?') ? '&' : '?';
-    return `${base}${sep}token=${encodeURIComponent(accessToken)}`;
+export function resolveMediaAssetUrl(path: string) {
+    const value = String(path || '').trim();
+    if (!value) return '';
+    if (/^https?:\/\//i.test(value) || /^(?:blob:|data:(?:image|video|audio)\/)/i.test(value)) {
+        return value;
+    }
+    // Never turn an untrusted URI scheme into a clickable/renderable media URL.
+    if (/^[a-z][a-z0-9+.-]*:/i.test(value)) return '';
+    return agentApi(value.startsWith('/') ? value : `/${value}`);
+}
+
+export function isProtectedStudioMedia(path: string) {
+    const value = String(path || '').trim();
+    if (!value) return false;
+    if (!/^https?:\/\//i.test(value)) {
+        return !/^(?:blob:|data:)/i.test(value);
+    }
+    try {
+        const origin = new URL(value).origin;
+        const trustedOrigins = new Set([
+            agentApi('/api/studio-agent'),
+            agentApi('/api/download'),
+            agentApi('/api/auto/scene-image'),
+        ].map((candidate) => new URL(candidate).origin));
+        return trustedOrigins.has(origin);
+    } catch {
+        return false;
+    }
+}
+
+export async function fetchMediaAsset(
+    path: string,
+    accessToken: string,
+    init: RequestInit = {},
+) {
+    const url = resolveMediaAssetUrl(path);
+    if (!url) throw new Error('Invalid media URL');
+    const headers = new Headers(init.headers || undefined);
+    if (isProtectedStudioMedia(path)) {
+        if (!accessToken) throw new Error('Authentication required for this Studio asset');
+        headers.set('Authorization', `Bearer ${accessToken}`);
+    } else {
+        // A Studio JWT must never be forwarded to a third-party asset host.
+        headers.delete('Authorization');
+        headers.delete('X-Access-Token');
+        headers.delete('X-Auth-Token');
+    }
+    return fetch(url, { ...init, headers });
 }
 
 /** Download a Studio-served asset (thumbnails, stills, packages) without opening FAL URLs. */
 export async function downloadStudioAsset(path: string, accessToken: string, filename: string) {
-    const url = mediaUrl(path, accessToken);
-    const res = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } });
+    const url = resolveMediaAssetUrl(path);
+    if (!url) throw new Error('Invalid download URL');
+    if (!isProtectedStudioMedia(path)) {
+        const anchor = document.createElement('a');
+        anchor.href = url;
+        anchor.download = filename;
+        anchor.rel = 'noopener noreferrer';
+        document.body.appendChild(anchor);
+        anchor.click();
+        anchor.remove();
+        return;
+    }
+    const res = await fetchMediaAsset(path, accessToken);
     if (!res.ok) {
         throw new Error(`Download failed (${res.status})`);
     }
@@ -249,7 +304,7 @@ export async function downloadStudioAsset(path: string, accessToken: string, fil
         anchor.click();
         anchor.remove();
     } finally {
-        URL.revokeObjectURL(objectUrl);
+        window.setTimeout(() => URL.revokeObjectURL(objectUrl), 0);
     }
 }
 

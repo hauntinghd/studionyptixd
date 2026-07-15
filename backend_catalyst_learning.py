@@ -2536,7 +2536,7 @@ def _catalyst_strategy_fingerprint(strategy: dict) -> str:
     keys = ["hook_strategy", "pacing_strategy", "visual_strategy", "cut_profile", "opening_intensity"]
     parts = [str(strategy.get(k, "") or "").strip().lower() for k in keys]
     raw = "|".join(parts)
-    return _hashlib.md5(raw.encode()).hexdigest()[:12]
+    return _hashlib.sha256(raw.encode()).hexdigest()[:12]
 
 
 def _catalyst_update_strategy_correlation(

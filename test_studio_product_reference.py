@@ -47,7 +47,15 @@ class LongFormMotionBudgetTests(unittest.TestCase):
         self.assertEqual(cost["n_scenes"], 36)
         self.assertEqual(cost["animated_scenes"], 13)
         self.assertEqual(cost["still_motion_scenes"], 23)
-        self.assertLess(cost["breakdown"]["ltx_i2v_clips"], 36 * 0.04)
+        full_cost = compute_render_cost(
+            get_channel("empire_magnates"),
+            {**outline, "motion_policy": "full"},
+        )
+        self.assertEqual(full_cost["animated_scenes"], 36)
+        self.assertLess(
+            cost["breakdown"]["ltx_i2v_clips"],
+            full_cost["breakdown"]["ltx_i2v_clips"],
+        )
 
 
 if __name__ == "__main__":

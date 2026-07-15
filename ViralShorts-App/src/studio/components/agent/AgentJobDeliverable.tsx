@@ -1,6 +1,7 @@
 import { ArrowLeft, Box, Check, CheckCircle2, Clapperboard, Download, FileText, Film, Loader2, Play, RefreshCw, Search, Square, Wand2, X } from 'lucide-react';
 import { createElement, memo, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import { AuthContext } from '../../shared';
+import { useAuthenticatedMediaUrls } from '../../hooks/useAuthenticatedMedia';
 import type { AgentJobSnapshot, AgentSceneSnapshot } from '../../lib/agentProduction';
 import {
     agentJobAnimateUrl,
@@ -16,7 +17,6 @@ import {
     agentJobStillUrl,
     downloadStudioAsset,
     fetchJobSnapshot,
-    mediaUrl,
     normalizeAgentJobKind,
 } from '../../lib/agentProduction';
 
@@ -460,6 +460,8 @@ function AgentJobDeliverable({
     const [sceneActionBusy, setSceneActionBusy] = useState('');
     const [sceneActionError, setSceneActionError] = useState('');
     const [thumbnailDownloadBusy, setThumbnailDownloadBusy] = useState<number | null>(null);
+    const [assetDownloadBusy, setAssetDownloadBusy] = useState('');
+    const [assetDownloadError, setAssetDownloadError] = useState('');
     const [openModelUrl, setOpenModelUrl] = useState('');
     const [inspectSceneIdx, setInspectSceneIdx] = useState<number | null>(null);
     const [clockMs, setClockMs] = useState(() => Date.now());
@@ -539,6 +541,15 @@ function AgentJobDeliverable({
     ]);
 
     const stills = snapshot.still_preview_urls || [];
+    const thumbnailUrls = useMemo(
+        () => (snapshot.thumbnail_urls || []).filter(Boolean),
+        [snapshot.thumbnail_urls],
+    );
+    const thumbnailMedia = useAuthenticatedMediaUrls(
+        thumbnailUrls,
+        session?.access_token || '',
+        thumbnailUrls.length > 0,
+    );
     const sceneCards = useMemo<AgentSceneSnapshot[]>(() => {
         if (snapshot.scenes?.length) return snapshot.scenes;
         const count = Math.max(snapshot.total_scenes || 0, stills.length);
@@ -555,17 +566,19 @@ function AgentJobDeliverable({
         (scene) => scene.approved_for_video || scene.approved_for_animation,
     ).length;
     const allScenesApproved = sceneCards.length > 0 && approvedSceneCount === sceneCards.length;
-    const modelUrls = useMemo(() => {
-        const raw = [
+    const modelPaths = useMemo(() => (
+        [
             snapshot.model_url,
             ...(snapshot.model_urls || []),
             ...(snapshot.asset_urls || []),
-        ].filter(Boolean) as string[];
-        const tok = session?.access_token || '';
-        return raw
-            .filter(isModelUrl)
-            .map((url) => (url.startsWith('http') ? url : tok ? mediaUrl(url, tok) : url));
-    }, [session?.access_token, snapshot.asset_urls, snapshot.model_url, snapshot.model_urls]);
+        ].filter(Boolean).filter((url) => isModelUrl(String(url))) as string[]
+    ), [snapshot.asset_urls, snapshot.model_url, snapshot.model_urls]);
+    const modelMedia = useAuthenticatedMediaUrls(
+        modelPaths,
+        session?.access_token || '',
+        modelPaths.length > 0,
+    );
+    const modelUrls = modelMedia.urls.filter(Boolean);
     const totalScenes = snapshot.total_scenes || stills.length || 0;
     const currentScene = snapshot.current_scene || 0;
     const pct = Math.max(0, Math.min(100, Number(
@@ -574,6 +587,11 @@ function AgentJobDeliverable({
     const clipLabClips = useMemo(
         () => (Array.isArray(snapshot.clips) ? snapshot.clips : []).filter(Boolean) as ClipLabClip[],
         [snapshot.clips],
+    );
+    const clipLabMedia = useAuthenticatedMediaUrls(
+        clipLabClips.map((clip) => clip.url || ''),
+        session?.access_token || '',
+        complete && isClipLabRender && clipLabClips.length > 0,
     );
     const clipLabPackages = useMemo(
         () => (Array.isArray(snapshot.upload_packages) ? snapshot.upload_packages : []).filter(Boolean) as ClipLabUploadPackage[],
@@ -859,7 +877,6 @@ function AgentJobDeliverable({
     const isLongform = snapshot.kind === 'longform';
     const isVisualProof = Boolean(snapshot.visual_proof_only) && awaiting;
     const isThumbnailOnly = Boolean(snapshot.thumbnail_only);
-    const thumbnailUrls = (snapshot.thumbnail_urls || []).filter(Boolean);
     const stageLabel = snapshot.stage_label || (running ? 'Working…' : awaiting ? 'Review stills' : complete ? 'Complete' : '');
     // Keep the scene grid visible while i2v runs so the clip lands in-chat.
     const showSceneReviewGrid = (
@@ -968,12 +985,16 @@ function AgentJobDeliverable({
                                     key={`${url}-${idx}`}
                                     className="overflow-hidden rounded-lg border border-white/10 bg-black/30"
                                 >
-                                    <img
-                                        src={mediaUrl(url, session?.access_token || '')}
-                                        alt={`Thumbnail candidate ${idx + 1}`}
-                                        className="aspect-video w-full object-cover"
-                                        loading="lazy"
-                                    />
+                                    {thumbnailMedia.urls[idx] ? (
+                                        <img
+                                            src={thumbnailMedia.urls[idx]}
+                                            alt={`Thumbnail candidate ${idx + 1}`}
+                                            className="aspect-video w-full object-cover"
+                                            loading="lazy"
+                                        />
+                                    ) : (
+                                        <div className="aspect-video w-full animate-pulse bg-white/5" />
+                                    )}
                                     <div className="flex items-center justify-between gap-2 px-2 py-1.5">
                                         <div className="text-[10px] font-medium text-white/75">Candidate {idx + 1}</div>
                                         <button
@@ -1430,7 +1451,7 @@ function AgentJobDeliverable({
                                 {clipLabClips.map((clip, idx) => {
                                     const pkg = clipLabPackages.find((item) => Number(item.clip_index) === Number(clip.index ?? idx)) || clipLabPackages[idx];
                                     const tok = session?.access_token || '';
-                                    const href = clip.url?.startsWith('http') ? clip.url : clip.url && tok ? mediaUrl(clip.url, tok) : clip.url || '';
+                                    const href = clipLabMedia.urls[idx] || '';
                                     const breakdown = clip.score_breakdown || pkg?.score_breakdown || {};
                                     const editPlan = clip.edit_plan?.length ? clip.edit_plan : pkg?.edit_plan || [];
                                     const score = clip.virality_score ?? pkg?.virality_score;
@@ -1460,14 +1481,26 @@ function AgentJobDeliverable({
                                                             </p>
                                                         )}
                                                     </div>
-                                                    {href && (
-                                                        <a
-                                                            href={href}
-                                                            download={clip.filename || `cliplab_clip_${idx + 1}.mp4`}
+                                                    {clip.url && (
+                                                        <button
+                                                            type="button"
+                                                            disabled={!tok || assetDownloadBusy === `clip-${idx}`}
+                                                            onClick={() => {
+                                                                if (!tok || !clip.url) return;
+                                                                setAssetDownloadBusy(`clip-${idx}`);
+                                                                setAssetDownloadError('');
+                                                                void downloadStudioAsset(
+                                                                    clip.url,
+                                                                    tok,
+                                                                    clip.filename || `cliplab_clip_${idx + 1}.mp4`,
+                                                                ).catch((error) => {
+                                                                    setAssetDownloadError(error instanceof Error ? error.message : 'Download failed');
+                                                                }).finally(() => setAssetDownloadBusy(''));
+                                                            }}
                                                             className="shrink-0 rounded-lg border border-emerald-400/20 bg-emerald-500/10 px-2 py-1 text-[10px] font-semibold text-emerald-100 hover:bg-emerald-500/15"
                                                         >
-                                                            Download
-                                                        </a>
+                                                            {assetDownloadBusy === `clip-${idx}` ? 'Savingâ€¦' : 'Download'}
+                                                        </button>
                                                     )}
                                                 </div>
                                                 {pkg?.hook && <p className="text-[11px] text-cyan-100/80">Hook: {pkg.hook}</p>}
@@ -1625,34 +1658,53 @@ function AgentJobDeliverable({
                 <div className="border-t border-white/[0.06] bg-black/20 px-3 py-2">
                     {(() => {
                         const tok = session?.access_token || '';
-                        const downloadHref =
+                        const downloadPath =
                             videoSrc ||
-                            (snapshot.download_url && tok ? mediaUrl(snapshot.download_url, tok) : '') ||
-                            (snapshot.mp4_url && tok ? mediaUrl(snapshot.mp4_url, tok) : '');
-                        const packageHref =
-                            snapshot.package_url && tok
-                                ? mediaUrl(snapshot.package_url, tok)
-                                : snapshot.job_id && tok
-                                ? mediaUrl(agentJobPackageUrl(snapshot.job_id, snapshot.kind), tok)
-                                : '';
-                        return downloadHref ? (
+                            snapshot.download_url ||
+                            snapshot.mp4_url ||
+                            (snapshot.job_id ? agentJobMediaUrl(snapshot.job_id, snapshot.kind) : '');
+                        const packagePath = snapshot.package_url || (
+                            snapshot.job_id ? agentJobPackageUrl(snapshot.job_id, snapshot.kind) : ''
+                        );
+                        return downloadPath ? (
                             <>
-                                <a
-                                    href={downloadHref}
-                                    download={`${snapshot.job_id}.mp4`}
+                                <button
+                                    type="button"
+                                    disabled={!tok || assetDownloadBusy === 'video'}
+                                    onClick={() => {
+                                        if (!tok) return;
+                                        setAssetDownloadBusy('video');
+                                        setAssetDownloadError('');
+                                        void downloadStudioAsset(downloadPath, tok, `${snapshot.job_id}.mp4`)
+                                            .catch((error) => setAssetDownloadError(error instanceof Error ? error.message : 'Download failed'))
+                                            .finally(() => setAssetDownloadBusy(''));
+                                    }}
                                     className="flex items-center justify-center gap-2 rounded-xl bg-emerald-600 py-2 text-sm font-semibold text-white transition hover:bg-emerald-500"
                                 >
-                                    <Download className="h-4 w-4" /> Download MP4
-                                </a>
-                                {packageHref && (
-                                    <a
-                                        href={packageHref}
-                                        download={`${snapshot.job_id}_upload_package.txt`}
+                                    <Download className="h-4 w-4" /> {assetDownloadBusy === 'video' ? 'Savingâ€¦' : 'Download MP4'}
+                                </button>
+                                {packagePath && (
+                                    <button
+                                        type="button"
+                                        disabled={!tok || assetDownloadBusy === 'package'}
+                                        onClick={() => {
+                                            if (!tok) return;
+                                            setAssetDownloadBusy('package');
+                                            setAssetDownloadError('');
+                                            void downloadStudioAsset(
+                                                packagePath,
+                                                tok,
+                                                `${snapshot.job_id}_upload_package.txt`,
+                                            ).catch((error) => {
+                                                setAssetDownloadError(error instanceof Error ? error.message : 'Download failed');
+                                            }).finally(() => setAssetDownloadBusy(''));
+                                        }}
                                         className="mt-2 flex items-center justify-center gap-2 rounded-xl border border-cyan-400/20 bg-cyan-500/10 py-2 text-sm font-semibold text-cyan-100 transition hover:bg-cyan-500/15"
                                     >
-                                        <FileText className="h-4 w-4" /> Upload package
-                                    </a>
+                                        <FileText className="h-4 w-4" /> {assetDownloadBusy === 'package' ? 'Savingâ€¦' : 'Upload package'}
+                                    </button>
                                 )}
+                                {assetDownloadError ? <p className="mt-2 text-xs text-red-300">{assetDownloadError}</p> : null}
                                 {onReply && (
                                     <button
                                         type="button"
@@ -1672,12 +1724,16 @@ function AgentJobDeliverable({
                                         <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
                                             {thumbnailUrls.map((url, idx) => (
                                                 <div key={`${url}-${idx}`} className="overflow-hidden rounded-lg border border-white/10 bg-black/30">
-                                                    <img
-                                                        src={mediaUrl(url, session?.access_token || '')}
-                                                        alt={`Thumbnail candidate ${idx + 1}`}
-                                                        className="aspect-video w-full object-cover"
-                                                        loading="lazy"
-                                                    />
+                                                    {thumbnailMedia.urls[idx] ? (
+                                                        <img
+                                                            src={thumbnailMedia.urls[idx]}
+                                                            alt={`Thumbnail candidate ${idx + 1}`}
+                                                            className="aspect-video w-full object-cover"
+                                                            loading="lazy"
+                                                        />
+                                                    ) : (
+                                                        <div className="aspect-video w-full animate-pulse bg-white/5" />
+                                                    )}
                                                     <div className="flex items-center justify-between gap-2 px-2 py-1.5">
                                                         <div className="text-[10px] font-medium text-white/75">Candidate {idx + 1}</div>
                                                         <button

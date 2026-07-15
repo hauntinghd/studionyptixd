@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 from studio_agent import production_budget
 
@@ -52,7 +53,7 @@ def test_budget_metadata_is_attached_to_json_results():
     assert payload["budget"]["estimated_usd"] <= payload["budget"]["max_budget_usd"]
 
 
-def test_shortform_full_auto_budget_uses_duration_and_model_rate():
+def test_shortform_start_budget_prices_only_the_required_visual_proof():
     estimate = production_budget.estimate_tool_cost(
         "start_shortform_generate",
         {
@@ -67,12 +68,18 @@ def test_shortform_full_auto_budget_uses_duration_and_model_rate():
     )
 
     breakdown = estimate.breakdown
-    assert breakdown["video_seconds"] == 72
+    assert breakdown["scene_count"] == 1
+    assert breakdown["visual_proof_only"] is True
+    assert breakdown["review_gate"] is True
+    assert breakdown["i2v_deferred_until_scene_approval"] is True
+    assert breakdown["requested_video_seconds"] == 72
+    assert breakdown["video_seconds"] == 0
     assert breakdown["video_model"] == "kling_pro"
-    assert breakdown["video_usd_per_second"] == production_budget._fallback("kling_v21_pro_per_second")
+    assert breakdown["video_usd"] == 0
     assert breakdown["tts_chars"] == 2400
+    assert breakdown["tts_pricing_note"] == "deferred_until_finalize"
     assert breakdown["cushion_pct"] >= 0.25
-    assert estimate.estimated_usd > breakdown["stills_usd"] + breakdown["video_usd"]
+    assert estimate.estimated_usd >= breakdown["stills_usd"]
 
 
 def test_shortform_review_gated_start_defers_final_audio_cost():
@@ -120,6 +127,7 @@ def test_finalize_production_budget_includes_narration_and_sound_design(tmp_path
     from studio_agent import jobs
 
     monkeypatch.setattr(jobs, "ROOT", tmp_path)
+    monkeypatch.setattr(jobs, "SKELETON_OUTPUT", Path("skeleton_output"))
     workspace = tmp_path / jobs.SKELETON_OUTPUT / "budgetshort"
     workspace.mkdir(parents=True)
     (workspace / "scenes.json").write_text(

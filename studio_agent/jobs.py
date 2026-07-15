@@ -24,6 +24,113 @@ SHORTFORM_RECLAIM_SEC = int(os.getenv("SHORTFORM_JOB_RECLAIM_SEC", "180"))  # re
 SHORTFORM_RECLAIM_MARKER_SEC = int(os.getenv("SHORTFORM_JOB_RECLAIM_MARKER_SEC", "240"))
 
 
+def valid_job_id(job_id: str) -> bool:
+    """Job ids are path components, never arbitrary filesystem input."""
+    jid = str(job_id or "").strip()
+    return bool(jid and len(jid) <= 48 and jid.replace("_", "").isalnum())
+
+
+def job_access_metadata(job_id: str, kind: str = "") -> dict[str, Any]:
+    """Return the durable owner/kind for an existing production job.
+
+    Legacy jobs without an owner remain visible only to an owner/admin at the
+    HTTP/tool boundary. This helper deliberately does not make that policy
+    decision; it only performs safe, read-only workspace inspection.
+    """
+    jid = str(job_id or "").strip()
+    requested = str(kind or "").strip().lower()
+    if not valid_job_id(jid):
+        return {"exists": False, "job_id": jid, "kind": requested, "owner_id": ""}
+
+    candidates = [requested] if requested in {"shortform", "longform", "competitor", "cliplab"} else []
+    candidates.extend(k for k in ("shortform", "longform", "competitor", "cliplab") if k not in candidates)
+
+    for candidate in candidates:
+        try:
+            if candidate == "shortform":
+                workspace = (ROOT / SKELETON_OUTPUT / jid).resolve()
+                expected_root = (ROOT / SKELETON_OUTPUT).resolve()
+                workspace.relative_to(expected_root)
+                if not workspace.is_dir():
+                    continue
+                owner_id = ""
+                spec_path = workspace / "job_spec.json"
+                if spec_path.is_file():
+                    payload = json.loads(spec_path.read_text(encoding="utf-8"))
+                    if isinstance(payload, dict):
+                        owner_id = str(payload.get("user_id") or "").strip()
+                return {"exists": True, "job_id": jid, "kind": candidate, "owner_id": owner_id}
+
+            if candidate == "longform":
+                from long_form import pipeline as lf_pipeline
+
+                workspace = lf_pipeline._job_dir(jid).resolve()
+                workspace.relative_to(lf_pipeline.LF_OUTPUT_ROOT.resolve())
+                state = lf_pipeline.load_state(jid) or {}
+                if not workspace.is_dir() and not state:
+                    continue
+                outline = state.get("outline") if isinstance(state.get("outline"), dict) else {}
+                owner_id = str(state.get("user_id") or outline.get("user_id") or "").strip()
+                return {"exists": True, "job_id": jid, "kind": candidate, "owner_id": owner_id}
+
+            if candidate == "competitor":
+                from studio_agent import competitor
+
+                workspace = (competitor.WORK_ROOT / jid).resolve()
+                workspace.relative_to(competitor.WORK_ROOT.resolve())
+                status_path = workspace / "status.json"
+                if not workspace.is_dir() and not status_path.is_file():
+                    continue
+                payload: dict[str, Any] = {}
+                if status_path.is_file():
+                    loaded = json.loads(status_path.read_text(encoding="utf-8"))
+                    if isinstance(loaded, dict):
+                        payload = loaded
+                return {
+                    "exists": True,
+                    "job_id": jid,
+                    "kind": candidate,
+                    "owner_id": str(payload.get("user_id") or "").strip(),
+                }
+
+            if candidate == "cliplab":
+                from cliplab.config import CLIPLAB_JOBS_DIR
+
+                state_path = (CLIPLAB_JOBS_DIR / f"{jid}.json").resolve()
+                state_path.relative_to(CLIPLAB_JOBS_DIR.resolve())
+                if not state_path.is_file():
+                    continue
+                loaded = json.loads(state_path.read_text(encoding="utf-8"))
+                payload = loaded if isinstance(loaded, dict) else {}
+                return {
+                    "exists": True,
+                    "job_id": jid,
+                    "kind": candidate,
+                    "owner_id": str(payload.get("user_id") or "").strip(),
+                }
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            continue
+
+    # A RunPod receipt is a durable job record even before its returned
+    # workspace has been synchronized back to Fly.
+    try:
+        from studio_agent import runpod_bridge
+
+        receipt = runpod_bridge.get_dispatch_receipt_by_studio_job_id(jid) or {}
+        if receipt:
+            tool = str(receipt.get("tool") or "").lower()
+            resolved_kind = "longform" if "longform" in tool else "shortform"
+            return {
+                "exists": True,
+                "job_id": jid,
+                "kind": resolved_kind,
+                "owner_id": str(receipt.get("billing_user_id") or "").strip(),
+            }
+    except Exception:
+        pass
+    return {"exists": False, "job_id": jid, "kind": requested, "owner_id": ""}
+
+
 def shortform_job_terminal_fast(job_id: str) -> bool:
     """Cheap terminal check for session active_jobs pruning (no QA / scene scans)."""
     jid = str(job_id or "").strip()
@@ -1871,9 +1978,39 @@ def _attach_render_qa(snap: dict[str, Any], job_id: str, kind: str) -> None:
         snap["ready_to_post"] = False
 
 
+def _cliplab_artifact_paths(job_id: str) -> tuple[dict[str, Any], list[Path]]:
+    from cliplab.config import CLIPLAB_RENDER_DIR
+    from cliplab.pipeline import load_job_state
+
+    state = load_job_state(job_id)
+    video_id = str(state.get("video_id") or "").strip()
+    if not state or not video_id or not valid_job_id(video_id):
+        return state, []
+    base = (CLIPLAB_RENDER_DIR / video_id).resolve()
+    rows = [row for row in list(state.get("clips") or []) if isinstance(row, dict)]
+    remix = state.get("remix")
+    if isinstance(remix, dict):
+        rows.insert(0, remix)
+    artifacts: list[Path] = []
+    for row in rows:
+        filename = Path(str(row.get("filename") or "")).name
+        if not filename:
+            continue
+        candidates = [Path(str(row.get("path") or base / filename)).resolve(), (base / filename).resolve()]
+        for candidate in candidates:
+            try:
+                candidate.relative_to(base)
+            except ValueError:
+                continue
+            if candidate.is_file():
+                artifacts.append(candidate)
+                break
+    return state, artifacts
+
+
 def resolve_media_path(job_id: str, kind: str) -> Path | None:
     kind = str(kind or "").strip().lower()
-    if not job_id.replace("_", "").isalnum() or len(job_id) > 48:
+    if not valid_job_id(job_id):
         return None
     if kind == "shortform":
         ws = (ROOT / SKELETON_OUTPUT / job_id).resolve()
@@ -1888,6 +2025,9 @@ def resolve_media_path(job_id: str, kind: str) -> Path | None:
 
         path = lf_pipeline.job_mp4_path(job_id)
         return path if path and path.exists() else None
+    if kind == "cliplab":
+        _state, artifacts = _cliplab_artifact_paths(job_id)
+        return artifacts[0] if artifacts else None
     return None
 
 
@@ -2082,9 +2222,49 @@ Studio promotion:
     return path
 
 
+def _build_cliplab_package(job_id: str) -> Path | None:
+    from cliplab.config import CLIPLAB_RENDER_DIR
+
+    state, artifacts = _cliplab_artifact_paths(job_id)
+    if not state or not artifacts:
+        return None
+    video_id = str(state.get("video_id") or "").strip()
+    base = (CLIPLAB_RENDER_DIR / video_id).resolve()
+    package_path = (base / f"{job_id}_package.txt").resolve()
+    try:
+        package_path.relative_to(base)
+    except ValueError:
+        return None
+    base.mkdir(parents=True, exist_ok=True)
+    prompt = str(state.get("prompt") or "").strip()
+    lines = [
+        "ClipLab export package",
+        f"Job: {job_id}",
+        f"Video: {video_id}",
+        f"Status: {state.get('status') or 'complete'}",
+    ]
+    if prompt:
+        lines.extend(["", "Clip-finding prompt:", prompt])
+    lines.extend(["", "Rendered files:"])
+    for index, artifact in enumerate(artifacts, start=1):
+        lines.append(f"{index}. {artifact.name}")
+    remix = state.get("remix") if isinstance(state.get("remix"), dict) else {}
+    if remix:
+        lines.extend([
+            "",
+            "Remix treatment:",
+            f"Style: {remix.get('style_preset') or state.get('style_preset') or 'clean_viral'}",
+            f"Captions: {remix.get('caption_style') or state.get('caption_style') or 'bold'}",
+            f"Intensity: {remix.get('edit_intensity') or state.get('edit_intensity') or 'medium'}",
+            f"Background: {remix.get('background_mode') or state.get('background_mode') or 'blur'}",
+        ])
+    package_path.write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
+    return package_path
+
+
 def resolve_package_path(job_id: str, kind: str) -> Path | None:
     kind = str(kind or "").strip().lower()
-    if not job_id.replace("_", "").isalnum() or len(job_id) > 48:
+    if not valid_job_id(job_id):
         return None
     if kind == "shortform":
         ws = (ROOT / SKELETON_OUTPUT / job_id).resolve()
@@ -2099,6 +2279,8 @@ def resolve_package_path(job_id: str, kind: str) -> Path | None:
         if p.is_file():
             return p
         return _build_longform_package(job_id)
+    if kind == "cliplab":
+        return _build_cliplab_package(job_id)
     return None
 
 

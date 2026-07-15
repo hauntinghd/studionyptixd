@@ -49,8 +49,12 @@ class StudioAgentRouterControlTests(unittest.TestCase):
         job_id = "shortform123"
         with (
             patch(
-                "studio_agent.tools.animate_production_scenes",
-                return_value=json.dumps({"ok": True, "job_id": job_id, "animated": [0, 1], "failed": []}),
+                "studio_agent.jobs.job_access_metadata",
+                return_value={"exists": True, "job_id": job_id, "kind": "shortform", "owner_id": "owner"},
+            ),
+            patch(
+                "studio_agent.tools.spawn_animate_production_scenes",
+                return_value=json.dumps({"status": "running", "job_id": job_id, "stage": "animate"}),
             ) as animate,
             patch(
                 "studio_agent.jobs.get_job_snapshot",
@@ -63,27 +67,45 @@ class StudioAgentRouterControlTests(unittest.TestCase):
                 },
             ),
         ):
-            response = self._client().post(f"/api/studio-agent/jobs/{job_id}/animate")
+            response = self._client().post(
+                f"/api/studio-agent/jobs/{job_id}/animate",
+                headers={"X-Idempotency-Key": "animate-shortform123"},
+            )
 
         self.assertEqual(response.status_code, 200)
-        animate.assert_called_once_with(job_id)
+        animate.assert_called_once_with(
+            job_id,
+            user_id="owner",
+            command_id="animate-shortform123",
+        )
         data = response.json()
         self.assertTrue(data["ok"])
         self.assertEqual(data["snapshot"]["animation_complete_count"], 2)
 
     def test_shortform_finalize_blocks_when_requested_animation_is_missing(self):
         job_id = "shortform123"
-        with patch(
-            "studio_agent.tools.finalize_production",
-            return_value=json.dumps({
+        with (
+            patch(
+                "studio_agent.jobs.job_access_metadata",
+                return_value={"exists": True, "job_id": job_id, "kind": "shortform", "owner_id": "owner"},
+            ),
+            patch(
+                "studio_agent.tools.shortform_finalize_preflight",
+                return_value={
                 "status": "awaiting_animation",
                 "job_id": job_id,
                 "pending_animated_scenes": [0, 1],
-            }),
+                },
+            ),
+            patch("studio_agent.tools.spawn_finalize_production") as spawn,
         ):
-            response = self._client().post(f"/api/studio-agent/jobs/{job_id}/finalize?kind=shortform")
+            response = self._client().post(
+                f"/api/studio-agent/jobs/{job_id}/finalize?kind=shortform",
+                headers={"X-Idempotency-Key": "finalize-shortform123"},
+            )
 
         self.assertEqual(response.status_code, 409)
+        spawn.assert_not_called()
         data = response.json()
         self.assertEqual(data["detail"]["status"], "awaiting_animation")
         self.assertEqual(data["detail"]["pending_animated_scenes"], [0, 1])

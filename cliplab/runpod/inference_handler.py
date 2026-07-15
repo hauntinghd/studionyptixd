@@ -44,9 +44,14 @@ _DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 def _torch_load(path: str) -> dict:
     try:
-        return torch.load(path, map_location=_DEVICE, weights_only=False)
-    except TypeError:
-        return torch.load(path, map_location=_DEVICE)
+        checkpoint = torch.load(path, map_location=_DEVICE, weights_only=True)
+    except TypeError as exc:
+        raise RuntimeError(
+            "safe checkpoint loading requires a PyTorch version with weights_only support"
+        ) from exc
+    if not isinstance(checkpoint, dict):
+        raise ValueError("checkpoint must contain a weights-only state dictionary")
+    return checkpoint
 
 
 def _load_virality(weights_path: str) -> tuple[ViralityReranker, TextEmbedder]:

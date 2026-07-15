@@ -1,7 +1,8 @@
 import { useContext, useState } from 'react';
 import { Download, Image as ImageIcon } from 'lucide-react';
 import { AuthContext } from '../../shared';
-import { downloadStudioAsset, mediaUrl } from '../../lib/agentProduction';
+import { downloadStudioAsset } from '../../lib/agentProduction';
+import { useAuthenticatedMediaUrls } from '../../hooks/useAuthenticatedMedia';
 
 export type ThumbnailReview = {
     review_id?: string;
@@ -28,6 +29,7 @@ export default function ThumbnailReviewCard({ review }: { review: ThumbnailRevie
     const [downloadError, setDownloadError] = useState('');
     const urls = (review.candidate_urls || []).filter(Boolean);
     const token = session?.access_token || '';
+    const thumbnailMedia = useAuthenticatedMediaUrls(urls, token, urls.length > 0);
     if (!urls.length) return null;
 
     const handleDownload = async (url: string, index: number) => {
@@ -58,12 +60,16 @@ export default function ThumbnailReviewCard({ review }: { review: ThumbnailRevie
                         key={`${url}-${index}`}
                         className="overflow-hidden rounded-xl border border-white/10 bg-black/35"
                     >
-                        <img
-                            src={mediaUrl(url, token)}
-                            alt={`Thumbnail candidate ${index + 1}`}
-                            className="aspect-video w-full object-cover"
-                            loading="lazy"
-                        />
+                        {thumbnailMedia.urls[index] ? (
+                            <img
+                                src={thumbnailMedia.urls[index]}
+                                alt={`Thumbnail candidate ${index + 1}`}
+                                className="aspect-video w-full object-cover"
+                                loading="lazy"
+                            />
+                        ) : (
+                            <div className="aspect-video w-full animate-pulse bg-white/5" />
+                        )}
                         <div className="flex items-center justify-between gap-2 px-2.5 py-2">
                             <p className="text-xs font-medium text-violet-50">Candidate {index + 1}</p>
                             <button
@@ -81,6 +87,9 @@ export default function ThumbnailReviewCard({ review }: { review: ThumbnailRevie
             </div>
             {downloadError ? (
                 <p className="px-4 pb-2 text-xs text-red-300">{downloadError}</p>
+            ) : null}
+            {thumbnailMedia.error ? (
+                <p className="px-4 pb-2 text-xs text-red-300">{thumbnailMedia.error}</p>
             ) : null}
             <p className="px-4 pb-3 text-xs text-violet-100/70">Reply naturally to revise these — for example: “make candidate 2 darker and focus on the siege.”</p>
         </section>

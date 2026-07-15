@@ -96,7 +96,9 @@ async def rank_segments(
     if not cues or not json_completion:
         return []
     plain = transcript_plain(cues)
-    system = SEGMENT_RANK_PROMPT.format(max_segments=max_segments)
+    # The prompt contains a literal JSON object. `str.format` interprets those
+    # braces as fields and raises before the model is ever called.
+    system = SEGMENT_RANK_PROMPT.replace("{max_segments}", str(max_segments))
     user_msg = f"USER PROMPT:\n{prompt.strip()}\n\nTRANSCRIPT:\n{plain[:100_000]}"
     try:
         result = await json_completion(system, user_msg, temperature=0.35, timeout_sec=120)

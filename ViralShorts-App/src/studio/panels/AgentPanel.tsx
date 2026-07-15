@@ -23,6 +23,7 @@ import AgentRenderDock from '../components/agent/AgentRenderDock';
 import AgentYouTubeConnect, { type ChannelRow } from '../components/agent/AgentYouTubeConnect';
 import DictationWaveform from '../components/agent/DictationWaveform';
 import { useAgentProductionJobs } from '../hooks/useAgentProductionJobs';
+import { useAuthenticatedMediaUrl, useAuthenticatedMediaUrls } from '../hooks/useAuthenticatedMedia';
 import {
     type AgentJobSnapshot,
     type AgentJobTrack,
@@ -1541,6 +1542,24 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
     const [replyingTo, setReplyingTo] = useState<(AgentJobSnapshot & { scene_index?: number }) | null>(null);
     const [renderStyleCatalog, setRenderStyleCatalog] = useState<RenderStyleOption[]>(FALLBACK_RENDER_STYLES);
     const [activeStylePreview, setActiveStylePreview] = useState('');
+    const styleStillMedia = useAuthenticatedMediaUrls(
+        renderStyleCatalog.map((style) => style.preview_url || ''),
+        session?.access_token || '',
+        showStyleGrid,
+    );
+    const activeStyleVideoPath = useMemo(
+        () => renderStyleCatalog.find((style) => style.key === activeStylePreview)?.preview_video_url || '',
+        [activeStylePreview, renderStyleCatalog],
+    );
+    const activeStyleVideoMedia = useAuthenticatedMediaUrl(
+        activeStyleVideoPath,
+        session?.access_token || '',
+        showStyleGrid && Boolean(activeStyleVideoPath),
+    );
+    const styleStillUrlByKey = useMemo(
+        () => new Map(renderStyleCatalog.map((style, index) => [style.key, styleStillMedia.urls[index] || ''])),
+        [renderStyleCatalog, styleStillMedia.urls],
+    );
 
     // Art Style picker is live session state — retarget waiting Approve cards
     // immediately so the user never approves a stale style.
@@ -4619,7 +4638,9 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                                                     {items.map(s => {
                                                         const isSelected = renderStyle === s.key;
                                                         const isActive = activeStylePreview === s.key;
-                                                        const showVideo = isActive && Boolean(s.preview_video_url);
+                                                        const stillPreviewUrl = styleStillUrlByKey.get(s.key) || '';
+                                                        const videoPreviewUrl = isActive ? activeStyleVideoMedia.url : '';
+                                                        const showVideo = Boolean(videoPreviewUrl);
                                                         return (
                                                             <button
                                                                 key={s.key}
@@ -4653,8 +4674,8 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                                                                     {showVideo ? (
                                                                         <video
                                                                             key={s.key}
-                                                                            src={s.preview_video_url}
-                                                                            poster={s.preview_url}
+                                                                            src={videoPreviewUrl}
+                                                                            poster={stillPreviewUrl || undefined}
                                                                             className="h-full w-full object-cover"
                                                                             autoPlay
                                                                             muted
@@ -4662,9 +4683,9 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                                                                             playsInline
                                                                             preload="none"
                                                                         />
-                                                                    ) : s.preview_url ? (
+                                                                    ) : stillPreviewUrl ? (
                                                                         <img
-                                                                            src={s.preview_url}
+                                                                            src={stillPreviewUrl}
                                                                             alt={s.label}
                                                                             className="h-full w-full object-cover transition duration-300 group-hover:scale-[1.035]"
                                                                             loading="lazy"

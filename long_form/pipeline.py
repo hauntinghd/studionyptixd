@@ -2207,6 +2207,7 @@ def start_render(
     _ensure_job_dir(job_id)
     state = {
         "job_id": job_id,
+        "user_id": str(outline.get("user_id") or "").strip(),
         "channel_key": channel.get("key"),
         "channel_label": channel.get("label"),
         "pipeline_kind": channel.get("pipeline_kind") or "sleep_doc",

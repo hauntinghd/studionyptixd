@@ -9753,8 +9753,8 @@ Internal ClipLab workflow (owner/admin only):
 - Poll `poll_cliplab_job` until ingest is complete.
 - Use `get_channel_analytics` for the selected channel when available and `get_public_search_trends` for public demand before choosing what clips should be cut.
 - Then call `analyze_cliplab_video(video_id, prompt, channel_id, registry_key)` with a prompt that names the target channel, niche, desired hooks, pacing, and emotional/tension moments.
-- If the user explicitly asks to test OpusClip or use Opus as the temporary clipping provider, include `provider: "opus"` in `analyze_cliplab_video`. Opus results are already rendered external clips; do not call `render_cliplab_segments` after Opus returns clips.
-- Poll until segments or clips are ready. If local segments are returned, pick the strongest segment_indices, then call `render_cliplab_segments`. If Opus clips are returned, review those clips and upload packages directly.
+- `provider: "auto"` and `provider: "local"` both use Studio's native model-agnostic ClipLab analysis. Do not claim an external OpusClip provider ran; that adapter is not implemented in this release.
+- Poll until segments are ready, pick the strongest segment_indices, then call `render_cliplab_segments`.
 - When render completes, summarize each clip with its upload package: title, description, tags, hook, and why it fits the selected channel. Do not claim a clip will go viral; explain the evidence behind the selection.
 
 Data: every turn and tool call is logged for product improvement and future custom model training

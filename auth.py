@@ -18,6 +18,13 @@ FALLBACK_SUPABASE_ANON_KEY = (
 
 
 def _extract_request_token(request: Request | None) -> str:
+    """Return an HTTP credential from headers only.
+
+    Access tokens in query strings leak through browser history, reverse-proxy
+    access logs, analytics, and referrer headers. WebSocket authentication is
+    handled explicitly by the WebSocket endpoint through ``__resolve_token__``;
+    ordinary HTTP requests must never fall back to query parameters.
+    """
     if request is None:
         return ""
     for header_name in ("authorization", "x-access-token", "x-auth-token"):
@@ -31,7 +38,7 @@ def _extract_request_token(request: Request | None) -> str:
                 return token
         if header_name != "authorization":
             return header_value
-    return str(request.query_params.get("access_token", "") or request.query_params.get("token", "") or "").strip()
+    return ""
 
 
 def _extract_role(payload: dict | None) -> str:

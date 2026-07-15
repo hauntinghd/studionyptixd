@@ -5,10 +5,17 @@ import logging
 import math
 import random
 import re
+import secrets
 import time
 from pathlib import Path
 
 from fastapi import HTTPException
+from upload_limits import (
+    MAX_ANALYTICS_IMAGE_BYTES,
+    MAX_CATALYST_VIDEO_BYTES,
+    UploadTooLargeError,
+    write_upload_limited,
+)
 
 
 log = logging.getLogger("nyptid-studio")
@@ -1711,23 +1718,27 @@ async def _catalyst_hub_reference_video_analysis_manual_for_user(
             video_ext = Path(saved_video_filename).suffix.lower()
             if video_ext not in {".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi"}:
                 video_ext = ".mp4"
-            video_path = target_dir / f"catalyst_ref_video_{int(time.time())}_{random.randint(1000, 9999)}{video_ext}"
-            with open(video_path, "wb") as fh:
-                while chunk := await reference_video.read(1024 * 1024):
-                    fh.write(chunk)
-            if video_path.exists() and video_path.stat().st_size > 0:
-                saved_video_path = str(video_path)
+            video_path = target_dir / f"catalyst_ref_video_{int(time.time() * 1000)}_{secrets.token_hex(4)}{video_ext}"
+            await write_upload_limited(
+                reference_video,
+                video_path,
+                max_bytes=MAX_CATALYST_VIDEO_BYTES,
+                label="Catalyst reference video",
+            )
+            saved_video_path = str(video_path)
         if comparison_video and str(getattr(comparison_video, "filename", "") or "").strip():
             saved_comparison_video_filename = str(getattr(comparison_video, "filename", "") or "").strip()
             comparison_ext = Path(saved_comparison_video_filename).suffix.lower()
             if comparison_ext not in {".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi"}:
                 comparison_ext = ".mp4"
-            comparison_path = target_dir / f"catalyst_cmp_video_{int(time.time())}_{random.randint(1000, 9999)}{comparison_ext}"
-            with open(comparison_path, "wb") as fh:
-                while chunk := await comparison_video.read(1024 * 1024):
-                    fh.write(chunk)
-            if comparison_path.exists() and comparison_path.stat().st_size > 0:
-                saved_comparison_video_path = str(comparison_path)
+            comparison_path = target_dir / f"catalyst_cmp_video_{int(time.time() * 1000)}_{secrets.token_hex(4)}{comparison_ext}"
+            await write_upload_limited(
+                comparison_video,
+                comparison_path,
+                max_bytes=MAX_CATALYST_VIDEO_BYTES,
+                label="Catalyst comparison video",
+            )
+            saved_comparison_video_path = str(comparison_path)
         for idx, analytics_image in enumerate(list(analytics_images or [])[:24]):
             filename = str(getattr(analytics_image, "filename", "") or "").strip()
             if not filename:
@@ -1735,12 +1746,14 @@ async def _catalyst_hub_reference_video_analysis_manual_for_user(
             ext = Path(filename).suffix.lower()
             if ext not in {".png", ".jpg", ".jpeg", ".webp"}:
                 ext = ".png"
-            saved_path = target_dir / f"catalyst_ref_{int(time.time())}_{random.randint(1000, 9999)}_{idx}{ext}"
-            with open(saved_path, "wb") as fh:
-                while chunk := await analytics_image.read(1024 * 1024):
-                    fh.write(chunk)
-            if saved_path.exists() and saved_path.stat().st_size > 0:
-                saved_image_paths.append(str(saved_path))
+            saved_path = target_dir / f"catalyst_ref_{int(time.time() * 1000)}_{secrets.token_hex(4)}_{idx}{ext}"
+            await write_upload_limited(
+                analytics_image,
+                saved_path,
+                max_bytes=MAX_ANALYTICS_IMAGE_BYTES,
+                label=f"Catalyst analytics image {idx + 1}",
+            )
+            saved_image_paths.append(str(saved_path))
         try:
             await _youtube_sync_and_persist_for_user(str(user.get("id", "") or ""), channel_id)
         except Exception:
@@ -1776,6 +1789,10 @@ async def _catalyst_hub_reference_video_analysis_manual_for_user(
             "analysis": analysis_result,
             "payload": payload,
         }
+    except UploadTooLargeError as exc:
+        raise HTTPException(413, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
     except HTTPException:
         raise
     except Exception as e:

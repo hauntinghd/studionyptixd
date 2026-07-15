@@ -39,26 +39,10 @@ def test_verify_what_people_want_to_watch_requires_public_search():
     assert _needs_public_search_preflight(text)
 
 
-def test_lets_do_chosen_topic_is_production_execution():
+def test_lets_do_chosen_topic_stays_in_planning_until_explicit_commit():
     text = "lets do The Real Reason Men Pull Away After getting close"
 
-    assert _wants_production_execution(text)
-    recovered = _build_requested_topic_production(
-        {"render_style": "comic_book", "registry_key": "mrskelewelly"},
-        text,
-        content_format="short",
-        active_registry="mrskelewelly",
-        active_channel_id="UC-skelly",
-    )
-
-    assert recovered is not None
-    name, args = recovered
-    assert name == "start_shortform_generate"
-    assert args["topic"] == "The Real Reason Men Pull Away After getting close"
-    assert args["category_key"] == "human_limits"
-    assert args["render_style"] == "comic_book"
-    assert args["caption_mode"] == "word"
-    assert args["animate"] is False
+    assert not _wants_production_execution(text)
 
 
 def test_lets_do_longform_topic_routes_to_longform_render():
@@ -194,7 +178,8 @@ def test_grounded_research_summary_combines_channel_and_public_evidence():
         user_text="verify what people want to watch",
     )
 
-    assert "I verified this against the selected-channel data and public YouTube demand" in text
+    assert "I verified public YouTube demand" in text
+    assert "cross-checked selected-channel data" in text
     assert "The Real Reason Men Build Emotional Walls" in text
     assert "Why Men Go Silent After Getting Close" in text
     assert "Blocked: do not reuse old viral view-count claims" in text

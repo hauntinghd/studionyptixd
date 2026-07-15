@@ -1537,7 +1537,7 @@ def _manual_catalyst_reference_video_id(source_url: str = "", title: str = "", f
     ).strip()
     if not seed:
         return label
-    digest = hashlib.sha1(seed.encode("utf-8", "ignore")).hexdigest()[:12]
+    digest = hashlib.sha256(seed.encode("utf-8", "ignore")).hexdigest()[:12]
     return f"{label}-{digest}"
 
 
@@ -3342,7 +3342,7 @@ async def _youtube_api_get(
     # Build cache key scoped by token hash so different users don't share entries.
     # `mine=true` calls return per-user data; other calls are user-agnostic but the
     # extra key-scoping cost is trivial vs the correctness guarantee.
-    token_fp = hashlib.sha1(str(access_token or "").encode("utf-8")).hexdigest()[:8]
+    token_fp = hashlib.sha256(str(access_token or "").encode("utf-8")).hexdigest()[:8]
     cache_key = youtube_cache.make_key(method, _path=path, _token=token_fp, **(params or {}))
     resolved_kind = cache_kind or youtube_cache.kind_for_method(method)
 

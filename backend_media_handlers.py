@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import random
+import re
 import shutil
 import sys
 import time
@@ -14,13 +15,83 @@ from urllib.parse import quote
 from fastapi import HTTPException
 from fastapi.responses import FileResponse
 
+from upload_limits import UploadTooLargeError, write_upload_limited
 
-def build_download_video_response(*, output_dir: Path):
-    async def download_video_response(filename: str):
+
+MAX_CHAT_STORY_PAYLOAD_BYTES = 1024 * 1024
+MAX_CHAT_STORY_AVATAR_BYTES = 12 * 1024 * 1024
+MAX_CHAT_STORY_BACKGROUND_BYTES = 512 * 1024 * 1024
+CHAT_STORY_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
+CHAT_STORY_VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".m4v"}
+
+from backend_job_payloads import job_access_allowed
+
+
+def validate_job_id_component(job_id: str) -> str:
+    normalized = str(job_id or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", normalized):
+        raise ValueError("Invalid job id")
+    return normalized
+
+
+def resolve_auto_scene_directory(root: Path, job_id: str, *, create: bool) -> Path:
+    directory = root / validate_job_id_component(job_id)
+    if create:
+        directory.mkdir(parents=True, exist_ok=True)
+    return directory
+
+
+def _job_id_candidates_for_output(filename: str) -> list[str]:
+    stem = Path(filename).stem
+    parts = [part for part in stem.split("_") if part]
+    candidates: list[str] = []
+    for index in range(len(parts)):
+        candidate = "_".join(parts[index:])
+        if candidate and candidate not in candidates:
+            candidates.append(candidate)
+    return candidates[-8:]
+
+
+def _job_output_matches(job: dict, filename: str) -> bool:
+    output_file = str(job.get("output_file", "") or "").strip()
+    return bool(output_file and Path(output_file).name == filename)
+
+
+def build_download_video_response(
+    *,
+    output_dir: Path,
+    jobs_ref: dict,
+    get_persisted_job_state,
+    admin_emails: set[str],
+):
+    async def download_video_response(filename: str, *, user: dict):
         safe_filename = Path(filename).name
-        if not safe_filename:
+        if not safe_filename or safe_filename != filename:
             raise HTTPException(400, "Invalid filename")
         path = output_dir / safe_filename
+
+        caller_is_admin = job_access_allowed({}, user, admin_emails)
+        if not caller_is_admin:
+            matching_jobs = [
+                job
+                for job in jobs_ref.values()
+                if isinstance(job, dict) and _job_output_matches(job, safe_filename)
+            ]
+            allowed = any(job_access_allowed(job, user, admin_emails) for job in matching_jobs)
+            if not allowed:
+                for job_id in _job_id_candidates_for_output(safe_filename):
+                    try:
+                        persisted = await get_persisted_job_state(job_id)
+                    except Exception:
+                        persisted = None
+                    if not isinstance(persisted, dict) or not _job_output_matches(persisted, safe_filename):
+                        continue
+                    allowed = job_access_allowed(persisted, user, admin_emails)
+                    break
+            if not allowed:
+                # Use the same response as a genuinely missing file so callers
+                # cannot enumerate another account's generated media.
+                raise HTTPException(404, "Video not found")
         if not path.exists():
             raise HTTPException(404, "Video not found")
         return FileResponse(str(path), media_type="video/mp4", filename=safe_filename)
@@ -37,6 +108,8 @@ def build_render_chat_story_handler(
     output_dir: Path,
     render_script_path: Path,
     log,
+    jobs_ref: dict | None = None,
+    persist_job_state=None,
 ):
     async def render_chat_story(
         request,
@@ -49,6 +122,9 @@ def build_render_chat_story_handler(
             raise HTTPException(401, "Authentication required")
         if not chat_story_access_for_user(user):
             raise HTTPException(403, "Chat Story requires an active Starter, Creator, or Pro monthly plan.")
+
+        if len(str(payload or "").encode("utf-8")) > MAX_CHAT_STORY_PAYLOAD_BYTES:
+            raise HTTPException(413, "Chat story payload exceeds 1MB")
 
         try:
             parsed_payload = json.loads(payload or "{}")
@@ -72,18 +148,38 @@ def build_render_chat_story_handler(
 
         try:
             if avatar and avatar.filename:
-                avatar_ext = Path(avatar.filename).suffix or ".png"
+                avatar_ext = Path(str(avatar.filename)).suffix.lower() or ".png"
+                if avatar_ext not in CHAT_STORY_IMAGE_EXTENSIONS:
+                    raise HTTPException(400, "Unsupported avatar image format")
                 avatar_path = str(work_dir / f"avatar{avatar_ext}")
-                with open(avatar_path, "wb") as handle:
-                    while chunk := await avatar.read(1024 * 1024):
-                        handle.write(chunk)
+                try:
+                    await write_upload_limited(
+                        avatar,
+                        Path(avatar_path),
+                        max_bytes=MAX_CHAT_STORY_AVATAR_BYTES,
+                        label="chat story avatar",
+                    )
+                except UploadTooLargeError as exc:
+                    raise HTTPException(413, "Chat story avatar exceeds 12MB") from exc
+                except ValueError as exc:
+                    raise HTTPException(400, str(exc)) from exc
 
             if background_video and background_video.filename:
-                bg_ext = Path(background_video.filename).suffix or ".mp4"
+                bg_ext = Path(str(background_video.filename)).suffix.lower() or ".mp4"
+                if bg_ext not in CHAT_STORY_VIDEO_EXTENSIONS:
+                    raise HTTPException(400, "Unsupported chat story background video format")
                 bg_video_path = str(work_dir / f"background{bg_ext}")
-                with open(bg_video_path, "wb") as handle:
-                    while chunk := await background_video.read(1024 * 1024):
-                        handle.write(chunk)
+                try:
+                    await write_upload_limited(
+                        background_video,
+                        Path(bg_video_path),
+                        max_bytes=MAX_CHAT_STORY_BACKGROUND_BYTES,
+                        label="chat story background video",
+                    )
+                except UploadTooLargeError as exc:
+                    raise HTTPException(413, "Chat story background video exceeds 512MB") from exc
+                except ValueError as exc:
+                    raise HTTPException(400, str(exc)) from exc
 
             payload_path = work_dir / "payload.json"
             payload_path.write_text(json.dumps(parsed_payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -118,6 +214,23 @@ def build_render_chat_story_handler(
 
             if not output_path.exists():
                 raise HTTPException(500, "Chat Story render did not produce an output video.")
+
+            if jobs_ref is not None:
+                job_state = {
+                    "status": "complete",
+                    "progress": 100,
+                    "lane": "chatstory",
+                    "mode": "chatstory_render",
+                    "user_id": str(user.get("id", "") or ""),
+                    "output_file": output_name,
+                    "created_at": time.time(),
+                }
+                jobs_ref[render_id] = job_state
+                if persist_job_state is not None:
+                    try:
+                        await persist_job_state(render_id, job_state)
+                    except Exception as exc:
+                        log.warning("Chat Story output ownership persistence failed for %s: %s", render_id, exc)
 
             return {
                 "ok": True,

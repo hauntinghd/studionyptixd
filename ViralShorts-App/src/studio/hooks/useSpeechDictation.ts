@@ -549,7 +549,6 @@ export function useSpeechDictation({
         try {
             const tok = await getAccessToken();
             const ws = new WebSocket(resolveStudioWsUrl('/api/studio-agent/dictation/stream', {
-                ...(tok ? { token: tok } : {}),
                 language: lang.split('-')[0] || 'en',
             }));
             wsRef.current = ws;

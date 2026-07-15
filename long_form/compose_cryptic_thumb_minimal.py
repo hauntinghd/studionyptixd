@@ -1,4 +1,4 @@
-`"""CrypticScience — minimal punch thumbnail (3 elements only).
+"""CrypticScience — minimal punch thumbnail (3 elements only).
 
 Designed for 120px-wide YouTube preview:
   1. Huge dollar hook (left)

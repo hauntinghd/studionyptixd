@@ -11,6 +11,8 @@ import {
 } from 'lucide-react';
 import { API, AuthContext, DIRECT_API } from '../shared';
 import { FeedbackWidget, ThumbProgressBar } from '../components/StudioWidgets';
+import { downloadStudioAsset } from '../lib/agentProduction';
+import { useAuthenticatedMediaUrl } from '../hooks/useAuthenticatedMedia';
 
 type RefVideo = {
     video_id: string;
@@ -95,6 +97,8 @@ export default function ThumbnailPanel() {
     const [job, setJob] = useState<JobStatus | null>(null);
     const [generating, setGenerating] = useState(false);
     const [genError, setGenError] = useState('');
+    const [downloadBusy, setDownloadBusy] = useState(false);
+    const [downloadError, setDownloadError] = useState('');
 
     const selectedCredits = useMemo(
         () => models.find((m) => m.id === imageModel)?.credits ?? 5,
@@ -274,6 +278,8 @@ export default function ThumbnailPanel() {
     };
 
     const outputUrl = job?.output_url ? `${api}${job.output_url}` : '';
+    const outputMedia = useAuthenticatedMediaUrl(outputUrl, token, Boolean(outputUrl));
+    const framePreviewMedia = useAuthenticatedMediaUrl(framePreviewUrl, token, Boolean(framePreviewUrl));
     const selectedChannel = myChannels.find((c) => c.channel_id === channelId);
     const vision = job?.ai_analysis?.vision;
     const abScoring = job?.ai_analysis?.ab_scoring;
@@ -357,8 +363,8 @@ export default function ThumbnailPanel() {
                         </label>
                     </div>
                 )}
-                {framePreviewUrl && (
-                    <img src={framePreviewUrl} alt="Video frame" className="mt-3 max-h-40 rounded-lg border border-white/10 object-cover" />
+                {framePreviewUrl && framePreviewMedia.url && (
+                    <img src={framePreviewMedia.url} alt="Video frame" className="mt-3 max-h-40 rounded-lg border border-white/10 object-cover" />
                 )}
                 <div className="mt-4 grid gap-3 sm:grid-cols-2">
                     <label className="block">
@@ -495,15 +501,33 @@ export default function ThumbnailPanel() {
                     )}
                     {job?.status === 'complete' && outputUrl && (
                         <div className="mt-5 space-y-4">
-                            <img src={outputUrl} alt="Generated thumbnail" className="w-full rounded-xl border border-white/10" />
+                            {outputMedia.url ? (
+                                <img src={outputMedia.url} alt="Generated thumbnail" className="w-full rounded-xl border border-white/10" />
+                            ) : (
+                                <div className="aspect-video w-full animate-pulse rounded-xl bg-white/5" />
+                            )}
                             <div className="flex flex-wrap gap-2">
-                                <a href={outputUrl} download className="inline-flex items-center gap-2 rounded-lg bg-white/10 px-4 py-2 text-sm font-medium text-white hover:bg-white/15">
+                                <button
+                                    type="button"
+                                    disabled={!token || downloadBusy}
+                                    onClick={() => {
+                                        setDownloadBusy(true);
+                                        setDownloadError('');
+                                        void downloadStudioAsset(outputUrl, token, `thumbnail-${jobId || 'output'}.png`)
+                                            .catch((error) => setDownloadError(error instanceof Error ? error.message : 'Download failed'))
+                                            .finally(() => setDownloadBusy(false));
+                                    }}
+                                    className="inline-flex items-center gap-2 rounded-lg bg-white/10 px-4 py-2 text-sm font-medium text-white hover:bg-white/15"
+                                >
                                     <Download className="h-4 w-4" /> Download 1920×1080
-                                </a>
-                                <a href={outputUrl} target="_blank" rel="noreferrer" className="inline-flex items-center gap-2 rounded-lg border border-white/10 px-4 py-2 text-sm text-gray-300 hover:text-white">
+                                </button>
+                                <a href={outputMedia.url || undefined} target="_blank" rel="noreferrer" className="inline-flex items-center gap-2 rounded-lg border border-white/10 px-4 py-2 text-sm text-gray-300 hover:text-white">
                                     <ExternalLink className="h-4 w-4" /> Open
                                 </a>
                             </div>
+                            {downloadError || outputMedia.error ? (
+                                <p className="text-xs text-red-300">{downloadError || outputMedia.error}</p>
+                            ) : null}
                             <FeedbackWidget feature="thumbnails" template="thumb_lab" />
                         </div>
                     )}

@@ -248,6 +248,7 @@ def build_refund_router(
 
 def build_studio_utility_router(
     *,
+    require_auth,
     shorts_ideas_endpoint,
     queue_status_endpoint,
 ):
@@ -256,6 +257,7 @@ def build_studio_utility_router(
         "/api/studio/shorts/ideas",
         shorts_ideas_endpoint,
         methods=["GET"],
+        dependencies=[Depends(require_auth)],
         include_in_schema=False,
     )
     router.add_api_route(
@@ -269,6 +271,7 @@ def build_studio_utility_router(
 
 def build_media_router(
     *,
+    require_auth,
     auto_scene_image_handler,
     auto_regenerate_scene_image_handler,
     job_status_handler,
@@ -280,27 +283,31 @@ def build_media_router(
     router = APIRouter()
 
     @router.get("/api/auto/scene-image/{job_id}/{filename}")
-    async def auto_scene_image(job_id: str, filename: str):
-        return await auto_scene_image_handler(job_id, filename)
+    async def auto_scene_image(job_id: str, filename: str, user: dict = Depends(require_auth)):
+        return await auto_scene_image_handler(job_id, filename, user=user)
 
     @router.post("/api/auto/regenerate-scene-image")
-    async def auto_regenerate_scene_image(body: dict, request: Request = None):
-        return await auto_regenerate_scene_image_handler(body, request)
+    async def auto_regenerate_scene_image(
+        body: dict,
+        request: Request = None,
+        user: dict = Depends(require_auth),
+    ):
+        return await auto_regenerate_scene_image_handler(body, request, user=user)
 
     @router.get("/api/status/{job_id}")
-    async def job_status(job_id: str):
-        return await job_status_handler(job_id)
+    async def job_status(job_id: str, user: dict = Depends(require_auth)):
+        return await job_status_handler(job_id, user=user)
 
     # Alias used by CatalystPanel + some production panels (historical path).
     @router.get("/api/job/{job_id}")
-    async def job_status_alias(job_id: str):
-        return await job_status_handler(job_id)
+    async def job_status_alias(job_id: str, user: dict = Depends(require_auth)):
+        return await job_status_handler(job_id, user=user)
 
     @router.get("/api/download/{filename}")
-    async def download_video(filename: str):
-        return await download_video_handler(filename)
+    async def download_video(filename: str, user: dict = Depends(require_auth)):
+        return await download_video_handler(filename, user=user)
 
-    @router.post("/api/chatstory/render")
+    @router.post("/api/chatstory/render", dependencies=[Depends(require_auth)])
     async def render_chat_story(
         request: Request,
         payload: str = Form(...),
@@ -309,7 +316,7 @@ def build_media_router(
     ):
         return await render_chat_story_handler(request, payload, avatar, background_video)
 
-    @router.post("/api/clone")
+    @router.post("/api/clone", dependencies=[Depends(require_auth)])
     async def clone_video(
         topic: str = Form(""),
         resolution: str = Form("720p"),
@@ -330,8 +337,8 @@ def build_media_router(
         )
 
     @router.get("/api/jobs")
-    async def list_jobs():
-        return await list_jobs_handler()
+    async def list_jobs(user: dict = Depends(require_auth)):
+        return await list_jobs_handler(user=user)
 
     return router
 
@@ -533,9 +540,14 @@ def build_longform_creative_router(
     return router
 
 
-def build_generation_router(*, generate_short_endpoint):
+def build_generation_router(*, require_auth, generate_short_endpoint):
     router = APIRouter()
-    router.add_api_route("/api/generate", generate_short_endpoint, methods=["POST"])
+    router.add_api_route(
+        "/api/generate",
+        generate_short_endpoint,
+        methods=["POST"],
+        dependencies=[Depends(require_auth)],
+    )
     return router
 
 
@@ -562,8 +574,6 @@ async def _get_current_user_from_request_via_dependency(request: Request, requir
             if header_name != "authorization":
                 token = header_value
                 break
-    if not token and request:
-        token = str(request.query_params.get("access_token", "") or request.query_params.get("token", "") or "").strip()
     if not token:
         return None
 

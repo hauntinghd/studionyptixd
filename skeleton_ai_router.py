@@ -101,6 +101,52 @@ OUTPUT_ROOT = Path(os.getenv("SKELETON_AI_OUTPUT_ROOT", "skeleton_ai/output"))
 REFERENCE_ROOT = OUTPUT_ROOT / "_references"
 
 
+def _write_job_owner(workspace: Path, job_id: str, user: dict) -> None:
+    """Persist the authenticated creator before any job artifacts are exposed."""
+    uid = _user_id(user).strip()
+    if not uid:
+        raise HTTPException(401, "auth_required")
+    workspace = Path(workspace)
+    workspace.mkdir(parents=True, exist_ok=True)
+    spec_path = workspace / "job_spec.json"
+    spec: dict[str, Any] = {}
+    if spec_path.is_file():
+        try:
+            loaded = json.loads(spec_path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                spec = loaded
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            spec = {}
+    existing_owner = str(spec.get("user_id") or "").strip()
+    if existing_owner and existing_owner != uid:
+        raise HTTPException(404, "job_not_found")
+    spec["job_id"] = str(job_id or workspace.name)
+    spec["user_id"] = uid
+    temporary = workspace / f".job_spec.{uuid.uuid4().hex}.tmp"
+    try:
+        temporary.write_text(json.dumps(spec, indent=2, ensure_ascii=False), encoding="utf-8")
+        os.replace(temporary, spec_path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _require_job_owner(workspace: Path, user: dict) -> str:
+    """Fail closed when a local job is missing owner metadata or is cross-user."""
+    uid = _user_id(user).strip()
+    if not uid:
+        raise HTTPException(401, "auth_required")
+    spec_path = Path(workspace) / "job_spec.json"
+    try:
+        payload = json.loads(spec_path.read_text(encoding="utf-8"))
+        owner_id = str((payload or {}).get("user_id") or "").strip() if isinstance(payload, dict) else ""
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        owner_id = ""
+    if not owner_id or owner_id != uid:
+        # Hide both job existence and owner identity from other accounts.
+        raise HTTPException(404, "job_not_found")
+    return uid
+
+
 def _persist_skeleton_reference(workspace: Path, reference_image: str) -> str:
     from skeleton_ai.styled_pipeline import _persist_skeleton_reference as persist_ref
 
@@ -280,12 +326,19 @@ def build_skeleton_ai_router(
 
     @router.post("/reference")
     async def upload_reference(reference_image: UploadFile = File(...), user: dict = auth_dep):
+        from upload_limits import MAX_REFERENCE_IMAGE_BYTES, UploadTooLargeError, read_upload_limited
+
         uid = _user_id(user) or "anon"
-        raw = await reference_image.read()
+        try:
+            raw = await read_upload_limited(
+                reference_image,
+                max_bytes=MAX_REFERENCE_IMAGE_BYTES,
+                label="skeleton reference image",
+            )
+        except UploadTooLargeError as exc:
+            raise HTTPException(413, "Reference image exceeds 12MB") from exc
         if not raw or len(raw) < 1024:
             raise HTTPException(400, "reference image too small")
-        if len(raw) > 12 * 1024 * 1024:
-            raise HTTPException(400, "reference image exceeds 12MB")
         mime = str(reference_image.content_type or "image/png").strip().lower()
         if not mime.startswith("image/"):
             raise HTTPException(400, "reference must be an image")
@@ -309,6 +362,11 @@ def build_skeleton_ai_router(
         safe = os.path.basename(filename)
         if not safe or safe != filename or ".." in filename:
             raise HTTPException(400, "bad_filename")
+        uid = _user_id(_user).strip()
+        if not uid:
+            raise HTTPException(401, "auth_required")
+        if not safe.startswith(f"{uid}_"):
+            raise HTTPException(404, "not_found")
         path = REFERENCE_ROOT / safe
         if not path.exists():
             raise HTTPException(404, "not_found")
@@ -474,6 +532,7 @@ def build_skeleton_ai_router(
         workspace = OUTPUT_ROOT / job_id
         stills_dir = workspace / "stills"
         stills_dir.mkdir(parents=True, exist_ok=True)
+        _write_job_owner(workspace, job_id, user)
         (workspace / "script.txt").write_text(body.script, encoding="utf-8")
         master_ref = ""
         if body.reference_image and str(body.reference_image).strip():
@@ -571,6 +630,7 @@ def build_skeleton_ai_router(
         workspace = OUTPUT_ROOT / job_id
         if not workspace.is_dir():
             raise HTTPException(404, "job_not_found")
+        _require_job_owner(workspace, _user)
         if body.reference_image and str(body.reference_image).strip():
             _persist_skeleton_reference(workspace, str(body.reference_image).strip())
         master_ref = _resolve_skeleton_reference(workspace)
@@ -617,7 +677,9 @@ def build_skeleton_ai_router(
             raise HTTPException(400, "bad_job_id")
         if not filename.endswith(".png") or "/" in filename or ".." in filename:
             raise HTTPException(400, "bad_filename")
-        path = OUTPUT_ROOT / job_id / "stills" / filename
+        workspace = OUTPUT_ROOT / job_id
+        _require_job_owner(workspace, _user)
+        path = workspace / "stills" / filename
         if not path.exists():
             raise HTTPException(404, "not_found")
         from fastapi.responses import FileResponse
@@ -704,6 +766,7 @@ def build_skeleton_ai_router(
 
         job_id = uuid.uuid4().hex[:12]
         workspace = OUTPUT_ROOT / job_id
+        _write_job_owner(workspace, job_id, user)
         master_ref = ""
         if body.reference_image and str(body.reference_image).strip():
             master_ref = _persist_skeleton_reference(workspace, str(body.reference_image).strip())
@@ -739,11 +802,19 @@ def build_skeleton_ai_router(
         from studio_agent.runpod_bridge import get_dispatch_receipt_by_studio_job_id
 
         if get_dispatch_receipt_by_studio_job_id(job_id) is not None:
-            from studio_agent.jobs import get_job_snapshot
+            from studio_agent.jobs import get_job_snapshot, job_access_metadata
 
+            access = job_access_metadata(job_id, "shortform")
+            uid = _user_id(_user).strip()
+            if not uid:
+                raise HTTPException(401, "auth_required")
+            if not access.get("exists") or str(access.get("owner_id") or "").strip() != uid:
+                raise HTTPException(404, "job_not_found")
             snapshot = get_job_snapshot(job_id, "shortform")
             return {"job_id": job_id, "result": snapshot, **snapshot}
-        result_path = OUTPUT_ROOT / job_id / "result.json"
+        workspace = OUTPUT_ROOT / job_id
+        _require_job_owner(workspace, _user)
+        result_path = workspace / "result.json"
         if not result_path.exists():
             raise HTTPException(404, "not_found")
         return {"job_id": job_id, "result": json.loads(result_path.read_text())}

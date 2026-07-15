@@ -29,7 +29,7 @@ class StudioAgentQueueTests(unittest.IsolatedAsyncioTestCase):
         async with studio_queue.studio_agent_slot(
             user_id="smoke-user",
             plan="creator",
-            operation="chat",
+            operation="continue_production",
             unlimited=False,
         ) as admission:
             data = admission.as_dict()
@@ -61,7 +61,8 @@ class StudioAgentQueueTests(unittest.IsolatedAsyncioTestCase):
     def test_fast_operations_bypass_queue(self):
         self.assertTrue(studio_queue.should_bypass_queue(operation="approve"))
         self.assertTrue(studio_queue.should_bypass_queue(operation="reject"))
-        self.assertFalse(studio_queue.should_bypass_queue(operation="chat"))
+        self.assertTrue(studio_queue.should_bypass_queue(operation="chat"))
+        self.assertFalse(studio_queue.should_bypass_queue(operation="continue_production"))
 
 
 if __name__ == "__main__":

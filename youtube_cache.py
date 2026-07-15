@@ -114,7 +114,7 @@ def make_key(method: str, **params: Any) -> str:
         {str(k): ("" if v is None else str(v)) for k, v in (params or {}).items()},
         sort_keys=True,
     )
-    digest = hashlib.sha1(norm.encode("utf-8")).hexdigest()[:16]
+    digest = hashlib.sha256(norm.encode("utf-8")).hexdigest()[:16]
     return f"{str(method or 'unknown').strip().lower()}::{digest}"
 
 

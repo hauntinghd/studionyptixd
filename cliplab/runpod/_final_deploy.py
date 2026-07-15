@@ -16,7 +16,8 @@ EP = "30lt3s0grkw5le"
 TID = None  # create fresh serverless template each deploy
 LOCAL = Path(r"C:\Users\casey\AppData\Local\Temp\cliplab_models_sync2\cliplab")
 SRC = Path(r"D:\games\asd\.claude\worktrees\laughing-mclean-b5c91d\cliplab")
-ROOT = "/tmp/cliplab"
+# The endpoint container is an isolated, single-tenant ephemeral workspace.
+ROOT = "/tmp/cliplab"  # nosec B108
 
 WRAPPER = f'''
 import base64, importlib.util, os, runpod, sys
