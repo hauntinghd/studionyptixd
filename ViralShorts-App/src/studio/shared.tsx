@@ -43,7 +43,7 @@ const rawProdApi = resolveSafeApiBase(viteEnv.VITE_PROD_API_BASE_URL || "");
 const hostedOrigin = typeof window !== "undefined" ? window.location.origin : "";
 export const API = isLocalDevHost ? rawLocalApi : (rawProdApi || PROD_API_BASE_URL || hostedOrigin);
 export const DIRECT_API = isLocalDevHost ? (rawLocalApi || API) : (rawProdApi || PROD_API_BASE_URL || API);
-/** Hosted agent HTTP goes through api-studio; worker proxies to Vercel with CORS on errors. */
+/** Hosted agent HTTP stays on the Fly API control plane. */
 export const STUDIO_AGENT_API = isLocalDevHost
     ? (rawLocalApi || API)
     : (resolveSafeApiBase(viteEnv.VITE_STUDIO_AGENT_API || "") || PROD_API_BASE_URL || API);
@@ -51,18 +51,15 @@ export const STUDIO_AGENT_API = isLocalDevHost
 /** Persistent sessions + agent chat run on Fly disk (never the RunPod queue). */
 export const STUDIO_FLY_SESSIONS_API = "https://nyptid-studio.fly.dev";
 
-/** Vercel Studio API — fast reads + billing (never the RunPod queue). */
-export const STUDIO_VERCEL_API = "https://nypidstudio.vercel.app";
-
-/** Fast reads + billing routes hit Vercel directly (never the RunPod queue). */
+/** Fast reads + billing stay on the Fly control plane (never the RunPod queue). */
 export const STUDIO_FLY_API = isLocalDevHost
     ? (rawLocalApi || API)
-    : (resolveSafeApiBase(viteEnv.VITE_STUDIO_FLY_API || viteEnv.VITE_STUDIO_VERCEL_API || "") || STUDIO_VERCEL_API);
+    : (resolveSafeApiBase(viteEnv.VITE_STUDIO_FLY_API || "") || PROD_API_BASE_URL);
 
-/** WebSockets cannot traverse the Cloudflare worker — dictation hits Vercel directly. */
+/** WebSockets use Fly directly so dictation shares the persistent agent runtime. */
 export const STUDIO_AGENT_WS_API = isLocalDevHost
     ? (rawLocalApi || API)
-    : (resolveSafeApiBase(viteEnv.VITE_STUDIO_AGENT_WS_API || viteEnv.VITE_STUDIO_VERCEL_API || "") || STUDIO_VERCEL_API);
+    : (resolveSafeApiBase(viteEnv.VITE_STUDIO_AGENT_WS_API || "") || STUDIO_FLY_SESSIONS_API);
 
 export const FLY_DIRECT_API_PREFIXES = [
     '/api/health',

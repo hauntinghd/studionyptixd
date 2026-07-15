@@ -280,6 +280,22 @@ def test_backend_installs_preflight_and_preserves_studio_cors() -> None:
     assert response.headers.get("access-control-allow-origin") == "https://studio.nyptidindustries.com"
 
 
+def test_backend_cors_allows_billable_idempotency_header() -> None:
+    response = TestClient(backend.app).options(
+        "/api/thumbnails/generate",
+        headers={
+            "origin": "https://studio.nyptidindustries.com",
+            "access-control-request-method": "POST",
+            "access-control-request-headers": "authorization,content-type,x-idempotency-key",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.headers.get("access-control-allow-origin") == "https://studio.nyptidindustries.com"
+    allowed = response.headers.get("access-control-allow-headers", "").lower()
+    assert "x-idempotency-key" in allowed
+
+
 def test_dictation_route_returns_413_before_transcription(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(upload_limits, "MAX_DICTATION_AUDIO_BYTES", 4)
     app = FastAPI()

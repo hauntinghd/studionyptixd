@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import calendar
+import hashlib
 import json
 import logging
+import os
 import time
+import uuid
 from datetime import datetime, timezone
 from urllib.parse import quote
 
@@ -26,6 +29,7 @@ TOPUP_WALLET_PATH = TEMP_DIR / "topup_wallets.json"
 PAYPAL_ORDERS_PATH = TEMP_DIR / "paypal_orders.json"
 PAYPAL_SUBSCRIPTIONS_PATH = TEMP_DIR / "paypal_subscriptions.json"
 PAYPAL_WEBHOOK_EVENTS_PATH = TEMP_DIR / "paypal_webhook_events.json"
+BILLING_EFFECT_VERSIONS_PATH = TEMP_DIR / "billing_effect_versions.json"
 PAYPAL_WEBHOOK_EVENTS_RETENTION = 5000  # cap dedup store to avoid unbounded growth
 USAGE_LEDGER_PATH = TEMP_DIR / "usage_ledger.jsonl"
 LANDING_NOTIFICATIONS_PATH = TEMP_DIR / "landing_notifications.json"
@@ -51,8 +55,56 @@ _paypal_subscriptions_lock = asyncio.Lock()
 # Webhook event dedup store: event_id -> {received_at, event_type, resource_id}
 _paypal_webhook_events: dict[str, dict] = {}
 _paypal_webhook_events_lock = asyncio.Lock()
+_billing_effect_versions: dict[str, dict] = {}
+_billing_effect_versions_lock = asyncio.Lock()
 _landing_notifications: list[dict] = []
 _landing_notifications_lock = asyncio.Lock()
+
+
+def _fsync_parent(path) -> None:
+    if os.name == "nt":
+        return
+    try:
+        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        fd = os.open(str(path.parent), flags)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except OSError:
+        pass
+
+
+def _atomic_write_json(path, payload) -> None:
+    """Persist one complete JSON snapshot via fsync + atomic replace."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+    try:
+        with temp_path.open("w", encoding="utf-8", newline="\n") as handle:
+            json.dump(payload, handle, indent=2, ensure_ascii=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, path)
+        _fsync_parent(path)
+    finally:
+        try:
+            temp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _restore_mapping(path, target: dict) -> None:
+    """Restore a mapping from the last durable snapshot after write failure."""
+    target.clear()
+    try:
+        if path.is_file():
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                target.update(data)
+    except Exception:
+        # Empty is safer than retaining a mutation that was never durable.
+        target.clear()
 
 
 def _load_kpi_metrics() -> None:
@@ -67,8 +119,7 @@ def _load_kpi_metrics() -> None:
 
 def _save_kpi_metrics() -> None:
     try:
-        KPI_METRICS_PATH.parent.mkdir(parents=True, exist_ok=True)
-        KPI_METRICS_PATH.write_text(json.dumps(_kpi_metrics, indent=2), encoding="utf-8")
+        _atomic_write_json(KPI_METRICS_PATH, _kpi_metrics)
     except Exception:
         pass
 
@@ -88,10 +139,10 @@ def _load_topup_wallets() -> None:
 
 def _save_topup_wallets() -> None:
     try:
-        TOPUP_WALLET_PATH.parent.mkdir(parents=True, exist_ok=True)
-        TOPUP_WALLET_PATH.write_text(json.dumps(_topup_wallets, indent=2), encoding="utf-8")
+        _atomic_write_json(TOPUP_WALLET_PATH, _topup_wallets)
     except Exception:
-        pass
+        _restore_mapping(TOPUP_WALLET_PATH, _topup_wallets)
+        raise
 
 
 def _load_paypal_orders() -> None:
@@ -109,10 +160,10 @@ def _load_paypal_orders() -> None:
 
 def _save_paypal_orders() -> None:
     try:
-        PAYPAL_ORDERS_PATH.parent.mkdir(parents=True, exist_ok=True)
-        PAYPAL_ORDERS_PATH.write_text(json.dumps(_paypal_orders, indent=2), encoding="utf-8")
+        _atomic_write_json(PAYPAL_ORDERS_PATH, _paypal_orders)
     except Exception:
-        pass
+        _restore_mapping(PAYPAL_ORDERS_PATH, _paypal_orders)
+        raise
 
 
 def _load_paypal_subscriptions() -> None:
@@ -130,10 +181,10 @@ def _load_paypal_subscriptions() -> None:
 
 def _save_paypal_subscriptions() -> None:
     try:
-        PAYPAL_SUBSCRIPTIONS_PATH.parent.mkdir(parents=True, exist_ok=True)
-        PAYPAL_SUBSCRIPTIONS_PATH.write_text(json.dumps(_paypal_subscriptions, indent=2), encoding="utf-8")
+        _atomic_write_json(PAYPAL_SUBSCRIPTIONS_PATH, _paypal_subscriptions)
     except Exception:
-        pass
+        _restore_mapping(PAYPAL_SUBSCRIPTIONS_PATH, _paypal_subscriptions)
+        raise
 
 
 def _load_paypal_webhook_events() -> None:
@@ -160,10 +211,240 @@ def _save_paypal_webhook_events() -> None:
             keep = sorted_items[-PAYPAL_WEBHOOK_EVENTS_RETENTION:]
             _paypal_webhook_events.clear()
             _paypal_webhook_events.update(dict(keep))
-        PAYPAL_WEBHOOK_EVENTS_PATH.parent.mkdir(parents=True, exist_ok=True)
-        PAYPAL_WEBHOOK_EVENTS_PATH.write_text(json.dumps(_paypal_webhook_events, indent=2), encoding="utf-8")
+        _atomic_write_json(PAYPAL_WEBHOOK_EVENTS_PATH, _paypal_webhook_events)
+    except Exception:
+        _restore_mapping(PAYPAL_WEBHOOK_EVENTS_PATH, _paypal_webhook_events)
+        raise
+
+
+def _load_billing_effect_versions() -> None:
+    try:
+        if BILLING_EFFECT_VERSIONS_PATH.exists():
+            data = json.loads(BILLING_EFFECT_VERSIONS_PATH.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                _billing_effect_versions.clear()
+                _billing_effect_versions.update(data)
+                return
     except Exception:
         pass
+    _billing_effect_versions.clear()
+
+
+def _save_billing_effect_versions() -> None:
+    try:
+        _atomic_write_json(BILLING_EFFECT_VERSIONS_PATH, _billing_effect_versions)
+    except Exception:
+        _restore_mapping(BILLING_EFFECT_VERSIONS_PATH, _billing_effect_versions)
+        raise
+
+
+def _billing_effect_version_key(provider: str, subject: str) -> str:
+    normalized_provider = str(provider or "").strip().lower()
+    normalized_subject = str(subject or "").strip()
+    if normalized_provider not in {"paypal", "stripe"} or not normalized_subject:
+        raise ValueError("invalid billing effect version identity")
+    digest = hashlib.sha256(normalized_subject.encode("utf-8")).hexdigest()
+    return f"{normalized_provider}:{digest}"
+
+
+async def _run_ordered_billing_effect(
+    provider: str,
+    subjects: list[str],
+    event_id: str,
+    event_timestamp: float,
+    effect,
+) -> dict:
+    """Serialize and durably version one provider plan mutation.
+
+    Strictly older timestamped events are ignored after a newer event has been
+    applied to any matching subscription/customer/user subject. Equal-time
+    events and events without a trustworthy provider timestamp are applied in
+    arrival order so a legitimate event is never discarded on an invented
+    ordering signal.
+    """
+    normalized_provider = str(provider or "").strip().lower()
+    normalized_event_id = str(event_id or "").strip()
+    unique_subjects = list(dict.fromkeys(
+        str(subject or "").strip() for subject in subjects if str(subject or "").strip()
+    ))
+    if normalized_provider not in {"paypal", "stripe"} or not normalized_event_id or not unique_subjects:
+        return {"status": "applied", "result": await effect(), "ordered": False}
+    try:
+        provider_timestamp = float(event_timestamp or 0)
+    except (TypeError, ValueError):
+        provider_timestamp = 0.0
+    if provider_timestamp < 0:
+        provider_timestamp = 0.0
+    keys = [_billing_effect_version_key(normalized_provider, subject) for subject in unique_subjects]
+
+    async with _billing_effect_versions_lock:
+        if provider_timestamp > 0:
+            for key in keys:
+                current = _billing_effect_versions.get(key)
+                current_timestamp = float((current or {}).get("event_timestamp", 0) or 0) if isinstance(current, dict) else 0.0
+                if current_timestamp > provider_timestamp:
+                    return {
+                        "status": "stale",
+                        "result": None,
+                        "ordered": True,
+                        "newer_event_id": str((current or {}).get("event_id", "") or ""),
+                    }
+
+        result = await effect()
+        now = time.time()
+        for key in keys:
+            current = dict(_billing_effect_versions.get(key) or {})
+            if provider_timestamp > 0:
+                current.update({
+                    "provider": normalized_provider,
+                    "event_id": normalized_event_id,
+                    "event_timestamp": provider_timestamp,
+                    "applied_at": now,
+                })
+            else:
+                # Missing provider time is deliberately not promoted into the
+                # ordering barrier. Record it for audit while allowing every
+                # such legitimate event to execute under this lock.
+                current.update({
+                    "provider": normalized_provider,
+                    "last_unversioned_event_id": normalized_event_id,
+                    "last_unversioned_applied_at": now,
+                })
+            _billing_effect_versions[key] = current
+        _save_billing_effect_versions()
+        return {
+            "status": "applied",
+            "result": result,
+            "ordered": provider_timestamp > 0,
+        }
+
+
+class WebhookIdempotencyError(RuntimeError):
+    """Raised when a durable webhook claim cannot be established."""
+
+
+def _webhook_event_key(provider: str, event_id: str) -> str:
+    normalized_provider = str(provider or "").strip().lower()
+    normalized_id = str(event_id or "").strip()
+    if normalized_provider not in {"paypal", "stripe"} or not normalized_id:
+        raise WebhookIdempotencyError("invalid webhook event identity")
+    return f"{normalized_provider}:{normalized_id}"
+
+
+async def _claim_webhook_event(
+    provider: str,
+    event_id: str,
+    event_type: str,
+    *,
+    lease_seconds: float = 300.0,
+) -> dict:
+    """Atomically persist an event claim before any billing side effect.
+
+    Completed events are duplicates, failed events may retry immediately, and
+    abandoned processing claims may retry only after the lease. The on-disk
+    snapshot is the authoritative fallback on the single Fly API process.
+    """
+    key = _webhook_event_key(provider, event_id)
+    now = time.time()
+    async with _paypal_webhook_events_lock:
+        existing = _paypal_webhook_events.get(key)
+        if not isinstance(existing, dict) and str(provider).strip().lower() == "paypal":
+            # Honor records written by the pre-namespaced PayPal implementation.
+            legacy = _paypal_webhook_events.get(str(event_id or "").strip())
+            if isinstance(legacy, dict):
+                legacy_status = str(legacy.get("status", "") or "").strip().lower()
+                if legacy_status in {"processed", "processed_via_supabase", "completed"}:
+                    return {"status": "duplicate", "event_key": key, "claim_id": ""}
+                existing = legacy
+        if isinstance(existing, dict):
+            status = str(existing.get("status", "") or "").strip().lower()
+            if status in {"completed", "processed", "processed_via_supabase"}:
+                return {"status": "duplicate", "event_key": key, "claim_id": ""}
+            if status == "processing":
+                claimed_at = float(existing.get("claimed_at", existing.get("received_at", 0)) or 0)
+                if claimed_at > 0 and (now - claimed_at) < max(1.0, float(lease_seconds or 0)):
+                    return {"status": "busy", "event_key": key, "claim_id": ""}
+            elif status not in {"failed", "error", ""}:
+                raise WebhookIdempotencyError("webhook event state is invalid")
+
+        claim_id = f"whc_{uuid.uuid4().hex}"
+        attempts = int((existing or {}).get("attempts", 0) or 0) + 1
+        _paypal_webhook_events[key] = {
+            "provider": str(provider or "").strip().lower(),
+            "event_id": str(event_id or "").strip(),
+            "event_type": str(event_type or "")[:120],
+            "status": "processing",
+            "claim_id": claim_id,
+            "attempts": attempts,
+            "received_at": float((existing or {}).get("received_at", now) or now),
+            "claimed_at": now,
+            "updated_at": now,
+        }
+        try:
+            _save_paypal_webhook_events()
+        except Exception as exc:
+            raise WebhookIdempotencyError("webhook claim persistence failed") from exc
+        return {"status": "claimed", "event_key": key, "claim_id": claim_id, "attempts": attempts}
+
+
+async def _complete_webhook_event(
+    provider: str,
+    event_id: str,
+    claim_id: str,
+    *,
+    action: str = "",
+) -> bool:
+    key = _webhook_event_key(provider, event_id)
+    async with _paypal_webhook_events_lock:
+        record = _paypal_webhook_events.get(key)
+        if not isinstance(record, dict):
+            return False
+        if record.get("status") == "completed":
+            return True
+        if record.get("status") != "processing" or record.get("claim_id") != claim_id:
+            return False
+        updated = dict(record)
+        updated.update({
+            "status": "completed",
+            "action": str(action or "")[:160],
+            "completed_at": time.time(),
+            "updated_at": time.time(),
+        })
+        _paypal_webhook_events[key] = updated
+        try:
+            _save_paypal_webhook_events()
+        except Exception as exc:
+            raise WebhookIdempotencyError("webhook completion persistence failed") from exc
+        return True
+
+
+async def _fail_webhook_event(
+    provider: str,
+    event_id: str,
+    claim_id: str,
+    *,
+    error_code: str = "effect_failed",
+) -> bool:
+    key = _webhook_event_key(provider, event_id)
+    async with _paypal_webhook_events_lock:
+        record = _paypal_webhook_events.get(key)
+        if not isinstance(record, dict):
+            return False
+        if record.get("status") != "processing" or record.get("claim_id") != claim_id:
+            return False
+        updated = dict(record)
+        updated.update({
+            "status": "failed",
+            "error_code": str(error_code or "effect_failed")[:80],
+            "failed_at": time.time(),
+            "updated_at": time.time(),
+        })
+        _paypal_webhook_events[key] = updated
+        try:
+            _save_paypal_webhook_events()
+        except Exception as exc:
+            raise WebhookIdempotencyError("webhook failure persistence failed") from exc
+        return True
 
 
 def _mask_email_for_public(email: str) -> str:
@@ -201,10 +482,9 @@ def _load_landing_notifications() -> None:
 
 def _save_landing_notifications() -> None:
     try:
-        LANDING_NOTIFICATIONS_PATH.parent.mkdir(parents=True, exist_ok=True)
-        LANDING_NOTIFICATIONS_PATH.write_text(
-            json.dumps(_landing_notifications[-LANDING_NOTIFICATIONS_LIMIT:], ensure_ascii=True, indent=2),
-            encoding="utf-8",
+        _atomic_write_json(
+            LANDING_NOTIFICATIONS_PATH,
+            _landing_notifications[-LANDING_NOTIFICATIONS_LIMIT:],
         )
     except Exception:
         pass
@@ -257,8 +537,22 @@ def _wallet_for_user(user_id: str) -> dict:
     wallet.setdefault("animated_topup_credits", int(wallet.get("topup_credits", 0) or 0))
     wallet.setdefault("monthly_usage", {})
     wallet.setdefault("monthly_usage_non_animated", {})
+    wallet.setdefault("processed_mutations", {})
     wallet.setdefault("updated_at", time.time())
     return wallet
+
+
+def _processed_wallet_mutations(wallet: dict) -> dict:
+    records = wallet.get("processed_mutations")
+    return dict(records) if isinstance(records, dict) else {}
+
+
+def _remember_wallet_mutation(wallet: dict, key: str, record: dict) -> None:
+    if not key:
+        return
+    records = _processed_wallet_mutations(wallet)
+    records[key] = {**record, "recorded_at": time.time()}
+    wallet["processed_mutations"] = dict(list(records.items())[-1000:])
 
 
 def _plan_monthly_animated_limit(plan: str) -> int:
@@ -391,17 +685,35 @@ def _append_usage_ledger(event: dict) -> None:
         USAGE_LEDGER_PATH.parent.mkdir(parents=True, exist_ok=True)
         with USAGE_LEDGER_PATH.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(event, ensure_ascii=True) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
     except Exception:
         pass
 
 
-async def _credit_topup_wallet(user_id: str, credits: int, source: str, stripe_session_id: str = "") -> None:
+async def _credit_topup_wallet(
+    user_id: str,
+    credits: int,
+    source: str,
+    stripe_session_id: str = "",
+    idempotency_key: str = "",
+) -> bool:
     if not user_id or credits <= 0:
-        return
+        return False
+    mutation_key = str(idempotency_key or "").strip()
+    if not mutation_key and stripe_session_id:
+        mutation_key = f"credit:{str(source or '').strip().lower()}:{str(stripe_session_id).strip()}"
     async with _topup_wallet_lock:
         wallet = _wallet_for_user(user_id)
+        if mutation_key and mutation_key in _processed_wallet_mutations(wallet):
+            return False
         wallet["animated_topup_credits"] = int(wallet.get("animated_topup_credits", wallet.get("topup_credits", 0)) or 0) + int(credits)
         wallet["topup_credits"] = wallet["animated_topup_credits"]
+        _remember_wallet_mutation(
+            wallet,
+            mutation_key,
+            {"operation": "credit", "credits": int(credits)},
+        )
         wallet["updated_at"] = time.time()
         _save_topup_wallets()
     _append_usage_ledger({
@@ -412,9 +724,35 @@ async def _credit_topup_wallet(user_id: str, credits: int, source: str, stripe_s
         "stripe_session_id": stripe_session_id,
         "ts": time.time(),
     })
+    return True
 
 
-async def _debit_topup_wallet(user_id: str, credits: int, source: str, reference_id: str = "") -> int:
+async def _reset_monthly_usage_for_activation(user_id: str, idempotency_key: str) -> bool:
+    """Reset one activation's usage exactly once across crash/retry cycles."""
+    uid = str(user_id or "").strip()
+    key = str(idempotency_key or "").strip()
+    if not uid or not key:
+        return False
+    async with _topup_wallet_lock:
+        wallet = _wallet_for_user(uid)
+        if key in _processed_wallet_mutations(wallet):
+            return False
+        mk = _month_key()
+        wallet.setdefault("monthly_usage", {})[mk] = 0
+        wallet.setdefault("monthly_usage_non_animated", {})[mk] = 0
+        _remember_wallet_mutation(wallet, key, {"operation": "activation_reset", "month": mk})
+        wallet["updated_at"] = time.time()
+        _save_topup_wallets()
+        return True
+
+
+async def _debit_topup_wallet(
+    user_id: str,
+    credits: int,
+    source: str,
+    reference_id: str = "",
+    idempotency_key: str = "",
+) -> int:
     """
     Reverse a topup credit grant — typically called when PayPal issues a refund.
     Clamps at zero so we never drive the wallet negative (if the user already spent
@@ -423,13 +761,24 @@ async def _debit_topup_wallet(user_id: str, credits: int, source: str, reference
     """
     if not user_id or credits <= 0:
         return 0
+    mutation_key = str(idempotency_key or "").strip()
+    if not mutation_key and reference_id:
+        mutation_key = f"debit:{str(source or '').strip().lower()}:{str(reference_id).strip()}"
     debited = 0
     async with _topup_wallet_lock:
         wallet = _wallet_for_user(user_id)
+        prior = _processed_wallet_mutations(wallet).get(mutation_key) if mutation_key else None
+        if isinstance(prior, dict):
+            return int(prior.get("credits", 0) or 0)
         current = int(wallet.get("animated_topup_credits", wallet.get("topup_credits", 0)) or 0)
         debited = min(current, int(credits))
         wallet["animated_topup_credits"] = max(0, current - debited)
         wallet["topup_credits"] = wallet["animated_topup_credits"]
+        _remember_wallet_mutation(
+            wallet,
+            mutation_key,
+            {"operation": "debit", "credits": int(debited), "credits_requested": int(credits)},
+        )
         wallet["updated_at"] = time.time()
         _save_topup_wallets()
     _append_usage_ledger({

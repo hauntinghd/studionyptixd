@@ -19,7 +19,11 @@ kill_timeout = 120  # match render.yaml maxShutdownDelaySeconds
 
 [env]
   PORT = "10000"
-  WEB_CONCURRENCY = "4"
+  STUDIO_ENVIRONMENT = "production"
+  # One API process owns file-backed sessions/credits and the embedded Redis
+  # production consumer. Do not raise this without moving that state to a
+  # shared transactional store and separating workers into a Fly process group.
+  WEB_CONCURRENCY = "1"
   FRONTEND_DIST_DIR = "/app/ViralShorts-App/dist"
   APP_DATA_DIR = "/var/data"
   STUDIO_AGENT_SESSIONS_DIR = "/var/data/studio_agent_sessions"
@@ -128,6 +132,9 @@ kill_timeout = 120  # match render.yaml maxShutdownDelaySeconds
     grace_period = "60s"
     method = "GET"
     path = "/api/health"
+
+    [http_service.checks.headers]
+      Host = "nyptid-studio.fly.dev"
 
 [[vm]]
   size = "shared-cpu-4x"

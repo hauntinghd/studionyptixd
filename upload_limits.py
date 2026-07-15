@@ -24,6 +24,7 @@ MAX_ANALYTICS_IMAGE_BYTES = 12 * MIB
 MAX_CLIPLAB_VIDEO_BYTES = 2 * GIB
 MAX_CATALYST_VIDEO_BYTES = 1 * GIB
 MAX_STUDIO_ATTACHMENT_VIDEO_BYTES = 3 * GIB
+MAX_THUMBNAIL_VIDEO_BYTES = 512 * MIB
 
 
 # Request-body budgets include room for multipart boundaries and non-file form
@@ -34,6 +35,7 @@ MULTIPART_CONTENT_LENGTH_LIMITS: tuple[tuple[re.Pattern[str], int], ...] = (
     (re.compile(r"^/api/studio-agent/dictation$"), MAX_DICTATION_AUDIO_BYTES + 1 * MIB),
     (re.compile(r"^/api/studio-agent/sessions/[^/]+/attachments/image$"), MAX_REFERENCE_IMAGE_BYTES + 1 * MIB),
     (re.compile(r"^/api/studio-agent/sessions/[^/]+/attachments/video$"), MAX_STUDIO_ATTACHMENT_VIDEO_BYTES + 16 * MIB),
+    (re.compile(r"^/api/thumbnails/upload-video$"), MAX_THUMBNAIL_VIDEO_BYTES + 8 * MIB),
     (re.compile(r"^/api/longform/session/bootstrap$"), 8 * MIB + 24 * MAX_ANALYTICS_IMAGE_BYTES + 16 * MIB),
     (re.compile(r"^/api/longform/session/[^/]+/(?:reference-image|character-reference)$"), MAX_LONGFORM_REFERENCE_IMAGE_BYTES + 1 * MIB),
     (re.compile(r"^/api/creative/reference-image$"), MAX_LONGFORM_REFERENCE_IMAGE_BYTES + 1 * MIB),

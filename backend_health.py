@@ -15,7 +15,6 @@ from backend_settings import (
     REDIS_QUEUE_ENABLED,
     REDIS_URL,
     RUNWAY_API_KEY,
-    RUNWAY_API_KEY_SOURCE,
     RUNWAY_VIDEO_MODEL,
     SKELETON_REQUIRE_WAN22,
     TEMPLATE_ADAPTER_ROUTING,
@@ -26,6 +25,32 @@ from backend_settings import (
 
 _HEALTH_PROBE_CACHE: dict[str, tuple[float, bool]] = {}
 _HEALTH_PROBE_TTL_SEC = 30.0
+
+
+def _public_error_code(value: object) -> str:
+    """Collapse provider/runtime errors to a non-sensitive operational code."""
+    text = str(value or "").strip().lower()
+    if not text:
+        return ""
+    if "acknowledg" in text:
+        return "acknowledgement_pending"
+    if any(marker in text for marker in ("busy", "queue", "capacity", "concurrent", "rate limit", "429", "resource")):
+        return "provider_busy"
+    if any(marker in text for marker in ("timeout", "timed out", "deadline")):
+        return "provider_timeout"
+    if any(marker in text for marker in ("unauthorized", "forbidden", "authentication", "401", "403", "api key")):
+        return "provider_authentication_failed"
+    if any(marker in text for marker in ("not configured", "missing configuration", "disabled")):
+        return "provider_not_configured"
+    if any(marker in text for marker in ("unavailable", "connection", "connect", "dns")):
+        return "provider_unavailable"
+    return "provider_error"
+
+
+def _public_queue_consumer_health(value: dict | None) -> dict:
+    public = dict(value or {})
+    public["last_error"] = _public_error_code(public.get("last_error"))
+    return public
 
 
 def build_health_payload(
@@ -50,6 +75,7 @@ def build_health_payload(
     image_provider_success_counts: dict,
     image_provider_fallback_total: Callable[[], int],
     image_provider_fallback_pairs: dict,
+    queue_runtime_health: Callable[[], dict] | None = None,
 ):
     async def cached_probe(name: str, fn) -> bool:
         entry = _HEALTH_PROBE_CACHE.get(name)
@@ -76,20 +102,26 @@ def build_health_payload(
         now_ts = time.time()
         hidream_checked_ts = float(hidream_availability_cache.get("checked_ts", 0.0) or 0.0)
         hidream_last_ok_ts = float(hidream_availability_cache.get("last_ok_ts", 0.0) or 0.0)
-        hidream_last_error = str(hidream_availability_cache.get("last_error", "") or "")
+        hidream_last_error = _public_error_code(hidream_availability_cache.get("last_error", ""))
         hidream_model = str(hidream_availability_cache.get("model_name", "") or "")
         hidream_edit_checked_ts = float(hidream_edit_availability_cache.get("checked_ts", 0.0) or 0.0)
         hidream_edit_last_ok_ts = float(hidream_edit_availability_cache.get("last_ok_ts", 0.0) or 0.0)
-        hidream_edit_last_error = str(hidream_edit_availability_cache.get("last_error", "") or "")
+        hidream_edit_last_error = _public_error_code(hidream_edit_availability_cache.get("last_error", ""))
         hidream_edit_model = str(hidream_edit_availability_cache.get("model_name", "") or "")
         wan_t2i_checked_ts = float(wan22_t2i_availability_cache.get("checked_ts", 0.0) or 0.0)
         wan_t2i_last_ok_ts = float(wan22_t2i_availability_cache.get("last_ok_ts", 0.0) or 0.0)
-        wan_t2i_last_error = str(wan22_t2i_availability_cache.get("last_error", "") or "")
+        wan_t2i_last_error = _public_error_code(wan22_t2i_availability_cache.get("last_error", ""))
         wan_t2i_mode = str(wan22_t2i_availability_cache.get("mode", "") or "")
         wan_t2i_checkpoint = str(wan22_t2i_availability_cache.get("ckpt_name", "") or "")
         wan_t2i_unet = str(wan22_t2i_availability_cache.get("unet_name", "") or "")
         provider_label = " > ".join(provider_order)
         backend_commit, frontend_bundle = read_deploy_meta()
+        queue_consumer = _public_queue_consumer_health(queue_runtime_health()) if queue_runtime_health else {
+            "required": False,
+            "running": False,
+            "ready": True,
+        }
+        queue_consumer_ready = bool(queue_consumer.get("ready", True))
         runpod_production = False
         runpod_longform = False
         runpod_control_ready = False
@@ -123,7 +155,7 @@ def build_health_payload(
         else:
             video_engine = "Static"
         return {
-            "status": "online",
+            "status": "online" if queue_consumer_ready else "degraded",
             "engine": "NYPTID Studio Engine v3.0",
             "ffmpeg_available": ffmpeg_available(),
             "kling_enabled": bool(FAL_AI_KEY),
@@ -147,9 +179,9 @@ def build_health_payload(
             "wan22_t2i_last_error": wan_t2i_last_error,
             "video_engine": video_engine,
             "runway_key_configured": runway_video_enabled,
-            "runway_key_source": RUNWAY_API_KEY_SOURCE if runway_video_enabled else "",
+            "runway_key_source": "configured" if runway_video_enabled else "",
             "runway_video_model": RUNWAY_VIDEO_MODEL if runway_video_enabled else "",
-            "comfyui_url": str(comfyui_url())[:50],
+            "comfyui_configured": bool(str(comfyui_url() or "").strip()),
             "skeleton_lora": skeleton_lora,
             "image_engine_skeleton": ("Skeleton LoRA (local) > " + provider_label) if skeleton_lora else provider_label,
             "image_provider_order": provider_order,
@@ -169,6 +201,9 @@ def build_health_payload(
             "backend_commit": backend_commit,
             "frontend_bundle": frontend_bundle,
             "queue_mode": "redis" if (REDIS_QUEUE_ENABLED and bool(REDIS_URL)) else "inprocess",
+            "queue_consumer": queue_consumer,
+            "queue_consumer_running": bool(queue_consumer.get("running", False)),
+            "queue_consumer_ready": queue_consumer_ready,
             "force_720p_only": FORCE_720P_ONLY,
             "runpod_production_enabled": runpod_production,
             "runpod_longform_enabled": runpod_longform,

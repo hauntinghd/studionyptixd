@@ -18,6 +18,10 @@ def test_production_app_mounts_private_generation_surfaces() -> None:
         ("GET", "/api/zerotier-private/jobs/not-a-job/mp4"),
         ("POST", "/api/alt-history-private/generate-topics"),
         ("POST", "/api/history-rewind-private/generate-topics"),
+        ("GET", "/api/catalyst/references"),
+        ("POST", "/api/catalyst/references"),
+        ("GET", "/api/thumbnails/models"),
+        ("POST", "/api/thumbnails/generate"),
     )
 
     for method, path in probes:

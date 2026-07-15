@@ -21,7 +21,6 @@ from datetime import date, datetime, timezone, timedelta
 from pathlib import Path
 from urllib.parse import quote, urlparse, unquote, parse_qs, urlencode
 from fastapi import FastAPI, UploadFile, File, Form, BackgroundTasks, HTTPException, Depends, Request, Query
-from fastapi.middleware.cors import CORSMiddleware
 from upload_limits import (
     MAX_ANALYTICS_IMAGE_BYTES,
     MAX_LONGFORM_REFERENCE_IMAGE_BYTES,
@@ -31,7 +30,6 @@ from upload_limits import (
     write_upload_limited,
 )
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
-from fastapi.staticfiles import StaticFiles
 from typing import Optional
 import stripe as stripe_lib
 import uvicorn
@@ -58,7 +56,13 @@ from backend_media_handlers import (
 )
 from backend_clone_handler import build_clone_video_handler
 from backend_billing_handlers import build_create_checkout_handler
-from backend_runtime import configure_backend_runtime, _ffmpeg_available, _read_deploy_meta
+from backend_runtime import (
+    configure_backend_runtime,
+    configure_frontend_static,
+    fastapi_documentation_kwargs,
+    _ffmpeg_available,
+    _read_deploy_meta,
+)
 from backend_studio_utilities import build_studio_utility_handlers
 from audio import (
     DEFAULT_ELEVENLABS_VOICES,
@@ -93,7 +97,6 @@ from audio import (
 from auth import FALLBACK_SUPABASE_ANON_KEY, FALLBACK_SUPABASE_URL, build_auth_helpers
 from alt_history_private_router import build_alt_history_private_router
 from routes import (
-    build_assets_router,
     build_billing_router,
     build_core_router,
     build_generation_router,
@@ -104,6 +107,7 @@ from routes import (
     build_studio_utility_router,
 )
 from backend_youtube_catalyst_routes import build_youtube_catalyst_app_router
+from catalyst_references_router import build_catalyst_references_router
 from cliplab_router import build_cliplab_router
 from long_form_router import build_long_form_router
 from history_rewind_private_router import build_history_rewind_private_router
@@ -111,6 +115,13 @@ from skeleton_ai_router import build_skeleton_ai_router
 from studio_agent_router import build_studio_agent_router
 from studio_analytics_router import build_studio_analytics_router
 from studio_hub_router import build_studio_hub_router
+from thumblab_router import (
+    build_thumblab_router,
+    _apply_thumbnail_text_overlay,
+    _enforce_thumbnail_1080,
+    _generate_thumbnail_image,
+    _thumbnail_output_dir_for_user,
+)
 from zerotier_private_router import build_zerotier_private_router
 from backend_settings import (
     XAI_API_KEY,
@@ -366,6 +377,7 @@ from catalyst import (
     configure_catalyst_runtime_hooks,
 )
 from billing import (
+    BILLING_EFFECT_VERSIONS_PATH,
     KPI_TARGETS,
     LANDING_NOTIFICATIONS_LIMIT,
     LANDING_NOTIFICATIONS_PATH,
@@ -388,6 +400,7 @@ from billing import (
     _landing_notifications_lock,
     _load_kpi_metrics,
     _load_landing_notifications,
+    _load_billing_effect_versions,
     _load_paypal_orders,
     _load_paypal_subscriptions,
     _load_paypal_webhook_events,
@@ -403,6 +416,7 @@ from billing import (
     _plan_monthly_non_animated_limit,
     _next_renewal_from_anchor,
     _record_kpi_for_job,
+    _run_ordered_billing_effect,
     _refund_generation_credit,
     _reserve_generation_credit,
     _save_kpi_metrics,
@@ -665,12 +679,15 @@ from backend_queue import (
     enqueue_generation_job,
     get_queue_depth,
     get_queue_max_depth,
+    get_queue_runtime_health,
     get_queue_workers,
     get_persisted_job_state,
     init_queue_runtime,
     persist_job_state,
     persist_job_state_awaited,
     schedule_persist_job_state,
+    start_embedded_generation_worker,
+    stop_embedded_generation_worker,
 )
 try:
     import paramiko
@@ -739,28 +756,12 @@ configure_reference_video_audit_hooks(
 )
 
 
-app = FastAPI(title="NYPTID Studio Engine", version="3.0")
-app.add_middleware(MultipartContentLengthLimitMiddleware)
-app.add_middleware(
-    CORSMiddleware,
-    # Studio is a separate frontend origin and sends Bearer-authenticated
-    # requests. Without this middleware its OPTIONS preflight can reach a
-    # route with no OPTIONS handler and surface as a misleading network error.
-    allow_origins=[
-        "https://studio.nyptidindustries.com",
-        "https://billing.nyptidindustries.com",
-        "https://invoicer.nyptidindustries.com",
-        "https://nyptid-studio.fly.dev",
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-        "http://localhost:8080",
-        "http://127.0.0.1:8080",
-    ],
-    allow_credentials=False,
-    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type", "Cache-Control"],
-    max_age=86400,
+app = FastAPI(
+    title="NYPTID Studio Engine",
+    version="3.0",
+    **fastapi_documentation_kwargs(),
 )
+app.add_middleware(MultipartContentLengthLimitMiddleware)
 configure_backend_runtime(app)
 
 jobs: dict = {}
@@ -4261,6 +4262,7 @@ _load_topup_wallets()
 _load_paypal_orders()
 _load_paypal_subscriptions()
 _load_paypal_webhook_events()
+_load_billing_effect_versions()
 _load_landing_notifications()
 _load_longform_sessions()
 _load_catalyst_memory()
@@ -18530,7 +18532,7 @@ def _languages_payload():
     return {"languages": [{"code": k, "name": v["name"]} for k, v in SUPPORTED_LANGUAGES.items()]}
 
 
-_health_payload = build_health_payload(
+_base_health_payload = build_health_payload(
     log=log,
     ffmpeg_available=_ffmpeg_available,
     comfyui_url=lambda: COMFYUI_URL,
@@ -18551,7 +18553,24 @@ _health_payload = build_health_payload(
     image_provider_success_counts=_image_provider_success_counts,
     image_provider_fallback_total=lambda: _image_provider_fallback_total,
     image_provider_fallback_pairs=_image_provider_fallback_pairs,
+    queue_runtime_health=get_queue_runtime_health,
 )
+
+
+async def _health_payload():
+    payload = await _base_health_payload()
+    if not bool(payload.get("queue_consumer_ready", True)):
+        # Fly's HTTP check must withdraw a process whose required consumer died
+        # or lost Redis; a 200 "API online" response would strand paid work.
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "status": "degraded",
+                "queue_consumer": payload.get("queue_consumer", {}),
+                "backend_commit": payload.get("backend_commit", ""),
+            },
+        )
+    return payload
 
 async def _set_comfyui_url(body: dict, user: dict):
     """Admin-only: update the ComfyUI URL at runtime (e.g. after cloudflared restart)."""
@@ -18738,6 +18757,24 @@ async def _skeleton_reserve_credit(user: dict, *, ac_cost: int):
 
 mount_router(
     app,
+    build_thumblab_router(
+        require_auth=require_auth,
+        jobs=jobs,
+        persist_job_state=persist_job_state,
+        fal_json_completion=_fal_any_llm_json_completion,
+        fal_vision_json_completion=_fal_any_llm_vision_json_completion,
+        generate_image_fal_selected_model=_generate_image_fal_selected_model,
+        youtube_fetch_public_channel_page_videos=_youtube_fetch_public_channel_page_videos,
+        list_connected_youtube_channels_for_user=_list_connected_youtube_channels_for_user,
+        save_training_candidate=_save_training_candidate,
+        fal_ai_key=FAL_AI_KEY,
+        pikzels_api_key=PIKZELS_API_KEY,
+    ),
+)
+
+
+mount_router(
+    app,
     build_skeleton_ai_router(
         require_auth=require_auth,
         reserve_credit=_skeleton_reserve_credit,
@@ -18776,6 +18813,11 @@ mount_router(
         require_auth=require_auth,
         is_admin_user=_is_admin_user,
     ),
+)
+
+mount_router(
+    app,
+    build_catalyst_references_router(require_auth=require_auth),
 )
 
 mount_router(
@@ -20279,6 +20321,18 @@ async def _create_paypal_topup_order(user: dict, price_id: str, pack: dict) -> s
     return approve_url
 
 
+_paypal_order_capture_locks: dict[str, asyncio.Lock] = {}
+
+
+def _paypal_order_capture_lock(order_id: str) -> asyncio.Lock:
+    """Return the single-process lock that serializes one PayPal capture."""
+    lock = _paypal_order_capture_locks.get(order_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _paypal_order_capture_locks[order_id] = lock
+    return lock
+
+
 async def _capture_paypal_topup_order(order_id: str) -> dict:
     order_id = str(order_id or "").strip()
     if not order_id:
@@ -20291,13 +20345,29 @@ async def _capture_paypal_topup_order(order_id: str) -> dict:
     # recheck prevented double-crediting), but PayPal's duplicate-capture
     # behavior isn't guaranteed idempotent and this could surface as an
     # error on the slower caller.
-    async with _paypal_orders_lock:
-        order_meta = dict(_paypal_orders.get(order_id, {}) or {})
-        if order_meta and order_meta.get("credited"):
-            return order_meta
-    if not order_meta:
-        raise HTTPException(404, "PayPal order was not found")
-    _, capture_id = await _capture_paypal_order_api(order_id)
+    async with _paypal_order_capture_lock(order_id):
+        async with _paypal_orders_lock:
+            order_meta = dict(_paypal_orders.get(order_id, {}) or {})
+            if order_meta and order_meta.get("credited"):
+                return order_meta
+        if not order_meta:
+            raise HTTPException(404, "PayPal order was not found")
+        capture_id = (
+            str(order_meta.get("capture_id", "") or "")
+            if order_meta.get("capture_confirmed")
+            else ""
+        )
+        if not capture_id:
+            _, capture_id = await _capture_paypal_order_api(order_id)
+            async with _paypal_orders_lock:
+                captured = dict(_paypal_orders.get(order_id, {}) or {})
+                if captured.get("credited"):
+                    return captured
+                captured["capture_confirmed"] = True
+                captured["capture_id"] = capture_id
+                captured["capture_confirmed_at"] = time.time()
+                _paypal_orders[order_id] = captured
+                _save_paypal_orders()
     async with _paypal_orders_lock:
         latest = dict(_paypal_orders.get(order_id, {}) or {})
         if latest.get("credited"):
@@ -20309,18 +20379,16 @@ async def _capture_paypal_topup_order(order_id: str) -> dict:
                 credits=int(latest.get("credits", 0) or 0),
                 source=str(latest.get("pack", "paypal") or "paypal"),
                 stripe_session_id=order_id,
+                idempotency_key=f"paypal_topup:{order_id}",
             )
-        try:
-            import unified_credits as uc
-            uc.add_credits(
-                str(latest.get("user_id", "") or ""),
-                int(latest.get("credits", 0) or 0),
-                reason="paypal_topup",
-                metadata={"order_id": order_id, "pack": str(latest.get("pack", "") or "")},
-                idempotency_key=f"paypal_order:{order_id}",
-            )
-        except Exception as uc_err:
-            log.warning(f"Unified wallet top-up mirror failed for {order_id}: {uc_err}")
+        import unified_credits as uc
+        uc.add_credits(
+            str(latest.get("user_id", "") or ""),
+            int(latest.get("credits", 0) or 0),
+            reason="paypal_topup",
+            metadata={"order_id": order_id, "pack": str(latest.get("pack", "") or "")},
+            idempotency_key=f"paypal_order:{order_id}",
+        )
         latest["credited"] = True
         latest["capture_id"] = capture_id
         latest["captured_at"] = time.time()
@@ -20338,15 +20406,32 @@ async def _capture_paypal_subscription_order(order_id: str) -> dict:
     order_id = str(order_id or "").strip()
     if not order_id:
         raise HTTPException(400, "Missing PayPal order id")
-    async with _paypal_orders_lock:
-        order_meta = dict(_paypal_orders.get(order_id, {}) or {})
-    if not order_meta:
-        raise HTTPException(404, "PayPal order was not found")
-    if str(order_meta.get("kind", "") or "").strip().lower() not in {"subscription", "monthly"}:
-        raise HTTPException(400, "PayPal order is not a monthly subscription checkout")
-    if order_meta.get("activated"):
-        return order_meta
-    _, capture_id = await _capture_paypal_order_api(order_id)
+    async with _paypal_order_capture_lock(order_id):
+        async with _paypal_orders_lock:
+            order_meta = dict(_paypal_orders.get(order_id, {}) or {})
+        if not order_meta:
+            raise HTTPException(404, "PayPal order was not found")
+        if str(order_meta.get("kind", "") or "").strip().lower() not in {"subscription", "monthly"}:
+            raise HTTPException(400, "PayPal order is not a monthly subscription checkout")
+        if order_meta.get("activated"):
+            return order_meta
+        capture_id = (
+            str(order_meta.get("capture_id", "") or "")
+            if order_meta.get("capture_confirmed")
+            else ""
+        )
+        if not capture_id:
+            _, capture_id = await _capture_paypal_order_api(order_id)
+            async with _paypal_orders_lock:
+                captured = dict(_paypal_orders.get(order_id, {}) or {})
+                if captured.get("activated"):
+                    return captured
+                captured["capture_confirmed"] = True
+                captured["capture_id"] = capture_id
+                captured["capture_confirmed_at"] = time.time()
+                _paypal_orders[order_id] = captured
+                _save_paypal_orders()
+                order_meta = captured
     user_id = str(order_meta.get("user_id", "") or "").strip()
     email = str(order_meta.get("email", "") or "").strip().lower()
     plan = str(order_meta.get("plan", "none") or "none").strip().lower()
@@ -20356,12 +20441,18 @@ async def _capture_paypal_subscription_order(order_id: str) -> dict:
     current_user = {"id": user_id, "email": email, "plan": plan}
     current_record = _paypal_subscription_record_for_user(current_user)
     current_snapshot = _paypal_subscription_snapshot_for_user(current_user)
-    period_start_unix = now_unix
-    if current_snapshot.get("billing_active") and str(current_snapshot.get("record_plan", "none") or "none") == plan:
-        active_end = int((current_record or {}).get("period_end_unix", 0) or 0)
-        if active_end > now_unix:
-            period_start_unix = active_end
-    period_end_unix = _add_months_utc(period_start_unix, 1)
+    same_order_retry = str((current_record or {}).get("order_id", "") or "") == order_id
+    if same_order_retry:
+        period_start_unix = int((current_record or {}).get("period_start_unix", now_unix) or now_unix)
+        period_end_unix = int((current_record or {}).get("period_end_unix", 0) or 0)
+        capture_id = str((current_record or {}).get("capture_id", capture_id) or capture_id)
+    else:
+        period_start_unix = now_unix
+        if current_snapshot.get("billing_active") and str(current_snapshot.get("record_plan", "none") or "none") == plan:
+            active_end = int((current_record or {}).get("period_end_unix", 0) or 0)
+            if active_end > now_unix:
+                period_start_unix = active_end
+        period_end_unix = _add_months_utc(period_start_unix, 1)
     if period_end_unix <= period_start_unix:
         period_end_unix = period_start_unix + (31 * 24 * 3600)
     subscription_key_candidates = _paypal_subscription_lookup_keys(user_id, email)
@@ -20385,26 +20476,11 @@ async def _capture_paypal_subscription_order(order_id: str) -> dict:
     async with _paypal_subscriptions_lock:
         _paypal_subscriptions[subscription_key] = subscription_record
         _save_paypal_subscriptions()
-    async with _paypal_orders_lock:
-        latest = dict(_paypal_orders.get(order_id, {}) or {})
-        if latest.get("activated"):
-            return latest
-        latest["activated"] = True
-        latest["capture_id"] = capture_id
-        latest["captured_at"] = time.time()
-        latest["period_start_unix"] = int(period_start_unix)
-        latest["period_end_unix"] = int(period_end_unix)
-        latest["paypal_subscription_key"] = subscription_key
-        _paypal_orders[order_id] = latest
-        _save_paypal_orders()
     if user_id:
         await _supabase_set_user_plan(user_id, plan)
         if plan in UNIFIED_PLANS:
-            try:
-                import unified_credits as uc
-                uc.set_plan(user_id, plan, grant_now=True)
-            except Exception as uc_err:
-                log.warning(f"Unified plan grant failed for {user_id[:12]} plan={plan}: {uc_err}")
+            import unified_credits as uc
+            uc.set_plan(user_id, plan, grant_now=True)
         # Phase 3 BUG #2 fix: reset monthly AC usage on subscription
         # activation. Before this patch, a user upgrading from a lower tier
         # (or reactivating after a cancellation) kept their old
@@ -20414,25 +20490,22 @@ async def _capture_paypal_subscription_order(order_id: str) -> dict:
         # out. Now: clear the animated + non-animated monthly buckets for
         # the current month_key so the new plan's full allotment is
         # available immediately.
-        try:
-            from billing import _wallet_for_user, _month_key, _save_topup_wallets
-            wallet = _wallet_for_user(user_id)
-            mk = _month_key()
-            wallet.setdefault("monthly_usage", {})[mk] = 0
-            wallet.setdefault("monthly_usage_non_animated", {})[mk] = 0
-            wallet["updated_at"] = time.time()
-            _save_topup_wallets()
-        except Exception as reset_err:
-            log.warning(f"Monthly AC reset on subscription activation failed for {user_id[:12]}: {reset_err}")
-            try:
-                _studio_alerts.send_alert(
-                    "warn",
-                    "Subscription activated but monthly AC reset failed",
-                    f"user={user_id[:12]} plan={plan} order={order_id}. Manual fix required: zero the current-month counter in topup_wallets for this user.",
-                    context={"user_id": user_id[:12], "plan": plan, "error": str(reset_err)[:200]},
-                )
-            except Exception:
-                pass
+        from billing import _reset_monthly_usage_for_activation
+        await _reset_monthly_usage_for_activation(
+            user_id,
+            f"activation_reset:paypal:{order_id}",
+        )
+    async with _paypal_orders_lock:
+        latest = dict(_paypal_orders.get(order_id, {}) or {})
+        if not latest.get("activated"):
+            latest["activated"] = True
+            latest["capture_id"] = capture_id
+            latest["captured_at"] = time.time()
+            latest["period_start_unix"] = int(period_start_unix)
+            latest["period_end_unix"] = int(period_end_unix)
+            latest["paypal_subscription_key"] = subscription_key
+            _paypal_orders[order_id] = latest
+            _save_paypal_orders()
     await _append_landing_notification(
         event_type="subscription",
         plan=plan,
@@ -20634,11 +20707,10 @@ async def _paypal_revoke_subscription_for_order(order_id: str, reason: str) -> b
             _paypal_orders[order_id] = latest
             _save_paypal_orders()
     if revoked and user_id:
-        try:
-            await _supabase_set_user_plan(user_id, "none")
-            log.info(f"PayPal revoke: user_id={user_id} email={email} plan reset to none ({reason})")
-        except Exception as e:
-            log.error(f"PayPal revoke: failed to reset plan for {user_id}: {e}")
+        await _supabase_set_user_plan(user_id, "none")
+        import unified_credits as uc
+        uc.set_plan(user_id, "", grant_now=False)
+        log.info("PayPal subscription revocation synchronized")
     return revoked
 
 
@@ -20652,11 +20724,28 @@ async def _paypal_revoke_topup_for_order(order_id: str, reason: str) -> int:
     if not order_meta:
         log.warning(f"PayPal revoke topup: no order record for {order_id}")
         return 0
+    if order_meta.get("revoked"):
+        return int(order_meta.get("credits_debited", 0) or 0)
     user_id = str(order_meta.get("user_id", "") or "")
     credits = int(order_meta.get("credits", 0) or 0)
     if not user_id or credits <= 0:
         return 0
-    debited = await _debit_topup_wallet(user_id, credits, source=reason, reference_id=order_id)
+    reversal_key = f"paypal_topup_reversal:{order_id}"
+    debited = await _debit_topup_wallet(
+        user_id,
+        credits,
+        source=reason,
+        reference_id=order_id,
+        idempotency_key=reversal_key,
+    )
+    import unified_credits as uc
+    unified_debited = uc.remove_topup_credits(
+        user_id,
+        credits,
+        reason=reason,
+        metadata={"order_id": order_id},
+        idempotency_key=reversal_key,
+    )
     async with _paypal_orders_lock:
         latest = dict(_paypal_orders.get(order_id, {}) or {})
         if latest:
@@ -20664,6 +20753,7 @@ async def _paypal_revoke_topup_for_order(order_id: str, reason: str) -> int:
             latest["revoked_at"] = time.time()
             latest["revocation_reason"] = reason
             latest["credits_debited"] = int(debited)
+            latest["unified_credits_debited"] = int(unified_debited)
             _paypal_orders[order_id] = latest
             _save_paypal_orders()
     log.info(f"PayPal revoke topup: user_id={user_id} order={order_id} debited={debited}/{credits} ({reason})")
@@ -20680,10 +20770,10 @@ def _paypal_find_order_by_capture_id(capture_id: str) -> str:
     return ""
 
 
-async def _paypal_apply_webhook_event(event: dict) -> dict:
+async def _paypal_apply_webhook_event_unordered(event: dict) -> dict:
     """
     Dispatch a verified PayPal webhook event. Returns a dict describing the action taken
-    for logging/debugging. Never raises — unknown event types are recorded as no-op.
+    for logging/debugging. Effect failures raise so the durable claim can retry.
     """
     event_type = str((event or {}).get("event_type", "") or "").upper()
     resource = (event or {}).get("resource", {}) or {}
@@ -20731,6 +20821,7 @@ async def _paypal_apply_webhook_event(event: dict) -> dict:
         custom_id = str(resource.get("custom_id", "") or "")
         # Match against stored subscription records
         revoked_count = 0
+        revoked_user_ids: set[str] = set()
         async with _paypal_subscriptions_lock:
             for key, rec in list(_paypal_subscriptions.items()):
                 if str((rec or {}).get("subscription_id", "") or "") == subscription_id or (
@@ -20744,12 +20835,13 @@ async def _paypal_apply_webhook_event(event: dict) -> dict:
                     revoked_count += 1
                     user_id = str(rec.get("user_id", "") or "")
                     if user_id:
-                        try:
-                            await _supabase_set_user_plan(user_id, "none")
-                        except Exception as e:
-                            log.error(f"PayPal webhook: failed to reset plan for {user_id}: {e}")
+                        revoked_user_ids.add(user_id)
             if revoked_count:
                 _save_paypal_subscriptions()
+        for user_id in revoked_user_ids:
+            await _supabase_set_user_plan(user_id, "none")
+            import unified_credits as uc
+            uc.set_plan(user_id, "", grant_now=False)
         result["action"] = f"cancelled_{revoked_count}_subscriptions"
         result["subscription_id"] = subscription_id
         return result
@@ -20774,16 +20866,11 @@ async def _paypal_apply_webhook_event(event: dict) -> dict:
                     f"PayPal webhook safety-net firing: order_id={order_id} kind={kind} "
                     "was never captured via /api/paypal/return — applying grant from webhook"
                 )
-                try:
-                    if kind in {"subscription", "monthly"}:
-                        await _capture_paypal_subscription_order(order_id)
-                    else:
-                        await _capture_paypal_topup_order(order_id)
-                    result["action"] = "capture_safety_net_applied"
-                except Exception as e:
-                    log.error(f"PayPal webhook safety-net failed for {order_id}: {e}")
-                    result["action"] = "capture_safety_net_error"
-                    result["error"] = str(e)[:200]
+                if kind in {"subscription", "monthly"}:
+                    await _capture_paypal_subscription_order(order_id)
+                else:
+                    await _capture_paypal_topup_order(order_id)
+                result["action"] = "capture_safety_net_applied"
                 result["order_id"] = order_id
                 result["capture_id"] = capture_id
                 return result
@@ -20796,23 +20883,245 @@ async def _paypal_apply_webhook_event(event: dict) -> dict:
     return result
 
 
-async def _paypal_webhook(request: Request):
-    """
-    PayPal webhook receiver. Verifies the signature via /v1/notifications/verify-webhook-signature
-    before dispatching. Dedupes events by event_id so PayPal's retry policy (up to 25 retries over
-    ~3 days) doesn't apply the same refund/cancellation twice.
+def _provider_event_timestamp(value) -> float:
+    """Parse a verified provider timestamp; zero means no ordering signal."""
+    if isinstance(value, bool) or value is None:
+        return 0.0
+    if isinstance(value, (int, float)):
+        return max(0.0, float(value))
+    raw = str(value or "").strip()
+    if not raw:
+        return 0.0
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        pass
+    try:
+        normalized = raw[:-1] + "+00:00" if raw.endswith("Z") else raw
+        parsed = datetime.fromisoformat(normalized)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return max(0.0, parsed.timestamp())
+    except (TypeError, ValueError, OverflowError):
+        return 0.0
 
-    Configure at https://developer.paypal.com/dashboard/applications/live -> your app -> Webhooks,
-    URL = https://api.nyptidindustries.com/api/paypal/webhook, events:
-    PAYMENT.CAPTURE.COMPLETED, PAYMENT.CAPTURE.REFUNDED, PAYMENT.CAPTURE.REVERSED,
-    BILLING.SUBSCRIPTION.CANCELLED, BILLING.SUBSCRIPTION.EXPIRED, BILLING.SUBSCRIPTION.SUSPENDED.
-    """
+
+def _paypal_plan_event_subjects(event: dict) -> list[str]:
+    event_type = str((event or {}).get("event_type", "") or "").upper()
+    resource = (event or {}).get("resource", {}) or {}
+    subjects: list[str] = []
+
+    if event_type in {
+        "BILLING.SUBSCRIPTION.CANCELLED",
+        "BILLING.SUBSCRIPTION.EXPIRED",
+        "BILLING.SUBSCRIPTION.SUSPENDED",
+    }:
+        subscription_id = str(resource.get("id", "") or "").strip()
+        custom_id = str(resource.get("custom_id", "") or "").strip()
+        if subscription_id:
+            subjects.append(f"subscription:{subscription_id}")
+        if custom_id:
+            subjects.append(f"user:{custom_id}")
+        for record in list(_paypal_subscriptions.values()):
+            if not isinstance(record, dict):
+                continue
+            if str(record.get("subscription_id", "") or "") == subscription_id or (
+                custom_id and str(record.get("user_id", "") or "") == custom_id
+            ):
+                user_id = str(record.get("user_id", "") or "").strip()
+                email = str(record.get("email", "") or "").strip().lower()
+                if user_id:
+                    subjects.append(f"user:{user_id}")
+                if email:
+                    subjects.append(f"email:{email}")
+
+    elif event_type in {
+        "PAYMENT.CAPTURE.COMPLETED",
+        "PAYMENT.CAPTURE.REFUNDED",
+        "PAYMENT.CAPTURE.REVERSED",
+    }:
+        capture_id = str(resource.get("id", "") or "") if event_type == "PAYMENT.CAPTURE.COMPLETED" else ""
+        if not capture_id:
+            for link in list(resource.get("links", []) or []):
+                if str((link or {}).get("rel", "") or "").lower() == "up":
+                    capture_id = str((link or {}).get("href", "") or "").rsplit("/", 1)[-1]
+                    break
+        if not capture_id:
+            capture_id = str(resource.get("capture_id", "") or "")
+        order_id = _paypal_find_order_by_capture_id(capture_id)
+        order_meta = dict(_paypal_orders.get(order_id, {}) or {}) if order_id else {}
+        if str(order_meta.get("kind", "") or "").lower() in {"subscription", "monthly"}:
+            subjects.append(f"order:{order_id}")
+            user_id = str(order_meta.get("user_id", "") or "").strip()
+            email = str(order_meta.get("email", "") or "").strip().lower()
+            if user_id:
+                subjects.append(f"user:{user_id}")
+            if email:
+                subjects.append(f"email:{email}")
+
+    return list(dict.fromkeys(subjects))
+
+
+async def _paypal_apply_webhook_event(event: dict) -> dict:
+    subjects = _paypal_plan_event_subjects(event)
+    if not subjects:
+        return await _paypal_apply_webhook_event_unordered(event)
+
+    async def apply_effect() -> dict:
+        return await _paypal_apply_webhook_event_unordered(event)
+
+    ordered = await _run_ordered_billing_effect(
+        "paypal",
+        subjects,
+        str((event or {}).get("id", "") or ""),
+        _provider_event_timestamp((event or {}).get("create_time") or ((event or {}).get("resource", {}) or {}).get("create_time")),
+        apply_effect,
+    )
+    if ordered.get("status") == "stale":
+        return {
+            "event_type": str((event or {}).get("event_type", "") or "").upper(),
+            "action": "stale_ignored",
+        }
+    return dict(ordered.get("result") or {})
+
+
+async def _claim_billing_webhook(provider: str, event_id: str, event_type: str) -> dict:
+    """Establish local and configured remote claims before billing effects."""
+    from billing import (
+        WebhookIdempotencyError,
+        _claim_webhook_event,
+        _complete_webhook_event,
+        _fail_webhook_event,
+    )
+    import paypal_webhook_store as remote_store
+
+    try:
+        local = await _claim_webhook_event(provider, event_id, event_type)
+    except WebhookIdempotencyError:
+        raise HTTPException(503, "Webhook idempotency is unavailable")
+    if local.get("status") == "duplicate":
+        return {"status": "duplicate"}
+    if local.get("status") != "claimed":
+        raise HTTPException(503, "Webhook event is already being processed")
+
+    context = {
+        "status": "claimed",
+        "provider": provider,
+        "event_id": event_id,
+        "event_type": event_type,
+        "local_claim_id": str(local.get("claim_id") or ""),
+        "remote_event_id": "",
+        "remote_claim_id": "",
+    }
+    if not remote_store.configured():
+        return context
+
+    remote_event_id = event_id if provider == "paypal" else f"stripe:{event_id}"
+    remote = await remote_store.claim_event(
+        remote_event_id,
+        event_type=event_type,
+        provider=provider,
+    )
+    remote_status = str(remote.get("status") or "")
+    if remote_status == "duplicate":
+        try:
+            completed = await _complete_webhook_event(
+                provider,
+                event_id,
+                context["local_claim_id"],
+                action="remote_duplicate",
+            )
+        except WebhookIdempotencyError:
+            raise HTTPException(503, "Webhook idempotency is unavailable")
+        if not completed:
+            raise HTTPException(503, "Webhook idempotency completion failed")
+        return {"status": "duplicate"}
+    if remote_status != "claimed":
+        try:
+            await _fail_webhook_event(
+                provider,
+                event_id,
+                context["local_claim_id"],
+                error_code=f"remote_{remote_status or 'unavailable'}",
+            )
+        except WebhookIdempotencyError:
+            pass
+        raise HTTPException(503, "Webhook idempotency is unavailable")
+    context["remote_event_id"] = remote_event_id
+    context["remote_claim_id"] = str(remote.get("claim_id") or "")
+    return context
+
+
+async def _complete_billing_webhook(context: dict, action: str) -> None:
+    from billing import WebhookIdempotencyError, _complete_webhook_event, _fail_webhook_event
+    import paypal_webhook_store as remote_store
+
+    provider = str(context.get("provider") or "")
+    event_id = str(context.get("event_id") or "")
+    local_claim_id = str(context.get("local_claim_id") or "")
+    remote_event_id = str(context.get("remote_event_id") or "")
+    remote_claim_id = str(context.get("remote_claim_id") or "")
+    if remote_event_id:
+        remote_ok = await remote_store.complete_event(
+            remote_event_id,
+            remote_claim_id,
+            event_type=str(context.get("event_type") or ""),
+            provider=provider,
+            action=action,
+        )
+        if not remote_ok:
+            try:
+                await _fail_webhook_event(
+                    provider,
+                    event_id,
+                    local_claim_id,
+                    error_code="remote_completion_failed",
+                )
+            except WebhookIdempotencyError:
+                pass
+            raise HTTPException(503, "Webhook idempotency completion failed")
+    try:
+        local_ok = await _complete_webhook_event(
+            provider,
+            event_id,
+            local_claim_id,
+            action=action,
+        )
+    except WebhookIdempotencyError:
+        raise HTTPException(503, "Webhook idempotency completion failed")
+    if not local_ok:
+        raise HTTPException(503, "Webhook idempotency completion failed")
+
+
+async def _fail_billing_webhook(context: dict, error_code: str) -> None:
+    from billing import WebhookIdempotencyError, _fail_webhook_event
+    import paypal_webhook_store as remote_store
+
+    remote_event_id = str(context.get("remote_event_id") or "")
+    if remote_event_id:
+        await remote_store.fail_event(
+            remote_event_id,
+            str(context.get("remote_claim_id") or ""),
+            event_type=str(context.get("event_type") or ""),
+            provider=str(context.get("provider") or ""),
+            error_code=error_code,
+        )
+    try:
+        await _fail_webhook_event(
+            str(context.get("provider") or ""),
+            str(context.get("event_id") or ""),
+            str(context.get("local_claim_id") or ""),
+            error_code=error_code,
+        )
+    except WebhookIdempotencyError:
+        pass
+
+
+async def _paypal_webhook(request: Request):
+    """Verify, durably claim, apply, and complete one PayPal event."""
     raw_body = await request.body()
-    headers = dict(request.headers or {})
-    verified = await _paypal_verify_webhook_signature(headers, raw_body)
+    verified = await _paypal_verify_webhook_signature(dict(request.headers or {}), raw_body)
     if not verified:
-        # Return 400 so PayPal retries (maybe a transient verify failure); if Webhook ID is
-        # genuinely misconfigured Casey will see these in the PayPal dashboard webhook log.
         raise HTTPException(400, "Webhook signature verification failed")
     try:
         event = json.loads(raw_body.decode("utf-8")) if raw_body else {}
@@ -20821,70 +21130,18 @@ async def _paypal_webhook(request: Request):
     event_id = str(event.get("id", "") or "").strip()
     event_type = str(event.get("event_type", "") or "").strip().upper()
     if not event_id:
-        log.warning(f"PayPal webhook missing event id: type={event_type}")
-        return {"status": "ok", "action": "no_id"}
-    # Dedup: if we've already processed this event id, ack 200 without re-dispatching.
-    # Phase 3 BUG #3 fix: check BOTH local (in-memory/disk) AND Supabase. Local
-    # dedup is wiped on every RunPod worker cycle, which happens multiple times
-    # per day during active development. Without the Supabase layer, any PayPal
-    # retry (up to 25 per event over 3 days) that landed on a fresh worker
-    # could re-apply the same event — double-credit / double-cancel.
-    import paypal_webhook_store as _pp_store
-    already_processed = False
-    async with _paypal_webhook_events_lock:
-        if event_id in _paypal_webhook_events:
-            already_processed = True
-    if not already_processed and _pp_store.configured():
-        if await _pp_store.has_processed(event_id):
-            already_processed = True
-            # Warm the local cache so subsequent retries on this worker short-circuit.
-            async with _paypal_webhook_events_lock:
-                _paypal_webhook_events[event_id] = {
-                    "received_at": time.time(),
-                    "event_type": event_type,
-                    "status": "processed_via_supabase",
-                }
-                _save_paypal_webhook_events()
-    if already_processed:
-        log.info(f"PayPal webhook dedup: event {event_id} already processed")
+        raise HTTPException(400, "Webhook event id is required")
+
+    claim = await _claim_billing_webhook("paypal", event_id, event_type)
+    if claim.get("status") == "duplicate":
         return {"status": "ok", "action": "duplicate"}
-    # Reserve the slot before dispatching so that concurrent retries on this worker see it.
-    async with _paypal_webhook_events_lock:
-        _paypal_webhook_events[event_id] = {
-            "received_at": time.time(),
-            "event_type": event_type,
-            "status": "processing",
-        }
-        _save_paypal_webhook_events()
     try:
         outcome = await _paypal_apply_webhook_event(event)
-    except Exception as e:
-        log.error(f"PayPal webhook dispatch error: event_id={event_id} type={event_type}: {e}")
-        async with _paypal_webhook_events_lock:
-            rec = _paypal_webhook_events.get(event_id, {}) or {}
-            rec["status"] = "error"
-            rec["error"] = str(e)[:400]
-            _paypal_webhook_events[event_id] = rec
-            _save_paypal_webhook_events()
-        # Return 500 so PayPal retries; we'll get another shot at the event.
+    except Exception as exc:
+        await _fail_billing_webhook(claim, type(exc).__name__)
         raise HTTPException(500, "Webhook dispatch failed")
-    async with _paypal_webhook_events_lock:
-        rec = _paypal_webhook_events.get(event_id, {}) or {}
-        rec["status"] = "processed"
-        rec["action"] = str(outcome.get("action", "") or "")
-        rec["processed_at"] = time.time()
-        _paypal_webhook_events[event_id] = rec
-    # Phase 3 BUG #3 fix: mirror to Supabase so the dedup survives worker cycles.
-    # Never block the PayPal ack on this — retries are Supabase's concern.
-    try:
-        await _pp_store.mark_processed(
-            event_id,
-            event_type=event_type,
-            payload_excerpt={"action": str(outcome.get("action", "") or "")[:120]},
-        )
-    except Exception:
-        pass
-        _save_paypal_webhook_events()
+    action = str(outcome.get("action", "") or "")
+    await _complete_billing_webhook(claim, action)
     return {"status": "ok", "event_id": event_id, "outcome": outcome}
 
 
@@ -21160,23 +21417,8 @@ async def _join_waitlist(req: WaitlistJoinRequest, request: Request = None):
     return {"checkout_url": approve_url, "provider": "paypal", "order_id": order_id}
 
 
-async def _stripe_webhook(request: Request):
-    payload = await request.body()
-    sig_header = request.headers.get("stripe-signature", "")
-
-    # Fail-closed: if STRIPE_WEBHOOK_SECRET isn't configured, refuse the webhook
-    # rather than silently parsing the unsigned body. Anyone who knows the URL
-    # could forge "checkout.session.completed" events otherwise.
-    if not STRIPE_WEBHOOK_SECRET:
-        log.error("Stripe webhook rejected: STRIPE_WEBHOOK_SECRET is not configured")
-        raise HTTPException(503, "Webhook signing is not configured on the server")
-
-    try:
-        event = stripe_lib.Webhook.construct_event(payload, sig_header, STRIPE_WEBHOOK_SECRET)
-    except Exception as e:
-        log.error(f"Webhook signature verification failed: {e}")
-        raise HTTPException(400, "Invalid signature")
-
+async def _stripe_apply_webhook_event_unordered(event: dict) -> dict:
+    """Apply one verified Stripe event; effect failures must propagate."""
     if event.get("type") == "checkout.session.completed":
         session_data = event["data"]["object"]
         metadata = session_data.get("metadata", {}) or {}
@@ -21191,27 +21433,23 @@ async def _stripe_webhook(request: Request):
             plan = str(metadata.get("plan") or "creator").strip().lower()
             if user_id and SUPABASE_URL:
                 svc_key = SUPABASE_SERVICE_KEY or SUPABASE_ANON_KEY
-                try:
-                    async with httpx.AsyncClient(timeout=15) as client:
-                        await client.post(
-                            f"{SUPABASE_URL}/rest/v1/profiles",
-                            headers={
-                                "apikey": svc_key,
-                                "Authorization": f"Bearer {svc_key}",
-                                "Content-Type": "application/json",
-                                "Prefer": "resolution=merge-duplicates",
-                            },
-                            json={"id": user_id, "plan": plan},
-                        )
-                    log.info(f"Stripe webhook: user {user_id} upgraded to {plan}")
-                except Exception as e:
-                    log.error(f"Failed to update plan for {user_id}: {e}")
+                async with httpx.AsyncClient(timeout=15) as client:
+                    profile_response = await client.post(
+                        f"{SUPABASE_URL}/rest/v1/profiles",
+                        headers={
+                            "apikey": svc_key,
+                            "Authorization": f"Bearer {svc_key}",
+                            "Content-Type": "application/json",
+                            "Prefer": "resolution=merge-duplicates",
+                        },
+                        json={"id": user_id, "plan": plan},
+                    )
+                if profile_response.status_code not in {200, 201, 204}:
+                    raise RuntimeError("Stripe profile synchronization failed")
+                log.info("Stripe subscription profile synchronized")
             if user_id and plan in UNIFIED_PLANS:
-                try:
-                    import unified_credits as uc
-                    uc.set_plan(user_id, plan, grant_now=True)
-                except Exception as uc_err:
-                    log.warning(f"Unified wallet plan grant failed for {user_id[:12]}: {uc_err}")
+                import unified_credits as uc
+                uc.set_plan(user_id, plan, grant_now=True)
             await _append_landing_notification(
                 event_type="subscription",
                 plan=str(plan or "starter"),
@@ -21223,12 +21461,14 @@ async def _stripe_webhook(request: Request):
                 plan = str(metadata.get("plan", "") or "").strip().lower()
                 plan_price_usd = float(metadata.get("plan_price_usd", PLAN_PRICE_USD.get(plan, 0.0)) or 0.0)
                 if customer_email and plan in {"starter", "creator", "pro", "elite"}:
-                    await _supabase_upsert_waitlist_entry(
+                    waitlist_saved = await _supabase_upsert_waitlist_entry(
                         email=customer_email,
                         plan=plan,
                         price_usd=plan_price_usd,
                         paid=True,
                     )
+                    if not waitlist_saved:
+                        raise RuntimeError("Stripe waitlist synchronization failed")
                     await _append_landing_notification(
                         event_type="subscription",
                         plan=plan,
@@ -21245,21 +21485,19 @@ async def _stripe_webhook(request: Request):
                         credits=topup_credits,
                         source=str(metadata.get("topup_pack", "topup") or "topup"),
                         stripe_session_id=str(session_data.get("id", "") or ""),
+                        idempotency_key=f"stripe_topup:{str(session_data.get('id', '') or '')}",
                     )
-                try:
-                    import unified_credits as uc
-                    uc.add_credits(
-                        user_id,
-                        topup_credits,
-                        reason="stripe_topup",
-                        metadata={
-                            "session_id": str(session_data.get("id", "") or ""),
-                            "pack": str(metadata.get("topup_pack", "") or ""),
-                        },
-                        idempotency_key=f"stripe_checkout:{str(session_data.get('id', '') or '')}",
-                    )
-                except Exception as uc_err:
-                    log.warning(f"Unified wallet top-up mirror failed for {user_id[:12]}: {uc_err}")
+                import unified_credits as uc
+                uc.add_credits(
+                    user_id,
+                    topup_credits,
+                    reason="stripe_topup",
+                    metadata={
+                        "session_id": str(session_data.get("id", "") or ""),
+                        "pack": str(metadata.get("topup_pack", "") or ""),
+                    },
+                    idempotency_key=f"stripe_checkout:{str(session_data.get('id', '') or '')}",
+                )
                 log.info(f"Stripe webhook: credited {topup_credits} top-up credits to {user_id}")
                 await _append_landing_notification(
                     event_type="topup",
@@ -21272,11 +21510,8 @@ async def _stripe_webhook(request: Request):
         customer_email = str(sub.get("customer_email", "") or "")
         customer_id = str(sub.get("customer", "") or "")
         if not customer_email and customer_id and STRIPE_SECRET_KEY:
-            try:
-                customer = stripe_lib.Customer.retrieve(customer_id)
-                customer_email = str(getattr(customer, "email", "") or "")
-            except Exception as e:
-                log.warning(f"Failed to resolve Stripe customer email from {customer_id}: {e}")
+            customer = stripe_lib.Customer.retrieve(customer_id)
+            customer_email = str(getattr(customer, "email", "") or "")
         if not customer_email:
             log.warning("Subscription lifecycle event received without resolvable customer email")
             return {"status": "ok"}
@@ -21289,39 +21524,34 @@ async def _stripe_webhook(request: Request):
             active_price_id = str((((items[0] or {}).get("price", {}) or {}).get("id", "") or ""))
         mapped_plan = STRIPE_PRICE_TO_PLAN.get(active_price_id, "")
 
-        try:
-            target_id = await _supabase_find_user_id_by_email(customer_email)
-            if not target_id:
-                log.warning(f"Subscription lifecycle event but no Supabase user found for {customer_email}")
-                return {"status": "ok"}
-            if event_type == "customer.subscription.deleted":
-                await _supabase_set_user_plan(target_id, "none")
-                log.info(f"Subscription deleted; downgraded {customer_email} -> none")
-            elif status in {"active", "trialing", "past_due"} and mapped_plan:
-                await _supabase_set_user_plan(target_id, mapped_plan)
-                if mapped_plan in UNIFIED_PLANS:
-                    try:
-                        import unified_credits as uc
-                        uc.set_plan(target_id, mapped_plan, grant_now=True)
-                    except Exception as uc_err:
-                        log.warning(f"Unified wallet subscription sync failed for {customer_email}: {uc_err}")
-                log.info(f"Subscription lifecycle sync: {customer_email} -> {mapped_plan} ({status})")
-            elif status in {"canceled", "unpaid", "incomplete_expired"}:
-                await _supabase_set_user_plan(target_id, "none")
-                log.info(f"Subscription became inactive; downgraded {customer_email} -> none")
-        except Exception as e:
-            log.error(f"Failed subscription lifecycle sync for {customer_email}: {e}")
+        target_id = await _supabase_find_user_id_by_email(customer_email)
+        if not target_id:
+            log.warning("Subscription lifecycle event has no matching Studio account")
+            return {"status": "ok"}
+        if event_type == "customer.subscription.deleted":
+            await _supabase_set_user_plan(target_id, "none")
+            import unified_credits as uc
+            uc.set_plan(target_id, "", grant_now=False)
+            log.info("Stripe subscription deletion synchronized")
+        elif status in {"active", "trialing", "past_due"} and mapped_plan:
+            await _supabase_set_user_plan(target_id, mapped_plan)
+            if mapped_plan in UNIFIED_PLANS:
+                import unified_credits as uc
+                uc.set_plan(target_id, mapped_plan, grant_now=True)
+            log.info("Stripe subscription lifecycle synchronized")
+        elif status in {"canceled", "unpaid", "incomplete_expired"}:
+            await _supabase_set_user_plan(target_id, "none")
+            import unified_credits as uc
+            uc.set_plan(target_id, "", grant_now=False)
+            log.info("Stripe inactive subscription synchronized")
 
     elif event.get("type") in {"invoice.payment_failed", "invoice.payment_succeeded"}:
         inv = event["data"]["object"]
         customer_email = str(inv.get("customer_email", "") or "")
         customer_id = str(inv.get("customer", "") or "")
         if not customer_email and customer_id and STRIPE_SECRET_KEY:
-            try:
-                customer = stripe_lib.Customer.retrieve(customer_id)
-                customer_email = str(getattr(customer, "email", "") or "")
-            except Exception as e:
-                log.warning(f"Failed to resolve invoice customer email from {customer_id}: {e}")
+            customer = stripe_lib.Customer.retrieve(customer_id)
+            customer_email = str(getattr(customer, "email", "") or "")
         if not customer_email:
             return {"status": "ok"}
         target_id = await _supabase_find_user_id_by_email(customer_email)
@@ -21329,6 +21559,8 @@ async def _stripe_webhook(request: Request):
             return {"status": "ok"}
         if event.get("type") == "invoice.payment_failed":
             await _supabase_set_user_plan(target_id, "none")
+            import unified_credits as uc
+            uc.set_plan(target_id, "", grant_now=False)
             log.info(f"Invoice payment failed; downgraded {customer_email} -> none")
         else:
             # Keep profile + Stripe lifecycle in sync on successful recurring renewals.
@@ -21340,14 +21572,119 @@ async def _stripe_webhook(request: Request):
             if plan:
                 await _supabase_set_user_plan(target_id, plan)
                 if plan in UNIFIED_PLANS:
-                    try:
-                        import unified_credits as uc
-                        uc.set_plan(target_id, plan, grant_now=True)
-                    except Exception as uc_err:
-                        log.warning(f"Unified wallet invoice renewal failed for {customer_email}: {uc_err}")
-                log.info(f"Invoice payment succeeded; ensured {customer_email} -> {plan}")
+                    import unified_credits as uc
+                    uc.set_plan(target_id, plan, grant_now=True)
+                log.info("Stripe invoice renewal synchronized")
 
-    return {"status": "ok"}
+    return {"status": "ok", "action": str(event.get("type", "") or "ignored")}
+
+
+def _stripe_plan_event_subjects(event: dict) -> list[str]:
+    event_type = str((event or {}).get("type", "") or "")
+    obj = (((event or {}).get("data", {}) or {}).get("object", {}) or {})
+    if event_type == "checkout.session.completed" and str(obj.get("mode", "") or "") != "subscription":
+        return []
+    if event_type not in {
+        "checkout.session.completed",
+        "customer.subscription.created",
+        "customer.subscription.updated",
+        "customer.subscription.deleted",
+        "invoice.payment_failed",
+        "invoice.payment_succeeded",
+    }:
+        return []
+
+    subjects: list[str] = []
+    subscription = ""
+    if event_type.startswith("customer.subscription."):
+        subscription = str(obj.get("id", "") or "")
+    else:
+        raw_subscription = obj.get("subscription")
+        if isinstance(raw_subscription, dict):
+            subscription = str(raw_subscription.get("id", "") or "")
+        else:
+            subscription = str(raw_subscription or "")
+        if not subscription:
+            parent = obj.get("parent", {}) or {}
+            details = parent.get("subscription_details", {}) if isinstance(parent, dict) else {}
+            raw_subscription = (details or {}).get("subscription") if isinstance(details, dict) else ""
+            if isinstance(raw_subscription, dict):
+                subscription = str(raw_subscription.get("id", "") or "")
+            else:
+                subscription = str(raw_subscription or "")
+    if subscription:
+        subjects.append(f"subscription:{subscription}")
+
+    customer = obj.get("customer")
+    customer_id = str((customer or {}).get("id", "") or "") if isinstance(customer, dict) else str(customer or "")
+    if customer_id:
+        subjects.append(f"customer:{customer_id}")
+    metadata = obj.get("metadata", {}) or {}
+    user_id = str(obj.get("client_reference_id") or metadata.get("user_id") or "").strip()
+    if user_id:
+        subjects.append(f"user:{user_id}")
+    customer_email = str(
+        (obj.get("customer_details", {}) or {}).get("email")
+        or obj.get("customer_email")
+        or ""
+    ).strip().lower()
+    if customer_email:
+        subjects.append(f"email:{customer_email}")
+    return list(dict.fromkeys(subjects))
+
+
+async def _stripe_apply_webhook_event(event: dict) -> dict:
+    subjects = _stripe_plan_event_subjects(event)
+    if not subjects:
+        return await _stripe_apply_webhook_event_unordered(event)
+
+    async def apply_effect() -> dict:
+        return await _stripe_apply_webhook_event_unordered(event)
+
+    ordered = await _run_ordered_billing_effect(
+        "stripe",
+        subjects,
+        str((event or {}).get("id", "") or ""),
+        _provider_event_timestamp((event or {}).get("created")),
+        apply_effect,
+    )
+    if ordered.get("status") == "stale":
+        return {
+            "status": "ok",
+            "action": "stale_ignored",
+            "event_type": str((event or {}).get("type", "") or ""),
+        }
+    return dict(ordered.get("result") or {})
+
+
+async def _stripe_webhook(request: Request):
+    """Verify, durably claim, apply, and complete one Stripe event."""
+    payload = await request.body()
+    sig_header = request.headers.get("stripe-signature", "")
+    if not STRIPE_WEBHOOK_SECRET:
+        log.error("Stripe webhook rejected: signing secret is not configured")
+        raise HTTPException(503, "Webhook signing is not configured on the server")
+    try:
+        event = stripe_lib.Webhook.construct_event(payload, sig_header, STRIPE_WEBHOOK_SECRET)
+    except Exception:
+        log.error("Stripe webhook signature verification failed")
+        raise HTTPException(400, "Invalid signature")
+
+    event_id = str(event.get("id", "") or "").strip()
+    event_type = str(event.get("type", "") or "").strip()
+    if not event_id:
+        raise HTTPException(400, "Webhook event id is required")
+    claim = await _claim_billing_webhook("stripe", event_id, event_type)
+    if claim.get("status") == "duplicate":
+        return {"status": "ok", "action": "duplicate"}
+    try:
+        outcome = await _stripe_apply_webhook_event(event)
+    except Exception as exc:
+        await _fail_billing_webhook(claim, type(exc).__name__)
+        raise HTTPException(500, "Webhook dispatch failed")
+    action = str(outcome.get("action", "") or event_type)
+    await _complete_billing_webhook(claim, action)
+    return {"status": "ok", "event_id": event_id, "outcome": outcome}
 
 
 # â"€â"€â"€ Admin: set plan for a user (admin-only) â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
@@ -21607,3 +21944,25 @@ mount_router(
         admin_grant_credits_endpoint=_admin_grant_credits,
     ),
 )
+
+# Register the SPA last so it can never shadow /api routes.
+configure_frontend_static(app)
+
+
+async def _start_embedded_production_consumer() -> None:
+    await start_embedded_generation_worker(
+        {
+            "run_generation_pipeline": run_generation_pipeline,
+            "_run_creative_pipeline": _run_creative_pipeline,
+            "_run_longform_pipeline": _run_longform_pipeline,
+            "run_clone_pipeline": run_clone_pipeline,
+        }
+    )
+
+
+async def _stop_embedded_production_consumer() -> None:
+    await stop_embedded_generation_worker()
+
+
+app.on_event("startup")(_start_embedded_production_consumer)
+app.on_event("shutdown")(_stop_embedded_production_consumer)

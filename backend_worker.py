@@ -3,10 +3,9 @@ import logging
 
 import backend
 from backend_queue import (
-    dequeue_generation_job,
-    get_persisted_job_state,
+    embedded_worker_enabled,
     init_queue_runtime,
-    persist_job_state,
+    run_generation_consumer,
 )
 
 
@@ -15,6 +14,10 @@ log = logging.getLogger("nyptid-worker")
 
 
 async def _run_worker_loop():
+    if embedded_worker_enabled():
+        raise RuntimeError(
+            "Standalone worker refused: RUN_EMBEDDED_WORKER enables the API-owned consumer"
+        )
     init_queue_runtime(backend.jobs, backend.log)
     task_map = {
         "run_generation_pipeline": backend.run_generation_pipeline,
@@ -22,39 +25,8 @@ async def _run_worker_loop():
         "_run_longform_pipeline": backend._run_longform_pipeline,
         "run_clone_pipeline": backend.run_clone_pipeline,
     }
-    log.info("Redis worker started")
-    while True:
-        try:
-            payload = await dequeue_generation_job()
-        except Exception as e:
-            log.warning(f"Queue poll failed; retrying: {e}")
-            await asyncio.sleep(1.0)
-            continue
-        if not payload:
-            await asyncio.sleep(0.5)
-            continue
-        job_id = str(payload.get("job_id", "") or "").strip()
-        task_name = str(payload.get("task_name", "") or "").strip()
-        args = tuple(payload.get("args", []) or [])
-        if not job_id or task_name not in task_map:
-            log.warning(f"Skipping unknown payload: task={task_name} job_id={job_id}")
-            continue
-        try:
-            seed = await get_persisted_job_state(job_id)
-            if seed:
-                backend.jobs[job_id] = seed
-            else:
-                backend.jobs.setdefault(job_id, {"status": "queued", "progress": 0})
-            backend.jobs[job_id]["status"] = "processing"
-            await persist_job_state(job_id, backend.jobs[job_id])
-            await task_map[task_name](*args)
-            await persist_job_state(job_id, backend.jobs.get(job_id, {}))
-        except Exception as e:
-            log.error(f"[{job_id}] Worker execution failed: {e}", exc_info=True)
-            backend.jobs.setdefault(job_id, {})
-            backend.jobs[job_id]["status"] = "error"
-            backend.jobs[job_id]["error"] = str(e)
-            await persist_job_state(job_id, backend.jobs[job_id])
+    log.info("Standalone Redis production consumer started")
+    await run_generation_consumer(task_map, recover_inflight=True)
 
 
 if __name__ == "__main__":

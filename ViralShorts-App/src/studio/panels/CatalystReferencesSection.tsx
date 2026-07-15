@@ -15,7 +15,7 @@ import { useCallback, useContext, useEffect, useState } from 'react';
 import {
     BookmarkPlus, Edit3, Eye, Heart, Link2, Loader2, MessageSquare, Plus, Trash2,
 } from 'lucide-react';
-import { AuthContext } from '../shared';
+import { AuthContext, resolveStudioBackendUrl } from '../shared';
 
 interface ReferenceRow {
     id: string;
@@ -69,7 +69,7 @@ export default function CatalystReferencesSection() {
         setLoading(true);
         try {
             const qs = filter ? `?channel_key=${encodeURIComponent(filter)}` : '';
-            const r = await fetch(`/api/catalyst/references${qs}`, {
+            const r = await fetch(resolveStudioBackendUrl(`/api/catalyst/references${qs}`), {
                 headers: { Authorization: `Bearer ${accessToken}` },
             });
             if (!r.ok) throw new Error(`HTTP ${r.status}`);
@@ -90,7 +90,7 @@ export default function CatalystReferencesSection() {
         setBusy(true);
         setError('');
         try {
-            const r = await fetch('/api/catalyst/references', {
+            const r = await fetch(resolveStudioBackendUrl('/api/catalyst/references'), {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -120,7 +120,7 @@ export default function CatalystReferencesSection() {
         if (!accessToken) return;
         if (!window.confirm('Remove this reference?')) return;
         try {
-            const r = await fetch(`/api/catalyst/references/${id}`, {
+            const r = await fetch(resolveStudioBackendUrl(`/api/catalyst/references/${id}`), {
                 method: 'DELETE',
                 headers: { Authorization: `Bearer ${accessToken}` },
             });
@@ -134,7 +134,7 @@ export default function CatalystReferencesSection() {
     const updateRef = useCallback(async (id: string, patch: { channel_key?: string; notes?: string }) => {
         if (!accessToken) return;
         try {
-            const r = await fetch(`/api/catalyst/references/${id}`, {
+            const r = await fetch(resolveStudioBackendUrl(`/api/catalyst/references/${id}`), {
                 method: 'PATCH',
                 headers: {
                     'Content-Type': 'application/json',

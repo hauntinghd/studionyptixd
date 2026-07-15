@@ -64,13 +64,13 @@ ENV STUDIO_BUILD_ID=${FRONTEND_BUILD_ID}
 ENV STUDIO_GIT_SHA=${GIT_SHA}
 EXPOSE 10000
 
-# Keep independent API workers available while one Studio Agent stream performs
-# synchronous provider polling. A single Uvicorn worker let a long FAL/xAI
-# regeneration block health checks, causing Fly to withdraw the only machine
-# and disconnect the browser stream.
-ENV WEB_CONCURRENCY=4
+# Studio's sessions, credit ledger, job state, and attached Fly volume are
+# process-local/file-backed. Exactly one Uvicorn process owns those resources;
+# its asyncio loop also runs the Redis production consumer. Provider calls are
+# async and do not require extra OS processes.
+ENV WEB_CONCURRENCY=1
 
 # Write deploy meta into the image so /api/health can prove which snapshot is live.
 RUN printf '{"build_id":"%s","git_sha":"%s"}\n' "$STUDIO_BUILD_ID" "$STUDIO_GIT_SHA" > /app/ops/deploy_meta.json || true
 
-CMD uvicorn backend:app --host 0.0.0.0 --port $PORT --workers ${WEB_CONCURRENCY:-4}
+CMD ["uvicorn", "backend:app", "--host", "0.0.0.0", "--port", "10000", "--workers", "1"]

@@ -5,7 +5,6 @@ hotfix routes out of the main backend feature implementation.
 """
 from __future__ import annotations
 
-import base64
 import json
 import logging
 import os
@@ -18,6 +17,8 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
+from fastapi.staticfiles import StaticFiles
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 import studio_alerts as _studio_alerts
 
@@ -27,6 +28,68 @@ _frontend_asset_cache = {"ts": 0.0, "js": "", "css": ""}
 _frontend_cache_buster = str(int(time.time()))
 _maintenance_lock_fd: int | None = None
 _log = logging.getLogger("nyptid-studio.runtime")
+
+_PRODUCTION_ENVIRONMENTS = {"production", "prod", "live"}
+_TRUSTED_HOSTS = (
+    "studio.nyptidindustries.com",
+    "api-studio.nyptidindustries.com",
+    "billing.nyptidindustries.com",
+    "invoicer.nyptidindustries.com",
+    "nyptid-studio.fly.dev",
+    "nyptid-studio.internal",
+    "localhost",
+    "127.0.0.1",
+    "testserver",
+)
+_CORS_ORIGINS = (
+    "https://studio.nyptidindustries.com",
+    "https://billing.nyptidindustries.com",
+    "https://invoicer.nyptidindustries.com",
+    "https://nyptid-studio.fly.dev",
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:8080",
+    "http://127.0.0.1:8080",
+)
+_CONTENT_SECURITY_POLICY = "; ".join(
+    (
+        "default-src 'self'",
+        "script-src 'self' 'unsafe-inline' https://www.googletagmanager.com https://unpkg.com",
+        "style-src 'self' 'unsafe-inline'",
+        "connect-src 'self' https: wss:",
+        "img-src 'self' data: blob: https:",
+        "media-src 'self' data: blob: https:",
+        "font-src 'self' data: https:",
+        "frame-src https://www.youtube-nocookie.com https://www.youtube.com",
+        "worker-src 'self' blob:",
+        "object-src 'none'",
+        "base-uri 'self'",
+        "form-action 'self' https:",
+        "frame-ancestors 'none'",
+        "manifest-src 'self'",
+    )
+)
+
+
+def production_runtime() -> bool:
+    """Return whether browser-facing production restrictions must apply."""
+    explicit = str(os.getenv("STUDIO_ENVIRONMENT", "") or "").strip().lower()
+    if explicit:
+        return explicit in _PRODUCTION_ENVIRONMENTS
+    return bool(str(os.getenv("FLY_APP_NAME", "") or "").strip() or str(os.getenv("FLY_MACHINE_ID", "") or "").strip())
+
+
+def fastapi_documentation_kwargs() -> dict[str, str | None]:
+    """Disable framework discovery endpoints on production, retain them locally."""
+    if not production_runtime():
+        return {}
+    return {"docs_url": None, "redoc_url": None, "openapi_url": None}
+
+
+def _error_query_key_summary(request: Request) -> list[str] | str:
+    """Expose query names for debugging without forwarding any query values."""
+    keys = sorted({str(key or "")[:80] for key in request.query_params.keys() if str(key or "")})
+    return keys[:50] if keys else "-"
 
 
 def _acquire_maintenance_singleton() -> bool:
@@ -243,23 +306,17 @@ async def _studio_error_reporter(request: Request, call_next):
     except Exception as exc:
         path = request.url.path or "?"
         method = request.method or "?"
-        user_hint = ""
-        try:
-            auth = str(request.headers.get("authorization", "") or request.headers.get("x-access-token", ""))
-            if auth.lower().startswith("bearer "):
-                parts = auth.split(" ", 1)[1].split(".")
-                if len(parts) >= 2:
-                    pad = "=" * (-len(parts[1]) % 4)
-                    user_hint = str(json.loads(base64.urlsafe_b64decode(parts[1] + pad)).get("email", ""))
-        except Exception:
-            user_hint = ""
+        credential_present = bool(
+            str(request.headers.get("authorization", "") or request.headers.get("x-access-token", "")).strip()
+        )
         _studio_alerts.send_exception(
             exc,
             source=f"{method} {path}",
             context={
                 "endpoint": f"{method} {path}",
-                "user": user_hint or "(anonymous)",
-                "query": dict(request.query_params) or "-",
+                # Never decode or forward unverified JWT claims/PII to alerts.
+                "request_identity": "credential_present" if credential_present else "anonymous",
+                "query_keys": _error_query_key_summary(request),
             },
         )
         raise
@@ -309,6 +366,21 @@ async def _disable_html_cache(request: Request, call_next):
     return response
 
 
+async def _security_headers(request: Request, call_next):
+    """Apply conservative browser security headers to API and SPA responses."""
+    response = await call_next(request)
+    response.headers.setdefault("Strict-Transport-Security", "max-age=63072000; includeSubDomains")
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    response.headers.setdefault(
+        "Permissions-Policy",
+        "camera=(), geolocation=(), microphone=(self), payment=(self), usb=()",
+    )
+    response.headers.setdefault("Content-Security-Policy", _CONTENT_SECURITY_POLICY)
+    return response
+
+
 async def serve_runtime_hotfix_js():
     """Serve JS with runtime text hotfixes to bypass stale CDN bundle caching."""
     latest_js, _ = _resolve_latest_frontend_assets()
@@ -342,25 +414,29 @@ async def serve_legacy_firefox_bundle_alias():
 
 def configure_backend_runtime(app: FastAPI) -> None:
     app.add_middleware(
+        TrustedHostMiddleware,
+        allowed_hosts=list(_TRUSTED_HOSTS),
+        www_redirect=False,
+    )
+    app.add_middleware(
         CORSMiddleware,
-        allow_origins=[
-            "https://studio.nyptidindustries.com",
-            "https://billing.nyptidindustries.com",
-            "https://invoicer.nyptidindustries.com",
-            "https://nyptid-studio.fly.dev",
-            "http://localhost:5173",
-            "http://127.0.0.1:5173",
-            "http://localhost:8080",
-            "http://127.0.0.1:8080",
-        ],
+        allow_origins=list(_CORS_ORIGINS),
+        allow_credentials=False,
         allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-        allow_headers=["Authorization", "Content-Type", "Cache-Control"],
+        allow_headers=[
+            "Authorization",
+            "Content-Type",
+            "Cache-Control",
+            "X-Access-Token",
+            "X-Idempotency-Key",
+        ],
         max_age=86400,
     )
     app.on_event("startup")(_start_persistent_background_maintenance)
     app.on_event("shutdown")(_stop_persistent_background_maintenance)
     app.middleware("http")(_studio_error_reporter)
     app.middleware("http")(_disable_html_cache)
+    app.middleware("http")(_security_headers)
     app.add_api_route("/assets/runtime-hotfix.js", serve_runtime_hotfix_js, methods=["GET"])
     app.add_api_route("/assets/index-BlMPK7KO.js", serve_legacy_firefox_bundle_alias, methods=["GET"])
 
@@ -393,3 +469,48 @@ def configure_backend_runtime(app: FastAPI) -> None:
             "frontend_bundle": frontend_bundle,
             "built_at": time.time(),
         }
+
+
+def configure_frontend_static(app: FastAPI) -> None:
+    """Serve the built React SPA from Fly after every API router is mounted."""
+    default_dist = (Path(__file__).resolve().parent / "ViralShorts-App" / "dist").resolve()
+    dist_root = Path(os.getenv("FRONTEND_DIST_DIR", str(default_dist))).resolve()
+    index_path = dist_root / "index.html"
+    assets_root = dist_root / "assets"
+    if not index_path.is_file() or not assets_root.is_dir():
+        _log.warning("Frontend dist is unavailable at %s; SPA routes will remain disabled", dist_root)
+        return
+
+    # This must be registered after the API routers so the SPA cannot shadow an
+    # API route. StaticFiles provides safe path resolution and HEAD support.
+    app.mount(
+        "/assets",
+        StaticFiles(directory=str(assets_root), check_dir=True),
+        name="frontend-assets",
+    )
+
+    @app.api_route("/{full_path:path}", methods=["GET", "HEAD"], include_in_schema=False)
+    async def frontend_spa(full_path: str):
+        normalized = str(full_path or "").lstrip("/")
+        if normalized == "api" or normalized.startswith("api/"):
+            raise HTTPException(404, "Not found")
+        if production_runtime() and normalized.rstrip("/") in {"docs", "redoc", "openapi.json"}:
+            raise HTTPException(404, "Not found")
+
+        if normalized:
+            candidate = (dist_root / normalized).resolve()
+            try:
+                candidate.relative_to(dist_root)
+            except ValueError:
+                raise HTTPException(404, "Not found")
+            if candidate.is_file():
+                return FileResponse(
+                    str(candidate),
+                    headers={"Cache-Control": "public, max-age=3600"},
+                )
+
+        return FileResponse(
+            str(index_path),
+            media_type="text/html",
+            headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
+        )

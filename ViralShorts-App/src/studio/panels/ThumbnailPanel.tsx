@@ -99,6 +99,7 @@ export default function ThumbnailPanel() {
     const [genError, setGenError] = useState('');
     const [downloadBusy, setDownloadBusy] = useState(false);
     const [downloadError, setDownloadError] = useState('');
+    const generationIdempotencyRef = useRef('');
 
     const selectedCredits = useMemo(
         () => models.find((m) => m.id === imageModel)?.credits ?? 5,
@@ -258,20 +259,32 @@ export default function ThumbnailPanel() {
             frame_at_pct: framePct / 100,
         };
 
+        let receivedHttpResponse = false;
         try {
+            const commandId = generationIdempotencyRef.current || crypto.randomUUID();
+            generationIdempotencyRef.current = commandId;
             const r = await fetch(`${api}/api/thumbnails/generate`, {
                 method: 'POST',
                 headers: {
                     Authorization: `Bearer ${token}`,
                     'Content-Type': 'application/json',
+                    'X-Idempotency-Key': commandId,
                 },
                 body: JSON.stringify(body),
             });
+            receivedHttpResponse = true;
             const data = await r.json();
-            if (!r.ok) throw new Error(data.detail || 'Generate failed');
+            if (!r.ok) {
+                generationIdempotencyRef.current = '';
+                throw new Error(data.detail || 'Generate failed');
+            }
+            generationIdempotencyRef.current = '';
             setJobId(String(data.job_id || ''));
             setJob({ status: 'queued', progress: 0, credit_cost: data.credit_cost });
         } catch (e: unknown) {
+            // Preserve the command key only when no HTTP response arrived, so
+            // a network retry cannot create a second billable job.
+            if (receivedHttpResponse) generationIdempotencyRef.current = '';
             setGenError(e instanceof Error ? e.message : 'Generate failed');
             setGenerating(false);
         }

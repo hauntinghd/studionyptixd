@@ -42,6 +42,40 @@ _loaded = False
 USD_QUANT = Decimal("0.000001")
 
 
+def _fsync_parent(path: Path) -> None:
+    """Best-effort directory sync after replace (supported on POSIX)."""
+    if os.name == "nt":
+        return
+    try:
+        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        fd = os.open(str(path.parent), flags)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except OSError:
+        pass
+
+
+def _atomic_write_json(path: Path, payload: Any) -> None:
+    """Write a complete JSON snapshot without exposing a partial file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+    try:
+        with temp_path.open("w", encoding="utf-8", newline="\n") as handle:
+            json.dump(payload, handle, indent=2, ensure_ascii=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, path)
+        _fsync_parent(path)
+    finally:
+        try:
+            temp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 def _runpod_worker_mode() -> bool:
     return str(os.getenv("STUDIO_RUNPOD_WORKER_MODE") or "").strip().lower() in {
         "1", "true", "yes", "on",
@@ -125,10 +159,18 @@ def _save() -> None:
     if _runpod_worker_mode():
         return
     try:
-        WALLETS_PATH.parent.mkdir(parents=True, exist_ok=True)
-        WALLETS_PATH.write_text(json.dumps(_wallets, indent=2), encoding="utf-8")
+        _atomic_write_json(WALLETS_PATH, _wallets)
     except Exception:
-        pass
+        # A failed replace must not leave an in-memory mutation that was never
+        # made durable. Roll back to the last complete snapshot before raising.
+        _wallets.clear()
+        try:
+            if WALLETS_PATH.is_file():
+                data = json.loads(WALLETS_PATH.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    _wallets.update(data)
+        finally:
+            raise
 
 
 def _append_ledger(event: dict[str, Any]) -> None:
@@ -138,6 +180,8 @@ def _append_ledger(event: dict[str, Any]) -> None:
         LEDGER_PATH.parent.mkdir(parents=True, exist_ok=True)
         with LEDGER_PATH.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(event, ensure_ascii=True) + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
     except Exception:
         pass
 
@@ -163,6 +207,7 @@ def _wallet(user_id: str) -> dict[str, Any]:
             "unlimited": False,
             "reservations": {},
             "processed_events": [],
+            "processed_adjustments": {},
             "updated_at": time.time(),
         }
         _wallets[user_id] = w
@@ -181,6 +226,7 @@ def _wallet(user_id: str) -> dict[str, Any]:
     w.setdefault("unlimited", False)
     w.setdefault("reservations", {})
     w.setdefault("processed_events", [])
+    w.setdefault("processed_adjustments", {})
     _sync_balance(w)
     return w
 
@@ -450,7 +496,7 @@ def add_credits(
         _sync_balance(w)
         if key:
             processed.append(key)
-            w["processed_events"] = processed[-500:]
+            w["processed_events"] = processed[-5000:]
         w["updated_at"] = time.time()
         _save()
         _append_ledger({
@@ -464,6 +510,61 @@ def add_credits(
             "ts": time.time(),
         })
         return dict(w)
+
+
+def remove_topup_credits(
+    user_id: str,
+    credits: int,
+    *,
+    reason: str = "topup_reversal",
+    metadata: dict | None = None,
+    idempotency_key: str,
+) -> int:
+    """Idempotently reverse purchased credits, clamped to that bucket.
+
+    Refunds must not consume monthly or rollover entitlements when the
+    purchased balance has already been spent. The persisted adjustment record
+    preserves the original amount removed so crash retries remain observable
+    and cannot debit the same purchase twice.
+    """
+    uid = str(user_id or "").strip()
+    requested = max(0, int(credits or 0))
+    key = str(idempotency_key or "").strip()
+    if not uid or requested <= 0 or not key:
+        return 0
+    with _lock:
+        w = _wallet(uid)
+        adjustments = w.get("processed_adjustments")
+        if not isinstance(adjustments, dict):
+            adjustments = {}
+        prior = adjustments.get(key)
+        if isinstance(prior, dict):
+            return max(0, int(prior.get("credits_removed", 0) or 0))
+        current = max(0, int(w.get("topup_balance", 0) or 0))
+        removed = min(current, requested)
+        w["topup_balance"] = current - removed
+        _sync_balance(w)
+        adjustments[key] = {
+            "credits_removed": removed,
+            "credits_requested": requested,
+            "reason": str(reason or "topup_reversal")[:120],
+            "recorded_at": time.time(),
+        }
+        w["processed_adjustments"] = dict(list(adjustments.items())[-5000:])
+        w["updated_at"] = time.time()
+        _save()
+        _append_ledger({
+            "type": "topup_reversal",
+            "user_id": uid,
+            "credits": -removed,
+            "credits_requested": requested,
+            "reason": reason,
+            "metadata": metadata or {},
+            "idempotency_key": key,
+            "balance_after": w["balance"],
+            "ts": time.time(),
+        })
+        return removed
 
 
 def set_unlimited(user_id: str, enabled: bool = True, *, reason: str = "owner_admin") -> dict[str, Any]:

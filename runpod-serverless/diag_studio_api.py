@@ -19,10 +19,12 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import time
-import urllib.error
-import urllib.request
+from urllib.parse import urlsplit
+
+import httpx
 
 
 API_KEY = os.getenv("RUNPOD_API_KEY", "").strip()
@@ -34,45 +36,56 @@ if not API_KEY:
 if not ENDPOINT_ID:
     print("FATAL: RUNPOD_ENDPOINT_ID not set. Find it in the RunPod dashboard under the studio-api-ada24 endpoint.")
     sys.exit(2)
+if not re.fullmatch(r"[A-Za-z0-9_-]{3,128}", ENDPOINT_ID):
+    print("FATAL: RUNPOD_ENDPOINT_ID contains invalid characters.")
+    sys.exit(2)
+
+
+def _validated_runpod_url(url: str) -> str:
+    parsed = urlsplit(str(url or "").strip())
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname != "api.runpod.ai"
+        or parsed.username
+        or parsed.password
+        or parsed.port not in {None, 443}
+    ):
+        raise ValueError("Only direct HTTPS requests to api.runpod.ai are allowed")
+    return parsed.geturl()
 
 
 def http_get(url: str, timeout: int = 15) -> tuple[int, dict | str]:
-    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {API_KEY}"})
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            raw = r.read().decode("utf-8", errors="replace")
-            try:
-                return r.status, json.loads(raw)
-            except json.JSONDecodeError:
-                return r.status, raw
-    except urllib.error.HTTPError as e:
-        body = e.read().decode("utf-8", errors="replace")
-        return e.code, body
+        response = httpx.get(
+            _validated_runpod_url(url),
+            headers={"Authorization": f"Bearer {API_KEY}"},
+            timeout=timeout,
+            follow_redirects=False,
+        )
+        try:
+            return response.status_code, response.json()
+        except json.JSONDecodeError:
+            return response.status_code, response.text
     except Exception as e:
         return 0, f"request_error: {type(e).__name__}: {e}"
 
 
 def http_post_json(url: str, payload: dict, timeout: int = 60) -> tuple[int, dict | str]:
-    body = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(
-        url,
-        data=body,
-        method="POST",
-        headers={
-            "Authorization": f"Bearer {API_KEY}",
-            "Content-Type": "application/json",
-        },
-    )
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            raw = r.read().decode("utf-8", errors="replace")
-            try:
-                return r.status, json.loads(raw)
-            except json.JSONDecodeError:
-                return r.status, raw
-    except urllib.error.HTTPError as e:
-        body = e.read().decode("utf-8", errors="replace")
-        return e.code, body
+        response = httpx.post(
+            _validated_runpod_url(url),
+            json=payload,
+            headers={
+                "Authorization": f"Bearer {API_KEY}",
+                "Content-Type": "application/json",
+            },
+            timeout=timeout,
+            follow_redirects=False,
+        )
+        try:
+            return response.status_code, response.json()
+        except json.JSONDecodeError:
+            return response.status_code, response.text
     except Exception as e:
         return 0, f"request_error: {type(e).__name__}: {e}"
 
