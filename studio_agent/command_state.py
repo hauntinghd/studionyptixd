@@ -29,6 +29,8 @@ class CompactSceneState(ContractModel):
     animate: bool = False
     has_clip: bool = False
     duration_seconds: float = Field(default=0.0, ge=0.0)
+    narration_excerpt: str = Field(default="", max_length=500)
+    scene_action_excerpt: str = Field(default="", max_length=500)
 
 
 class CompactJobState(ContractModel):
@@ -41,6 +43,7 @@ class CompactJobState(ContractModel):
     scene_count: int = Field(default=0, ge=0)
     planned_scene_count: int = Field(default=0, ge=0)
     expandable_proof: bool = False
+    repairable_scene_review: bool = False
     ownership_verified: bool = False
     scenes: list[CompactSceneState] = Field(default_factory=list, max_length=60)
 
@@ -84,6 +87,15 @@ class StudioStateContext(ContractModel):
             if item.kind == "shortform" and item.expandable_proof and item.ownership_verified
         ]
 
+    def repairable_short_jobs(self) -> list[CompactJobState]:
+        return [
+            item
+            for item in self.jobs
+            if item.kind == "shortform"
+            and item.repairable_scene_review
+            and item.ownership_verified
+        ]
+
 
 def _safe_kind(raw: Any) -> JobKind:
     value = str(raw or "shortform").strip().lower()
@@ -98,6 +110,7 @@ def compact_job_snapshot(
     role: JobRole,
     expandable_proof: bool,
     ownership_verified: bool,
+    repairable_scene_review: bool = False,
 ) -> CompactJobState:
     """Reduce a UI job snapshot to command-relevant, 1-based scene state."""
 
@@ -123,6 +136,10 @@ def compact_job_snapshot(
                 animate=bool(raw.get("animate")),
                 has_clip=bool(raw.get("has_clip")),
                 duration_seconds=max(0.0, duration),
+                narration_excerpt=str(raw.get("narration") or "")[:500],
+                scene_action_excerpt=str(
+                    raw.get("scene_action") or raw.get("action") or raw.get("prompt") or ""
+                )[:500],
             )
         )
     scene_count = _as_nonnegative_int(snapshot.get("current_scene"), default=len(scenes))
@@ -140,6 +157,7 @@ def compact_job_snapshot(
         scene_count=scene_count,
         planned_scene_count=planned,
         expandable_proof=bool(expandable_proof),
+        repairable_scene_review=bool(repairable_scene_review),
         ownership_verified=bool(ownership_verified),
         scenes=scenes,
     )
@@ -164,6 +182,24 @@ def _call_snapshot_loader(
 
 
 def _legacy_pending_command(session: dict[str, Any]) -> PendingCommandState | None:
+    pending_repair = session.get("pending_scene_repair")
+    if isinstance(pending_repair, dict) and pending_repair:
+        known = {
+            key: pending_repair[key]
+            for key in (
+                "scene_numbers",
+                "repair_scope",
+                "instruction",
+                "execution_requested",
+            )
+            if pending_repair.get(key) not in (None, "", [])
+        }
+        return PendingCommandState(
+            action="audit_and_repair_scenes",
+            target_job_id=str(pending_repair.get("job_id") or ""),
+            known_fields=known,
+            missing_fields=[str(item) for item in pending_repair.get("missing_fields") or []],
+        )
     raw = session.get("short_expansion_intake")
     if not isinstance(raw, dict) or not raw:
         return None
@@ -226,6 +262,7 @@ def build_studio_state_context(
     *,
     reply_to: dict[str, Any] | None = None,
     expandable_job_id: str | None = None,
+    repairable_job_ids: list[str] | tuple[str, ...] | set[str] | None = None,
     snapshot_loader: Callable[..., dict[str, Any]],
     ownership_verifier: Callable[[str], bool] | None = None,
 ) -> StudioStateContext:
@@ -239,6 +276,11 @@ def build_studio_state_context(
     reply_to = reply_to if isinstance(reply_to, dict) else {}
     reply_job_id = str(reply_to.get("job_id") or "").strip()
     expandable_id = str(expandable_job_id or "").strip()
+    repairable_ids = {
+        str(job_id or "").strip()
+        for job_id in (repairable_job_ids or [])
+        if str(job_id or "").strip()
+    }
     tracked: dict[str, dict[str, Any]] = {}
     ordered_ids: list[str] = []
 
@@ -259,6 +301,8 @@ def build_studio_state_context(
             _remember(str(row.get("job_id") or ""), row)
     if expandable_id:
         _remember(expandable_id, {"kind": "shortform"})
+    for repairable_id in repairable_ids:
+        _remember(repairable_id, {"kind": "shortform"})
 
     jobs: list[CompactJobState] = []
     for jid in ordered_ids[:8]:
@@ -283,7 +327,7 @@ def build_studio_state_context(
         # During compatibility rollout, the runner-supplied expandable id is a
         # trusted capability token. The runner can additionally inject its
         # authoritative job-spec/user verifier here.
-        ownership_verified = jid == expandable_id
+        ownership_verified = jid == expandable_id or jid in repairable_ids
         if ownership_verifier is not None:
             try:
                 ownership_verified = bool(ownership_verifier(jid))
@@ -294,6 +338,7 @@ def build_studio_state_context(
                 snapshot,
                 role=role,
                 expandable_proof=jid == expandable_id,
+                repairable_scene_review=jid in repairable_ids,
                 ownership_verified=ownership_verified,
             )
         )
@@ -319,6 +364,7 @@ def build_studio_state_context(
         "reply_job_id": reply_job_id,
         "jobs": [job.model_dump(mode="json") for job in jobs],
         "pending": session.get("short_expansion_intake") or {},
+        "pending_scene_repair": session.get("pending_scene_repair") or {},
         "recent_expansion": {
             "additional": recent_additional,
             "total": recent_total,
@@ -331,6 +377,8 @@ def build_studio_state_context(
     actions: list[CommandAction] = ["conversation", "clarify"]
     if any(job.expandable_proof and job.ownership_verified for job in jobs):
         actions.append("expand_existing_short")
+    if any(job.repairable_scene_review and job.ownership_verified for job in jobs):
+        actions.append("audit_and_repair_scenes")
     agent_mode = str(session.get("agent_mode") or "studio").lower()
     if agent_mode not in {"plan", "studio", "cliplab"}:
         agent_mode = "studio"

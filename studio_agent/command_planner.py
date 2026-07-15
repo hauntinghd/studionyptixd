@@ -15,10 +15,16 @@ from studio_agent.command_contract import (
     StudioCommand,
     approval_authorization_evidence,
     compiler_tool_schema,
+    contextual_confirmation_evidence,
     execution_authorization_evidence,
     extract_scene_count_request,
+    extract_scene_numbers_request,
+    infer_scene_repair_scope,
     make_turn_id,
     normalize_proposal,
+    scene_repair_authorization_evidence,
+    scene_repair_block_reason,
+    scene_repair_candidate,
 )
 from studio_agent.command_state import StudioStateContext
 
@@ -190,6 +196,9 @@ def _default_mapping() -> dict[str, Any]:
         "preserve_scene_numbers": [],
         "animation_scope": "unspecified",
         "animation_scene_numbers": [],
+        "repair_scene_numbers": [],
+        "repair_scope": "general_scene_quality",
+        "repair_instruction": "",
         "duration_seconds": 0,
         "creative_direction": "",
         "existing_work_approved": False,
@@ -299,6 +308,14 @@ def _ground_proposal(
 
     high_confidence = _high_confidence_expand(user_text, state)
     expand_candidate = _expand_candidate(user_text, state)
+    pending_repair = (
+        state.pending_command
+        if state.pending_command is not None
+        and state.pending_command.action == "audit_and_repair_scenes"
+        else None
+    )
+    repair_candidate = scene_repair_candidate(user_text)
+    repair_turn = bool(repair_candidate or pending_repair is not None)
     if proposal is None:
         proposal = _proposal_from_mapping(
             {
@@ -306,6 +323,117 @@ def _ground_proposal(
                 "clarification_question": "What would you like Studio to do next?",
             }
         )
+
+    # Scene repair is grounded independently from provider output. The model
+    # can interpret wording, but it cannot invent target scenes, permission, or
+    # a mutation when the literal user turn (plus server-owned pending state)
+    # does not support one.
+    repair_jobs = state.repairable_short_jobs()
+    if repair_turn or proposal.action == "audit_and_repair_scenes":
+        if not repair_turn:
+            proposal = proposal.model_copy(
+                update={
+                    "action": "conversation",
+                    "target_source": "none",
+                    "target_job_id": "",
+                    "repair_scene_numbers": [],
+                    "repair_instruction": "",
+                    "execution_requested": False,
+                    "execution_evidence": "",
+                    "clarification_question": "",
+                }
+            )
+        else:
+            known = dict(pending_repair.known_fields) if pending_repair is not None else {}
+            repair_job = repair_jobs[0] if len(repair_jobs) == 1 else None
+            total_scenes = max(
+                1,
+                int(
+                    (repair_job.scene_count if repair_job is not None else 0)
+                    or (len(repair_job.scenes) if repair_job is not None else 0)
+                    or 1
+                ),
+            )
+            selected = extract_scene_numbers_request(
+                user_text,
+                total_scenes=total_scenes,
+                allow_bare=pending_repair is not None,
+            )
+            if not selected and pending_repair is not None:
+                selected = [
+                    int(number)
+                    for number in known.get("scene_numbers") or []
+                    if str(number).isdigit() and 1 <= int(number) <= total_scenes
+                ]
+            selected = sorted(dict.fromkeys(selected))
+            blocked = scene_repair_block_reason(user_text)
+            direct_evidence = scene_repair_authorization_evidence(user_text)
+            confirmation = contextual_confirmation_evidence(user_text) if pending_repair else ""
+            pending_authorized = bool(known.get("execution_requested"))
+            scoped_followup = bool(
+                pending_repair is not None
+                and pending_authorized
+                and selected
+                and str(user_text or "").strip()
+            )
+            execution_quote = "" if blocked else (
+                direct_evidence
+                or confirmation
+                or (str(user_text or "").strip()[:300] if scoped_followup else "")
+            )
+            if repair_candidate and not blocked:
+                instruction = str(user_text or "").strip()[:2_000]
+                repair_scope = infer_scene_repair_scope(user_text)
+            else:
+                instruction = str(known.get("instruction") or "").strip()[:2_000]
+                repair_scope = str(known.get("repair_scope") or "general_scene_quality")
+            if repair_scope not in {
+                "general_scene_quality",
+                "narrative_alignment",
+                "visual_quality",
+                "animation_quality",
+                "full_quality",
+            }:
+                repair_scope = "general_scene_quality"
+
+            if blocked:
+                clarification = (
+                    "Do you want me to audit and repair those scenes now, or are you only asking about them?"
+                )
+            elif len(repair_jobs) != 1:
+                clarification = "Which short should I repair? Reply to its production card."
+            elif not selected:
+                clarification = "Which scene or scene range should I audit and repair?"
+            elif not execution_quote:
+                human = ", ".join(str(number) for number in selected)
+                clarification = f"Do you want me to audit and repair Scene(s) {human} now?"
+            else:
+                clarification = ""
+            proposal = proposal.model_copy(
+                update={
+                    "action": "audit_and_repair_scenes",
+                    "target_source": (
+                        "explicit_job_id"
+                        if pending_repair is not None and pending_repair.target_job_id
+                        else "reply_to"
+                        if state.reply_target_job_id
+                        else "active_job"
+                    ),
+                    "target_job_id": (
+                        str(pending_repair.target_job_id or "") if pending_repair is not None else ""
+                    ),
+                    "repair_scene_numbers": selected,
+                    "repair_scope": repair_scope,
+                    "repair_instruction": instruction,
+                    "existing_work_approved": False,
+                    "approval_evidence": "",
+                    "execution_requested": bool(execution_quote),
+                    "execution_evidence": execution_quote,
+                    "clarification_question": clarification,
+                    "confidence": max(0.9 if selected else 0.72, proposal.confidence),
+                }
+            )
+
     eligible = state.expandable_short_jobs()
     existing_count = eligible[0].scene_count if len(eligible) == 1 else 1
     existing_count = max(1, int(existing_count or 1))
@@ -372,7 +500,7 @@ def _ground_proposal(
         )
     if proposal.action == "expand_existing_short" and len(eligible) == 1 and not proposal.target_job_id:
         updates["target_source"] = "reply_to" if state.reply_target_job_id else "active_job"
-    return proposal.model_copy(update=updates), high_confidence
+    return proposal.model_copy(update=updates), bool(high_confidence or repair_turn)
 
 
 async def plan_studio_command(
@@ -397,7 +525,10 @@ async def plan_studio_command(
                 "Do not call production tools. Scene numbers are human-facing and 1-based. Distinguish "
                 "additional scenes from total scenes. Resolve 'them' to the closest mentioned scene set. "
                 "Negation wins: 'do not animate them' means animation_scope=none. Evidence fields must "
-                "be exact substrings of the user message. Use clarify instead of guessing a target."
+                "be exact substrings of the user message. For scene-quality complaints, use "
+                "audit_and_repair_scenes, preserve human-facing 1-based scene numbers, and distinguish "
+                "narrative alignment from still/animation defects. A question or hypothetical is not "
+                "permission to mutate. Use clarify instead of guessing a target, scene range, or intent."
             ),
         },
         {

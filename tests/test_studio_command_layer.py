@@ -44,7 +44,7 @@ def _snapshot(*, stage: str = "awaiting_scene_review", scene_count: int = 1, cli
     }
 
 
-def _state(snapshot=None, *, session_updates=None):
+def _state(snapshot=None, *, session_updates=None, repairable=False):
     snap = snapshot or _snapshot()
     session = {
         "session_id": "sa_test_command_layer",
@@ -61,6 +61,7 @@ def _state(snapshot=None, *, session_updates=None):
     return build_studio_state_context(
         session,
         expandable_job_id=JOB_ID,
+        repairable_job_ids=[JOB_ID] if repairable else [],
         snapshot_loader=lambda _job_id, _kind: snap,
     )
 
@@ -75,6 +76,9 @@ def _proposal(**updates):
         "preserve_scene_numbers": [],
         "animation_scope": "unspecified",
         "animation_scene_numbers": [],
+        "repair_scene_numbers": [],
+        "repair_scope": "general_scene_quality",
+        "repair_instruction": "",
         "duration_seconds": 0,
         "creative_direction": "",
         "existing_work_approved": False,
@@ -402,14 +406,263 @@ def test_hypothetical_expand_question_never_authorizes_production():
     assert not validation.can_execute
 
 
+@pytest.mark.parametrize(
+    "selected_model",
+    [
+        "anthropic/claude-haiku-test",
+        "anthropic/claude-sonnet-test",
+        "x-ai/grok-test",
+    ],
+)
+def test_scene_defect_language_compiles_model_agnostically_to_exact_repair(selected_model):
+    text = (
+        "Scenes 2 through 6 do not perfectly adhere to the prompt and script of "
+        "The Night Ghosted Her and Here's What Actually Happened."
+    )
+    capture = {}
+    state = _state(_snapshot(scene_count=6), repairable=True)
+
+    async def fake_chat_completion(**kwargs):
+        capture.update(kwargs)
+        # Even a weak/wrong provider proposal cannot change scope or prevent
+        # deterministic grounding of this direct production defect report.
+        return _tool_response(
+            _proposal(
+                action="audit_and_repair_scenes",
+                repair_scene_numbers=[1, 6],
+                repair_scope="visual_quality",
+                repair_instruction="invented",
+                execution_requested=False,
+            )
+        )
+
+    command = asyncio.run(
+        plan_studio_command(
+            text,
+            state,
+            model=selected_model,
+            chat_completion=fake_chat_completion,
+        )
+    )
+    assert capture["model"] == selected_model
+    assert command.action == "audit_and_repair_scenes"
+    assert command.repair is not None
+    assert command.repair.scene_numbers == [2, 3, 4, 5, 6]
+    assert command.repair.scope == "narrative_alignment"
+    assert command.repair.instruction == text
+    assert command.authorization.execution_requested is True
+
+    validation = validate_studio_command(
+        command,
+        state,
+        user_text=text,
+        fingerprint_loader=lambda _job_id, _numbers: [
+            SceneAssetFingerprint(
+                scene_number=1,
+                still_sha256="scene-1-still",
+                clip_sha256="scene-1-clip",
+            )
+        ],
+    )
+    assert validation.can_execute
+    assert validation.resolved_action is not None
+    assert validation.resolved_action.tool_name == "audit_and_repair_production_scenes"
+    assert validation.resolved_action.arguments.scene_indices == [1, 2, 3, 4, 5]
+    assert validation.resolved_action.arguments.reason == text
+    assert validation.resolved_action.expected.selected_scene_numbers == [2, 3, 4, 5, 6]
+    assert validation.resolved_action.expected.untouched_scene_numbers == [1]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Scenes 2 through 6 aren't properly doing what the script says.",
+        "Those 2 through 6 aren't right for their narration.",
+        "Fix scenes 2, 3, 4, 5 and 6 so each one tells its own story beat.",
+    ],
+)
+def test_scene_repair_accepts_ordinary_wording_variants_without_model_inventing_scope(text):
+    state = _state(_snapshot(scene_count=6), repairable=True)
+    command = _plan(text, _tool_response(_proposal()), state=state)
+    validation = validate_studio_command(command, state, user_text=text)
+    assert command.action == "audit_and_repair_scenes"
+    assert command.repair is not None
+    assert command.repair.scene_numbers == [2, 3, 4, 5, 6]
+    assert validation.can_execute
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Are scenes 2 through 6 wrong?",
+        "Will Studio fix scenes 2 through 6?",
+        "What would happen if I asked Studio to fix scenes 2 through 6?",
+        "Do not fix scenes 2 through 6 yet.",
+    ],
+)
+def test_scene_repair_questions_hypotheticals_and_negation_never_mutate(text):
+    state = _state(_snapshot(scene_count=6), repairable=True)
+    command = _plan(
+        text,
+        _tool_response(
+            _proposal(
+                action="audit_and_repair_scenes",
+                repair_scene_numbers=[2, 3, 4, 5, 6],
+                execution_requested=True,
+                execution_evidence=text,
+            )
+        ),
+        state=state,
+    )
+    validation = validate_studio_command(command, state, user_text=text)
+    assert validation.decision == "clarify"
+    assert not validation.can_execute
+
+    calls = []
+    receipt = execute_validated_command(
+        validation,
+        user_id="user_test",
+        session_id="sa_test_command_layer",
+        content_format="short",
+        tool_executor=lambda *_args, **_kwargs: calls.append(True),
+        ledger=InMemoryExecutionLedger(),
+    )
+    assert receipt.status == "rejected"
+    assert calls == []
+
+
+def test_ambiguous_defect_asks_one_scope_question_then_bare_range_executes():
+    first_text = "The scenes do not match their narration."
+    first_state = _state(_snapshot(scene_count=6), repairable=True)
+    first_command = _plan(first_text, _tool_response(_proposal()), state=first_state)
+    first_validation = validate_studio_command(first_command, first_state, user_text=first_text)
+    assert first_validation.decision == "clarify"
+    assert first_validation.clarification is not None
+    assert first_validation.clarification.code == "missing_scene_selection"
+
+    pending = {
+        "job_id": JOB_ID,
+        "scene_numbers": [],
+        "repair_scope": "narrative_alignment",
+        "instruction": first_text,
+        "execution_requested": True,
+        "missing_fields": ["repair.scene_numbers"],
+    }
+    second_state = _state(
+        _snapshot(scene_count=6),
+        repairable=True,
+        session_updates={"pending_scene_repair": pending},
+    )
+    second_text = "2 through 6"
+    second_command = _plan(second_text, _tool_response(_proposal()), state=second_state)
+    second_validation = validate_studio_command(
+        second_command,
+        second_state,
+        user_text=second_text,
+    )
+    assert second_command.repair is not None
+    assert second_command.repair.scene_numbers == [2, 3, 4, 5, 6]
+    assert second_validation.can_execute
+
+
+def _validated_scene_repair():
+    text = "Scenes 2 through 6 do not match their prompt and narration."
+    state = _state(_snapshot(scene_count=6), repairable=True)
+    command = _plan(text, _tool_response(_proposal()), state=state)
+
+    def fingerprints(_job_id, _numbers):
+        return [
+            SceneAssetFingerprint(
+                scene_number=1,
+                still_sha256="scene-1-still",
+                clip_sha256="scene-1-clip",
+            )
+        ]
+    validation = validate_studio_command(
+        command,
+        state,
+        user_text=text,
+        fingerprint_loader=fingerprints,
+    )
+    return validation, fingerprints
+
+
+def test_synchronous_scene_repair_receipt_and_postconditions_prove_scope():
+    validation, fingerprints = _validated_scene_repair()
+    calls = []
+
+    def executor(name, arguments, **kwargs):
+        calls.append((name, arguments, kwargs))
+        return json.dumps(
+            {
+                "ok": True,
+                "job_id": JOB_ID,
+                "audited": [1, 2, 3, 4, 5],
+                "repaired_stills": [2],
+                "repaired_animations": [2],
+                "failed": [],
+            }
+        )
+
+    ledger = InMemoryExecutionLedger()
+    receipt = execute_validated_command(
+        validation,
+        user_id="user_test",
+        session_id="sa_test_command_layer",
+        content_format="short",
+        tool_executor=executor,
+        ledger=ledger,
+    )
+    duplicate = execute_validated_command(
+        validation,
+        user_id="user_test",
+        session_id="sa_test_command_layer",
+        content_format="short",
+        tool_executor=executor,
+        ledger=ledger,
+    )
+    assert receipt.status == "completed"
+    assert duplicate.status == "duplicate"
+    assert len(calls) == 1
+    assert calls[0][0] == "audit_and_repair_production_scenes"
+    assert calls[0][1]["scene_indices"] == [1, 2, 3, 4, 5]
+
+    verdict = verify_execution(
+        receipt,
+        snapshot_loader=lambda _job_id, _kind: _snapshot(scene_count=6, clips=True),
+        fingerprint_loader=fingerprints,
+    )
+    assert verdict.status == "passed"
+    assert verdict.safe_claim == "completed"
+
+    changed = verify_execution(
+        receipt,
+        snapshot_loader=lambda _job_id, _kind: _snapshot(scene_count=6, clips=True),
+        fingerprint_loader=lambda _job_id, _numbers: [
+            SceneAssetFingerprint(
+                scene_number=1,
+                still_sha256="changed",
+                clip_sha256="scene-1-clip",
+            )
+        ],
+    )
+    assert changed.status == "failed"
+    assert changed.safe_claim == "none"
+
+
 def _validated_exact(*, fingerprints=False):
     text = "I like scene one. Let's go ahead and make the other five scenes and animate them."
     command = _plan(text, _tool_response(_proposal()))
-    loader = None
-    if fingerprints:
-        loader = lambda _job_id, _numbers: [
-            SceneAssetFingerprint(scene_number=1, still_sha256="still-before", clip_sha256="clip-before")
+    def fingerprint_loader(_job_id, _numbers):
+        return [
+            SceneAssetFingerprint(
+                scene_number=1,
+                still_sha256="still-before",
+                clip_sha256="clip-before",
+            )
         ]
+
+    loader = fingerprint_loader if fingerprints else None
     return validate_studio_command(
         command,
         _state(),
@@ -605,9 +858,14 @@ def test_postconditions_are_pending_while_running_and_completed_only_after_obser
         tool_executor=lambda *_args, **_kwargs: json.dumps({"ok": True, "job_id": JOB_ID}),
         ledger=InMemoryExecutionLedger(),
     )
-    fingerprint_loader = lambda _job_id, _numbers: [
-        SceneAssetFingerprint(scene_number=1, still_sha256="still-before", clip_sha256="clip-before")
-    ]
+    def fingerprint_loader(_job_id, _numbers):
+        return [
+            SceneAssetFingerprint(
+                scene_number=1,
+                still_sha256="still-before",
+                clip_sha256="clip-before",
+            )
+        ]
     pending = verify_execution(
         receipt,
         snapshot_loader=lambda _job_id, _kind: _snapshot(stage="restarting", scene_count=1),

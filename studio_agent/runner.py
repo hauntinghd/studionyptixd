@@ -4446,47 +4446,6 @@ def _may_be_scene_quality_request(user_text: str) -> bool:
     return visual_subject and visual_action
 
 
-def _resolve_scene_quality_intent(user_text: str, total_scenes: int) -> dict[str, Any] | None:
-    """Use the agent model to understand a production quality request.
-
-    Range parsing is only a fallback for an unavailable model.  The model is
-    responsible for understanding ordinary phrasing, exclusions, and whether
-    the creator is actually asking Studio to act rather than merely chatting.
-    """
-    if not _may_be_scene_quality_request(user_text):
-        return None
-    try:
-        from skeleton_ai.scripting_grok import GrokClient
-
-        raw = GrokClient().complete(
-            "You convert a creator's natural-language Studio production message into a safe action decision. "
-            "Return JSON only. Select scene numbers only when the creator explicitly asks to inspect, fix, repair, "
-            "rebuild, regenerate, or change visual scenes now. Do not select scenes for a hypothetical question or "
-            "ordinary planning discussion. Understand ranges such as '2 through 6', exclusions, pronouns, and loose "
-            "phrasing. A scene quality request includes artifacts, repetitive backgrounds/compositions, generic staging, "
-            "or a scene that does not match its prompt/narration. "
-            f"There are exactly {max(1, int(total_scenes))} scenes, numbered 1 through {max(1, int(total_scenes))}. "
-            "Return exactly: {\"execute\":false,\"scene_numbers\":[],\"reason\":\"\",\"confidence\":0.0}.",
-            f"Creator message: {str(user_text or '')[:1800]}",
-            max_tokens=180,
-            temperature=0.0,
-        )
-        cleaned = str(raw or "").strip().strip("`").strip()
-        if cleaned.lower().startswith("json"):
-            cleaned = cleaned[4:].strip()
-        parsed = json.loads(cleaned)
-        if not isinstance(parsed, dict) or parsed.get("execute") is not True:
-            return None
-        confidence = float(parsed.get("confidence") or 0.0)
-        raw_numbers = parsed.get("scene_numbers") if isinstance(parsed.get("scene_numbers"), list) else []
-        selected = sorted({int(value) - 1 for value in raw_numbers if str(value).isdigit() and 1 <= int(value) <= total_scenes})
-        if confidence < 0.72 or not selected:
-            return None
-        return {"scene_indices": selected, "reason": str(parsed.get("reason") or user_text)[:900]}
-    except Exception:
-        return None
-
-
 async def _apply_bulk_artifact_audit(
     *,
     session: dict[str, Any],
@@ -4497,7 +4456,17 @@ async def _apply_bulk_artifact_audit(
     approval_mode: str,
     reasoning_depth: str,
 ) -> dict[str, Any] | None:
-    if not (_is_bulk_artifact_audit_request(user_text) or _may_be_scene_quality_request(user_text)):
+    # Compatibility fallback only. Broad natural language is owned by the
+    # typed command layer; this legacy path requires an explicit repair ask so
+    # a question or failed classifier can never fall through into mutation.
+    if not _is_bulk_artifact_audit_request(user_text):
+        return None
+    from studio_agent.command_contract import (
+        scene_repair_authorization_evidence,
+        scene_repair_block_reason,
+    )
+
+    if scene_repair_block_reason(user_text) or not scene_repair_authorization_evidence(user_text):
         return None
     # Prefer the largest same-title multi-scene job, even if an earlier UI
     # sync detached it. Never fall back to a newer one-scene proof merely
@@ -4528,8 +4497,7 @@ async def _apply_bulk_artifact_audit(
     ranked.sort(reverse=True)
     _, _, job_id, snapshot = ranked[0]
     total = int(snapshot.get("total_scenes") or snapshot.get("scene_count") or len(snapshot.get("scenes") or []) or 0)
-    understood = _resolve_scene_quality_intent(user_text, total)
-    indices = list(understood.get("scene_indices") or []) if understood else _bulk_artifact_audit_scene_indices(user_text, total)
+    indices = _bulk_artifact_audit_scene_indices(user_text, total)
     if not indices:
         return _bulk_artifact_audit_error(
             session,
@@ -4542,7 +4510,7 @@ async def _apply_bulk_artifact_audit(
     try:
         result = execute_tool_logged(
             "audit_and_repair_production_scenes",
-            {"job_id": job_id, "scene_indices": indices, "reason": str((understood or {}).get("reason") or user_text)},
+            {"job_id": job_id, "scene_indices": indices, "reason": str(user_text or "")[:900]},
             user_id=user_id,
             content_format=content_format,
             session_id=sid,
@@ -5553,6 +5521,104 @@ def _verified_expand_command_target(session: dict[str, Any], job_id: str) -> boo
         return False
 
 
+def _verified_scene_repair_command_target(session: dict[str, Any], job_id: str) -> bool:
+    """Verify ownership and a live short-form scene set before any repair."""
+
+    wanted_job = str(job_id or "").strip()
+    wanted_user = str(session.get("user_id") or "").strip()
+    if not wanted_job or not wanted_user:
+        return False
+    try:
+        from studio_agent.tools import _shortform_workspace
+
+        workspace = _shortform_workspace(wanted_job)
+        spec_path = workspace / "job_spec.json"
+        scenes_path = workspace / "scenes.json"
+        if not spec_path.is_file() or not scenes_path.is_file():
+            return False
+        spec = json.loads(spec_path.read_text(encoding="utf-8"))
+        scenes = json.loads(scenes_path.read_text(encoding="utf-8"))
+        if not isinstance(spec, dict) or not isinstance(scenes, list) or not scenes:
+            return False
+        if str(spec.get("user_id") or "").strip() != wanted_user:
+            return False
+        snapshot = get_job_snapshot(wanted_job, "shortform")
+        status = str(snapshot.get("status") or "").strip().lower()
+        stage = str(snapshot.get("stage") or "").strip().lower()
+        return status not in {"failed", "error", "cancelled", "missing"} and stage not in {
+            "failed",
+            "error",
+            "cancelled",
+        }
+    except Exception:
+        return False
+
+
+def _find_repairable_shortform_job(
+    session: dict[str, Any],
+    *,
+    reply_to: dict | None = None,
+) -> str | None:
+    """Recover the creator's owned multi-scene short without choosing a newer proof."""
+
+    pending = session.get("pending_scene_repair")
+    pending_job = str(pending.get("job_id") or "").strip() if isinstance(pending, dict) else ""
+    reply_job = str((reply_to or {}).get("job_id") or "").strip()
+    for preferred in (pending_job, reply_job):
+        if preferred and _verified_scene_repair_command_target(session, preferred):
+            return preferred
+
+    candidate_ids: list[str] = []
+    for row in reversed(list(session.get("active_jobs") or [])):
+        if isinstance(row, dict) and str(row.get("kind") or "shortform") == "shortform":
+            candidate_ids.append(str(row.get("job_id") or ""))
+    recovered = _recover_shortform_job_from_session(session)
+    if recovered:
+        candidate_ids.append(recovered)
+    for message in reversed(list(session.get("messages") or [])[-120:]):
+        if not isinstance(message, dict):
+            continue
+        deliverable = message.get("jobDeliverable")
+        if isinstance(deliverable, dict):
+            candidate_ids.append(str(deliverable.get("job_id") or ""))
+        for match in re.finditer(
+            r'"job_id"\s*:\s*"([A-Za-z0-9_-]{6,48})"',
+            str(message.get("content") or ""),
+        ):
+            candidate_ids.append(match.group(1))
+
+    expected_title = (
+        str((session.get("pending_concept") or {}).get("title") or "")
+        if isinstance(session.get("pending_concept"), dict)
+        else ""
+    )
+    ranked: list[tuple[int, int, int, str]] = []
+    for order, candidate in enumerate(dict.fromkeys(value for value in candidate_ids if value)):
+        if not _verified_scene_repair_command_target(session, candidate):
+            continue
+        try:
+            snapshot = get_job_snapshot(candidate, "shortform")
+        except Exception:
+            continue
+        title = str(snapshot.get("title") or snapshot.get("topic") or "")
+        title_match = int(
+            not expected_title
+            or not title
+            or store._title_overlap_score(expected_title, title) >= 0.75
+        )
+        count = int(
+            snapshot.get("total_scenes")
+            or snapshot.get("scene_count")
+            or len(snapshot.get("scenes") or [])
+            or 0
+        )
+        ranked.append((title_match, count, -order, candidate))
+    if not ranked:
+        return None
+    ranked.sort(reverse=True)
+    return ranked[0][3]
+
+
 async def _bill_studio_command_compiler(
     *,
     response: dict[str, Any],
@@ -5620,7 +5686,7 @@ async def _bill_studio_command_compiler(
     }
 
 
-async def _apply_model_agnostic_expand_command(
+async def _apply_model_agnostic_studio_command(
     *,
     session: dict[str, Any],
     user_id: str,
@@ -5634,7 +5700,7 @@ async def _apply_model_agnostic_expand_command(
     reasoning_depth: str,
     reply_to: dict | None = None,
 ) -> dict[str, Any] | None:
-    """Compile, validate, execute, and verify an in-place proof expansion.
+    """Compile, validate, execute, and verify typed production commands.
 
     Every selectable chat model sees the same single non-mutating compiler tool.
     The selected model never receives the render tools or permission to mutate a
@@ -5644,15 +5710,78 @@ async def _apply_model_agnostic_expand_command(
 
     if str(os.getenv("STUDIO_COMMAND_ROUTING_MODE", "authoritative")).strip().lower() == "off":
         return None
-    if not _wants_expand_visual_proof_short(user_text):
+    from studio_agent.command_contract import (
+        scene_repair_candidate,
+        scene_repair_cancellation_evidence,
+        scene_repair_followup_candidate,
+    )
+
+    pending_repair = session.get("pending_scene_repair")
+    has_pending_repair = bool(isinstance(pending_repair, dict) and pending_repair)
+    if has_pending_repair and scene_repair_cancellation_evidence(user_text):
+        sid = str(session.get("session_id") or "")
+        fresh = store.get_session(sid) or session
+        messages = list(fresh.get("messages") or [])
+        assistant_text = "Understood — I will not repair or change those scenes."
+        messages.append({"role": "assistant", "content": assistant_text})
+        updated = store.update_session(
+            sid,
+            messages=messages,
+            pending_scene_repair={},
+        ) or fresh
+        return _turn_result(updated, {
+            "session_id": sid,
+            "assistant_message": assistant_text,
+            "pending_actions": list(updated.get("pending_actions") or []),
+            "active_jobs": list(updated.get("active_jobs") or []),
+            "approval_mode": approval_mode,
+            "reasoning_depth": reasoning_depth,
+            "usage": {},
+            "billing": {
+                "credits_charged": 0,
+                "provider_usd": 0.0,
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+            },
+        })
+    if has_pending_repair and not scene_repair_followup_candidate(user_text):
+        # An unrelated turn abandons the one-question repair clarification;
+        # it must not hijack later planning or conversation.
+        try:
+            store.update_session(str(session.get("session_id") or ""), pending_scene_repair={})
+        except Exception:
+            pass
+        return None
+    wants_repair = bool(
+        scene_repair_candidate(user_text)
+        or (has_pending_repair and scene_repair_followup_candidate(user_text))
+    )
+    wants_expand = bool(_wants_expand_visual_proof_short(user_text) and not wants_repair)
+    if not wants_expand and not wants_repair:
         return None
 
     sid = str(session.get("session_id") or "")
-    candidate = _find_expandable_shortform_job(session, reply_to=reply_to) or ""
-    if not candidate or not _verified_expand_command_target(session, candidate):
+    candidate = (
+        _find_repairable_shortform_job(session, reply_to=reply_to)
+        if wants_repair
+        else _find_expandable_shortform_job(session, reply_to=reply_to)
+    ) or ""
+    target_verified = bool(
+        candidate
+        and (
+            _verified_scene_repair_command_target(session, candidate)
+            if wants_repair
+            else _verified_expand_command_target(session, candidate)
+        )
+    )
+    if not target_verified:
         fresh = store.get_session(sid) or session
         messages = list(fresh.get("messages") or session.get("messages") or [])
         assistant_text = (
+            "I understood the scene-repair request, but I could not verify an owned short-form job to change. "
+            "Reply directly to that short's production card and try again."
+            if wants_repair
+            else
             "I understood that you want to preserve Scene 1 and expand this short, but I could not verify "
             "an expandable proof job owned by this Studio session. Reply directly to the Scene 1 card and try again."
         )
@@ -5663,6 +5792,7 @@ async def _apply_model_agnostic_expand_command(
             pending_actions=[],
             last_production={},
             short_expansion_intake={},
+            pending_scene_repair={},
         ) or fresh
         await _fire_event(emit, "pending_actions", actions=[])
         return _turn_result(updated, {
@@ -5716,11 +5846,16 @@ async def _apply_model_agnostic_expand_command(
     state = build_studio_state_context(
         session,
         reply_to=reply_to,
-        expandable_job_id=candidate,
+        expandable_job_id=candidate if wants_expand else None,
+        repairable_job_ids=[candidate] if wants_repair else [],
         snapshot_loader=get_job_snapshot,
         ownership_verifier=lambda job_id: (
             str(job_id or "").strip() == candidate
-            and _verified_expand_command_target(session, job_id)
+            and (
+                _verified_scene_repair_command_target(session, job_id)
+                if wants_repair
+                else _verified_expand_command_target(session, job_id)
+            )
         ),
     )
     compiler_box: dict[str, Any] = {}
@@ -5794,12 +5929,27 @@ async def _apply_model_agnostic_expand_command(
                 "I could not safely turn that request into a production command.",
             )
         messages.append({"role": "assistant", "content": assistant_text})
+        pending_scene_repair: dict[str, Any] = {}
+        if command.action == "audit_and_repair_scenes" and command.repair is not None:
+            pending_scene_repair = {
+                "job_id": candidate,
+                "scene_numbers": list(command.repair.scene_numbers),
+                "repair_scope": command.repair.scope,
+                "instruction": command.repair.instruction,
+                "execution_requested": bool(command.authorization.execution_requested),
+                "missing_fields": (
+                    list(validation.clarification.missing_fields)
+                    if validation.clarification is not None
+                    else []
+                ),
+            }
         updated = store.update_session(
             sid,
             messages=messages,
             pending_actions=[],
             last_production={},
             short_expansion_intake={},
+            pending_scene_repair=pending_scene_repair,
             last_studio_command={
                 "command": command.model_dump(mode="json", exclude_none=True),
                 "validation": validation.model_dump(mode="json", exclude_none=True),
@@ -5835,7 +5985,7 @@ async def _apply_model_agnostic_expand_command(
     async with studio_agent_slot(
         user_id=user_id,
         plan=membership_plan,
-        operation="expand_visual_proof_short",
+        operation=action.tool_name,
         unlimited=bool(profile.get("unlimited")),
     ):
         receipt = execute_validated_command(
@@ -5850,7 +6000,7 @@ async def _apply_model_agnostic_expand_command(
         snapshot_loader=get_job_snapshot,
         fingerprint_loader=fingerprint_loader,
     )
-    tool_status = "ok" if receipt.status in {"accepted", "duplicate"} else "error"
+    tool_status = "ok" if receipt.status in {"accepted", "completed", "duplicate"} else "error"
     await _fire_tool_end(
         emit,
         action.tool_name,
@@ -5864,50 +6014,87 @@ async def _apply_model_agnostic_expand_command(
     )
 
     expected = action.expected
-    new_scene_range = (
-        f"Scenes {expected.expected_existing_scene_count + 1}-{expected.expected_total_scene_count}"
-    )
-    if expected.expected_animated_scene_numbers:
-        animation_started_text = f"{new_scene_range} are queued for animation"
-        animation_completed_text = f"{new_scene_range} are animated"
-    elif expected.animation_scope == "none":
-        animation_started_text = f"{new_scene_range} will remain still as requested"
-        animation_completed_text = f"{new_scene_range} remain still as requested"
-    else:
-        animation_started_text = "only selected hero scenes are queued for animation"
-        animation_completed_text = "only selected hero scenes were animated"
-    if receipt.status in {"failed", "rejected"}:
-        assistant_text = (
-            "I did not start the expansion because the validated tool call failed: "
-            f"{str(receipt.error or receipt.result.get('error') or 'unknown error')[:400]}"
-        )
-    elif receipt.status == "duplicate":
-        if receipt.result.get("idempotency_claim_pending"):
+    if getattr(expected, "kind", "") == "scene_repair":
+        selected = list(expected.selected_scene_numbers)
+        selected_text = ", ".join(str(number) for number in selected)
+        repaired_stills = [int(value) + 1 for value in receipt.result.get("repaired_stills") or []]
+        repaired_clips = [int(value) + 1 for value in receipt.result.get("repaired_animations") or []]
+        if receipt.status in {"failed", "rejected"}:
             assistant_text = (
-                "The same command is being claimed by another Studio process, but immediate job-state "
-                "verification has not confirmed dispatch yet, so I am not claiming that the expansion started."
+                f"I did not claim a repair for Scene(s) {selected_text} because the validated audit failed: "
+                f"{str(receipt.error or receipt.result.get('error') or 'unknown error')[:400]}"
+            )
+        elif receipt.status == "duplicate" and receipt.result.get("idempotency_claim_pending"):
+            assistant_text = (
+                "The same repair command is being handled by another Studio process, but verification has not "
+                "confirmed its result yet, so I am not claiming that any scene changed."
+            )
+        elif verdict.safe_claim == "completed":
+            changes: list[str] = []
+            if repaired_stills:
+                changes.append(f"rebuilt stills {repaired_stills}")
+            if repaired_clips:
+                changes.append(f"re-animated clips {repaired_clips}")
+            detail = "; ".join(changes) if changes else "all selected scenes passed without regeneration"
+            assistant_text = (
+                f"I audited exactly Scene(s) {selected_text} against their prompt, narration, still quality, "
+                f"and animation quality; {detail}. Every unselected scene was verified unchanged."
+            )
+        elif verdict.safe_claim == "started":
+            assistant_text = (
+                f"The audit/repair tool ran for Scene(s) {selected_text}, but excluded-scene byte verification "
+                "was incomplete, so I am not claiming the repair is fully verified yet."
             )
         else:
             assistant_text = (
-                f"That exact expansion was already accepted on this same job. Scene 1 remains locked; "
-                f"the target is {expected.expected_total_scene_count} scenes total, and {animation_started_text}."
+                f"The audit/repair result for Scene(s) {selected_text} did not satisfy the typed postconditions, "
+                "so I am not claiming that the scenes were fixed."
             )
-    elif verdict.safe_claim == "completed":
-        assistant_text = (
-            f"The same short now has exactly {expected.expected_total_scene_count} scenes. Scene 1 was preserved, "
-            f"and {animation_completed_text}."
-        )
-    elif verdict.safe_claim == "started":
-        assistant_text = (
-            f"I kept Scene 1 locked and started adding exactly {expected.expected_added_scene_count} new scenes "
-            f"to the same short ({expected.expected_total_scene_count} total). {animation_started_text.capitalize()}; "
-            "Scene 1 will not be regenerated or reanimated."
-        )
     else:
-        assistant_text = (
-            "The tool accepted the command, but the immediate job-state verification did not match the typed "
-            "postconditions, so I am not claiming that production started or completed."
+        new_scene_range = (
+            f"Scenes {expected.expected_existing_scene_count + 1}-{expected.expected_total_scene_count}"
         )
+        if expected.expected_animated_scene_numbers:
+            animation_started_text = f"{new_scene_range} are queued for animation"
+            animation_completed_text = f"{new_scene_range} are animated"
+        elif expected.animation_scope == "none":
+            animation_started_text = f"{new_scene_range} will remain still as requested"
+            animation_completed_text = f"{new_scene_range} remain still as requested"
+        else:
+            animation_started_text = "only selected hero scenes are queued for animation"
+            animation_completed_text = "only selected hero scenes were animated"
+        if receipt.status in {"failed", "rejected"}:
+            assistant_text = (
+                "I did not start the expansion because the validated tool call failed: "
+                f"{str(receipt.error or receipt.result.get('error') or 'unknown error')[:400]}"
+            )
+        elif receipt.status == "duplicate":
+            if receipt.result.get("idempotency_claim_pending"):
+                assistant_text = (
+                    "The same command is being claimed by another Studio process, but immediate job-state "
+                    "verification has not confirmed dispatch yet, so I am not claiming that the expansion started."
+                )
+            else:
+                assistant_text = (
+                    f"That exact expansion was already accepted on this same job. Scene 1 remains locked; "
+                    f"the target is {expected.expected_total_scene_count} scenes total, and {animation_started_text}."
+                )
+        elif verdict.safe_claim == "completed":
+            assistant_text = (
+                f"The same short now has exactly {expected.expected_total_scene_count} scenes. Scene 1 was preserved, "
+                f"and {animation_completed_text}."
+            )
+        elif verdict.safe_claim == "started":
+            assistant_text = (
+                f"I kept Scene 1 locked and started adding exactly {expected.expected_added_scene_count} new scenes "
+                f"to the same short ({expected.expected_total_scene_count} total). {animation_started_text.capitalize()}; "
+                "Scene 1 will not be regenerated or reanimated."
+            )
+        else:
+            assistant_text = (
+                "The tool accepted the command, but the immediate job-state verification did not match the typed "
+                "postconditions, so I am not claiming that production started or completed."
+            )
 
     fresh = store.get_session(sid) or session
     messages = list(fresh.get("messages") or [])
@@ -5922,7 +6109,7 @@ async def _apply_model_agnostic_expand_command(
     messages.append(_tool_observation_message(action.tool_name, observation))
     messages.append({"role": "assistant", "content": assistant_text})
     active_jobs = list(fresh.get("active_jobs") or [])
-    if receipt.status in {"accepted", "duplicate"}:
+    if receipt.status in {"accepted", "completed", "duplicate"}:
         active_jobs = merge_active_jobs(
             active_jobs,
             [{
@@ -5946,6 +6133,7 @@ async def _apply_model_agnostic_expand_command(
         pending_actions=[],
         last_production={},
         short_expansion_intake={},
+        pending_scene_repair={},
         last_studio_command={
             "command": command.model_dump(mode="json", exclude_none=True),
             "validation": validation.model_dump(mode="json", exclude_none=True),
@@ -10205,7 +10393,7 @@ async def _run_turn_impl(
         **store.production_session_fields(session),
     )
     if not plan_only:
-        semantic_expand = await _apply_model_agnostic_expand_command(
+        semantic_command = await _apply_model_agnostic_studio_command(
             session=session,
             user_id=user_id,
             user_text=intent_text or user_text,
@@ -10218,8 +10406,8 @@ async def _run_turn_impl(
             reasoning_depth=reasoning_depth,
             reply_to=reply_to,
         )
-        if semantic_expand is not None:
-            return semantic_expand
+        if semantic_command is not None:
+            return semantic_command
     from studio_agent.turn_router import route_plan_turn
     plan_turn = route_plan_turn(
         intent_text or user_text,

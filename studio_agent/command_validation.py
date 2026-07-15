@@ -9,11 +9,18 @@ from pydantic import Field
 from studio_agent.command_contract import (
     AnimationScope,
     ContractModel,
+    RepairScope,
     StudioCommand,
     approval_authorization_evidence,
+    contextual_confirmation_evidence,
     execution_authorization_evidence,
     execution_block_reason,
+    extract_scene_numbers_request,
+    infer_scene_repair_scope,
     normalized_text_contains,
+    scene_repair_authorization_evidence,
+    scene_repair_block_reason,
+    scene_repair_candidate,
 )
 from studio_agent.command_state import CompactJobState, StudioStateContext
 
@@ -50,6 +57,16 @@ class LegacyExpandArguments(ContractModel):
         return self.model_dump(mode="json", exclude_none=True)
 
 
+class LegacySceneRepairArguments(ContractModel):
+    command_id: str
+    job_id: str
+    scene_indices: list[int] = Field(min_length=1, max_length=60)
+    reason: str = Field(default="", max_length=2_000)
+
+    def as_legacy_dict(self) -> dict[str, Any]:
+        return self.model_dump(mode="json", exclude_none=True)
+
+
 class SceneAssetFingerprint(ContractModel):
     scene_number: int = Field(ge=1)
     still_sha256: str = ""
@@ -57,6 +74,7 @@ class SceneAssetFingerprint(ContractModel):
 
 
 class ExpandPostconditions(ContractModel):
+    kind: Literal["expand_existing_short"] = "expand_existing_short"
     job_id: str
     expected_existing_scene_count: int = Field(ge=1)
     expected_total_scene_count: int = Field(ge=2, le=60)
@@ -67,10 +85,23 @@ class ExpandPostconditions(ContractModel):
     preserved_assets: list[SceneAssetFingerprint] = Field(default_factory=list)
 
 
+class SceneRepairPostconditions(ContractModel):
+    kind: Literal["scene_repair"] = "scene_repair"
+    job_id: str
+    selected_scene_numbers: list[int] = Field(min_length=1, max_length=60)
+    untouched_scene_numbers: list[int] = Field(default_factory=list, max_length=60)
+    expected_clip_scene_numbers: list[int] = Field(default_factory=list, max_length=60)
+    repair_scope: RepairScope
+    untouched_assets: list[SceneAssetFingerprint] = Field(default_factory=list)
+
+
 class ResolvedToolAction(ContractModel):
-    tool_name: Literal["expand_visual_proof_shortform"]
-    arguments: LegacyExpandArguments
-    expected: ExpandPostconditions
+    tool_name: Literal[
+        "expand_visual_proof_shortform",
+        "audit_and_repair_production_scenes",
+    ]
+    arguments: LegacyExpandArguments | LegacySceneRepairArguments
+    expected: ExpandPostconditions | SceneRepairPostconditions
     state_revision: str
 
 
@@ -129,7 +160,11 @@ def _resolve_target(command: StudioCommand, state: StudioStateContext) -> tuple[
         return state.job(explicit), "explicit"
     if command.target.source == "reply_to" and state.reply_target_job_id:
         return state.job(state.reply_target_job_id), "reply_to"
-    eligible = state.expandable_short_jobs()
+    eligible = (
+        state.repairable_short_jobs()
+        if command.action == "audit_and_repair_scenes"
+        else state.expandable_short_jobs()
+    )
     if len(eligible) == 1:
         return eligible[0], "single_expandable"
     return None, "ambiguous" if len(eligible) > 1 else "missing"
@@ -160,6 +195,189 @@ def _load_fingerprints(
     return out
 
 
+def _pending_repair_state(state: StudioStateContext) -> dict[str, Any]:
+    pending = state.pending_command
+    if pending is None or pending.action != "audit_and_repair_scenes":
+        return {}
+    return {
+        "target_job_id": pending.target_job_id,
+        **dict(pending.known_fields),
+    }
+
+
+def _validate_scene_repair(
+    command: StudioCommand,
+    state: StudioStateContext,
+    *,
+    user_text: str,
+    fingerprint_loader: FingerprintLoader | None,
+) -> CommandValidationResult:
+    repair = command.repair
+    if repair is None:
+        return _reject(command, "missing_repair_payload", "The scene-repair request is incomplete.")
+
+    block = scene_repair_block_reason(user_text)
+    job, target_reason = _resolve_target(command, state)
+    if job is None:
+        if str(command.target.job_id or "").strip():
+            return _reject(
+                command,
+                "target_job_not_found",
+                "The requested production job is not part of this Studio session.",
+                field="target.job_id",
+            )
+        if target_reason == "ambiguous":
+            return _clarify(
+                command,
+                "ambiguous_target_job",
+                "Which short should I repair? Reply to its production card.",
+                fields=["target.job_id"],
+            )
+        return _clarify(
+            command,
+            "missing_target_job",
+            "I could not find the short to repair. Reply directly to its production card.",
+            fields=["target.job_id"],
+        )
+    if not job.ownership_verified:
+        return _reject(
+            command,
+            "target_not_owned",
+            "The target job is not verified as belonging to this session.",
+            field="target.job_id",
+        )
+    if job.kind != "shortform" or not job.repairable_scene_review:
+        return _reject(
+            command,
+            "target_not_repairable",
+            "That job is not a verified short-form scene-review job.",
+            field="target.job_id",
+        )
+
+    total = max(1, int(job.scene_count or len(job.scenes) or 1))
+    selected = sorted(dict.fromkeys(int(number) for number in repair.scene_numbers))
+    if not selected:
+        return _clarify(
+            command,
+            "missing_scene_selection",
+            "Which scene or scene range should I audit and repair?",
+            fields=["repair.scene_numbers"],
+        )
+    if any(number < 1 or number > total for number in selected):
+        return _reject(
+            command,
+            "invalid_scene_selection",
+            f"This short has {total} scene(s); the requested range is outside that job.",
+            field="repair.scene_numbers",
+        )
+
+    pending = _pending_repair_state(state)
+    literal_selected = extract_scene_numbers_request(
+        user_text,
+        total_scenes=total,
+        allow_bare=bool(pending),
+    )
+    pending_selected = sorted(
+        dict.fromkeys(
+            int(number)
+            for number in pending.get("scene_numbers") or []
+            if str(number).isdigit() and 1 <= int(number) <= total
+        )
+    )
+    grounded_selected = literal_selected or pending_selected
+    if grounded_selected != selected:
+        return _reject(
+            command,
+            "ungrounded_scene_selection",
+            "The selected scenes were not grounded in your message or the pending clarification.",
+            field="repair.scene_numbers",
+        )
+
+    if block:
+        return _clarify(
+            command,
+            "repair_confirmation_required",
+            "Do you want me to audit and repair those scenes now, or are you only asking about them?",
+            fields=["authorization.execution_quote"],
+        )
+
+    direct = scene_repair_authorization_evidence(user_text)
+    confirmation = contextual_confirmation_evidence(user_text) if pending else ""
+    scoped_followup = bool(
+        pending
+        and pending.get("execution_requested")
+        and literal_selected
+        and literal_selected == selected
+    )
+    authorization_signal = direct or confirmation or (str(user_text or "").strip() if scoped_followup else "")
+    execution_grounded = bool(
+        command.authorization.execution_requested
+        and authorization_signal
+        and normalized_text_contains(user_text, command.authorization.execution_quote)
+    )
+    if not execution_grounded:
+        human = ", ".join(str(number) for number in selected)
+        return _clarify(
+            command,
+            "repair_not_authorized",
+            f"Do you want me to audit and repair Scene(s) {human} now?",
+            fields=["authorization.execution_quote"],
+        )
+
+    if scene_repair_candidate(user_text):
+        reason = str(user_text or "").strip()[:2_000]
+        repair_scope = infer_scene_repair_scope(user_text)
+    else:
+        reason = str(pending.get("instruction") or "").strip()[:2_000]
+        repair_scope = str(pending.get("repair_scope") or repair.scope)
+    if repair_scope not in {
+        "general_scene_quality",
+        "narrative_alignment",
+        "visual_quality",
+        "animation_quality",
+        "full_quality",
+    }:
+        repair_scope = "general_scene_quality"
+    if not reason:
+        reason = "Creator requested fresh quality and narrative-correspondence QA for the selected scenes."
+
+    untouched = [number for number in range(1, total + 1) if number not in selected]
+    untouched_assets = _load_fingerprints(fingerprint_loader, job.job_id, untouched)
+    by_number = {scene.scene_number: scene for scene in job.scenes}
+    expected_clips = [number for number in selected if by_number.get(number) and by_number[number].has_clip]
+    expected = SceneRepairPostconditions(
+        job_id=job.job_id,
+        selected_scene_numbers=selected,
+        untouched_scene_numbers=untouched,
+        expected_clip_scene_numbers=expected_clips,
+        repair_scope=repair_scope,  # type: ignore[arg-type]
+        untouched_assets=untouched_assets,
+    )
+    resolved = ResolvedToolAction(
+        tool_name="audit_and_repair_production_scenes",
+        arguments=LegacySceneRepairArguments(
+            command_id=command.command_id,
+            job_id=job.job_id,
+            scene_indices=[number - 1 for number in selected],
+            reason=reason,
+        ),
+        expected=expected,
+        state_revision=state.state_revision,
+    )
+    return CommandValidationResult(
+        decision="execute",
+        command_id=command.command_id,
+        resolved_action=resolved,
+        issues=[
+            _issue(
+                "resolved_scene_repair",
+                f"Audit and repair only Scene(s) {selected} on the same job.",
+                severity="info",
+            )
+        ],
+    )
+
+
 def validate_studio_command(
     command: StudioCommand,
     state: StudioStateContext,
@@ -174,6 +392,13 @@ def validate_studio_command(
     if command.action == "clarify":
         question = command.clarification_question or "What would you like Studio to do next?"
         return _clarify(command, "model_requested_clarification", question, fields=[])
+    if command.action == "audit_and_repair_scenes":
+        return _validate_scene_repair(
+            command,
+            state,
+            user_text=user_text,
+            fingerprint_loader=fingerprint_loader,
+        )
     if command.action != "expand_existing_short" or command.expand is None:
         return _reject(command, "unsupported_action", f"Unsupported command action: {command.action}")
 

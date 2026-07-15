@@ -13,7 +13,11 @@ from typing import Any, Literal, Protocol
 from pydantic import Field
 
 from studio_agent.command_contract import ContractModel
-from studio_agent.command_validation import CommandValidationResult, ExpandPostconditions
+from studio_agent.command_validation import (
+    CommandValidationResult,
+    ExpandPostconditions,
+    SceneRepairPostconditions,
+)
 
 
 ExecutionStatus = Literal["accepted", "completed", "duplicate", "rejected", "failed"]
@@ -32,7 +36,7 @@ class ExecutionReceipt(ContractModel):
     error: str = ""
     started_at: float
     finished_at: float | None = None
-    expected: ExpandPostconditions | None = None
+    expected: ExpandPostconditions | SceneRepairPostconditions | None = None
     duplicate_of: str = ""
 
     def legacy_result_text(self) -> str:
@@ -272,6 +276,11 @@ def execute_validated_command(
             # command compiled by another HTTP turn/process. Surface that as a
             # duplicate receipt instead of pretending a new worker was started.
             status = "duplicate"
+        elif action.tool_name == "audit_and_repair_production_scenes":
+            # This tool performs its selected-scene audit and any required
+            # repairs synchronously. Completion is still subject to observed
+            # postconditions below; this status only describes the tool call.
+            status = "completed"
         else:
             # expand_visual_proof_shortform starts a background thread. Even a
             # truthy return proves dispatch only; postcondition verification is

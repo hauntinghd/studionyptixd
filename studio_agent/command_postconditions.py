@@ -13,7 +13,7 @@ from pydantic import Field
 
 from studio_agent.command_contract import ContractModel
 from studio_agent.command_execution import ExecutionReceipt
-from studio_agent.command_validation import SceneAssetFingerprint
+from studio_agent.command_validation import SceneAssetFingerprint, SceneRepairPostconditions
 
 
 CheckStatus = Literal["passed", "failed", "pending", "not_applicable"]
@@ -126,6 +126,206 @@ def _actual_fingerprints(
     return out
 
 
+def _finalize_verdict(
+    receipt: ExecutionReceipt,
+    checks: list[PostconditionCheck],
+    *,
+    checked_at: float,
+) -> PostconditionVerdict:
+    required = [check for check in checks if check.required]
+    if any(check.status == "failed" for check in required):
+        status: VerdictStatus = "failed"
+        claim: SafeClaim = "none"
+        retry_after = None
+    elif any(check.status == "pending" for check in required):
+        status = "pending"
+        claim = "started"
+        retry_after = 2.0
+    elif any(check.status == "not_applicable" for check in required):
+        status = "inconclusive"
+        claim = "started"
+        retry_after = None
+    else:
+        status = "passed"
+        claim = "completed"
+        retry_after = None
+    return PostconditionVerdict(
+        receipt_id=receipt.execution_id,
+        status=status,
+        safe_claim=claim,
+        checked_at=checked_at,
+        checks=checks,
+        retry_after_seconds=retry_after,
+    )
+
+
+def _verify_scene_repair(
+    receipt: ExecutionReceipt,
+    expected: SceneRepairPostconditions,
+    *,
+    snapshot_loader: Callable[..., dict[str, Any]],
+    fingerprint_loader: Callable[[str, list[int]], list[SceneAssetFingerprint] | list[dict[str, Any]]] | None,
+    checked_at: float,
+) -> PostconditionVerdict:
+    try:
+        snapshot = _call_snapshot_loader(snapshot_loader, expected.job_id)
+    except Exception as exc:
+        return PostconditionVerdict(
+            receipt_id=receipt.execution_id,
+            status="inconclusive",
+            safe_claim="started" if receipt.status in {"accepted", "completed", "duplicate"} else "none",
+            checked_at=checked_at,
+            checks=[
+                PostconditionCheck(
+                    name="job_snapshot",
+                    status="not_applicable",
+                    expected=expected.job_id,
+                    actual=None,
+                    message=f"Snapshot unavailable: {exc}",
+                )
+            ],
+        )
+
+    checks: list[PostconditionCheck] = []
+    actual_job_id = str(snapshot.get("job_id") or "")
+    checks.append(
+        PostconditionCheck(
+            name="same_job",
+            status="passed" if actual_job_id == expected.job_id else "failed",
+            expected=expected.job_id,
+            actual=actual_job_id,
+            message="Scene repair must remain on the selected production job.",
+        )
+    )
+    audited = sorted(
+        int(number) + 1
+        for number in receipt.result.get("audited") or []
+        if str(number).lstrip("-").isdigit()
+    )
+    checks.append(
+        PostconditionCheck(
+            name="exact_selected_scene_set",
+            status="passed" if audited == expected.selected_scene_numbers else "failed",
+            expected=expected.selected_scene_numbers,
+            actual=audited,
+            message="The tool must audit exactly the creator-selected scenes and no others.",
+        )
+    )
+    failed = sorted(
+        int(number) + 1
+        for number in receipt.result.get("failed") or []
+        if str(number).lstrip("-").isdigit()
+    )
+    tool_ok = receipt.result.get("ok") is True and not failed
+    checks.append(
+        PostconditionCheck(
+            name="selected_scene_repairs_succeeded",
+            status="passed" if tool_ok else "failed",
+            expected={"ok": True, "failed": []},
+            actual={"ok": receipt.result.get("ok"), "failed": failed},
+        )
+    )
+    status = str(snapshot.get("status") or "").lower()
+    stage = str(snapshot.get("stage") or "").lower()
+    terminal_failure = status in {"failed", "cancelled", "error"} or stage in {
+        "failed",
+        "cancelled",
+        "error",
+    }
+    checks.append(
+        PostconditionCheck(
+            name="job_lifecycle",
+            status="failed" if terminal_failure else "passed",
+            expected="non-failed",
+            actual={"status": status, "stage": stage},
+        )
+    )
+    rows = _scene_rows(snapshot)
+    actual_clips = [
+        number
+        for number in expected.expected_clip_scene_numbers
+        if bool(rows.get(number, {}).get("has_clip"))
+    ]
+    checks.append(
+        PostconditionCheck(
+            name="selected_clip_continuity",
+            status=(
+                "passed"
+                if actual_clips == expected.expected_clip_scene_numbers
+                else "failed"
+            ),
+            expected=expected.expected_clip_scene_numbers,
+            actual=actual_clips,
+            message="Selected scenes that were animated before repair must remain clip-ready.",
+        )
+    )
+
+    if not expected.untouched_scene_numbers:
+        checks.append(
+            PostconditionCheck(
+                name="untouched_scene_assets",
+                status="passed",
+                expected=[],
+                actual=[],
+                message="Every scene was explicitly selected, so there is no excluded asset set.",
+            )
+        )
+    else:
+        before_by_scene = {item.scene_number: item for item in expected.untouched_assets}
+        after = _actual_fingerprints(
+            fingerprint_loader,
+            expected.job_id,
+            expected.untouched_scene_numbers,
+        )
+        after_by_scene = {item.scene_number: item for item in after}
+        if not before_by_scene or not after_by_scene:
+            checks.append(
+                PostconditionCheck(
+                    name="untouched_scene_assets",
+                    status="not_applicable",
+                    expected=expected.untouched_scene_numbers,
+                    actual=list(after_by_scene),
+                    message="Byte fingerprints are required to prove excluded scenes remained untouched.",
+                )
+            )
+        else:
+            mismatched: list[int] = []
+            unverifiable: list[int] = []
+            for number in expected.untouched_scene_numbers:
+                before = before_by_scene.get(number)
+                after_item = after_by_scene.get(number)
+                if before is None or after_item is None:
+                    unverifiable.append(number)
+                    continue
+                comparable = False
+                for field_name in ("still_sha256", "clip_sha256"):
+                    wanted = str(getattr(before, field_name) or "")
+                    if not wanted:
+                        continue
+                    comparable = True
+                    if str(getattr(after_item, field_name) or "") != wanted:
+                        mismatched.append(number)
+                        break
+                if not comparable:
+                    unverifiable.append(number)
+            checks.append(
+                PostconditionCheck(
+                    name="untouched_scene_assets",
+                    status=(
+                        "failed"
+                        if mismatched
+                        else "not_applicable"
+                        if unverifiable
+                        else "passed"
+                    ),
+                    expected=expected.untouched_scene_numbers,
+                    actual={"mismatched": mismatched, "unverifiable": unverifiable},
+                    message="Every unselected scene must remain byte-for-byte unchanged.",
+                )
+            )
+    return _finalize_verdict(receipt, checks, checked_at=checked_at)
+
+
 def verify_execution(
     receipt: ExecutionReceipt,
     *,
@@ -152,6 +352,19 @@ def verify_execution(
             ],
         )
     expected = receipt.expected
+    if isinstance(expected, SceneRepairPostconditions) or getattr(expected, "kind", "") == "scene_repair":
+        repair_expected = (
+            expected
+            if isinstance(expected, SceneRepairPostconditions)
+            else SceneRepairPostconditions.model_validate(expected)
+        )
+        return _verify_scene_repair(
+            receipt,
+            repair_expected,
+            snapshot_loader=snapshot_loader,
+            fingerprint_loader=fingerprint_loader,
+            checked_at=checked_at,
+        )
     try:
         snapshot = _call_snapshot_loader(snapshot_loader, expected.job_id)
     except Exception as exc:
@@ -330,29 +543,4 @@ def verify_execution(
             )
         )
 
-    required = [check for check in checks if check.required]
-    if any(check.status == "failed" for check in required):
-        verdict_status: VerdictStatus = "failed"
-        safe_claim: SafeClaim = "none"
-        retry_after = None
-    elif any(check.status == "pending" for check in required):
-        verdict_status = "pending"
-        safe_claim = "started"
-        retry_after = 2.0
-    elif any(check.status == "not_applicable" for check in required):
-        verdict_status = "inconclusive"
-        safe_claim = "started"
-        retry_after = None
-    else:
-        verdict_status = "passed"
-        safe_claim = "completed"
-        retry_after = None
-    return PostconditionVerdict(
-        receipt_id=receipt.execution_id,
-        status=verdict_status,
-        safe_claim=safe_claim,
-        checked_at=checked_at,
-        checks=checks,
-        retry_after_seconds=retry_after,
-    )
-
+    return _finalize_verdict(receipt, checks, checked_at=checked_at)

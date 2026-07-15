@@ -15,7 +15,12 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
-CommandAction = Literal["conversation", "clarify", "expand_existing_short"]
+CommandAction = Literal[
+    "conversation",
+    "clarify",
+    "expand_existing_short",
+    "audit_and_repair_scenes",
+]
 TargetSource = Literal["none", "reply_to", "active_job", "explicit_job_id", "recent_job"]
 AnimationScope = Literal[
     "unspecified",
@@ -24,6 +29,13 @@ AnimationScope = Literal[
     "all_scenes",
     "heroes",
     "explicit",
+]
+RepairScope = Literal[
+    "general_scene_quality",
+    "narrative_alignment",
+    "visual_quality",
+    "animation_quality",
+    "full_quality",
 ]
 
 
@@ -109,6 +121,64 @@ _SCENE_COUNT_TOKEN = (
     r"thirty|forty|fifty|sixty)"
 )
 
+_SCENE_REPAIR_SUBJECT_RE = re.compile(
+    r"\b(?:scenes?|stills?|frames?|shots?|visuals?|images?|clips?|animations?|"
+    r"prompts?|scripts?|narrations?|story\s+beats?|settings?|backgrounds?|"
+    r"those|these|they)\b",
+    re.IGNORECASE,
+)
+_SCENE_REPAIR_ACTION_RE = re.compile(
+    r"\b(?:(?:can|could|would|will)\s+you\s+|please\s+)?"
+    r"(?:fix|repair|correct|redo|rebuild|regenerate|rerender|re-render|reanimate|"
+    r"re-animate|revise|restage|re-stage)\b",
+    re.IGNORECASE,
+)
+_SCENE_REPAIR_DEFECT_RE = re.compile(
+    r"\b(?:do(?:es)?\s+not|don'?t|isn'?t|aren'?t|not)\s+(?:perfectly\s+|properly\s+|really\s+)?"
+    r"(?:adhere|align|match|follow|correspond|represent|depict|reflect|fit)\b"
+    r"|\b(?:fails?|failed|failing)\s+to\s+(?:adhere|align|match|follow|correspond|represent|depict|reflect)\b"
+    r"|\b(?:do(?:es)?\s+not|don'?t|isn'?t|aren'?t|not)\s+(?:perfectly\s+|properly\s+|really\s+)?"
+    r"(?:do|doing|show|showing|tell|telling|portray|portraying|stage|staging|look|looking)\b"
+    r"|\b(?:isn'?t|aren'?t|not)\s+(?:quite\s+)?(?:right|correct|accurate|"
+    r"what\s+(?:the\s+)?(?:prompt|script|narration)\s+says)\b"
+    r"|\b(?:issues?|problems?|something\s+(?:is\s+)?wrong)\b"
+    r"|\b(?:wrong|incorrect|inaccurate|unrelated|off[- ]script|mismatched?|misaligned|"
+    r"generic|bland|repetitive|duplicated?|artifact(?:ed|ing|s)?|warped?|morph(?:ed|ing)?|"
+    r"flicker(?:ed|ing)?|drift(?:ed|ing)?|broken)\b"
+    r"|\b(?:should|needs?\s+to)\s+(?:adhere|align|match|follow|correspond|represent|depict|reflect)\b",
+    re.IGNORECASE,
+)
+_SCENE_REPAIR_NEGATED_ACTION_RE = re.compile(
+    r"\b(?:do\s+not|don'?t|never|stop)\s+(?:please\s+)?"
+    r"(?:fix|repair|correct|redo|rebuild|regenerate|rerender|re-render|reanimate|"
+    r"re-animate|change|update|revise|restage|re-stage|touch|modify)\b"
+    r"|\b(?:do\s+not|don'?t)\s+(?:do|make)\s+anything\s+(?:to|with)\b"
+    r"|\b(?:leave|keep)\s+(?:the\s+)?(?:scenes?|stills?|clips?)\s+(?:alone|unchanged|as\s+is)\b",
+    re.IGNORECASE,
+)
+_SCENE_REPAIR_QUESTION_RE = re.compile(
+    r"^\s*(?:what\s+(?:if|would\s+happen)|suppose|hypothetically|"
+    r"how\s+(?:would|could|should)|(?:will|would|could|can)\s+(?:it|studio|the\s+agent)|"
+    r"why\s+(?:do|does|did|are|is)|are\s+(?:the\s+)?scenes?|"
+    r"do\s+(?:the\s+)?scenes?|does\s+(?:scene|the\s+scene)|is\s+(?:scene|the\s+scene))\b",
+    re.IGNORECASE,
+)
+_CONTEXTUAL_CONFIRMATION_RE = re.compile(
+    r"^\s*(?:yes|yeah|yep|yup|sure|okay|ok|correct|exactly|please\s+do|do\s+it|"
+    r"go\s+ahead|fix\s+them|repair\s+them)\b",
+    re.IGNORECASE,
+)
+_CONTEXTUAL_CANCELLATION_RE = re.compile(
+    r"^\s*(?:no|nope|nah|not\s+now|never\s+mind|nevermind|cancel(?:\s+that)?|"
+    r"stop|leave\s+them|don'?t\s+(?:do|fix|repair|change)\s+(?:it|them|that))\b",
+    re.IGNORECASE,
+)
+_CONTEXTUAL_SCENE_SCOPE_RE = re.compile(
+    r"\b(?:all\s+(?:of\s+)?(?:them|those|these)|(?:scenes?|shots?|clips?)\s+\d|"
+    r"\d{1,3}\s*(?:-|through|thru|to|,|&|and)\s*\d{1,3})\b",
+    re.IGNORECASE,
+)
+
 
 def _parse_scene_count_token(token: str) -> int | None:
     raw = str(token or "").strip().lower().replace("-", " ")
@@ -151,6 +221,174 @@ def extract_scene_count_request(text: str, *, existing_count: int) -> tuple[int 
     if additional is not None and total is None:
         total = existing_count + additional
     return additional, total
+
+
+def _scene_numbers_as_digits(text: str) -> str:
+    source = str(text or "").lower().replace("–", "-").replace("—", "-")
+    for word, value in sorted(_SCENE_COUNT_WORDS.items(), key=lambda item: -len(item[0])):
+        source = re.sub(rf"\b{re.escape(word)}\b", str(value), source)
+    return source
+
+
+def extract_scene_numbers_request(
+    text: str,
+    *,
+    total_scenes: int,
+    allow_bare: bool = False,
+) -> list[int]:
+    """Resolve explicit human-facing scene selectors to a bounded 1-based set."""
+
+    total = max(0, min(60, int(total_scenes or 0)))
+    if total <= 0:
+        return []
+    low = _scene_numbers_as_digits(text)
+    selected: set[int] = set()
+    all_selected = bool(
+        re.search(
+            r"\b(?:all|every|each)\s+(?:of\s+the\s+)?scenes?\b|"
+            r"\bscenes?\s+(?:all|every|each)\b",
+            low,
+        )
+    )
+    if allow_bare and re.search(r"\ball\s+(?:of\s+)?(?:them|those|these)\b", low):
+        all_selected = True
+    if all_selected:
+        selected.update(range(1, total + 1))
+
+    range_prefix = (
+        r"(?:(?:scenes?|shots?|clips?|those|these)\s+)?"
+        if allow_bare
+        else r"(?:scenes?|shots?|clips?|those|these)\s+"
+    )
+    for match in re.finditer(
+        rf"\b{range_prefix}(\d{{1,3}})\s*(?:-|through|thru|to)\s*(\d{{1,3}})\b",
+        low,
+    ):
+        left, right = int(match.group(1)), int(match.group(2))
+        start, end = sorted((left, right))
+        selected.update(number for number in range(start, end + 1) if 1 <= number <= total)
+
+    list_prefix = (
+        r"(?:(?:scenes?|shots?|clips?|those|these)\s+)?"
+        if allow_bare
+        else r"(?:scenes?|shots?|clips?|those|these)\s+"
+    )
+    for match in re.finditer(
+        rf"\b{list_prefix}((?:\d{{1,3}}\s*(?:,|&|and)\s*)+\d{{1,3}})\b",
+        low,
+    ):
+        selected.update(
+            number
+            for number in (int(value) for value in re.findall(r"\d{1,3}", match.group(1)))
+            if 1 <= number <= total
+        )
+
+    for match in re.finditer(r"\bscene\s+(\d{1,3})\b", low):
+        number = int(match.group(1))
+        if 1 <= number <= total:
+            selected.add(number)
+    if allow_bare and not selected:
+        bare = re.fullmatch(r"\s*(\d{1,3})\s*[.!?]?\s*", low)
+        if bare and 1 <= int(bare.group(1)) <= total:
+            selected.add(int(bare.group(1)))
+
+    excluded: set[int] = set()
+    for match in re.finditer(
+        r"\b(?:excluding|exclude|except|other\s+than|leave\s+out|skip)\s+"
+        r"(?:for\s+)?(?:scene\s+)?(\d{1,3})\b",
+        low,
+    ):
+        number = int(match.group(1))
+        if 1 <= number <= total:
+            excluded.add(number)
+    return sorted(selected - excluded)
+
+
+def scene_repair_candidate(text: str) -> bool:
+    """Broad semantic gate only; validation still owns permission and scope."""
+
+    source = str(text or "")
+    return bool(
+        _SCENE_REPAIR_SUBJECT_RE.search(source)
+        and (_SCENE_REPAIR_ACTION_RE.search(source) or _SCENE_REPAIR_DEFECT_RE.search(source))
+    )
+
+
+def scene_repair_block_reason(text: str) -> str:
+    """Return why a possible repair turn must not mutate production."""
+
+    source = str(text or "")
+    if _SCENE_REPAIR_NEGATED_ACTION_RE.search(source):
+        return "negated"
+    explicit_request = re.search(
+        r"^\s*(?:(?:can|could|would|will)\s+you\s+|please\s+)",
+        source,
+        re.IGNORECASE,
+    )
+    if _SCENE_REPAIR_QUESTION_RE.search(source) and not explicit_request:
+        return "hypothetical"
+    return ""
+
+
+def scene_repair_authorization_evidence(text: str) -> str:
+    """Return literal repair authorization, including direct review-stage defect reports."""
+
+    source = str(text or "").strip()
+    if not source or scene_repair_block_reason(source):
+        return ""
+    action = _SCENE_REPAIR_ACTION_RE.search(source)
+    if action:
+        return str(action.group(0)).strip()[:300]
+    if _SCENE_REPAIR_SUBJECT_RE.search(source) and _SCENE_REPAIR_DEFECT_RE.search(source):
+        return source[:300]
+    return ""
+
+
+def contextual_confirmation_evidence(text: str) -> str:
+    match = _CONTEXTUAL_CONFIRMATION_RE.search(str(text or ""))
+    return str(match.group(0) if match else "").strip()[:300]
+
+
+def scene_repair_cancellation_evidence(text: str) -> str:
+    match = _CONTEXTUAL_CANCELLATION_RE.search(str(text or ""))
+    return str(match.group(0) if match else "").strip()[:300]
+
+
+def scene_repair_followup_candidate(text: str) -> bool:
+    source = str(text or "")
+    return bool(
+        scene_repair_candidate(source)
+        or contextual_confirmation_evidence(source)
+        or scene_repair_cancellation_evidence(source)
+        or _CONTEXTUAL_SCENE_SCOPE_RE.search(source)
+    )
+
+
+def infer_scene_repair_scope(text: str) -> RepairScope:
+    low = str(text or "").lower()
+    narrative = bool(re.search(
+        r"\b(?:prompt|script|narration|story|beat|adhere|align|match|follow|correspond|"
+        r"represent|depict|reflect|off[- ]script|mismatch)\w*\b",
+        low,
+    ))
+    animation = bool(re.search(
+        r"\b(?:animation|animated|clip|motion|movement|i2v|flicker|morph|warping|drift)\w*\b",
+        low,
+    ))
+    visual = bool(re.search(
+        r"\b(?:still|frame|image|visual|background|setting|room|character|skeleton|artifact|"
+        r"lighting|pose|prop|composition)\w*\b",
+        low,
+    ))
+    if sum((narrative, animation, visual)) > 1:
+        return "full_quality"
+    if narrative:
+        return "narrative_alignment"
+    if animation:
+        return "animation_quality"
+    if visual:
+        return "visual_quality"
+    return "general_scene_quality"
 
 
 def _assertion_scope_blocked(source: str, candidate: re.Match[str]) -> bool:
@@ -278,6 +516,9 @@ class ModelCommandProposal(ContractModel):
     preserve_scene_numbers: list[int] = Field(max_length=200)
     animation_scope: AnimationScope
     animation_scene_numbers: list[int] = Field(max_length=200)
+    repair_scene_numbers: list[int] = Field(max_length=200)
+    repair_scope: RepairScope
+    repair_instruction: str = Field(max_length=2_000)
     duration_seconds: float = Field(ge=0, le=43_200)
     creative_direction: str = Field(max_length=2_000)
     existing_work_approved: bool
@@ -287,7 +528,11 @@ class ModelCommandProposal(ContractModel):
     clarification_question: str = Field(max_length=500)
     confidence: float = Field(ge=0.0, le=1.0)
 
-    @field_validator("preserve_scene_numbers", "animation_scene_numbers")
+    @field_validator(
+        "preserve_scene_numbers",
+        "animation_scene_numbers",
+        "repair_scene_numbers",
+    )
     @classmethod
     def _dedupe_scene_numbers(cls, value: list[int]) -> list[int]:
         out: list[int] = []
@@ -348,6 +593,17 @@ class ExpandExistingShortRequest(ContractModel):
         return list(dict.fromkeys(int(item) for item in value if int(item) > 0))
 
 
+class SceneRepairRequest(ContractModel):
+    scene_numbers: list[int] = Field(default_factory=list, max_length=60)
+    scope: RepairScope = "general_scene_quality"
+    instruction: str = Field(default="", max_length=2_000)
+
+    @field_validator("scene_numbers")
+    @classmethod
+    def _dedupe_scene_numbers(cls, value: list[int]) -> list[int]:
+        return list(dict.fromkeys(int(item) for item in value if int(item) > 0))
+
+
 class StudioCommand(ContractModel):
     schema_version: Literal["studio-command-v1"] = "studio-command-v1"
     command_id: str
@@ -355,17 +611,22 @@ class StudioCommand(ContractModel):
     action: CommandAction
     target: CommandTarget
     expand: ExpandExistingShortRequest | None = None
+    repair: SceneRepairRequest | None = None
     authorization: AuthorizationEvidence = Field(default_factory=AuthorizationEvidence)
     clarification_question: str = Field(default="", max_length=500)
     source_text_sha256: str
     compiler: CompilerProvenance
 
     @model_validator(mode="after")
-    def _require_expand_payload(self) -> "StudioCommand":
+    def _require_action_payload(self) -> "StudioCommand":
         if self.action == "expand_existing_short" and self.expand is None:
             raise ValueError("expand_existing_short requires an expand payload")
         if self.action != "expand_existing_short" and self.expand is not None:
             raise ValueError("expand payload is only valid for expand_existing_short")
+        if self.action == "audit_and_repair_scenes" and self.repair is None:
+            raise ValueError("audit_and_repair_scenes requires a repair payload")
+        if self.action != "audit_and_repair_scenes" and self.repair is not None:
+            raise ValueError("repair payload is only valid for audit_and_repair_scenes")
         return self
 
 
@@ -407,6 +668,7 @@ def normalize_proposal(
     """Convert a provider proposal into the trusted canonical envelope."""
 
     expand: ExpandExistingShortRequest | None = None
+    repair: SceneRepairRequest | None = None
     if proposal.action == "expand_existing_short":
         expand = ExpandExistingShortRequest(
             additional_scene_count=proposal.additional_scene_count or None,
@@ -419,6 +681,12 @@ def normalize_proposal(
                 scene_numbers=proposal.animation_scene_numbers,
             ),
         )
+    if proposal.action == "audit_and_repair_scenes":
+        repair = SceneRepairRequest(
+            scene_numbers=proposal.repair_scene_numbers,
+            scope=proposal.repair_scope,
+            instruction=proposal.repair_instruction,
+        )
     canonical = {
         "turn_id": turn_id,
         "action": proposal.action,
@@ -427,6 +695,7 @@ def normalize_proposal(
             "job_id": proposal.target_job_id,
         },
         "expand": expand.model_dump(mode="json") if expand else None,
+        "repair": repair.model_dump(mode="json") if repair else None,
         "authorization": {
             "existing_work_approved": proposal.existing_work_approved,
             "approval_quote": proposal.approval_evidence,
@@ -444,6 +713,7 @@ def normalize_proposal(
             job_id=proposal.target_job_id,
         ),
         expand=expand,
+        repair=repair,
         authorization=AuthorizationEvidence(
             existing_work_approved=proposal.existing_work_approved,
             approval_quote=proposal.approval_evidence,
