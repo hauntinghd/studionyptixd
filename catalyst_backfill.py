@@ -70,7 +70,20 @@ DEFAULT_TICK_BUDGET_UNITS = int(os.getenv("CATALYST_BACKFILL_TICK_BUDGET", "500"
 # trending shifts on that order and 4 ticks/day × 1 unit/region/tick = trivial
 # against the 10k cap.
 AUTO_TICK_INTERVAL_SEC = int(os.getenv("CATALYST_BACKFILL_AUTO_INTERVAL_SEC", str(6 * 3600)))
-AUTO_ENABLED = str(os.getenv("CATALYST_BACKFILL_AUTO_ENABLED", "0")).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _auto_enabled() -> bool:
+    """Read env at call time so dotenv load order cannot freeze this as False."""
+    return str(os.getenv("CATALYST_BACKFILL_AUTO_ENABLED", "0")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+# Prefer _auto_enabled() at runtime; this snapshot is for callers that only read the attr.
+AUTO_ENABLED = _auto_enabled()
 
 _TEMP_DIR = Path(os.getenv("TEMP_DIR") or (Path(__file__).resolve().parent / "temp_assets"))
 _CORPUS_FILE = _TEMP_DIR / "catalyst_reference_corpus.json"
@@ -382,7 +395,8 @@ def start_auto_loop() -> None:
     Safe to call multiple times — subsequent calls are no-ops while the task is alive.
     Intended to be invoked from the FastAPI startup hook.
     """
-    global _auto_loop_task
+    global _auto_loop_task, AUTO_ENABLED
+    AUTO_ENABLED = _auto_enabled()
     if not AUTO_ENABLED:
         log.info("Catalyst backfill auto-loop disabled (CATALYST_BACKFILL_AUTO_ENABLED=0)")
         return
@@ -390,6 +404,10 @@ def start_auto_loop() -> None:
         return
     try:
         _auto_loop_task = asyncio.create_task(_auto_loop_runner())
+        log.info(
+            "Catalyst backfill auto-loop started (interval=%ss)",
+            AUTO_TICK_INTERVAL_SEC,
+        )
     except RuntimeError:
         # No running event loop — caller should invoke from async context.
         log.warning("start_auto_loop() called outside a running event loop — skipping")

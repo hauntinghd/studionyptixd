@@ -17,6 +17,7 @@ legacy plans keep working until fully migrated.
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 import uuid
@@ -41,11 +42,73 @@ _loaded = False
 USD_QUANT = Decimal("0.000001")
 
 
+def _runpod_worker_mode() -> bool:
+    return str(os.getenv("STUDIO_RUNPOD_WORKER_MODE") or "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+
+
+def _runpod_dispatch_id() -> str:
+    raw = str(os.getenv("STUDIO_RUNPOD_DISPATCH_ID") or "").strip()
+    return raw if raw.startswith("rpd_") and raw[4:].isalnum() else "unattributed"
+
+
+def _worker_cost_fact_path(dispatch_id: str | None = None) -> Path:
+    root = Path(str(os.getenv("APP_DATA_DIR") or TEMP_DIR)).expanduser()
+    safe_id = str(dispatch_id or _runpod_dispatch_id()).strip()
+    if not (safe_id.startswith("rpd_") and safe_id[4:].isalnum()):
+        safe_id = "unattributed"
+    return root / "runpod_worker_cost_facts" / f"{safe_id}.jsonl"
+
+
+def _record_worker_cost_fact(kind: str, **payload: Any) -> dict[str, Any]:
+    """Persist provider-cost facts, never a wallet mutation, on RunPod workers."""
+
+    fact = {
+        "kind": str(kind or "provider_cost"),
+        "dispatch_id": _runpod_dispatch_id(),
+        "ts": time.time(),
+        **payload,
+    }
+    path = _worker_cost_fact_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with _lock:
+            with path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(fact, ensure_ascii=False, default=str) + "\n")
+                fh.flush()
+    except OSError:
+        pass
+    return fact
+
+
+def get_runpod_worker_cost_facts(dispatch_id: str = "") -> list[dict[str, Any]]:
+    """Read deferred billing facts for control-plane reconciliation."""
+
+    path = _worker_cost_fact_path(dispatch_id or None)
+    rows: list[dict[str, Any]] = []
+    try:
+        with path.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                try:
+                    row = json.loads(line)
+                except (TypeError, ValueError):
+                    continue
+                if isinstance(row, dict):
+                    rows.append(row)
+    except OSError:
+        pass
+    return rows
+
+
 # ---------------------------------------------------------------------------
 # Persistence
 # ---------------------------------------------------------------------------
 def _load() -> None:
     global _loaded
+    if _runpod_worker_mode():
+        _loaded = True
+        return
     if _loaded:
         return
     try:
@@ -59,6 +122,8 @@ def _load() -> None:
 
 
 def _save() -> None:
+    if _runpod_worker_mode():
+        return
     try:
         WALLETS_PATH.parent.mkdir(parents=True, exist_ok=True)
         WALLETS_PATH.write_text(json.dumps(_wallets, indent=2), encoding="utf-8")
@@ -67,6 +132,8 @@ def _save() -> None:
 
 
 def _append_ledger(event: dict[str, Any]) -> None:
+    if _runpod_worker_mode():
+        return
     try:
         LEDGER_PATH.parent.mkdir(parents=True, exist_ok=True)
         with LEDGER_PATH.open("a", encoding="utf-8") as fh:
@@ -483,6 +550,16 @@ def debit_credits(
     completed render — it clamps the wallet at 0 and records the shortfall.
     """
     credits = max(0, int(credits or 0))
+    if _runpod_worker_mode():
+        _record_worker_cost_fact(
+            "debit_credits",
+            user_id=str(user_id or ""),
+            credits=credits,
+            reason=str(reason or ""),
+            metadata=dict(metadata or {}),
+            allow_negative=bool(allow_negative),
+        )
+        return True, 0
     if credits == 0:
         return True, get_balance(user_id)
     with _lock:
@@ -528,6 +605,18 @@ def debit_usd(
     md["credit_usd_value"] = float(CREDIT_USD_VALUE)
     md["credit_usd_value_decimal"] = str(_decimal(CREDIT_USD_VALUE))
     md["credit_margin"] = float(CREDIT_MARGIN)
+    if _runpod_worker_mode():
+        _record_worker_cost_fact(
+            "provider_usd",
+            user_id=str(user_id or ""),
+            provider_usd=_usd_float(provider_amount),
+            provider_usd_decimal=str(provider_amount),
+            credits=credits,
+            reason=str(reason or ""),
+            metadata=md,
+            allow_negative=bool(allow_negative),
+        )
+        return credits, 0
     _ok, bal = debit_credits(user_id, credits, reason=reason, metadata=md, allow_negative=allow_negative)
     return credits, bal
 
@@ -546,6 +635,16 @@ def reserve_credits(
     """Atomically hold credits before a paid operation begins."""
     uid = str(user_id or "").strip()
     amount = max(0, int(credits or 0))
+    if _runpod_worker_mode():
+        return {
+            "reservation_id": f"worker_{_runpod_dispatch_id()}_{uuid.uuid4().hex[:12]}",
+            "credits": amount,
+            "unlimited": False,
+            "worker_deferred": True,
+            "balance_after": 0,
+            "reason": str(reason or "production"),
+            "metadata": dict(metadata or {}),
+        }
     if not uid or amount <= 0:
         return {"reservation_id": "", "credits": 0, "unlimited": False, "balance_after": get_balance(uid)}
     with _lock:
@@ -611,6 +710,15 @@ def reserve_usd(
 def release_reservation(user_id: str, reservation_id: str, *, reason: str = "operation_failed") -> dict[str, Any]:
     uid = str(user_id or "").strip()
     rid = str(reservation_id or "").strip()
+    if _runpod_worker_mode():
+        _record_worker_cost_fact(
+            "reservation_release",
+            user_id=uid,
+            reservation_id=rid,
+            reason=str(reason or ""),
+            credits=0,
+        )
+        return {"balance": 0, "worker_deferred": True}
     if not uid or not rid or rid.startswith("owner_"):
         return get_state(uid) if uid else {}
     with _lock:
@@ -646,6 +754,16 @@ def commit_reservation(
     """Finalize a hold and refund any unused repair reserve."""
     uid = str(user_id or "").strip()
     rid = str(reservation_id or "").strip()
+    if _runpod_worker_mode():
+        _record_worker_cost_fact(
+            "reservation_commit",
+            user_id=uid,
+            reservation_id=rid,
+            actual_credits=max(0, int(actual_credits or 0)) if actual_credits is not None else None,
+            reason=str(reason or ""),
+            metadata=dict(metadata or {}),
+        )
+        return {"balance": 0, "worker_deferred": True}
     if not uid or not rid or rid.startswith("owner_"):
         return get_state(uid) if uid else {}
     with _lock:
@@ -683,6 +801,109 @@ def commit_reservation(
             "ts": time.time(),
         })
         return get_state(uid)
+
+
+def settle_reservation(
+    user_id: str,
+    reservation_id: str,
+    *,
+    actual_credits: int,
+    reason: str = "production_actuals",
+    metadata: dict | None = None,
+    allow_negative: bool = True,
+) -> dict[str, Any]:
+    """Atomically settle a hold and any verified overage in one wallet write.
+
+    ``commit_reservation`` intentionally clamps to the held amount. Deferred
+    RunPod reconciliation can learn a larger actual only after production has
+    finished, so splitting commit + debit would create a crash window between
+    two mutations. This operation consumes the hold, refunds any unused part,
+    and consumes (or records) the overage under the same lock and ledger row.
+    """
+
+    uid = str(user_id or "").strip()
+    rid = str(reservation_id or "").strip()
+    target = max(0, int(actual_credits or 0))
+    if _runpod_worker_mode():
+        _record_worker_cost_fact(
+            "reservation_settle",
+            user_id=uid,
+            reservation_id=rid,
+            actual_credits=target,
+            reason=str(reason or "production_actuals"),
+            metadata=dict(metadata or {}),
+            allow_negative=bool(allow_negative),
+        )
+        return {"balance": 0, "worker_deferred": True, "credits_charged": target}
+    if not uid or not rid or rid.startswith("owner_"):
+        return {**(get_state(uid) if uid else {}), "credits_charged": 0}
+    with _lock:
+        w = _wallet(uid)
+        if w.get("unlimited"):
+            return {**get_state(uid), "credits_charged": 0, "unlimited": True}
+        reservations = dict(w.get("reservations") or {})
+        reservation = reservations.pop(rid, None)
+        if not reservation:
+            return {**get_state(uid), "credits_charged": 0, "reservation_missing": True}
+
+        held = max(0, int(reservation.get("credits", 0) or 0))
+        from_hold = min(held, target)
+        refund = held - from_hold
+        overage = max(0, target - from_hold)
+        available_after_refund = _sync_balance(w) + refund
+        if overage > available_after_refund and not allow_negative:
+            # Leave the reservation untouched when the caller asked for a
+            # strict balance gate. Deferred provider actuals normally use the
+            # post-paid policy because the render has already happened.
+            reservations[rid] = reservation
+            w["reservations"] = reservations
+            return {
+                **get_state(uid),
+                "credits_charged": 0,
+                "insufficient_for_overage": True,
+                "required_overage": overage,
+            }
+        if refund:
+            original = dict(reservation.get("buckets") or {})
+            restored: dict[str, int] = {}
+            remaining_refund = refund
+            for bucket in ("topup_balance", "monthly_balance", "rollover_balance"):
+                take = min(remaining_refund, int(original.get(bucket, 0) or 0))
+                restored[bucket] = take
+                remaining_refund -= take
+            _restore_locked(w, restored)
+        available_after_refund = _sync_balance(w)
+        consumed_overage = _consume_locked(w, min(overage, available_after_refund)) or {}
+        shortfall = max(0, overage - available_after_refund)
+        w["reservations"] = reservations
+        w["lifetime_spent"] = int(w.get("lifetime_spent", 0) or 0) + target
+        w["updated_at"] = time.time()
+        _sync_balance(w)
+        _save()
+        _append_ledger({
+            "type": "settle",
+            "user_id": uid,
+            "reservation_id": rid,
+            "credits": -target,
+            "held_credits": held,
+            "charged_from_hold": from_hold,
+            "overage_credits": overage,
+            "overage_buckets": consumed_overage,
+            "shortfall": shortfall,
+            "refunded_credits": refund,
+            "reason": reason,
+            "metadata": metadata or {},
+            "balance_after": w["balance"],
+            "ts": time.time(),
+        })
+        return {
+            **get_state(uid),
+            "credits_charged": target,
+            "charged_from_hold": from_hold,
+            "overage_credits": overage,
+            "shortfall": shortfall,
+            "refunded_credits": refund,
+        }
 
 
 def recent_ledger(user_id: str = "", limit: int = 50) -> list[dict[str, Any]]:

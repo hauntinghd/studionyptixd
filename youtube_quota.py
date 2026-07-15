@@ -43,6 +43,10 @@ YOUTUBE_DAILY_QUOTA_CAP = int(os.getenv("YOUTUBE_DAILY_QUOTA_CAP", "10000"))
 # Warn when we cross this fraction of the cap (logs a WARN but still allows the call).
 YOUTUBE_QUOTA_WARN_PCT = float(os.getenv("YOUTUBE_QUOTA_WARN_PCT", "0.85"))
 
+# Pause Catalyst / background niche warm when interactive spend crosses this fraction.
+# Leaves headroom for a few user-initiated Live Demand searches.
+YOUTUBE_QUOTA_BACKGROUND_PAUSE_PCT = float(os.getenv("YOUTUBE_QUOTA_BACKGROUND_PAUSE_PCT", "0.70"))
+
 # Reserve this fraction for user-initiated lookups; background jobs should not exceed
 # (1 - this) of the cap. Enforced only if the caller passes kind="background".
 YOUTUBE_QUOTA_INTERACTIVE_RESERVE_PCT = float(os.getenv("YOUTUBE_QUOTA_INTERACTIVE_RESERVE_PCT", "0.20"))
@@ -280,6 +284,57 @@ async def remaining_today() -> int:
         return max(0, YOUTUBE_DAILY_QUOTA_CAP - _today_bucket()["total"])
 
 
+def spent_today_sync() -> int:
+    """Sync snapshot for tool paths that cannot await (thread pool)."""
+    return int(_today_bucket()["total"])
+
+
+def remaining_today_sync() -> int:
+    return max(0, YOUTUBE_DAILY_QUOTA_CAP - spent_today_sync())
+
+
+def pct_used_sync() -> float:
+    if YOUTUBE_DAILY_QUOTA_CAP <= 0:
+        return 1.0
+    return min(1.0, spent_today_sync() / float(YOUTUBE_DAILY_QUOTA_CAP))
+
+
+def can_afford_sync(units: int) -> bool:
+    return remaining_today_sync() >= max(0, int(units or 0))
+
+
+def background_should_pause_sync() -> bool:
+    """True when Catalyst/background public search should stop for the day."""
+    return pct_used_sync() >= YOUTUBE_QUOTA_BACKGROUND_PAUSE_PCT
+
+
+def quota_reset_hint() -> str:
+    """Human-readable when Google's daily YouTube Data API quota typically resets (midnight PT)."""
+    return (
+        "YouTube Data API daily quota resets around midnight Pacific Time "
+        "(Google project quota, not Studio credits)."
+    )
+
+
+def snapshot_sync() -> dict:
+    """Lightweight status for tool results / agent synthesis (no I/O lock needed beyond cache)."""
+    spent = spent_today_sync()
+    remaining = max(0, YOUTUBE_DAILY_QUOTA_CAP - spent)
+    pct = (spent / YOUTUBE_DAILY_QUOTA_CAP) if YOUTUBE_DAILY_QUOTA_CAP else 0.0
+    exhausted = remaining < 100  # cannot afford even one search.list
+    return {
+        "daily_cap": YOUTUBE_DAILY_QUOTA_CAP,
+        "total_spent": spent,
+        "total_remaining": remaining,
+        "pct_used": round(pct, 3),
+        "exhausted": exhausted,
+        "background_paused": background_should_pause_sync(),
+        "background_pause_pct": YOUTUBE_QUOTA_BACKGROUND_PAUSE_PCT,
+        "reset_hint": quota_reset_hint(),
+        "youtube_quota_exhausted": exhausted,
+    }
+
+
 async def breakdown() -> dict:
     """Return today's quota-spend breakdown for admin UI / monitoring."""
     async with _lock:
@@ -294,6 +349,10 @@ async def breakdown() -> dict:
             "total_remaining": remaining,
             "pct_used": round(pct_used, 3),
             "warn_threshold_pct": YOUTUBE_QUOTA_WARN_PCT,
+            "background_pause_pct": YOUTUBE_QUOTA_BACKGROUND_PAUSE_PCT,
+            "background_paused": pct_used >= YOUTUBE_QUOTA_BACKGROUND_PAUSE_PCT,
+            "youtube_quota_exhausted": remaining < 100,
+            "reset_hint": quota_reset_hint(),
             "interactive_reserve_pct": YOUTUBE_QUOTA_INTERACTIVE_RESERVE_PCT,
             "background_cap": int(YOUTUBE_DAILY_QUOTA_CAP * (1.0 - YOUTUBE_QUOTA_INTERACTIVE_RESERVE_PCT)),
             "by_method": dict(bucket.get("by_method", {})),

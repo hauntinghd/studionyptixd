@@ -22,7 +22,21 @@ import {
     Film, Headphones, Image as ImageIcon, Loader2, Music, Play, RefreshCw, RotateCcw,
     Search, Sparkles, TrendingUp, Wand2, AlertTriangle,
 } from 'lucide-react';
-import { API, AuthContext } from '../shared';
+import { AuthContext, resolveStudioBackendUrl } from '../shared';
+import AgentModelPicker, { type AgentModelOption } from './AgentModelPicker';
+import {
+    DEFAULT_IMAGE_MODEL,
+    loadImageModelPref,
+    saveImageModelPref,
+} from '../lib/productionModelPrefs';
+import { productionIdempotencyKey } from '../lib/productionIdempotency';
+
+const FALLBACK_IMAGE_MODELS: AgentModelOption[] = [
+    { id: 'seedream_edit', name: 'Seedream 4.5 Edit', provider: 'fal', recommended: true, intelligence: 5, speed: 4, estimated_unit_usd: 0.04, billing_unit: 'image', description: 'Canonical reference editing and high-fidelity stills.' },
+    { id: 'grok_imagine', name: 'Grok Imagine Quality', provider: 'xAI', intelligence: 5, speed: 5, estimated_unit_usd: 0.05, billing_unit: '1K image', description: '$0.05 per 1K output; premium still lane.' },
+    { id: 'grok_imagine_standard', name: 'Grok Imagine', provider: 'xAI', intelligence: 4, speed: 5, estimated_unit_usd: 0.02, billing_unit: 'image', description: '$0.02 per 1K or 2K output. Lower-cost Grok still lane.' },
+    { id: 'ernie_image', name: 'ERNIE-Image', provider: 'fal', intelligence: 4, speed: 5, estimated_unit_usd: 0.03, billing_unit: 'megapixel', description: '$0.03 per megapixel. Cost scales with output resolution.' },
+];
 
 type LongFormTab = 'channel' | 'outline' | 'render';
 
@@ -269,6 +283,9 @@ export default function LongFormPanel() {
     const [jobFullState, setJobFullState] = useState<JobFullState | null>(null);
     const [renderError, setRenderError] = useState('');
     const [renderStarting, setRenderStarting] = useState(false);
+    const [imageModel, setImageModel] = useState(() => loadImageModelPref(DEFAULT_IMAGE_MODEL));
+    const [imageModelCatalog, setImageModelCatalog] = useState<AgentModelOption[]>(FALLBACK_IMAGE_MODELS);
+    const [imageModelPickerOpen, setImageModelPickerOpen] = useState(false);
     const [recentJobs, setRecentJobs] = useState<RecentJobRow[]>([]);
     const [recentLoading, setRecentLoading] = useState(false);
     const pollAbortRef = useRef<{ cancelled: boolean }>({ cancelled: false });
@@ -340,10 +357,10 @@ export default function LongFormPanel() {
         try {
             const tok = await getFreshToken();
             const [chRes, connRes] = await Promise.all([
-                fetchJsonResilient(`${API}/api/long-form/channels`, {
+                fetchJsonResilient(resolveStudioBackendUrl('/api/long-form/channels'), {
                     headers: { Authorization: `Bearer ${tok}` },
                 }),
-                fetchJsonResilient(`${API}/api/long-form/connected-channels`, {
+                fetchJsonResilient(resolveStudioBackendUrl('/api/long-form/connected-channels'), {
                     headers: { Authorization: `Bearer ${tok}` },
                 }),
             ]);
@@ -417,7 +434,7 @@ export default function LongFormPanel() {
         setInsightsLoading(true);
         setInsights(null);
         setCatalystPresent(null);
-        fetch('/api/long-form/catalyst-insights', {
+        fetch(resolveStudioBackendUrl('/api/long-form/catalyst-insights'), {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
@@ -442,7 +459,7 @@ export default function LongFormPanel() {
         setOutlineError('');
         setOutline(null);
         try {
-            const r = await fetch('/api/long-form/outline', {
+            const r = await fetch(resolveStudioBackendUrl('/api/long-form/outline'), {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -476,7 +493,7 @@ export default function LongFormPanel() {
         setRecentLoading(true);
         try {
             const tok = await getFreshToken();
-            const { ok, data } = await fetchJsonResilient(`${API}/api/long-form/jobs?limit=20`, {
+            const { ok, data } = await fetchJsonResilient(resolveStudioBackendUrl('/api/long-form/jobs?limit=20'), {
                 headers: { Authorization: `Bearer ${tok}` },
             });
             if (ok && Array.isArray(data?.jobs)) {
@@ -510,7 +527,7 @@ export default function LongFormPanel() {
             try {
                 const tok = await getFreshToken();
                 const { ok, status, data } = await fetchJsonResilient(
-                    `${API}/api/long-form/jobs/${jobId}/status`,
+                    resolveStudioBackendUrl(`/api/long-form/jobs/${jobId}/status`),
                     { headers: { Authorization: `Bearer ${tok}` } },
                 );
                 if (status === 401) {
@@ -536,7 +553,7 @@ export default function LongFormPanel() {
                     // Fetch full state for MP4 + thumbnail URLs.
                     try {
                         const stateResp = await fetchJsonResilient(
-                            `${API}/api/long-form/jobs/${jobId}/state`,
+                            resolveStudioBackendUrl(`/api/long-form/jobs/${jobId}/state`),
                             { headers: { Authorization: `Bearer ${tok}` } },
                         );
                         if (stateResp.ok) setJobFullState(stateResp.data as JobFullState);
@@ -564,6 +581,45 @@ export default function LongFormPanel() {
         }
     }, [getFreshToken, fetchJsonResilient, fetchRecentJobs]);
 
+    useEffect(() => {
+        if (!accessToken) return;
+        let cancelled = false;
+        void (async () => {
+            try {
+                const tok = await getFreshToken();
+                const { ok, data } = await fetchJsonResilient(
+                    resolveStudioBackendUrl('/api/studio-agent/models'),
+                    { headers: { Authorization: `Bearer ${tok}` } },
+                    { retries: 2, retryDelayMs: 1500 },
+                );
+                if (cancelled || !ok) return;
+                const imageOptions = (Array.isArray(data?.image_models) ? data.image_models : [])
+                    .map((row: Record<string, unknown>) => ({
+                        id: String(row.id || row.model_id || '').trim(),
+                        name: String(row.name || row.label || row.id || '').trim(),
+                        provider: String(row.provider || '').trim(),
+                        description: String(row.description || '').trim(),
+                        estimated_unit_usd: typeof row.estimated_unit_usd === 'number' ? row.estimated_unit_usd : undefined,
+                        billing_unit: String(row.billing_unit || '').trim() || undefined,
+                        recommended: Boolean(row.recommended),
+                        intelligence: typeof row.intelligence === 'number' ? row.intelligence : undefined,
+                        speed: typeof row.speed === 'number' ? row.speed : undefined,
+                    }))
+                    .filter((row: AgentModelOption) => row.id);
+                if (imageOptions.length) {
+                    setImageModelCatalog(
+                        [...FALLBACK_IMAGE_MODELS, ...imageOptions].filter(
+                            (m, i, arr) => arr.findIndex((x) => x.id === m.id) === i,
+                        ),
+                    );
+                }
+            } catch {
+                /* keep fallback catalog */
+            }
+        })();
+        return () => { cancelled = true; };
+    }, [accessToken, getFreshToken, fetchJsonResilient]);
+
     // ── Kick a new render ───────────────────────────────────────────────
     const startRender = useCallback(async () => {
         if (!selectedChannel || !outline) {
@@ -574,12 +630,25 @@ export default function LongFormPanel() {
         setRenderError('');
         setJobStatus(null);
         setJobFullState(null);
+        const outlineWithModel = {
+            ...outline,
+            image_model_id: imageModel,
+        };
+        const commandId = productionIdempotencyKey('longform-render-start');
         try {
             const tok = await getFreshToken();
-            const { ok, status, data } = await fetchJsonResilient(`${API}/api/long-form/render-start`, {
+            const { ok, status, data } = await fetchJsonResilient(resolveStudioBackendUrl('/api/long-form/render-start'), {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${tok}` },
-                body: JSON.stringify({ channel_key: selectedChannel, outline }),
+                headers: {
+                    'Content-Type': 'application/json',
+                    Authorization: `Bearer ${tok}`,
+                    'X-Idempotency-Key': commandId,
+                },
+                body: JSON.stringify({
+                    channel_key: selectedChannel,
+                    outline: outlineWithModel,
+                    image_model: imageModel,
+                }),
             });
             if (!ok) {
                 throw new Error(
@@ -598,7 +667,7 @@ export default function LongFormPanel() {
         } finally {
             setRenderStarting(false);
         }
-    }, [selectedChannel, outline, getFreshToken, fetchJsonResilient, pollJob, fetchRecentJobs]);
+    }, [selectedChannel, outline, imageModel, getFreshToken, fetchJsonResilient, pollJob, fetchRecentJobs]);
 
     // ── Resume an in-progress / past render from the Recent panel ───────
     const resumeJob = useCallback(async (jobId: string) => {
@@ -610,7 +679,7 @@ export default function LongFormPanel() {
         try {
             const tok = await getFreshToken();
             const { ok, data } = await fetchJsonResilient(
-                `${API}/api/long-form/jobs/${jobId}/state`,
+                resolveStudioBackendUrl(`/api/long-form/jobs/${jobId}/state`),
                 { headers: { Authorization: `Bearer ${tok}` } },
             );
             if (!ok) throw new Error(`resume failed: ${data?.detail || 'unknown'}`);
@@ -643,10 +712,13 @@ export default function LongFormPanel() {
             if (state.phase && stuckPhases.includes(state.phase)) {
                 try {
                     const finalizeResp = await fetchJsonResilient(
-                        `${API}/api/long-form/jobs/${jobId}/finalize`,
+                        resolveStudioBackendUrl(`/api/long-form/jobs/${jobId}/finalize`),
                         {
                             method: 'POST',
-                            headers: { Authorization: `Bearer ${tok}` },
+                            headers: {
+                                Authorization: `Bearer ${tok}`,
+                                'X-Idempotency-Key': productionIdempotencyKey('longform-finalize', jobId),
+                            },
                         },
                     );
                     if (finalizeResp.ok) {
@@ -688,7 +760,7 @@ export default function LongFormPanel() {
         try {
             const tok = await getFreshToken();
             const { ok, data } = await fetchJsonResilient(
-                `${API}/api/long-form/jobs/${jobId}/scenes`,
+                resolveStudioBackendUrl(`/api/long-form/jobs/${jobId}/scenes`),
                 { headers: { Authorization: `Bearer ${tok}` } },
             );
             if (ok && Array.isArray(data?.scenes)) {
@@ -716,15 +788,17 @@ export default function LongFormPanel() {
     ) => {
         if (!activeJobId) return;
         setRegeneratingIdx(sceneIdx);
+        const commandId = productionIdempotencyKey(`longform-scene-${activeJobId}-${sceneIdx}`);
         try {
             const tok = await getFreshToken();
             const { ok, data } = await fetchJsonResilient(
-                `${API}/api/long-form/jobs/${activeJobId}/regenerate-scene`,
+                resolveStudioBackendUrl(`/api/long-form/jobs/${activeJobId}/regenerate-scene`),
                 {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
                         Authorization: `Bearer ${tok}`,
+                        'X-Idempotency-Key': commandId,
                     },
                     body: JSON.stringify({
                         scene_idx: sceneIdx,
@@ -747,13 +821,17 @@ export default function LongFormPanel() {
         if (!activeJobId) return;
         setFinalizingBusy(true);
         setRenderError('');
+        const commandId = productionIdempotencyKey('longform-finalize', activeJobId);
         try {
             const tok = await getFreshToken();
             const { ok, data } = await fetchJsonResilient(
-                `${API}/api/long-form/jobs/${activeJobId}/finalize`,
+                resolveStudioBackendUrl(`/api/long-form/jobs/${activeJobId}/finalize`),
                 {
                     method: 'POST',
-                    headers: { Authorization: `Bearer ${tok}` },
+                    headers: {
+                        Authorization: `Bearer ${tok}`,
+                        'X-Idempotency-Key': commandId,
+                    },
                 },
             );
             if (!ok) throw new Error(data?.detail || 'finalize failed');
@@ -796,7 +874,7 @@ export default function LongFormPanel() {
         try {
             const tok = await getFreshToken();
             const { ok, data } = await fetchJsonResilient(
-                `${API}/api/long-form/jobs/${activeJobId}/regenerate-thumbnail/${idx}`,
+                resolveStudioBackendUrl(`/api/long-form/jobs/${activeJobId}/regenerate-thumbnail/${idx}`),
                 {
                     method: 'POST',
                     headers: {
@@ -836,7 +914,7 @@ export default function LongFormPanel() {
         try {
             const tok = await getFreshToken();
             const { ok, data } = await fetchJsonResilient(
-                `${API}/api/long-form/jobs/${activeJobId}/cancel`,
+                resolveStudioBackendUrl(`/api/long-form/jobs/${activeJobId}/cancel`),
                 {
                     method: 'POST',
                     headers: { Authorization: `Bearer ${tok}` },
@@ -868,6 +946,21 @@ export default function LongFormPanel() {
     const shortsChannels = channels.filter((c) => c.format === 'shorts');
 
     return (
+        <>
+            <AgentModelPicker
+                open={imageModelPickerOpen}
+                models={imageModelCatalog}
+                selectedId={imageModel}
+                title="Choose an image model"
+                subtitle="Used for every scene still in this long-form render. Your pick is saved and reused on Agent short-form too."
+                statusText={`${imageModelCatalog.length} image models available`}
+                searchPlaceholder="Search image models, providers, or costs..."
+                onSelect={(id) => {
+                    setImageModel(id);
+                    saveImageModelPref(id);
+                }}
+                onClose={() => setImageModelPickerOpen(false)}
+            />
         <div className="flex flex-col gap-6 px-6 py-8 max-w-5xl mx-auto">
             <header className="flex items-center justify-between">
                 <h1 className="text-2xl font-bold text-white">Long-Form</h1>
@@ -958,9 +1051,13 @@ export default function LongFormPanel() {
                     regeneratingThumbIdx={regeneratingThumbIdx}
                     onStartNew={startNewRender}
                     costEstimate={costEstimate}
+                    imageModel={imageModel}
+                    imageModelCatalog={imageModelCatalog}
+                    onOpenImageModelPicker={() => setImageModelPickerOpen(true)}
                 />
             )}
         </div>
+        </>
     );
 }
 
@@ -1482,6 +1579,9 @@ function RenderTab({
     onRegenerateThumbnail, regeneratingThumbIdx,
     onStartNew,
     costEstimate,
+    imageModel,
+    imageModelCatalog,
+    onOpenImageModelPicker,
 }: {
     selectedChannel: string;
     channels: ChannelInfo[];
@@ -1509,8 +1609,13 @@ function RenderTab({
     regeneratingThumbIdx: number | null;
     onStartNew: () => void;
     costEstimate: CostEstimate | null;
+    imageModel: string;
+    imageModelCatalog: AgentModelOption[];
+    onOpenImageModelPicker: () => void;
 }) {
     const channel = channels.find((c) => c.key === selectedChannel);
+    const imageModelLabel =
+        imageModelCatalog.find((m) => m.id === imageModel)?.name || imageModel;
     const totalMinutes = outline ? outline.chapters.reduce((s, c) => s + c.minutes, 0) : 0;
     // PR #137: prefer the dynamic cost estimate (computed from outline +
     // real fal pricing); fall back to channel.cost_estimate_usd if the
@@ -1538,7 +1643,18 @@ function RenderTab({
                         <div className="text-sm text-zinc-300"><span className="text-zinc-500">Chapters:</span> {outline.chapters.length}</div>
                         <div className="text-sm text-zinc-300"><span className="text-zinc-500">Length:</span> {totalMinutes >= 60 ? `${(totalMinutes / 60).toFixed(1)}h` : `${totalMinutes}m`}</div>
                         <div className="text-sm text-zinc-300"><span className="text-zinc-500">Pipeline:</span> {channel.pipeline_kind || 'sleep_doc'}</div>
-                        <div className="text-sm text-zinc-300"><span className="text-zinc-500">Image model:</span> {channel.image_model_default}</div>
+                        <div className="flex flex-wrap items-center gap-2 text-sm text-zinc-300">
+                            <span className="text-zinc-500">Image model:</span>
+                            <button
+                                type="button"
+                                onClick={onOpenImageModelPicker}
+                                className="inline-flex items-center gap-1.5 rounded-md border border-zinc-700 bg-zinc-900 px-2.5 py-1 text-xs font-medium text-violet-200 hover:border-violet-500/50 hover:bg-violet-500/10"
+                            >
+                                <ImageIcon className="h-3.5 w-3.5" />
+                                {imageModelLabel}
+                            </button>
+                            <span className="text-[10px] text-zinc-500">(channel default: {channel.image_model_default})</span>
+                        </div>
                         <div className="text-sm text-zinc-300"><span className="text-zinc-500">Voice:</span> {channel.voice_provider_default}</div>
                         <div className="text-sm text-zinc-300"><span className="text-zinc-500">Estimated fal cost:</span> ~${totalCost.toFixed(2)}{costEstimate ? <span className="text-[10px] text-zinc-500 ml-2">(stage 1 ${stage1.toFixed(2)} · stage 2 ${stage2.toFixed(2)} · {costEstimate.n_scenes} scenes{costEstimate.pricing_source ? ` · ${costEstimate.pricing_source}` : ''}{typeof costEstimate.non_fal_usd === 'number' && costEstimate.non_fal_usd > 0 ? ` · +$${costEstimate.non_fal_usd.toFixed(2)} non-fal VO` : ''})</span> : null}</div>
                     </div>

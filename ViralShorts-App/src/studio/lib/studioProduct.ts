@@ -369,7 +369,11 @@ export interface UnifiedTopupPack {
 }
 
 export const UNIFIED_TOPUP_PACKS: UnifiedTopupPack[] = [
+    { price_id: 'uc_starter', pack: 'starter', credits: 300, price_usd: 10 },
     { price_id: 'uc_reload', pack: 'reload', credits: 1000, price_usd: 25 },
+    { price_id: 'uc_creator', pack: 'creator', credits: 2200, price_usd: 50 },
+    { price_id: 'uc_studio', pack: 'studio', credits: 5000, price_usd: 100 },
+    { price_id: 'uc_scale', pack: 'scale', credits: 14000, price_usd: 250 },
 ];
 
 export function visibleNiches(isOwner: boolean): StudioNiche[] {

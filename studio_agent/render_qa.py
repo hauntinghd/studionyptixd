@@ -141,10 +141,12 @@ def _probe_video(video_path: Path) -> dict[str, Any]:
     except Exception as exc:
         return {"ok": False, "error": f"ffprobe returned invalid JSON: {exc}"}
     streams = data.get("streams") if isinstance(data.get("streams"), list) else []
-    video = next((s for s in streams if s.get("codec_type") == "video"), None)
+    # ffprobe can occasionally emit non-dict stream entries; never call .get on those.
+    dict_streams = [s for s in streams if isinstance(s, dict)]
+    video = next((s for s in dict_streams if s.get("codec_type") == "video"), None)
     if not isinstance(video, dict):
         return {"ok": False, "error": "No video stream found"}
-    audio = any(s.get("codec_type") == "audio" for s in streams if isinstance(s, dict))
+    audio = any(s.get("codec_type") == "audio" for s in dict_streams)
     fmt = data.get("format") if isinstance(data.get("format"), dict) else {}
     return {
         "ok": True,

@@ -1,7 +1,11 @@
 # Rookcast skills manifest — full API import
-# Skills: 26 | Files: 41
+# Skills: 27 | Files: 42
 
 skills:
+  studio-agent-tools:
+    status: extracted
+    siblings: []
+    notes: Tyler-loop tool dictionary — load when planning/calling Studio tools
   ai-host-setup:
     status: extracted
     siblings: [host-doctor.md, host-financial-advisor.md, host-teacher.md, host-war-veteran.md]

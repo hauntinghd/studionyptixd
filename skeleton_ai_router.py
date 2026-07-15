@@ -21,7 +21,7 @@ import json
 from pathlib import Path
 from typing import Any, Callable
 
-from fastapi import APIRouter, HTTPException, Depends, Request
+from fastapi import APIRouter, HTTPException, Depends, Request, UploadFile, File
 from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel, Field
 
@@ -98,6 +98,19 @@ def _references_for_skeleton_ai(user: dict) -> str:
 
 
 OUTPUT_ROOT = Path(os.getenv("SKELETON_AI_OUTPUT_ROOT", "skeleton_ai/output"))
+REFERENCE_ROOT = OUTPUT_ROOT / "_references"
+
+
+def _persist_skeleton_reference(workspace: Path, reference_image: str) -> str:
+    from skeleton_ai.styled_pipeline import _persist_skeleton_reference as persist_ref
+
+    return persist_ref(workspace, reference_image)
+
+
+def _resolve_skeleton_reference(workspace: Path) -> str:
+    from skeleton_ai.styled_pipeline import _resolve_skeleton_master_reference
+
+    return _resolve_skeleton_master_reference(workspace, None)
 
 
 async def _maybe_refund(refund_fn, user: dict, source: str, credits: int) -> None:
@@ -128,10 +141,15 @@ class GenerateRequest(BaseModel):
         default=None,
         description="seedance | pixverse | kling_pro — stills always canonical Seedream edit",
     )
+    image_model: str | None = None
     voice_id: str | None = None
     script_override: str | None = None
     script: str | None = None  # frontend alias
     render_tier: str = Field(default="draft")  # draft | ship | documentary
+    reference_image: str | None = Field(
+        default=None,
+        description="User-uploaded skeleton reference (HTTPS URL or data:image/... base64)",
+    )
 
 
 class PlanRequest(BaseModel):
@@ -146,6 +164,19 @@ class ScenesRequest(BaseModel):
     topic: str | None = None
     image_model: str = Field(default="seedream_edit")  # ignored — canonical edit is always used
     beats_target: int = 12
+    reference_image: str | None = Field(
+        default=None,
+        description="User-uploaded skeleton reference (HTTPS URL or data:image/... base64)",
+    )
+
+
+class RegenerateSceneRequest(BaseModel):
+    job_id: str
+    beat_index: int = Field(ge=0)
+    outfit: str | None = None
+    scene_action: str | None = None
+    motion_prompt: str | None = None
+    reference_image: str | None = None
 
 
 class CreateCategoryRequest(BaseModel):
@@ -247,6 +278,49 @@ def build_skeleton_ai_router(
             ],
         }
 
+    @router.post("/reference")
+    async def upload_reference(reference_image: UploadFile = File(...), user: dict = auth_dep):
+        uid = _user_id(user) or "anon"
+        raw = await reference_image.read()
+        if not raw or len(raw) < 1024:
+            raise HTTPException(400, "reference image too small")
+        if len(raw) > 12 * 1024 * 1024:
+            raise HTTPException(400, "reference image exceeds 12MB")
+        mime = str(reference_image.content_type or "image/png").strip().lower()
+        if not mime.startswith("image/"):
+            raise HTTPException(400, "reference must be an image")
+        ext = ".png"
+        if "jpeg" in mime or "jpg" in mime:
+            ext = ".jpg"
+        elif "webp" in mime:
+            ext = ".webp"
+        REFERENCE_ROOT.mkdir(parents=True, exist_ok=True)
+        ref_name = f"{uid}_{uuid.uuid4().hex[:12]}{ext}"
+        ref_path = REFERENCE_ROOT / ref_name
+        ref_path.write_bytes(raw)
+        return {
+            "ok": True,
+            "reference_image": str(ref_path),
+            "reference_image_url": f"/api/skeleton-ai/references/{ref_name}",
+        }
+
+    @router.get("/references/{filename}")
+    async def serve_reference(filename: str, _user: dict = auth_dep):
+        safe = os.path.basename(filename)
+        if not safe or safe != filename or ".." in filename:
+            raise HTTPException(400, "bad_filename")
+        path = REFERENCE_ROOT / safe
+        if not path.exists():
+            raise HTTPException(404, "not_found")
+        from fastapi.responses import FileResponse
+
+        media_type = "image/png"
+        if path.suffix.lower() in {".jpg", ".jpeg"}:
+            media_type = "image/jpeg"
+        elif path.suffix.lower() == ".webp":
+            media_type = "image/webp"
+        return FileResponse(str(path), media_type=media_type)
+
     @router.get("/voices")
     async def voices(_user: dict = auth_dep):
         try:
@@ -343,7 +417,7 @@ def build_skeleton_ai_router(
     # ──────────────────────────────────────────────────────────────────────
 
     @router.post("/scenes")
-    async def generate_scenes(body: ScenesRequest, user: dict = auth_dep):
+    async def generate_scenes(body: ScenesRequest, request: Request, user: dict = auth_dep):
         """
         SSE-streaming stills render. Emits events as scenes complete so the
         frontend can reveal each tile the moment fal returns it (Korpi-style),
@@ -359,6 +433,10 @@ def build_skeleton_ai_router(
           event: complete   data: {job_id, scenes_count}
           event: error      data: {beat_index?, message}    # on failure
         """
+        from studio_agent.direct_production import fail_closed_uncovered, runpod_production_enabled
+
+        if runpod_production_enabled():
+            fail_closed_uncovered(request, "/api/skeleton-ai/scenes")
         if not body.script or not body.script.strip():
             raise HTTPException(400, "script is required")
         uid = _user_id(user) or None
@@ -397,6 +475,11 @@ def build_skeleton_ai_router(
         stills_dir = workspace / "stills"
         stills_dir.mkdir(parents=True, exist_ok=True)
         (workspace / "script.txt").write_text(body.script, encoding="utf-8")
+        master_ref = ""
+        if body.reference_image and str(body.reference_image).strip():
+            master_ref = _persist_skeleton_reference(workspace, str(body.reference_image).strip())
+        else:
+            master_ref = _resolve_skeleton_reference(workspace)
 
         endpoint = "fal-ai/bytedance/seedream/v4.5/edit"
 
@@ -411,7 +494,8 @@ def build_skeleton_ai_router(
                     "job_id": job_id,
                     "image_model": "seedream_edit",
                     "endpoint": endpoint,
-                    "render_mode": "canonical_master_edit",
+                    "render_mode": "user_reference_edit" if master_ref else "canonical_master_edit",
+                    "reference_locked": bool(master_ref),
                     "total": len(sentences),
                 })
                 plan = analyze_script(grok, body.script, category_label=cat_label, topic=body.topic)
@@ -437,6 +521,7 @@ def build_skeleton_ai_router(
                         generate_still_edit(
                             edit_prompt,
                             out_file,
+                            master_url=master_ref,
                             seed=420042 + i,
                         )
                     except StillsError as e:
@@ -470,6 +555,62 @@ def build_skeleton_ai_router(
 
         return StreamingResponse(event_stream(), media_type="text/event-stream")
 
+    @router.post("/scenes/regenerate")
+    async def regenerate_scene(
+        body: RegenerateSceneRequest,
+        request: Request,
+        _user: dict = auth_dep,
+    ):
+        from studio_agent.direct_production import fail_closed_uncovered, runpod_production_enabled
+
+        if runpod_production_enabled():
+            fail_closed_uncovered(request, "/api/skeleton-ai/scenes/regenerate")
+        job_id = str(body.job_id or "").strip()
+        if not job_id.replace("_", "").isalnum() or len(job_id) > 32:
+            raise HTTPException(400, "bad_job_id")
+        workspace = OUTPUT_ROOT / job_id
+        if not workspace.is_dir():
+            raise HTTPException(404, "job_not_found")
+        if body.reference_image and str(body.reference_image).strip():
+            _persist_skeleton_reference(workspace, str(body.reference_image).strip())
+        master_ref = _resolve_skeleton_reference(workspace)
+        scenes_path = workspace / "scenes.json"
+        scenes_doc: dict[str, Any] = {"job_id": job_id, "scenes": []}
+        if scenes_path.is_file():
+            try:
+                loaded = json.loads(scenes_path.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    scenes_doc = loaded
+            except Exception:
+                pass
+        scenes = list(scenes_doc.get("scenes") or [])
+        scene = next((s for s in scenes if int(s.get("beat_index", -1)) == int(body.beat_index)), None)
+        if scene is None:
+            raise HTTPException(404, "scene_not_found")
+        outfit = str(body.outfit if body.outfit is not None else scene.get("outfit") or "")
+        action = str(body.scene_action if body.scene_action is not None else scene.get("scene_action") or "")
+        motion = str(body.motion_prompt if body.motion_prompt is not None else scene.get("motion_prompt") or "")
+        sid = f"b{int(body.beat_index):02d}"
+        stills_dir = workspace / "stills"
+        stills_dir.mkdir(parents=True, exist_ok=True)
+        out_file = stills_dir / f"{sid}.png"
+        edit_prompt = build_scene_edit_prompt(
+            topic=str(scene.get("topic") or ""),
+            visual_description=action,
+            outfit=outfit,
+        )
+        generate_still_edit(edit_prompt, out_file, master_url=master_ref, seed=880000 + int(body.beat_index))
+        scene.update({
+            "outfit": outfit,
+            "scene_action": action,
+            "motion_prompt": motion,
+            "edit_prompt": edit_prompt,
+            "image_path": f"/api/skeleton-ai/jobs/{job_id}/stills/{sid}.png",
+        })
+        scenes_doc["scenes"] = scenes
+        scenes_path.write_text(json.dumps(scenes_doc, indent=2, ensure_ascii=False), encoding="utf-8")
+        return {"ok": True, "scene": scene}
+
     @router.get("/jobs/{job_id}/stills/{filename}")
     async def serve_still(job_id: str, filename: str, _user: dict = auth_dep):
         if not job_id.replace("_", "").isalnum() or len(job_id) > 32:
@@ -487,7 +628,36 @@ def build_skeleton_ai_router(
     # ──────────────────────────────────────────────────────────────────────
 
     @router.post("/generate")
-    async def generate(body: GenerateRequest, user: dict = auth_dep):
+    async def generate(body: GenerateRequest, request: Request, user: dict = auth_dep):
+        from studio_agent.direct_production import execute_logged_production, runpod_production_enabled
+
+        if runpod_production_enabled():
+            script_text = (body.script_override or body.script or "").strip()
+            payload = await execute_logged_production(
+                "start_shortform_generate",
+                {
+                    "category_key": body.category,
+                    "topic": str(body.topic or "Custom scripted short").strip(),
+                    "script": script_text,
+                    "scene_count": 1,
+                    "render_style": "skeleton_host",
+                    "video_model": str(body.video_model or "seedance"),
+                    "tier": body.tier,
+                    "image_model_id": str(body.image_model or "seedream_edit"),
+                    "reference_image": str(body.reference_image or "").strip(),
+                    "visual_proof_only": True,
+                    "animate": False,
+                    "captions_enabled": True,
+                    "caption_mode": "word",
+                },
+                request=request,
+                user_id=_user_id(user),
+                content_format="short",
+            )
+            payload.setdefault("poll_url", f"/api/skeleton-ai/jobs/{payload.get('job_id', '')}")
+            payload["legacy_route"] = "/api/skeleton-ai/generate"
+            payload["staged_visual_proof"] = True
+            return payload
         if body.tier not in ("standard", "premium"):
             raise HTTPException(400, "tier must be standard or premium")
         if body.render_tier == "ship" and body.tier != "premium":
@@ -534,6 +704,9 @@ def build_skeleton_ai_router(
 
         job_id = uuid.uuid4().hex[:12]
         workspace = OUTPUT_ROOT / job_id
+        master_ref = ""
+        if body.reference_image and str(body.reference_image).strip():
+            master_ref = _persist_skeleton_reference(workspace, str(body.reference_image).strip())
         try:
             result = run_pipeline(
                 category_key=body.category,
@@ -544,6 +717,7 @@ def build_skeleton_ai_router(
                 voice_id=body.voice_id,
                 script_override=script_text,
                 user_id=uid,
+                master_reference_url=master_ref,
             )
         except ValueError as e:
             await _maybe_refund(refund_credit, user, credit_source, ac_required)
@@ -560,8 +734,15 @@ def build_skeleton_ai_router(
 
     @router.get("/jobs/{job_id}")
     async def job_status(job_id: str, _user: dict = auth_dep):
-        if not job_id.isalnum() or len(job_id) > 32:
+        if not job_id.replace("_", "").isalnum() or len(job_id) > 32:
             raise HTTPException(400, "bad_job_id")
+        from studio_agent.runpod_bridge import get_dispatch_receipt_by_studio_job_id
+
+        if get_dispatch_receipt_by_studio_job_id(job_id) is not None:
+            from studio_agent.jobs import get_job_snapshot
+
+            snapshot = get_job_snapshot(job_id, "shortform")
+            return {"job_id": job_id, "result": snapshot, **snapshot}
         result_path = OUTPUT_ROOT / job_id / "result.json"
         if not result_path.exists():
             raise HTTPException(404, "not_found")

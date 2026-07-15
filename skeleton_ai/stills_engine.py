@@ -68,7 +68,7 @@ def _build_args(model_key: str, prompt: str, negative_prompt: str,
     Right now we keep this minimal — some endpoints ignore extra fields
     silently, some 422 if you send the wrong key. We tune as we hit issues.
     """
-    base = {"prompt": prompt[:3500]}
+    base = {"prompt": prompt[:759]}
     neg = (negative_prompt or "")[:1500]
 
     if model_key == "seedream_45":

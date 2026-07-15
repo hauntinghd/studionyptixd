@@ -39,7 +39,7 @@ import os
 from pathlib import Path
 from typing import Any, Callable
 
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
@@ -77,6 +77,10 @@ except Exception:
 class RegenerateSceneRequest(BaseModel):
     scene_idx: int
     new_prompt: str | None = None
+
+
+class RegenerateThumbnailRequest(BaseModel):
+    custom_prompt: str | None = None
 
 
 def _references_for_channel(user: dict, channel_key: str) -> str:
@@ -401,23 +405,95 @@ def build_long_form_router(
         if not job_id or not job_id.replace("_", "").isalnum() or len(job_id) > 32:
             raise HTTPException(400, "bad_job_id")
 
+    def _runpod_receipt(job_id: str) -> dict[str, Any] | None:
+        from studio_agent.runpod_bridge import get_dispatch_receipt_by_studio_job_id
+
+        return get_dispatch_receipt_by_studio_job_id(job_id)
+
+    def _runpod_snapshot(job_id: str) -> dict[str, Any] | None:
+        if _runpod_receipt(job_id) is None:
+            return None
+        from studio_agent.jobs import get_job_snapshot
+
+        return get_job_snapshot(job_id, "longform")
+
+    def _legacy_status_from_snapshot(job_id: str, snapshot: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "job_id": job_id,
+            "phase": str(snapshot.get("stage") or snapshot.get("status") or "unknown"),
+            "percent": int(snapshot.get("progress") or 0),
+            "error": snapshot.get("error") or "",
+            "scene_done": int(snapshot.get("current_scene") or 0),
+            "scene_total": int(snapshot.get("total_scenes") or 0),
+            "chapter_done": int(snapshot.get("current_chapter") or 0),
+            "chapter_total": int(snapshot.get("total_chapters") or 0),
+            "running": bool(snapshot.get("running")),
+            "execution_backend": snapshot.get("execution_backend"),
+            "runpod": snapshot.get("runpod"),
+        }
+
     @router.post("/render-start")
-    async def render_start_route(body: RenderRequest, user: dict = auth_dep):
+    async def render_start_route(body: RenderRequest, request: Request, user: dict = auth_dep):
         _gate_admin(user)
+        from studio_agent.direct_production import (
+            execute_logged_production,
+            require_longform_runpod_if_global_enabled,
+        )
+
+        if require_longform_runpod_if_global_enabled():
+            outline = dict(body.outline or {})
+            payload = await execute_logged_production(
+                "start_longform_render",
+                {
+                    "channel_key": body.channel_key,
+                    "title": str(outline.get("title") or body.channel_key).strip(),
+                    "topic": str(outline.get("topic") or outline.get("title") or body.channel_key).strip(),
+                    "chapters_json": json.dumps(outline, ensure_ascii=False),
+                    "motion_policy": str(outline.get("motion_policy") or "balanced"),
+                    "render_style": str(outline.get("render_style") or "cinematic"),
+                    "visual_proof_only": bool(outline.get("visual_proof_only", True)),
+                    "image_model_id": str(body.image_model or outline.get("image_model_id") or ""),
+                    "sfx_enabled": bool(outline.get("sfx_enabled", False)),
+                    "sound_design_brief": str(outline.get("sound_design_brief") or ""),
+                    "background_music": str(outline.get("background_music") or "off"),
+                },
+                request=request,
+                user_id=str((user or {}).get("id") or (user or {}).get("user_id") or ""),
+                content_format="long",
+            )
+            job_id = str(payload.get("job_id") or payload.get("studio_job_id") or "").strip()
+            payload.update({
+                "job_id": job_id,
+                "phase": "queued",
+                "poll_url": f"/api/long-form/jobs/{job_id}/status",
+                "state_url": f"/api/long-form/jobs/{job_id}/state",
+                "mp4_url_when_done": f"/api/long-form/jobs/{job_id}/mp4",
+                "legacy_route": "/api/long-form/render-start",
+            })
+            return payload
         try:
-            channel = get_channel(body.channel_key)
+            channel = dict(get_channel(body.channel_key))
         except ValueError as e:
             raise HTTPException(404, str(e))
         if not isinstance(body.outline, dict) or not (body.outline.get("chapters") or []):
             raise HTTPException(400, "outline must include a non-empty chapters list")
+        outline = dict(body.outline)
+        picked_image = str(body.image_model or outline.get("image_model_id") or "").strip()
+        if picked_image:
+            from studio_agent import store as agent_store
+
+            normalized = agent_store.normalize_image_model(picked_image)
+            channel["image_model_default"] = normalized
+            outline["image_model_id"] = normalized
         try:
-            job_id = lf_pipeline.start_render(channel, body.outline)
+            job_id = lf_pipeline.start_render(channel, outline)
         except lf_pipeline.LFRenderError as e:
             raise HTTPException(400, f"render_start_failed: {e}")
         return {
             "job_id": job_id,
             "channel_key": body.channel_key,
             "pipeline_kind": channel.get("pipeline_kind") or "sleep_doc",
+            "image_model": channel.get("image_model_default"),
             "poll_url": f"/api/long-form/jobs/{job_id}/status",
             "state_url": f"/api/long-form/jobs/{job_id}/state",
             "mp4_url_when_done": f"/api/long-form/jobs/{job_id}/mp4",
@@ -465,11 +541,22 @@ def build_long_form_router(
         _validate_job_id(job_id)
         st = lf_pipeline.load_state(job_id)
         if not st:
+            runpod_snapshot = _runpod_snapshot(job_id)
+            if runpod_snapshot is not None:
+                return {
+                    **_legacy_status_from_snapshot(job_id, runpod_snapshot),
+                    "kind": "longform",
+                    "status": runpod_snapshot.get("status"),
+                    "title": runpod_snapshot.get("title") or "Long-form production",
+                }
             raise HTTPException(404, "no such job")
         # Merge in the live status snapshot (phase + percent from registry,
         # in case the on-disk state is stale between phase boundaries).
         live = lf_pipeline.get_status(job_id) or {}
         merged = dict(st)
+        runpod_snapshot = _runpod_snapshot(job_id)
+        if runpod_snapshot is not None:
+            merged.update(_legacy_status_from_snapshot(job_id, runpod_snapshot))
         for k in ("phase", "percent", "error", "scene_done", "scene_total",
                   "narration_done", "narration_total", "chapter_done", "chapter_total"):
             if k in live:
@@ -503,6 +590,9 @@ def build_long_form_router(
     async def job_status_route(job_id: str, user: dict = auth_dep):
         _gate_admin(user)
         _validate_job_id(job_id)
+        runpod_snapshot = _runpod_snapshot(job_id)
+        if runpod_snapshot is not None:
+            return _legacy_status_from_snapshot(job_id, runpod_snapshot)
         live = lf_pipeline.get_status(job_id)
         if live is None:
             # Fall back to disk state (process restart).
@@ -581,12 +671,32 @@ def build_long_form_router(
     async def job_regenerate_scene_route(
         job_id: str,
         body: RegenerateSceneRequest,
+        request: Request,
         user: dict = auth_dep,
     ):
         _gate_admin(user)
         _validate_job_id(job_id)
         if body.scene_idx < 0 or body.scene_idx > 9999:
             raise HTTPException(400, "bad_scene_index")
+        from studio_agent.direct_production import (
+            execute_logged_production,
+            require_longform_runpod_if_global_enabled,
+        )
+
+        if require_longform_runpod_if_global_enabled():
+            payload = await execute_logged_production(
+                "regenerate_longform_still",
+                {
+                    "job_id": job_id,
+                    "scene_idx": int(body.scene_idx),
+                    "reason": str(body.new_prompt or ""),
+                },
+                request=request,
+                user_id=str((user or {}).get("id") or (user or {}).get("user_id") or ""),
+                content_format="long",
+            )
+            payload.update({"job_id": job_id, "scene_idx": int(body.scene_idx)})
+            return payload
         try:
             new_path = lf_pipeline.regenerate_still(
                 job_id, body.scene_idx, body.new_prompt
@@ -605,9 +715,28 @@ def build_long_form_router(
         }
 
     @router.post("/jobs/{job_id}/finalize")
-    async def job_finalize_route(job_id: str, user: dict = auth_dep):
+    async def job_finalize_route(job_id: str, request: Request, user: dict = auth_dep):
         _gate_admin(user)
         _validate_job_id(job_id)
+        from studio_agent.direct_production import (
+            execute_logged_production,
+            require_longform_runpod_if_global_enabled,
+        )
+
+        if require_longform_runpod_if_global_enabled():
+            payload = await execute_logged_production(
+                "finalize_longform_render",
+                {"job_id": job_id},
+                request=request,
+                user_id=str((user or {}).get("id") or (user or {}).get("user_id") or ""),
+                content_format="long",
+            )
+            payload.update({
+                "job_id": job_id,
+                "phase": "finalizing",
+                "poll_url": f"/api/long-form/jobs/{job_id}/status",
+            })
+            return payload
         try:
             lf_pipeline.start_finalize(job_id)
         except lf_pipeline.LFRenderError as e:
@@ -617,9 +746,6 @@ def build_long_form_router(
             "phase": "finalizing",
             "poll_url": f"/api/long-form/jobs/{job_id}/status",
         }
-
-    class RegenerateThumbnailRequest(BaseModel):
-        custom_prompt: str | None = None
 
     @router.post("/jobs/{job_id}/regenerate-thumbnail/{idx}")
     async def job_regenerate_thumbnail_route(
@@ -659,6 +785,11 @@ def build_long_form_router(
         later from where it stopped."""
         _gate_admin(user)
         _validate_job_id(job_id)
+        if _runpod_receipt(job_id) is not None:
+            raise HTTPException(
+                409,
+                "This job is owned by RunPod. Legacy local cancel cannot stop its remote spend and is disabled.",
+            )
         try:
             result = lf_pipeline.cancel_render(job_id)
         except lf_pipeline.LFRenderError as e:

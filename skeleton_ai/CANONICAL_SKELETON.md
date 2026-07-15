@@ -5,9 +5,9 @@
 
 ## How every Skeleton AI short is rendered
 
-1. **Identity** — fixed from the master PNG (gym reference). Never regenerated from scratch per scene.
+1. **Identity** — fixed from the master PNG (empty-hands studio reference). Never regenerated from scratch per scene.
 2. **Each scene still** — `fal-ai/bytedance/seedream/v4.5/edit` with `image_urls: [master (+ optional uniform roster)]`.
-3. **Prompt** — describes only background, props, pose, and outfit. Character lock text forbids redesign.
+3. **Prompt** — describes only background, pose, and optional outfit. Hands stay empty unless the topic is sports/fitness. Character lock text forbids redesign and strips gym/sports prop leakage.
 4. **Uniform** — when a beat has an outfit, we optionally cache a roster still (edit master → outfit only), then pass it as a second ref for scene edits.
 5. **Animation** — user picks i2v: `seedance` | `pixverse` | `kling_pro` (Studio Agent + Create Audio tab). Stills are not selectable.
 

@@ -56,7 +56,7 @@ export default function NavBar({ onNavigate, active }: { onNavigate: PageNav; ac
 
     const brandHref = (() => {
         if (billingHost) {
-            return session ? `${BILLING_SITE_URL}?view=checkout` : BILLING_SITE_URL;
+            return session ? `${BILLING_SITE_URL}?page=billing` : BILLING_SITE_URL;
         }
         return session ? buildPageHref('dashboard') : buildPageHref('landing');
     })();

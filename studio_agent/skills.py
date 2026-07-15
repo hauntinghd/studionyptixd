@@ -51,15 +51,19 @@ def read_channel_doc(channel_key: str, doc: str = "CHANNEL") -> str:
     return path.read_text(encoding="utf-8")
 
 
-def skills_index_for_prompt(*, max_skills: int = 26) -> str:
-    slugs = list_skill_slugs()[:max_skills]
+def skills_index_for_prompt(*, max_skills: int = 40) -> str:
+    slugs = list_skill_slugs()
+    # Prefer studio-agent-tools first so task-makers see the Tyler tool dictionary.
+    if "studio-agent-tools" in slugs:
+        slugs = ["studio-agent-tools"] + [s for s in slugs if s != "studio-agent-tools"]
+    slugs = slugs[:max_skills]
     lines = ["Available Rookcast skills (load with load_skill):"]
     for slug in slugs:
         skill_path = SKILLS / slug / "SKILL.md"
         desc = ""
         if skill_path.exists():
-            head = skill_path.read_text(encoding="utf-8")[:400]
-            m = re.search(r"^description:\s*>-\s*\n\s*(.+)$", head, re.M)
+            head = skill_path.read_text(encoding="utf-8")[:500]
+            m = re.search(r"^description:\s*(.+)$", head, re.M)
             if m:
                 desc = m.group(1).strip()[:120]
         lines.append(f"- {slug}" + (f" — {desc}" if desc else ""))

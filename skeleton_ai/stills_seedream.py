@@ -49,7 +49,7 @@ def generate(
 
     key = api_key or _load_key()
     payload = {
-        "prompt": prompt[:3500],
+        "prompt": prompt[:759],
         "negative_prompt": negative_prompt[:1500],
         "image_size": {"width": width, "height": height},
         "num_images": 1,

@@ -8,11 +8,14 @@ import stripe as stripe_lib
 
 env_path = Path(__file__).parent / ".env"
 if env_path.exists():
-    for line in env_path.read_text().splitlines():
+    for line in env_path.read_text(encoding="utf-8", errors="replace").splitlines():
         line = line.strip()
         if line and not line.startswith("#") and "=" in line:
             key, val = line.split("=", 1)
-            os.environ[key.strip()] = val.strip().strip('"').strip("'")
+            # Runtime/container configuration must win over local development
+            # defaults. This is required for RunPod's APP_DATA_DIR mount and
+            # keeps injected endpoint secrets from being replaced by .env.
+            os.environ.setdefault(key.strip(), val.strip().strip('"').strip("'"))
 
 
 XAI_API_KEY = os.getenv("XAI_API_KEY", "")
@@ -319,6 +322,8 @@ RUNWAY_API_VERSION = os.getenv("RUNWAY_API_VERSION", "2024-11-06")
 XAI_IMAGE_ASPECT_RATIO = os.getenv("XAI_IMAGE_ASPECT_RATIO", "9:16")
 XAI_IMAGE_RESOLUTION = os.getenv("XAI_IMAGE_RESOLUTION", "2k")
 USE_XAI_VIDEO = os.getenv("USE_XAI_VIDEO", "1").lower() in ("1", "true", "yes", "on")
+FAL_PUBLIC_RENDERS_ENABLED = os.getenv("FAL_PUBLIC_RENDERS_ENABLED", "1").lower() in ("1", "true", "yes", "on")
+XAI_PUBLIC_RENDERS_ENABLED = os.getenv("XAI_PUBLIC_RENDERS_ENABLED", "1").lower() in ("1", "true", "yes", "on")
 PRODUCT_DEMO_PUBLIC_ENABLED = os.getenv("PRODUCT_DEMO_PUBLIC_ENABLED", "0").lower() in ("1", "true", "yes", "on")
 WAITLIST_ONLY_MODE = os.getenv("WAITLIST_ONLY_MODE", "0").lower() in ("1", "true", "yes", "on")
 WAITLIST_REQUIRE_STRIPE_PAYMENT = os.getenv("WAITLIST_REQUIRE_STRIPE_PAYMENT", "0").lower() in ("1", "true", "yes", "on")
@@ -465,7 +470,9 @@ DISABLE_ALL_SFX = os.getenv("DISABLE_ALL_SFX", "0").lower() in ("1", "true", "ye
 LONGFORM_BETA_ENABLED = os.getenv("LONGFORM_BETA_ENABLED", "1").lower() in ("1", "true", "yes", "on")
 LONGFORM_DEFAULT_TARGET_MINUTES = float(os.getenv("LONGFORM_DEFAULT_TARGET_MINUTES", "8"))
 LONGFORM_MIN_TARGET_MINUTES = float(os.getenv("LONGFORM_MIN_TARGET_MINUTES", "2"))
-LONGFORM_MAX_TARGET_MINUTES = float(os.getenv("LONGFORM_MAX_TARGET_MINUTES", "30"))
+# Multi-hour agent long-form: default max 3 hours (180 min). Override via env.
+LONGFORM_MAX_TARGET_MINUTES = float(os.getenv("LONGFORM_MAX_TARGET_MINUTES", "180"))
+LONGFORM_MAX_CHAPTERS = max(12, int(os.getenv("LONGFORM_MAX_CHAPTERS", "48")))
 LONGFORM_MAX_SCENE_RETRIES = max(1, int(os.getenv("LONGFORM_MAX_SCENE_RETRIES", "4")))
 
 
@@ -653,7 +660,13 @@ ANIMATION_CREDIT_UNIT_USD = round(
 
 DEMO_PRO_PRICE_ID = "price_1T4wZLBL8lRmwao2SyYRfHdQ"
 TOPUP_PACK_SPECS = [
+    # Stripe uses inline price_data when a dedicated price ID is not supplied,
+    # so these remain purchasable without a dashboard migration.
+    {"id": "uc_starter", "pack": "starter", "credits": 300, "price_usd": 10.00},
     {"id": "uc_reload", "pack": "reload", "credits": 1000, "price_usd": 25.00},
+    {"id": "uc_creator", "pack": "creator", "credits": 2200, "price_usd": 50.00},
+    {"id": "uc_studio", "pack": "studio", "credits": 5000, "price_usd": 100.00},
+    {"id": "uc_scale", "pack": "scale", "credits": 14000, "price_usd": 250.00},
 ]
 TOPUP_PACKS = {
     str(spec["id"]): {

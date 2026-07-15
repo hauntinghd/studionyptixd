@@ -315,7 +315,7 @@ export default function SettingsPage({ onNavigate }: { onNavigate: PageNav }) {
                     actions={
                         <button
                             type="button"
-                            onClick={() => { window.location.href = `${BILLING_SITE_URL}?view=checkout`; }}
+                            onClick={() => { window.location.href = `${BILLING_SITE_URL}?page=billing`; }}
                             className="rounded-xl bg-violet-600 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-violet-500"
                         >
                             Open Billing

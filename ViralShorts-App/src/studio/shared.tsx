@@ -43,14 +43,35 @@ const rawProdApi = resolveSafeApiBase(viteEnv.VITE_PROD_API_BASE_URL || "");
 const hostedOrigin = typeof window !== "undefined" ? window.location.origin : "";
 export const API = isLocalDevHost ? rawLocalApi : (rawProdApi || PROD_API_BASE_URL || hostedOrigin);
 export const DIRECT_API = isLocalDevHost ? (rawLocalApi || API) : (rawProdApi || PROD_API_BASE_URL || API);
-/** Studio Agent hits Fly directly (persistent sessions); api-studio RunPod can lag behind. */
+/** Hosted agent HTTP goes through api-studio; worker proxies to Vercel with CORS on errors. */
 export const STUDIO_AGENT_API = isLocalDevHost
     ? (rawLocalApi || API)
-    : (resolveSafeApiBase(viteEnv.VITE_STUDIO_AGENT_API || "") || "https://nyptid-studio.fly.dev");
+    : (resolveSafeApiBase(viteEnv.VITE_STUDIO_AGENT_API || "") || PROD_API_BASE_URL || API);
+
+/** Persistent sessions + agent chat run on Fly disk (never the RunPod queue). */
+export const STUDIO_FLY_SESSIONS_API = "https://nyptid-studio.fly.dev";
+
+/** Vercel Studio API — fast reads + billing (never the RunPod queue). */
+export const STUDIO_VERCEL_API = "https://nypidstudio.vercel.app";
+
+/** Fast reads + billing routes hit Vercel directly (never the RunPod queue). */
+export const STUDIO_FLY_API = isLocalDevHost
+    ? (rawLocalApi || API)
+    : (resolveSafeApiBase(viteEnv.VITE_STUDIO_FLY_API || viteEnv.VITE_STUDIO_VERCEL_API || "") || STUDIO_VERCEL_API);
+
+/** WebSockets cannot traverse the Cloudflare worker — dictation hits Vercel directly. */
+export const STUDIO_AGENT_WS_API = isLocalDevHost
+    ? (rawLocalApi || API)
+    : (resolveSafeApiBase(viteEnv.VITE_STUDIO_AGENT_WS_API || viteEnv.VITE_STUDIO_VERCEL_API || "") || STUDIO_VERCEL_API);
 
 export const FLY_DIRECT_API_PREFIXES = [
+    '/api/health',
+    '/api/config',
+    '/api/me',
     '/api/studio-agent',
     '/api/studio-hub',
+    '/api/studio/release-notes',
+    '/api/studio/client-manifest',
     '/api/youtube',
     '/api/studio/analytics',
     '/api/checkout',
@@ -62,10 +83,32 @@ export const FLY_DIRECT_API_PREFIXES = [
 export function resolveStudioBackendUrl(path: string): string {
     const normalized = path.startsWith('/') ? path : `/${path}`;
     if (isLocalDevHost) return `${API}${normalized}`;
+    // Agent sessions + long-form jobs live on Fly disk — bypass api-studio RunPod proxy.
+    if (
+        normalized.startsWith('/api/studio-agent')
+        || normalized.startsWith('/api/long-form')
+    ) {
+        return `${STUDIO_FLY_SESSIONS_API}${normalized}`;
+    }
     if (FLY_DIRECT_API_PREFIXES.some((prefix: string) => normalized.startsWith(prefix))) {
-        return `${STUDIO_AGENT_API}${normalized}`;
+        return `${STUDIO_FLY_API}${normalized}`;
     }
     return `${API}${normalized}`;
+}
+
+/** WebSocket upgrade must bypass the worker (see STUDIO_AGENT_WS_API). */
+export function resolveStudioWsUrl(path: string, query?: Record<string, string>): string {
+    const normalized = path.startsWith('/') ? path : `/${path}`;
+    const base = isLocalDevHost ? (API || STUDIO_AGENT_WS_API) : STUDIO_AGENT_WS_API;
+    const httpUrl = `${base.replace(/\/+$/, '')}${normalized}`;
+    const wsUrl = httpUrl.replace(/^http/i, 'ws');
+    if (!query || Object.keys(query).length === 0) return wsUrl;
+    const params = new URLSearchParams();
+    for (const [k, v] of Object.entries(query)) {
+        if (v) params.set(k, v);
+    }
+    const qs = params.toString();
+    return qs ? `${wsUrl}?${qs}` : wsUrl;
 }
 
 /** OAuth return URL that lands back on Studio Agent after Google connect. */
@@ -103,7 +146,7 @@ const FIREFOX_HOTFIX_TAG = "ff-hotfix-1";
 const BOOT_CONFIG_TIMEOUT_MS = 12000;
 const SUPABASE_SESSION_TIMEOUT_MS = 8000;
 const HEALTH_PROBE_TIMEOUT_MS = 8000;
-const HEALTH_PROBE_INTERVAL_MS = 6000;
+const HEALTH_PROBE_INTERVAL_MS = 30000;
 const HEALTH_FAILURE_THRESHOLD = 8;
 const HEALTH_RECENT_SUCCESS_GRACE_MS = 45000;
 const OWNER_EMAILS = new Set(
@@ -610,7 +653,11 @@ export const PUBLIC_PLAN_FEATURES_FALLBACK: PlanFeatureMap = {
     studio_pro_15k: ['studio_agent', 'openrouter', 'fal_render', 'elevenlabs', 'priority_queue'],
 };
 export const PUBLIC_TOPUP_PACKS_FALLBACK: TopupPack[] = [
+    { price_id: 'uc_starter', pack: 'starter', credits: 300, price_usd: 10 },
     { price_id: 'uc_reload', pack: 'reload', credits: 1000, price_usd: 25 },
+    { price_id: 'uc_creator', pack: 'creator', credits: 2200, price_usd: 50 },
+    { price_id: 'uc_studio', pack: 'studio', credits: 5000, price_usd: 100 },
+    { price_id: 'uc_scale', pack: 'scale', credits: 14000, price_usd: 250 },
 ];
 
 export interface AuthContextType {
@@ -650,7 +697,7 @@ export interface AuthContextType {
     signInWithGoogle: () => Promise<string | null>;
     signUp: (email: string, password: string) => Promise<string | null>;
     signOut: () => Promise<void>;
-    checkout: (plan: string) => Promise<string | null>;
+    checkout: (plan: string, options?: { trial?: boolean }) => Promise<string | null>;
     checkoutTopup: (priceId: string, preferredMethod?: 'card' | 'paypal') => Promise<string | null>;
     checkoutDemo: () => Promise<void>;
     manageBilling: () => Promise<string | null>;
@@ -749,6 +796,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         setOwnerOverride(true);
         setStudioLaneAccess(ownerLaneAccess);
         setLongformOwnerBeta(true);
+        setMonthlyCreditsRemaining(999999);
+        setTopupCreditsRemaining(999999);
+        setCreditsTotalRemaining(999999);
+        setRequiresTopup(false);
     }, []);
     const normalizeViewerPlanId = useCallback((rawValue: unknown, fallback: Plan = 'free'): Plan => {
         const normalized = String(rawValue || '').trim().toLowerCase();
@@ -845,7 +896,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             return;
         }
         try {
-            const res = await fetch(`${API}/api/me`, {
+            const res = await fetch(resolveStudioBackendUrl('/api/me'), {
                 headers: { Authorization: `Bearer ${session.access_token}` },
             });
             if (!res.ok) throw new Error('Unable to refresh account state');
@@ -870,11 +921,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             setMonthlyCreditsRemaining(Number(data.included_credits_remaining ?? data.animated_credits_remaining ?? data.monthly_credits_remaining ?? 0));
             setTopupCreditsRemaining(Number(data.credit_wallet_balance ?? data.animated_topup_credits_remaining ?? data.topup_credits_remaining ?? 0));
             setCreditsTotalRemaining(Number(data.animated_credits_total_remaining ?? data.credits_total_remaining ?? 0));
-            setRequiresTopup(Boolean(data.requires_topup));
+            setRequiresTopup(Boolean(data.requires_topup) && !Boolean(data.unlimited));
             setDemoAccess(data.demo_access || false);
             if (data.demo_price_id) setDemoPriceId(data.demo_price_id);
             setDemoComingSoon(data.demo_coming_soon !== false);
-            if (isOwner) {
+            if (isOwner || Boolean(data.unlimited) || Boolean(data.owner_override)) {
                 applyOwnerAccess();
             }
         } catch {
@@ -904,6 +955,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }, [session?.access_token, session?.user?.id, backendOffline, applyOwnerAccess, normalizeViewerPlanId]);
 
     useEffect(() => {
+        if (isOwnerEmail(session?.user?.email)) {
+            applyOwnerAccess();
+        }
+    }, [session?.user?.email, applyOwnerAccess]);
+
+    useEffect(() => {
         let cancelled = false;
         (async () => {
             let timeout: ReturnType<typeof setTimeout> | null = null;
@@ -912,7 +969,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             let sbCreated = false;
             try {
                 timeout = setTimeout(() => controller.abort(), BOOT_CONFIG_TIMEOUT_MS);
-                const res = await fetch(`${API}/api/config`, { signal: controller.signal });
+                const res = await fetch(resolveStudioBackendUrl('/api/config'), { signal: controller.signal });
                 const { data: cfg } = await readJsonResponse<any>(res);
                 if (!cfg || typeof cfg !== "object") throw new Error("Invalid config payload");
                 if (cancelled) return;
@@ -1009,10 +1066,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         };
         const probe = async () => {
             if (isLocalDevHost && !API) return;
+            if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
             const controller = new AbortController();
             const timeout = setTimeout(() => controller.abort(), HEALTH_PROBE_TIMEOUT_MS);
             try {
-                const res = await fetch(`${API}/api/health`, { signal: controller.signal });
+                const res = await fetch(resolveStudioBackendUrl('/api/health'), { signal: controller.signal });
                 if (!res.ok) {
                     markProbeFailure();
                     return;
@@ -1058,9 +1116,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         };
         probe();
         const id = setInterval(probe, HEALTH_PROBE_INTERVAL_MS);
+        const onVisible = () => {
+            if (document.visibilityState === 'visible') void probe();
+        };
+        document.addEventListener('visibilitychange', onVisible);
         return () => {
             cancelled = true;
             clearInterval(id);
+            document.removeEventListener('visibilitychange', onVisible);
         };
     }, []);
 
@@ -1170,7 +1233,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         pendingAuthIntentRef.current = '';
     }, [session]);
 
-    const checkout = useCallback(async (planName: string): Promise<string | null> => {
+    const checkout = useCallback(async (planName: string, options?: { trial?: boolean }): Promise<string | null> => {
         if (!session) return "Missing membership checkout details";
         const normalizedPlanName = String(planName || '').trim().toLowerCase();
         const isMembershipCheckout = normalizedPlanName === 'membership';
@@ -1198,7 +1261,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
                     Authorization: `Bearer ${session.access_token}`,
                 },
                 body: JSON.stringify(
-                    { product: 'membership', plan: targetPlanId }
+                    { product: 'membership', plan: targetPlanId, trial: Boolean(options?.trial) }
                 ),
             });
             const { data } = await readJsonResponse<any>(res);

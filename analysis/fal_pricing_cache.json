@@ -1,5 +1,5 @@
 {
-  "fetched_at": 1780048601.4899578,
+  "fetched_at": 1784074716.9294982,
   "source": "fal_api",
   "error": null,
   "prices": {
@@ -7,6 +7,12 @@
       "endpoint_id": "fal-ai/ltx-video-13b-distilled/image-to-video",
       "unit_price": 0.04,
       "unit": "units",
+      "currency": "USD"
+    },
+    "fal-ai/ltxv-13b-098-distilled/image-to-video": {
+      "endpoint_id": "fal-ai/ltxv-13b-098-distilled/image-to-video",
+      "unit_price": 0.02,
+      "unit": "seconds",
       "currency": "USD"
     },
     "fal-ai/bytedance/seedream/v4.5/text-to-image": {
@@ -50,10 +56,23 @@
       "unit_price": 0.005,
       "unit": "seconds",
       "currency": "USD"
+    },
+    "bytedance/seedance-2.0/image-to-video": {
+      "endpoint_id": "bytedance/seedance-2.0/image-to-video",
+      "unit_price": 0.014,
+      "unit": "units",
+      "currency": "USD"
+    },
+    "fal-ai/wan/v2.2-a14b/image-to-video": {
+      "endpoint_id": "fal-ai/wan/v2.2-a14b/image-to-video",
+      "unit_price": 0.08,
+      "unit": "seconds",
+      "currency": "USD"
     }
   },
   "endpoints": {
     "ltx_13b_distilled": "fal-ai/ltx-video-13b-distilled/image-to-video",
+    "ltx_098_distilled": "fal-ai/ltxv-13b-098-distilled/image-to-video",
     "seedream_v45": "fal-ai/bytedance/seedream/v4.5/text-to-image",
     "seedream_v45_edit": "fal-ai/bytedance/seedream/v4.5/edit",
     "mmaudio_v2": "fal-ai/mmaudio-v2/text-to-audio",
@@ -61,19 +80,26 @@
     "kling_v21_standard": "fal-ai/kling-video/v2.1/standard/image-to-video",
     "kling_v21_pro": "fal-ai/kling-video/v2.1/pro/image-to-video",
     "pixverse_v6": "fal-ai/pixverse/v6/image-to-video",
+    "seedance_20_i2v": "bytedance/seedance-2.0/image-to-video",
+    "wan_i2v": "fal-ai/wan/v2.2-a14b/image-to-video",
     "minimax_speech_zt": "fal-ai/minimax/speech-02-hd"
   },
   "fallback_usd": {
-    "ltx_13b_distilled_per_clip": 0.04,
+    "ltx_13b_distilled_per_second": 0.04,
+    "ltx_098_distilled_per_second": 0.02,
     "seedream_v45_per_image": 0.04,
+    "seedream_v45_edit_per_image": 0.04,
     "mmaudio_v2_per_second": 0.001,
     "fal_minimax_per_1k_chars": 0.1,
     "elevenlabs_per_1k_chars": 0.1,
     "kling_v21_standard_per_second": 0.056,
     "kling_v21_pro_per_second": 0.098,
     "pixverse_v6_per_second": 0.045,
+    "seedance_20_i2v_per_second": 0.03,
+    "wan_i2v_per_second": 0.05,
     "ernie_per_image": 0.03,
     "cushion_pct": 0.15,
+    "shortform_compose_allowance_usd": 0.05,
     "grok_chapter_expand": 0.0,
     "grok_outline": 0.0
   }

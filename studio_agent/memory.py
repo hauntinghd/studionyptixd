@@ -643,6 +643,31 @@ def observe_tool_result(
         _remember_public_youtube_evidence(uid, tool_name, args, data)
         _remember_recommended_topics(uid, tool_name, args, data)
         return
+    if tool_name in {"analyze_reference_video", "analyze_competitor_video", "poll_render_job", "retry_reference_analysis"} and isinstance(data, dict):
+        if data.get("error") and not (data.get("pacing") or data.get("storytelling") or data.get("visual_summary")):
+            _remember_scoped_tool_lesson(
+                uid,
+                f"Reference/production job issue ({tool_name}): {str(data.get('error'))[:200]}",
+                args=args,
+                data=data,
+                kind="production_watchout",
+                source=tool_name,
+                importance=4,
+            )
+            return
+        storytelling = data.get("storytelling") if isinstance(data.get("storytelling"), dict) else {}
+        hook = str(storytelling.get("hook") or "").strip()
+        if hook:
+            _remember_scoped_tool_lesson(
+                uid,
+                f"Reference hook pattern: {hook[:180]}",
+                args=args,
+                data=data,
+                kind="reference_hook",
+                source=tool_name,
+                importance=4,
+            )
+        return
     if tool_name == "refresh_channel_intelligence" and isinstance(data, dict):
         learnings = []
         learnings.extend([str(x) for x in (data.get("packaging_learnings") or [])[:3]])

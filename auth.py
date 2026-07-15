@@ -89,34 +89,40 @@ def build_auth_helpers(
             "email": str(data.get("email", "") or "").strip(),
         }
 
-    async def get_current_user(
-        cred: HTTPAuthorizationCredentials = Depends(security),
-    ) -> Optional[dict]:
-        if cred is None:
-            return None
-        token = str(getattr(cred, "credentials", "") or "").strip()
-        if not token:
+    async def resolve_user_from_access_token(token: str) -> Optional[dict]:
+        """Resolve a Supabase access token to a user dict (no FastAPI Depends).
+
+        Used by HTTP auth and Studio Agent WebSocket dictation — same identity path.
+        """
+        cleaned = str(token or "").strip()
+        if cleaned.lower().startswith("bearer "):
+            cleaned = cleaned[7:].strip()
+        if not cleaned:
             return None
 
         user_id = ""
         email = ""
-        try:
-            payload = jwt.decode(
-                token,
-                supabase_jwt_secret,
-                algorithms=["HS256"],
-                options={"verify_aud": False},
-            )
-            role = _extract_role(payload)
-            if role == "anon":
-                return None
-            user_id = str(payload.get("sub", "") or payload.get("id", "") or "").strip()
-            email = str(payload.get("email", "") or "").strip()
-        except jwt.exceptions.PyJWTError:
-            payload = None
+        secret = str(supabase_jwt_secret or "").strip()
+        if secret:
+            try:
+                payload = jwt.decode(
+                    cleaned,
+                    secret,
+                    algorithms=["HS256"],
+                    options={"verify_aud": False},
+                )
+                role = _extract_role(payload)
+                if role == "anon":
+                    return None
+                user_id = str(payload.get("sub", "") or payload.get("id", "") or "").strip()
+                email = str(payload.get("email", "") or "").strip()
+            except jwt.exceptions.PyJWTError:
+                user_id = ""
+                email = ""
 
         if not user_id:
-            resolved = await _resolve_user_via_supabase(token)
+            # Always fall back to Supabase Auth API (handles rotated secrets / ES keys).
+            resolved = await _resolve_user_via_supabase(cleaned)
             if not resolved:
                 return None
             user_id = str(resolved.get("id", "") or "").strip()
@@ -156,17 +162,19 @@ def build_auth_helpers(
 
         return {"id": user_id, "email": email, "plan": plan}
 
+    async def get_current_user(
+        cred: HTTPAuthorizationCredentials = Depends(security),
+    ) -> Optional[dict]:
+        if cred is None:
+            return None
+        token = str(getattr(cred, "credentials", "") or "").strip()
+        return await resolve_user_from_access_token(token)
+
     async def get_current_user_from_request(request: Request) -> Optional[dict]:
         token = _extract_request_token(request)
         if not token:
             return None
-
-        class _FakeCred:
-            credentials = ""
-
-        fake = _FakeCred()
-        fake.credentials = token
-        return await get_current_user(fake)
+        return await resolve_user_from_access_token(token)
 
     async def require_auth(
         request: Request,
@@ -178,5 +186,8 @@ def build_auth_helpers(
         if not user:
             raise HTTPException(401, "Authentication required. Please sign in.")
         return user
+
+    # Attach token resolver so WebSocket paths can call it without Depends/FakeCred.
+    get_current_user.__resolve_token__ = resolve_user_from_access_token  # type: ignore[attr-defined]
 
     return security, get_current_user, get_current_user_from_request, require_auth

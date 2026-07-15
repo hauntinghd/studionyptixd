@@ -7,14 +7,21 @@
  *         outfit, props only — identity never drifts).
  */
 import { useCallback, useContext, useEffect, useRef, useState } from 'react';
-import { Sparkles, Wand2, Image as ImageIcon, Music, Loader2, X } from 'lucide-react';
+import { Sparkles, Wand2, Image as ImageIcon, Music, Loader2, X, Upload, RefreshCw } from 'lucide-react';
 import { AuthContext } from '../shared';
+import { loadImageModelPref, saveImageModelPref } from '../lib/productionModelPrefs';
+import { productionIdempotencyKey } from '../lib/productionIdempotency';
 import NichePickerStrip from '../components/create/NichePickerStrip';
 import type { NicheId } from '../lib/studioProduct';
 
 type Tab = 'script' | 'scenes' | 'audio';
-/** Stills always use canonical master + Seedream 4.5 edit (backend ignores other models). */
-const CANONICAL_IMAGE_MODEL = 'seedream_edit' as const;
+
+const IMAGE_MODEL_OPTIONS = [
+    { id: 'seedream_edit', label: 'Seedream 4.5 Edit' },
+    { id: 'grok_imagine', label: 'Grok Imagine Quality' },
+    { id: 'grok_imagine_standard', label: 'Grok Imagine' },
+    { id: 'ernie_image', label: 'ERNIE-Image' },
+] as const;
 
 type VideoModel = 'ltx_budget' | 'seedance' | 'pixverse' | 'kling_pro';
 
@@ -43,6 +50,13 @@ interface RenderedScene {
     scene_action: string;
     motion_prompt: string;
     image_path: string;
+    edit_prompt?: string;
+}
+
+interface SkeletonReferenceState {
+    previewUrl: string;
+    payload: string;
+    name: string;
 }
 
 interface CreatePanelProps {
@@ -81,6 +95,7 @@ export default function CreatePanel({
     const [captionFont, setCaptionFont] = useState('Komika Axis');
     const [voices, setVoices] = useState<Voice[]>([]);
     const [videoModel, setVideoModel] = useState<VideoModel>(renderTier === 'ship' ? 'kling_pro' : 'seedance');
+    const [imageModel, setImageModel] = useState(() => loadImageModelPref('seedream_edit'));
 
     useEffect(() => {
         setVideoModel(renderTier === 'ship' ? 'kling_pro' : 'seedance');
@@ -96,7 +111,14 @@ export default function CreatePanel({
     const [renderedScenes, setRenderedScenes] = useState<RenderedScene[]>([]);
     const [scenesProgress, setScenesProgress] = useState<{ done: number; total: number }>({ done: 0, total: 0 });
     const [sceneError, setSceneError] = useState<string>('');
+    const [scenesJobId, setScenesJobId] = useState('');
+    const [skeletonReference, setSkeletonReference] = useState<SkeletonReferenceState | null>(null);
+    const [referenceUploading, setReferenceUploading] = useState(false);
     const scenesAbortRef = useRef<AbortController | null>(null);
+    const referenceInputRef = useRef<HTMLInputElement>(null);
+    const openReferencePicker = useCallback(() => {
+        referenceInputRef.current?.click();
+    }, []);
 
     // Fetch voices once we have an auth token (voices route is auth-gated).
     useEffect(() => {
@@ -115,6 +137,89 @@ export default function CreatePanel({
     const estimatedDuration = Math.round(scriptCharCount / 15); // rough: 15 chars/sec
     const estimatedScenes = Math.max(1, Math.ceil(estimatedDuration / 5));
 
+    const uploadSkeletonReference = useCallback(async (file: File) => {
+        if (!accessToken) {
+            alert('You must be signed in to upload a skeleton reference.');
+            return;
+        }
+        setReferenceUploading(true);
+        try {
+            const form = new FormData();
+            form.append('reference_image', file);
+            const r = await fetch('/api/skeleton-ai/reference', {
+                method: 'POST',
+                headers: { Authorization: `Bearer ${accessToken}` },
+                body: form,
+            });
+            const d = await r.json().catch(() => ({}));
+            if (!r.ok) {
+                throw new Error(String(d?.detail || d?.error || `upload failed: ${r.status}`));
+            }
+            const payload = String(d.reference_image || d.reference_image_url || '').trim();
+            if (!payload) throw new Error('upload returned no reference image');
+            const previewUrl = URL.createObjectURL(file);
+            setSkeletonReference({ previewUrl, payload, name: file.name });
+        } catch (e) {
+            const err = e as Error;
+            setSceneError(err.message || String(err));
+        } finally {
+            setReferenceUploading(false);
+        }
+    }, [accessToken]);
+
+    const onReferenceFileChange = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
+        const file = event.target.files?.[0];
+        if (file) void uploadSkeletonReference(file);
+        event.target.value = '';
+    }, [uploadSkeletonReference]);
+
+    const updateRenderedScene = useCallback((beatIndex: number, patch: Partial<RenderedScene>) => {
+        setRenderedScenes((prev) => prev.map((scene) => (
+            scene.beat_index === beatIndex ? { ...scene, ...patch } : scene
+        )));
+    }, []);
+
+    const regenerateScene = useCallback(async (scene: RenderedScene) => {
+        if (!accessToken || !scenesJobId) return;
+        setScenesGenerating(true);
+        setSceneError('');
+        try {
+            const commandId = productionIdempotencyKey(`skeleton-scene-${scenesJobId}-${scene.beat_index}`);
+            const r = await fetch('/api/skeleton-ai/scenes/regenerate', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    Authorization: `Bearer ${accessToken}`,
+                    'X-Idempotency-Key': commandId,
+                },
+                body: JSON.stringify({
+                    job_id: scenesJobId,
+                    beat_index: scene.beat_index,
+                    outfit: scene.outfit,
+                    scene_action: scene.scene_action,
+                    motion_prompt: scene.motion_prompt,
+                    reference_image: skeletonReference?.payload || undefined,
+                }),
+            });
+            const d = await r.json().catch(() => ({}));
+            if (!r.ok) {
+                throw new Error(String(d?.detail || d?.error || `regenerate failed: ${r.status}`));
+            }
+            if (d.scene) {
+                const nextScene = d.scene as RenderedScene;
+                updateRenderedScene(scene.beat_index, {
+                    ...nextScene,
+                    image_path: `${nextScene.image_path}?t=${Date.now()}`,
+                });
+            }
+        } catch (e) {
+            const err = e as Error;
+            setSceneError(err.message || String(err));
+        } finally {
+            setScenesGenerating(false);
+        }
+    }, [accessToken, scenesJobId, skeletonReference?.payload, updateRenderedScene]);
+
     // Generate Scenes (stills only) — Korpi-style SSE streaming. Each scene
     // appears in the gallery the moment fal returns it. Stop button cancels
     // mid-flight via AbortController.
@@ -127,24 +232,36 @@ export default function CreatePanel({
             alert('You must be signed in to generate scenes.');
             return;
         }
+        if (!skeletonReference?.payload) {
+            alert('Upload your skeleton reference image first — this locks identity like KORPI custom niche creator.');
+            return;
+        }
         // Reset state for a fresh run.
         setScenesGenerating(true);
         setRenderedScenes([]);
         setSceneError('');
+        setScenesJobId('');
         setScenesProgress({ done: 0, total: 0 });
 
         const controller = new AbortController();
         scenesAbortRef.current = controller;
 
         try {
+            const commandId = productionIdempotencyKey('skeleton-scenes');
             const r = await fetch('/api/skeleton-ai/scenes', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
                     Accept: 'text/event-stream',
                     Authorization: `Bearer ${accessToken}`,
+                    'X-Idempotency-Key': commandId,
                 },
-                body: JSON.stringify({ script, image_model: CANONICAL_IMAGE_MODEL, category: activeCategory }),
+                body: JSON.stringify({
+                    script,
+                    image_model: imageModel,
+                    category: activeCategory,
+                    reference_image: skeletonReference.payload,
+                }),
                 signal: controller.signal,
             });
             if (!r.ok || !r.body) {
@@ -176,6 +293,7 @@ export default function CreatePanel({
                     let payload: any;
                     try { payload = JSON.parse(dataStr); } catch { continue; }
                     if (currentEvent === 'meta') {
+                        if (payload.job_id) setScenesJobId(String(payload.job_id));
                         setScenesProgress({ done: 0, total: Number(payload.total || 0) });
                     } else if (currentEvent === 'scene') {
                         setRenderedScenes((prev) => {
@@ -200,7 +318,7 @@ export default function CreatePanel({
             setScenesGenerating(false);
             scenesAbortRef.current = null;
         }
-    }, [script, accessToken, activeCategory]);
+    }, [script, accessToken, activeCategory, skeletonReference?.payload]);
 
     const stopGenerateScenes = useCallback(() => {
         scenesAbortRef.current?.abort();
@@ -216,19 +334,25 @@ export default function CreatePanel({
             alert('You must be signed in to generate.');
             return;
         }
+        if (!skeletonReference?.payload) {
+            alert('Upload your skeleton reference image before full render.');
+            return;
+        }
         setGenerating(true);
         try {
+            const commandId = productionIdempotencyKey('skeleton-generate');
             const r = await fetch('/api/skeleton-ai/generate', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
                     Authorization: `Bearer ${accessToken}`,
+                    'X-Idempotency-Key': commandId,
                 },
                 body: JSON.stringify({
                     category: activeCategory,
                     script_override: script,
                     render_tier: renderTier,
-                    image_model: CANONICAL_IMAGE_MODEL,
+                    image_model: imageModel,
                     voice_id: voiceId,
                     voice_speed: voiceSpeed,
                     voice_pitch: voicePitch,
@@ -236,6 +360,7 @@ export default function CreatePanel({
                     caption_font: captionFont,
                     tier: videoModel === 'kling_pro' ? 'premium' : 'standard',
                     video_model: videoModel,
+                    reference_image: skeletonReference.payload,
                 }),
             });
             const d = await r.json();
@@ -260,13 +385,18 @@ export default function CreatePanel({
                 setGeneratedVideoUrl(d.video_path);
                 return;
             }
+            if (r.ok && d.job_id) {
+                setScenesJobId(String(d.job_id));
+                setSceneError('Production queued. Studio is building the staged visual proof for review.');
+                return;
+            }
             const msg = typeof d.detail === 'string' ? d.detail
                 : (d.detail?.code || d.error || `HTTP ${r.status}`);
             alert(`Generation failed: ${msg}`);
         } finally {
             setGenerating(false);
         }
-    }, [script, voiceId, voiceSpeed, voicePitch, voiceLang, captionFont, videoModel, accessToken, activeCategory, renderTier]);
+    }, [script, voiceId, voiceSpeed, voicePitch, voiceLang, captionFont, videoModel, accessToken, activeCategory, renderTier, skeletonReference?.payload]);
 
     const tierLabel = renderTier === 'ship' ? 'Ship tier · premium motion' : renderTier === 'documentary' ? 'Documentary lane' : 'Draft tier · fast iteration';
     const scriptHeading = nicheTitle ? `${nicheTitle} script` : 'Narration script';
@@ -311,6 +441,13 @@ export default function CreatePanel({
                     onOpenIdeaModal={() => setIdeaModalOpen(true)}
                 />
             )}
+            <input
+                ref={referenceInputRef}
+                type="file"
+                accept="image/png,image/jpeg,image/webp"
+                className="hidden"
+                onChange={onReferenceFileChange}
+            />
             {tab === 'scenes' && (
                 <ScenesTab
                     charCount={scriptCharCount}
@@ -325,6 +462,17 @@ export default function CreatePanel({
                     scenesProgress={scenesProgress}
                     sceneError={sceneError}
                     accessToken={accessToken}
+                    imageModel={imageModel}
+                    setImageModel={(id) => {
+                        setImageModel(id);
+                        saveImageModelPref(id);
+                    }}
+                    skeletonReference={skeletonReference}
+                    referenceUploading={referenceUploading}
+                    onPickReference={openReferencePicker}
+                    onClearReference={() => setSkeletonReference(null)}
+                    onUpdateScene={updateRenderedScene}
+                    onRegenerateScene={regenerateScene}
                 />
             )}
             {tab === 'audio' && (
@@ -463,6 +611,9 @@ function ScenesTab({
     charCount, duration, estimatedScenes, scriptValid,
     onGenerateScenes, onStopGenerateScenes, onGenerateAndAnimate,
     scenesGenerating, renderedScenes, scenesProgress, sceneError, accessToken,
+    imageModel, setImageModel,
+    skeletonReference, referenceUploading, onPickReference,
+    onClearReference, onUpdateScene, onRegenerateScene,
 }: {
     charCount: number;
     duration: number;
@@ -476,18 +627,70 @@ function ScenesTab({
     scenesProgress: { done: number; total: number };
     sceneError: string;
     accessToken: string;
+    imageModel: string;
+    setImageModel: (id: string) => void;
+    skeletonReference: SkeletonReferenceState | null;
+    referenceUploading: boolean;
+    onPickReference: () => void;
+    onClearReference: () => void;
+    onUpdateScene: (beatIndex: number, patch: Partial<RenderedScene>) => void;
+    onRegenerateScene: (scene: RenderedScene) => void;
 }) {
     return (
         <section className="flex flex-col gap-4">
             <h2 className="text-lg font-semibold text-white">Generate Scenes</h2>
 
             <div className="rounded-md border border-violet-500/30 bg-violet-500/10 px-3 py-3">
-                <div className="text-sm font-semibold text-white">Canonical Skeleton (locked)</div>
+                <div className="text-sm font-semibold text-white">Skeleton Reference (required)</div>
                 <p className="text-xs text-zinc-400 mt-1">
-                    Every scene uses the same Studio skeleton from our master reference. Seedream 4.5 Edit
-                    changes only the background, props, and outfit — the character never drifts.
+                    Upload your approved skeleton image first — same as KORPI custom niche creator.
+                    Seedream 4.5 Edit changes only background, props, and outfit while identity stays locked.
                 </p>
+                <div className="mt-3 flex flex-wrap items-center gap-3">
+                    <button
+                        type="button"
+                        onClick={onPickReference}
+                        disabled={referenceUploading}
+                        className="inline-flex items-center gap-2 rounded-md bg-violet-500 px-3 py-2 text-xs font-semibold text-white hover:bg-violet-600 disabled:opacity-50"
+                    >
+                        {referenceUploading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Upload className="h-3.5 w-3.5" />}
+                        {skeletonReference ? 'Replace Reference' : 'Upload Skeleton Reference'}
+                    </button>
+                    {skeletonReference && (
+                        <button
+                            type="button"
+                            onClick={onClearReference}
+                            className="text-xs text-zinc-400 hover:text-zinc-200"
+                        >
+                            Clear
+                        </button>
+                    )}
+                    {skeletonReference && (
+                        <div className="flex items-center gap-2 rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5">
+                            <img src={skeletonReference.previewUrl} alt="Skeleton reference" className="h-10 w-10 rounded object-cover" />
+                            <span className="text-[11px] text-zinc-300 max-w-[180px] truncate">{skeletonReference.name}</span>
+                        </div>
+                    )}
+                </div>
                 <p className="text-xs text-violet-300 mt-2">~4 credits per scene still</p>
+            </div>
+
+            <div className="rounded-md border border-zinc-800 bg-zinc-950 px-3 py-3">
+                <label className="text-xs font-semibold text-zinc-400 uppercase tracking-wide">
+                    Image model (stills)
+                </label>
+                <select
+                    value={imageModel}
+                    onChange={(e) => setImageModel(e.target.value)}
+                    className="mt-2 w-full rounded-md bg-zinc-900 border border-zinc-700 px-3 py-2 text-sm text-white"
+                >
+                    {IMAGE_MODEL_OPTIONS.map((m) => (
+                        <option key={m.id} value={m.id}>{m.label}</option>
+                    ))}
+                </select>
+                <p className="text-[11px] text-zinc-500 mt-2">
+                    Same preference syncs with Studio Agent and Long-form. Pick before generating stills.
+                </p>
             </div>
 
             <div className="grid grid-cols-3 gap-3">
@@ -507,7 +710,7 @@ function ScenesTab({
                     </button>
                 ) : (
                     <button
-                        disabled={!scriptValid}
+                        disabled={!scriptValid || !skeletonReference}
                         onClick={onGenerateScenes}
                         className="w-full rounded-md bg-violet-500 px-4 py-2.5 text-sm font-semibold text-white hover:bg-violet-600 disabled:bg-zinc-800 disabled:text-zinc-500 disabled:cursor-not-allowed flex items-center justify-center gap-2"
                     >
@@ -549,13 +752,24 @@ function ScenesTab({
                             </button>
                         )}
                     </div>
-                    <SceneGallery scenes={renderedScenes} accessToken={accessToken} />
+                    <SceneGallery
+                        scenes={renderedScenes}
+                        accessToken={accessToken}
+                        scenesGenerating={scenesGenerating}
+                        onUpdateScene={onUpdateScene}
+                        onRegenerateScene={onRegenerateScene}
+                    />
                 </>
             )}
 
             {!scriptValid && (
                 <div className="rounded-md bg-amber-500/10 border border-amber-500/30 px-3 py-2 text-sm text-amber-200">
                     Please add or generate a script on the Script tab before generating scenes.
+                </div>
+            )}
+            {scriptValid && !skeletonReference && (
+                <div className="rounded-md bg-amber-500/10 border border-amber-500/30 px-3 py-2 text-sm text-amber-200">
+                    Upload your skeleton reference image before generating scenes.
                 </div>
             )}
 
@@ -587,7 +801,19 @@ function ScenesProgressBar({ progress, active }: { progress: { done: number; tot
     );
 }
 
-function SceneGallery({ scenes, accessToken }: { scenes: RenderedScene[]; accessToken: string }) {
+function SceneGallery({
+    scenes,
+    accessToken,
+    scenesGenerating,
+    onUpdateScene,
+    onRegenerateScene,
+}: {
+    scenes: RenderedScene[];
+    accessToken: string;
+    scenesGenerating: boolean;
+    onUpdateScene: (beatIndex: number, patch: Partial<RenderedScene>) => void;
+    onRegenerateScene: (scene: RenderedScene) => void;
+}) {
     // Each still is served by an auth-gated endpoint, so we have to fetch
     // with a Bearer header and convert to a blob URL — a plain <img src>
     // can't attach Authorization. Cleanup blobs on unmount/replace.
@@ -620,18 +846,54 @@ function SceneGallery({ scenes, accessToken }: { scenes: RenderedScene[]; access
     }, [scenes, accessToken]);
 
     return (
-        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3 mt-2">
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 mt-2">
             {scenes.map((s) => (
                 <div key={s.beat_index} className="rounded-md overflow-hidden border border-zinc-800 bg-zinc-950">
-                    <div className="aspect-[9/16] bg-zinc-900 flex items-center justify-center">
-                        {blobUrls[s.beat_index] ? (
-                            <img src={blobUrls[s.beat_index]} alt={`Beat ${s.beat_index + 1}`} className="w-full h-full object-cover" />
-                        ) : (
-                            <Loader2 className="h-6 w-6 text-zinc-600 animate-spin" />
-                        )}
+                    <div className="grid grid-cols-[120px_1fr] gap-3 p-3">
+                        <div className="aspect-[9/16] bg-zinc-900 flex items-center justify-center rounded-md overflow-hidden">
+                            {blobUrls[s.beat_index] ? (
+                                <img src={blobUrls[s.beat_index]} alt={`Beat ${s.beat_index + 1}`} className="w-full h-full object-cover" />
+                            ) : (
+                                <Loader2 className="h-6 w-6 text-zinc-600 animate-spin" />
+                            )}
+                        </div>
+                        <div className="flex flex-col gap-2 min-w-0">
+                            <div className="text-[11px] text-zinc-500">
+                                Beat {s.beat_index + 1}
+                            </div>
+                            <label className="text-[10px] uppercase tracking-wide text-zinc-500">Scene action</label>
+                            <textarea
+                                value={s.scene_action}
+                                onChange={(e) => onUpdateScene(s.beat_index, { scene_action: e.target.value })}
+                                rows={3}
+                                className="w-full rounded-md bg-zinc-900 border border-zinc-800 px-2 py-1.5 text-[11px] text-zinc-200 resize-y"
+                            />
+                            <label className="text-[10px] uppercase tracking-wide text-zinc-500">Outfit</label>
+                            <textarea
+                                value={s.outfit}
+                                onChange={(e) => onUpdateScene(s.beat_index, { outfit: e.target.value })}
+                                rows={2}
+                                className="w-full rounded-md bg-zinc-900 border border-zinc-800 px-2 py-1.5 text-[11px] text-zinc-200 resize-y"
+                            />
+                            <label className="text-[10px] uppercase tracking-wide text-zinc-500">Motion prompt</label>
+                            <textarea
+                                value={s.motion_prompt}
+                                onChange={(e) => onUpdateScene(s.beat_index, { motion_prompt: e.target.value })}
+                                rows={2}
+                                className="w-full rounded-md bg-zinc-900 border border-zinc-800 px-2 py-1.5 text-[11px] text-zinc-200 resize-y"
+                            />
+                            <button
+                                type="button"
+                                disabled={scenesGenerating}
+                                onClick={() => onRegenerateScene(s)}
+                                className="inline-flex items-center justify-center gap-1.5 rounded-md border border-zinc-700 px-2.5 py-1.5 text-[11px] font-semibold text-zinc-200 hover:bg-zinc-900 disabled:opacity-40"
+                            >
+                                <RefreshCw className="h-3 w-3" />
+                                Regenerate still
+                            </button>
+                        </div>
                     </div>
-                    <div className="px-2 py-1.5 text-[10px] text-zinc-400 truncate">
-                        <span className="text-zinc-500">{`b${String(s.beat_index).padStart(2, '0')}: `}</span>
+                    <div className="px-3 pb-2 text-[10px] text-zinc-500 truncate border-t border-zinc-900 pt-2">
                         {s.narration}
                     </div>
                 </div>

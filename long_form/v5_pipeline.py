@@ -625,8 +625,10 @@ def _process_scene(
         d.mkdir(parents=True, exist_ok=True)
 
     # 1. Still (seedream) — cached from Stage 1
+    treatment = dict(scene_brief.get("visual_treatment") or {})
+    is_motion_graphic = str(treatment.get("kind") or "") == "motion_graphic"
     still = stills / f"scene_{global_idx:04d}.png"
-    if not still.exists() or still.stat().st_size < 1024:
+    if (not is_motion_graphic) and (not still.exists() or still.stat().st_size < 1024):
         _gen_em_still(scene_brief["scene_prompt"], visual_style, still)
 
     # 2. VO first — clip length follows narration for storytelling sync
@@ -652,8 +654,12 @@ def _process_scene(
         vo_dur = 2.0
 
     # 3. LTX clip — generate at EM_LTX_CLIP_SEC (12s+), trim/slow to VO below
-    clip = clips / f"clip_{sid}_{'i2v' if paid_motion else 'still'}.mp4"
-    if paid_motion:
+    clip = clips / f"clip_{sid}_{'graphic' if is_motion_graphic else ('i2v' if paid_motion else 'still')}.mp4"
+    if is_motion_graphic:
+        from studio_agent.visual_treatment import render_motion_graphic_clip
+        if not clip.exists() or clip.stat().st_size < 1024:
+            render_motion_graphic_clip(treatment, clip, duration_sec=vo_dur + 0.5, fps=fps)
+    elif paid_motion:
         motion = (motion_prompt_hint or "").strip() or "slow camera push-in, subtle parallax"
         _gen_em_clip(still, motion, clip, duration_sec=EM_LTX_CLIP_SEC)
     elif not clip.exists() or clip.stat().st_size < 1024:
@@ -855,6 +861,14 @@ async def run_v5_episode_pipeline(
             global_idx = ch_idx * scenes_per_chapter + local_idx
             scene_briefs.append((ch_idx, local_idx, global_idx, sb))
 
+    from studio_agent.visual_treatment import plan_visual_treatments
+    treatment_plan = plan_visual_treatments(
+        [sb for _, _, _, sb in scene_briefs],
+        channel_key=str(state.get("channel_key") or ""),
+    )
+    for (_, _, _, sb), treatment in zip(scene_briefs, treatment_plan):
+        sb["visual_treatment"] = treatment
+
     # ── Phase 2 — STILLS ONLY (per-scene approval gate, PR #127) ──────────
     # Renders just the seedream still for every scene. The expensive parts
     # of v5 (LTX i2v + ElevenLabs VO + mmaudio SFX + 2-pass loudnorm + scene
@@ -877,7 +891,19 @@ async def run_v5_episode_pipeline(
     def _gen_one_still(triple):
         ci, li, gi, sb = triple
         out = stills_dir / f"scene_{gi:04d}.png"
-        _gen_em_still(sb["scene_prompt"], visual_style, out)
+        treatment = dict(sb.get("visual_treatment") or {})
+        if str(treatment.get("kind") or "") == "motion_graphic":
+            from studio_agent.visual_treatment import render_motion_graphic_clip
+            preview = job_dir / "motion_graphics" / f"preview_{gi:04d}.mp4"
+            render_motion_graphic_clip(treatment, preview, duration_sec=4.0, fps=fps)
+            result = subprocess.run(
+                ["ffmpeg", "-hide_banner", "-loglevel", "warning", "-y", "-ss", "2.0", "-i", str(preview), "-frames:v", "1", str(out)],
+                capture_output=True, text=True,
+            )
+            if result.returncode != 0:
+                raise LFRenderError(f"motion-graphic preview extraction failed: {result.stderr[-300:]}")
+        else:
+            _gen_em_still(sb["scene_prompt"], visual_style, out)
         return gi
 
     # Stills-only concurrency = 6 (each is one seedream call ~5-10s; lower

@@ -31,6 +31,8 @@ from typing import Iterator
 
 FAL_ANYLLM_URL = "https://fal.run/fal-ai/any-llm"
 DEFAULT_MODEL = "anthropic/claude-sonnet-4.5"
+XAI_CHAT_URL = "https://api.x.ai/v1/chat/completions"
+DEFAULT_XAI_SCRIPT_MODEL = "grok-4.20-0309-non-reasoning"
 
 
 class GrokAuthError(RuntimeError):
@@ -42,6 +44,22 @@ class GrokAuthError(RuntimeError):
 
 class GrokRateLimitError(RuntimeError):
     """Raised after all 429 retries have been exhausted."""
+
+
+def _xai_output_token_budget(requested: int) -> int:
+    """Honor caller max_tokens for long-form chapter expansion; keep short scripts fast."""
+    req = int(requested or 1500)
+    if req <= 2500:
+        return max(200, min(req, 2500))
+    return max(200, min(req, 32768))
+
+
+def _xai_timeout_seconds(max_tokens: int) -> float:
+    budget = _xai_output_token_budget(max_tokens)
+    if budget <= 2500:
+        return 45.0
+    # Conservative ~8 tok/s floor; cap at 10 minutes for very long chapters.
+    return min(600.0, max(90.0, budget / 8.0))
 
 
 class GrokClient:
@@ -62,6 +80,8 @@ class GrokClient:
         if not self.api_key:
             raise GrokAuthError("FAL_AI_KEY not set in env")
         self.model = model
+        self.xai_api_key = str(os.getenv("XAI_API_KEY") or "").strip()
+        self.xai_model = str(os.getenv("STUDIO_FAST_SCRIPT_MODEL") or DEFAULT_XAI_SCRIPT_MODEL).strip()
         self._headers = {
             "Authorization": f"Key {self.api_key}",
             "Content-Type": "application/json",
@@ -90,6 +110,35 @@ class GrokClient:
         # fal any-llm does NOT accept max_tokens — its router infers
         # from the underlying provider's defaults. The arg is preserved
         # in the signature so existing callers don't break.
+        # Script and scene planning are latency-sensitive. Use direct xAI
+        # first, then preserve fal any-llm as a transparent fallback.
+        if self.xai_api_key:
+            try:
+                token_budget = _xai_output_token_budget(max_tokens)
+                timeout_s = _xai_timeout_seconds(max_tokens)
+                with httpx.Client(timeout=timeout_s) as c:
+                    direct = c.post(
+                        XAI_CHAT_URL,
+                        headers={"Authorization": f"Bearer {self.xai_api_key}", "Content-Type": "application/json"},
+                        json={
+                            "model": self.xai_model,
+                            "messages": [
+                                {"role": "system", "content": system},
+                                {"role": "user", "content": user},
+                            ],
+                            "temperature": max(0.2, float(temperature)),
+                            "max_tokens": token_budget,
+                        },
+                    )
+                direct.raise_for_status()
+                direct_payload = direct.json()
+                choices = direct_payload.get("choices") if isinstance(direct_payload, dict) else None
+                content = ((choices or [{}])[0].get("message") or {}).get("content")
+                if content:
+                    return str(content).strip()
+            except Exception:
+                pass
+
         payload = {
             "model": self.model,
             "system_prompt": system,
@@ -97,7 +146,7 @@ class GrokClient:
             "temperature": max(0.2, float(temperature)),
         }
         max_retries = 3
-        backoff_seconds = [30, 60, 120]
+        backoff_seconds = [2, 5, 10]
         transient_backoff_seconds = [2, 5, 10]
 
         for attempt in range(max_retries + 1):

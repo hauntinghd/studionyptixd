@@ -90,6 +90,26 @@ def build_health_payload(
         wan_t2i_unet = str(wan22_t2i_availability_cache.get("unet_name", "") or "")
         provider_label = " > ".join(provider_order)
         backend_commit, frontend_bundle = read_deploy_meta()
+        runpod_production = False
+        runpod_longform = False
+        runpod_control_ready = False
+        runpod_storage_ready = False
+        try:
+            from studio_agent.runpod_bridge import runpod_configured
+            from studio_agent.runpod_contract import (
+                runpod_longform_enabled,
+                runpod_production_enabled,
+            )
+            from studio_agent.runpod_storage import configured as runpod_storage_configured
+
+            runpod_production = bool(runpod_production_enabled())
+            runpod_longform = bool(runpod_longform_enabled())
+            runpod_control_ready = bool(runpod_configured())
+            runpod_storage_ready = bool(runpod_storage_configured())
+        except Exception:
+            # Health must remain available even when the optional RunPod plane
+            # is intentionally disabled or only partially configured.
+            pass
         fal_video_enabled = bool(FAL_AI_KEY)
         runway_video_enabled = bool(RUNWAY_API_KEY)
         if runway_video_enabled and fal_video_enabled:
@@ -150,6 +170,11 @@ def build_health_payload(
             "frontend_bundle": frontend_bundle,
             "queue_mode": "redis" if (REDIS_QUEUE_ENABLED and bool(REDIS_URL)) else "inprocess",
             "force_720p_only": FORCE_720P_ONLY,
+            "runpod_production_enabled": runpod_production,
+            "runpod_longform_enabled": runpod_longform,
+            "runpod_control_configured": runpod_control_ready,
+            "runpod_storage_configured": runpod_storage_ready,
+            "runpod_configured": bool(runpod_control_ready and runpod_storage_ready),
         }
 
     return health_payload

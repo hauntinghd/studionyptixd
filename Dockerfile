@@ -4,7 +4,9 @@ WORKDIR /frontend
 COPY ViralShorts-App/package*.json ./
 RUN npm ci
 COPY ViralShorts-App/ ./
-RUN npm run build
+ARG FRONTEND_BUILD_ID=studio-agent-local
+ARG GIT_SHA=unknown
+RUN echo "frontend build ${FRONTEND_BUILD_ID} git=${GIT_SHA}" && npm run build
 
 FROM python:3.11-slim
 
@@ -55,7 +57,20 @@ RUN sed -i 's/\r$//' ./ops/run_render_service.sh \
 
 RUN mkdir -p generated_videos temp_assets demo_uploads
 
+ARG FRONTEND_BUILD_ID=studio-agent-local
+ARG GIT_SHA=unknown
 ENV PORT=10000
+ENV STUDIO_BUILD_ID=${FRONTEND_BUILD_ID}
+ENV STUDIO_GIT_SHA=${GIT_SHA}
 EXPOSE 10000
 
-CMD uvicorn backend:app --host 0.0.0.0 --port $PORT
+# Keep independent API workers available while one Studio Agent stream performs
+# synchronous provider polling. A single Uvicorn worker let a long FAL/xAI
+# regeneration block health checks, causing Fly to withdraw the only machine
+# and disconnect the browser stream.
+ENV WEB_CONCURRENCY=4
+
+# Write deploy meta into the image so /api/health can prove which snapshot is live.
+RUN printf '{"build_id":"%s","git_sha":"%s"}\n' "$STUDIO_BUILD_ID" "$STUDIO_GIT_SHA" > /app/ops/deploy_meta.json || true
+
+CMD uvicorn backend:app --host 0.0.0.0 --port $PORT --workers ${WEB_CONCURRENCY:-4}

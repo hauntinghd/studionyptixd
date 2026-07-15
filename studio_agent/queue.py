@@ -1,8 +1,9 @@
 """
-Distributed concurrency gate for Studio Agent (OpenRouter chat + fal tool spawns).
+Distributed concurrency gate for Studio Agent production/tool operations.
 
-When active turns exceed STUDIO_AGENT_MAX_CONCURRENT (default 250), additional
-chat/approve requests block until a slot frees (up to STUDIO_AGENT_QUEUE_MAX_WAIT_SEC).
+Ordinary planning and conversation stay on the control plane without queue
+accounting. Capacity-bound production operations acquire a slot and block until
+one frees (up to STUDIO_AGENT_QUEUE_MAX_WAIT_SEC).
 
 Configure via env:
   STUDIO_AGENT_MAX_CONCURRENT=250   # start queueing above this (100–500 typical)
@@ -107,11 +108,11 @@ def should_bypass_queue(
     operation: str = "chat",
     unlimited: bool = False,
 ) -> bool:
-    """Owners and fast paths (approve/reject) should not block behind chat turns."""
+    """Keep control-plane conversation and existing fast paths out of production accounting."""
     if unlimited or str(plan or "").strip().lower() in ("owner", "admin"):
         return True
     op = str(operation or "chat").strip().lower()
-    return op in ("approve", "reject", "read", "retry_production")
+    return op in ("chat", "approve", "reject", "read", "retry_production")
 
 
 @dataclass

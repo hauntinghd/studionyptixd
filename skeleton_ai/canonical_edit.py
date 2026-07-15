@@ -1,9 +1,10 @@
 """
 Canonical Skeleton — Seedream v4.5 edit lock.
 
-One approved master still (gym dumbbell reference) is the identity anchor.
-Every scene is an *edit* of that master: change background, props, and wardrobe
+One approved master still (empty-hands dark-studio reference) is the identity anchor.
+Every scene is an *edit* of that master: change background, pose, and optional wardrobe
 only. Mesh, skull, glass shell, and eyes stay fixed — no per-scene T2I drift.
+Do not invent sports gear (basketball, dumbbells) unless the topic is sports/fitness.
 
 Pattern mirrors long_form/pb_lies_cast_kit.py (master + roster + scene edits).
 """
@@ -43,10 +44,147 @@ IDENTITY_LOCK = (
     "or replace any arm, hand, leg, or foot with human anatomy."
 )
 
+SKELETON_EYE_LOCK = (
+    "EYE RULE: preserve the reference's same two proportional natural eyeballs inside the skull "
+    "sockets only. Do not enlarge, stylize, glow, duplicate, remove, or place eyeballs elsewhere."
+)
+
+SKELETON_TORSO_LOCK = (
+    "TORSO RULE: the ribcage shows clean ivory ribs and sternum only under the clear glass shell. "
+    "No eyeballs, no second face, no organs rendered as eyes, no breasts-as-eyes, no spheres with "
+    "iris/pupil inside the chest. Soft amber lighting may glow along the spine/bones as light only — "
+    "never as literal eyes or orbs."
+)
+
+SKELETON_HEAD_LOCK = (
+    "HEAD RULE: closed ivory skull only. No exposed brain, no brain outside the cranium, "
+    "no circuit boards, neural network wires, LEDs, cyber implants, halo rings, or tech "
+    "decorations on the skull. Glass shell may cover the skull; identity stays anatomical."
+)
+
+SKELETON_HOST_LOCK = (
+    "HOST RULE: exactly one continuous MrSkeleWelly host identity across every scene. "
+    "Do not cast multiple human personas (caveman, woman in sweater, streetwear guy) as "
+    "separate characters — wardrobe may change only as simple clothing ON the same skeleton. "
+    "Prefer simple dark turtleneck + dark trousers OR no clothing. Never animal-hide tribal "
+    "costumes, ballet flats, gold bracelets, or fashion-model looks unless the user explicitly asks."
+)
+
+SKELETON_HAND_LOCK = (
+    "HAND RULE: exactly two hands attached to the two arms, five fingers per hand, "
+    "no third hand, no fourth hand, no floating hand, no duplicate hand, no extra wrist, "
+    "no disembodied fingers, no merged hands, no mirrored duplicate limbs."
+)
+
+SINGLE_FRAME_LOCK = (
+    "COMPOSITION RULE: one continuous full-frame 9:16 shot with exactly one skeleton host. "
+    "No multi-panel, diptych, side-by-side, before/after, comparison-collage, or "
+    "duplicated-character layout."
+)
+
+DUAL_FRAME_LOCK = (
+    "COMPOSITION RULE: one continuous full-frame 9:16 shot with exactly TWO identical skeleton hosts "
+    "sharing one physical space. No multi-panel, diptych, before/after collage, or third skeleton."
+)
+
+
+def composition_lock(*, cast_count: int = 1) -> str:
+    return DUAL_FRAME_LOCK if int(cast_count or 1) >= 2 else SINGLE_FRAME_LOCK
+
+_SPLIT_SCREEN_PATTERNS: tuple[str, ...] = (
+    r"\bsplit[\s-]?screen\b",
+    r"\bdiptych\b",
+    r"\bbefore[\s/-]+after\b",
+    r"\bcomparison\s+panel\b",
+    r"\btwo[\s-]?panel\b",
+    r"\bdual[\s-]?panel\b",
+    r"\bside[\s-]by[\s-]side\b",
+    r"\bleft\s+(?:half|side|panel).{0,48}\bright\s+(?:half|side|panel)\b",
+    r"\bcontrast(?:ing)?\s+(?:visual|image|scene|split)\b",
+)
+
+
+def sanitize_skeleton_scene_action(
+    action: str,
+    *,
+    topic: str = "",
+    visual_brief: str = "",
+    narration: str = "",
+    aspect_ratio: str = "9:16",
+    cast_count: int = 1,
+) -> tuple[str, bool]:
+    """Return one compact, idempotent, physical scene direction."""
+    from skeleton_ai.prompt_compose import (
+        compact_skeleton_scene_direction,
+        dual_host_scene_prefix,
+        dual_host_staging_brief,
+        resolve_cast_count,
+    )
+
+    hosts = resolve_cast_count(
+        scene_cast=cast_count,
+        topic=topic,
+        visual_brief=visual_brief,
+        narration=narration,
+        scene_action=action,
+    )
+    text = re.sub(r"\s+", " ", str(action or "")).strip()
+    aspect_ratio = str(aspect_ratio or "9:16").strip()
+    if hosts >= 2:
+        canonical_prefix = dual_host_scene_prefix(aspect_ratio)
+        default_empty = (
+            f"{canonical_prefix} {dual_host_staging_brief()} "
+            "Premium cinematic lighting, no text, no sports props."
+        )
+    else:
+        canonical_prefix = f"One continuous {aspect_ratio} scene with exactly one skeleton host."
+        default_empty = (
+            "Single full-frame vertical scene with exactly one canonical skeleton host, "
+            "empty hands in a clear presenter gesture, psychology-studio environment, "
+            "premium cinematic lighting, no text, no sports props."
+        )
+    if not text:
+        return (default_empty, True)
+    if (
+        text.lower().startswith(canonical_prefix.lower())
+        and (hosts >= 2 or "exactly two hands attached to the arms" in text.lower())
+    ):
+        return text[:280], False
+    modified = any(re.search(pattern, text, re.IGNORECASE) for pattern in _SPLIT_SCREEN_PATTERNS)
+    if modified:
+        for pattern in _SPLIT_SCREEN_PATTERNS:
+            text = re.sub(pattern, "", text, flags=re.IGNORECASE)
+        text = re.sub(r"\bleft\s+(?:half|side|panel)\b", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"\bright\s+(?:half|side|panel)\b", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"\s+", " ", text).strip(" .")
+    before_props = text
+    text = sanitize_skeleton_prop_language(
+        text, topic=topic, visual_brief=visual_brief, narration=narration
+    )
+    if text != before_props:
+        modified = True
+    text = compact_skeleton_scene_direction(text, max_chars=500)
+    prefix = canonical_prefix
+    if not text.lower().startswith(prefix.lower()):
+        text = f"{prefix} {text}".strip()
+        modified = True
+    if hosts >= 2 and "two identical" not in text.lower() and "two skeleton" not in text.lower():
+        text = f"{text} {dual_host_staging_brief()}".strip()
+        modified = True
+    if hosts < 2 and not topic_allows_sports_props(topic, visual_brief, narration):
+        hands_lock = " Exactly two hands attached to the arms; empty hands in a presenter gesture."
+        if "exactly two hands attached" not in text.lower():
+            text = (text + hands_lock).strip()
+            modified = True
+    return text[:280], modified
+
+
 ARTIFACT_GUARD = (
     "Exactly ONE canonical skeleton host in frame unless the scene explicitly "
     "requires background people. Anatomically correct hands, no extra limbs, "
-    "no melted skull, no cartoon eyes, no missing glass shell, photoreal 3D render. "
+    "no melted skull, no cartoon eyes, no empty eye sockets, no missing eyeballs, "
+    "no eyeballs outside the skull sockets, no eyes in the ribcage or chest, "
+    "no missing glass shell, photoreal 3D render. "
     "The transparent glass shell is ONLY a thin body-shaped clear shell hugging "
     "the skeleton silhouette like clear skin. It is never a bell jar, capsule, "
     "dome, specimen tube, cylinder, display case, helmet bubble, glass container "
@@ -59,26 +197,114 @@ ARTIFACT_GUARD = (
     "fabric never melts into bones or glass, no half-clothes, no floating straps, no torn accidental seams. "
     "If a white T-shirt or undershirt is requested, it must be opaque and continuous under any open coat "
     "or jacket in every frame: no bare sternum, no exposed ribcage through the shirt, no transparent shirt, "
-    "and no shirt disappearing under the lapels."
+    "and no shirt disappearing under the lapels. "
+    f"{SKELETON_HAND_LOCK} {SINGLE_FRAME_LOCK}"
 )
 
-NEG_EDIT = (
+_NEG_EDIT_CORE = (
     "different character, redesigned skeleton, alternate mascot, chibi, anime, "
-    "cartoon eyes, glowing eyes, missing bones, exposed ribcage outside shell, "
+    "cartoon eyes, glowing eyes, empty eye sockets, no eyes, hollow eyes, missing eyeballs, "
+    "eyes in chest, eyes in ribcage, eyes on sternum, eyes in torso, eyeballs on ribs, "
+    "extra eyeballs, third eye, fourth eye, eyes outside skull, eyes in abdomen, "
+    "iris on ribs, pupil in chest, floating eye orbs in body, organ eyes, breast eyes, "
+    "glowing eyes, neon eyes, emissive eyes, laser eyes, orange glowing eyes, fire eyes, "
+    "exposed brain, brain outside skull, open cranium, circuit board head, neural circuits, "
+    "cyber implants, LED skull, tech halo, cyberpunk wires on head, "
+    "missing bones, exposed ribcage outside shell, "
     "human skin, flesh, human body, human actor, human arm, human hand, human fingers, "
     "human leg, human foot, human toes, fingernails, toenails, muscles, hybrid human skeleton, "
-    "half human, asymmetrical anatomy, opaque skin replacing glass, duplicate skeleton, twin bodies, "
+    "half human, asymmetrical anatomy, opaque skin replacing glass, "
     "melted clothing, fused fabric, incomplete pants, missing shoes, half shirt, "
     "bare chest, exposed sternum, exposed ribs under jacket, transparent shirt, disappearing shirt, "
     "bell jar, capsule, dome, specimen tube, cylinder, display case, glass container, "
     "helmet bubble, glass walls, circular base, floor ring, floating glass edge, "
     "diagram label, callout, readable text, typography, UI element, "
-    "extra fingers, broken hands, low quality, blurry, watermark, text overlay"
+    "extra fingers, extra hand, third hand, fourth hand, floating hand, duplicate hand, "
+    # Default gym-master leakage: never invent sports gear for non-sports topics.
+    "basketball, soccer ball, football, baseball, tennis ball, volleyball, sports ball, "
+    "dumbbell, barbell, kettlebell, weight plate, gym equipment, gym rack, "
+    "holding ball, holding dumbbell, sports jersey, basketball court, "
+    "broken hands, low quality, blurry, watermark, text overlay"
+)
+
+NEG_EDIT = (
+    f"{_NEG_EDIT_CORE}, duplicate skeleton, twin bodies, "
+    "split screen, diptych, side by side, comparison panel, before and after, duplicate character"
+)
+
+NEG_EDIT_DUAL = (
+    f"{_NEG_EDIT_CORE}, third skeleton, four skeletons, crowd of skeletons, "
+    "split screen, diptych, multi-panel collage, before and after panel, "
+    "human skin replacing either host, shared glass bubble, fused chest glass, "
+    "curved glass pod behind back, body capsule, dome enclosure, glass booth"
 )
 
 
-def sanitize_skeleton_outfit(outfit: str) -> str:
-    """Remove wardrobe language that makes edit models reconstruct human tissue."""
+def negative_prompt_for_cast(cast_count: int = 1) -> str:
+    return NEG_EDIT_DUAL if int(cast_count or 1) >= 2 else NEG_EDIT
+
+# Props the gym master / lazy edits invent when the topic is psychology/relationships.
+_BANNED_SPORTS_PROP_PATTERNS: tuple[str, ...] = (
+    r"\bbasket\s*balls?\b",
+    r"\bsoccer\s*balls?\b",
+    r"\bfoot\s*balls?\b",
+    r"\bbase\s*balls?\b",
+    r"\btennis\s*balls?\b",
+    r"\bvolley\s*balls?\b",
+    r"\bsports?\s*balls?\b",
+    r"\bdumbbells?\b",
+    r"\bbarbells?\b",
+    r"\bkettle\s*bells?\b",
+    r"\bweight\s*plates?\b",
+    r"\bgym\s*(?:equipment|rack|weights?|bench)\b",
+    r"\bholding\s+(?:a\s+)?(?:basketball|ball|dumbbell|weight|kettlebell)\b",
+    r"\bwith\s+(?:a\s+)?(?:basketball|dumbbell|barbell)\s+in\s+(?:his|her|its|the)\s+hand",
+    r"\bprimitive\s+tools?\b",
+    r"\bhunter[\s-]?gatherer\s+gear\b",
+    r"\bbone\s+necklace\b",
+    r"\banimal\s+hide\b",
+)
+
+_TOPIC_ALLOWS_SPORTS_RE = re.compile(
+    r"\b(?:basketball|soccer|football|baseball|tennis|volleyball|gym|workout|fitness|"
+    r"lifting|athlete|sport|sports|dumbbell|barbell)\b",
+    re.IGNORECASE,
+)
+
+
+def topic_allows_sports_props(topic: str = "", visual_brief: str = "", narration: str = "") -> bool:
+    blob = " ".join(str(x or "") for x in (topic, visual_brief, narration))
+    return bool(_TOPIC_ALLOWS_SPORTS_RE.search(blob))
+
+
+def sanitize_skeleton_prop_language(
+    text: str,
+    *,
+    topic: str = "",
+    visual_brief: str = "",
+    narration: str = "",
+) -> str:
+    """Strip sports/gym/hunter props the model invents from the gym master or free-prompt drift."""
+    cleaned = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not cleaned:
+        return cleaned
+    if topic_allows_sports_props(topic, visual_brief, narration):
+        return cleaned
+    for pattern in _BANNED_SPORTS_PROP_PATTERNS:
+        cleaned = re.sub(pattern, "", cleaned, flags=re.IGNORECASE)
+    # Hands should not invent random handheld objects for talking-head psychology shorts.
+    cleaned = re.sub(
+        r"\bholding\s+(?:a|an|the)\s+[a-z0-9\-]{2,30}\b",
+        "hands open in a clear presenter gesture",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(r"\s{2,}", " ", cleaned).strip(" ,.;")
+    return cleaned
+
+
+def sanitize_skeleton_outfit(outfit: str, *, topic: str = "", visual_brief: str = "") -> str:
+    """Remove wardrobe language that makes edit models reconstruct human tissue or invent props."""
     text = str(outfit or "").strip()
     replacements = (
         (r"\bbare[\s-]*feet\b", "uncovered canonical glass-and-bone skeletal feet"),
@@ -91,6 +317,7 @@ def sanitize_skeleton_outfit(outfit: str) -> str:
     )
     for pattern, replacement in replacements:
         text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
+    text = sanitize_skeleton_prop_language(text, topic=topic, visual_brief=visual_brief)
     return text
 
 
@@ -179,6 +406,23 @@ def _reference_url_to_local(reference_url: str) -> Path | None:
     return None
 
 
+def resolve_master_reference_local(master_url: str = "") -> Path | None:
+    """Return the local canonical skeleton reference when one is configured."""
+    master = str(master_url or os.getenv("SKELETON_GLOBAL_REFERENCE_IMAGE_URL", "")).strip()
+    if master:
+        local = _reference_url_to_local(master)
+        if local and local.is_file() and local.stat().st_size > 1024:
+            return local
+    public_dir = Path(__file__).resolve().parents[1] / "ViralShorts-App" / "public"
+    for local_default in (
+        public_dir / "canonical-skeleton-master-hires.png",
+        public_dir / "canonical-skeleton-master.png",
+    ):
+        if local_default.is_file() and local_default.stat().st_size > 1024:
+            return local_default
+    return None
+
+
 def resolve_master_reference_urls(
     *,
     master_url: str = "",
@@ -260,7 +504,7 @@ def _build_scene_edit_prompt_legacy(
         "Clothes, muscle definition, armor, or props",
         "Clothes, armor, or props",
     )
-    return prompt[:3500]
+    return prompt[:759]
 
 
 def build_scene_edit_prompt(
@@ -268,58 +512,71 @@ def build_scene_edit_prompt(
     topic: str = "",
     visual_description: str = "",
     outfit: str = "",
+    visual_brief: str = "",
+    narration: str = "",
+    catalyst_block: str = "",
+    aspect_ratio: str = "9:16",
+    cast_count: int = 1,
 ) -> str:
-    """Build a compact scene-first edit prompt; identity comes from the reference."""
+    """Scene-first edit prompt. Creative content is never deleted by guardrail bloat."""
+    from skeleton_ai.prompt_compose import compose_skeleton_still_prompt, resolve_cast_count
+
     topic = str(topic or "").strip()
     visual = str(visual_description or "").strip()
-    outfit = sanitize_skeleton_outfit(outfit)
-
-    parts: list[str] = []
-    if visual:
-        parts.append(
-            f"PRIMARY EDIT: REPLACE THE ENTIRE BACKGROUND AND RECOMPOSE THE SHOT. {visual}. "
-            "The named location, action, and composition are mandatory. "
-            "Do not substitute a studio backdrop or unrelated props."
-        )
-    else:
-        parts.append(
-            "PRIMARY EDIT: Change only the background environment while preserving "
-            "the canonical character."
-        )
-
-    parts.append(
-        "Use the exact canonical character from the reference image: identical ivory "
-        "skeleton, transparent glass shell, skull, eyes, proportions, hands, and feet. "
-        "Every exposed body part remains ivory bone inside clear glass; zero human skin "
-        "or flesh."
+    hosts = resolve_cast_count(
+        scene_cast=cast_count,
+        topic=topic,
+        visual_brief=visual_brief,
+        narration=narration,
+        scene_action=visual,
     )
-    parts.append(
-        "GLASS-SHELL RULE: the glass shell must hug the skeleton body silhouette like "
-        "clear skin. Do not create a bell jar, capsule, dome, specimen tube, cylinder, "
-        "display case, helmet bubble, glass container walls, circular base, floor ring, "
-        "floating glass edge, text label, callout, diagram label, or any readable text."
+    visual, _ = sanitize_skeleton_scene_action(
+        visual,
+        topic=topic,
+        visual_brief=visual_brief,
+        narration=narration,
+        aspect_ratio=aspect_ratio,
+        cast_count=hosts,
     )
-    if topic:
-        parts.append(f"TOPIC CONTEXT: {topic}.")
-
-    no_clothing = bool(re.search(r"\bno clothing\b", outfit, re.IGNORECASE))
-    if outfit and not no_clothing:
-        parts.append(
-            f"WARDROBE: {outfit}. Render complete physically coherent garments over "
-            "the glass shell. At cuffs and hems, exposed limbs remain glass-and-bone "
-            "skeleton anatomy."
-        )
-    else:
-        parts.append(
-            "No clothing. Preserve the complete transparent glass shell and visible "
-            "ivory skeleton."
-        )
-
-    parts.append(
-        "Exactly one skeleton host. Vertical 9:16 cinematic composition, environment "
-        "clearly visible, sharp focus. No text or watermark."
+    # sanitize_skeleton_scene_action appends long HAND RULE blocks — keep visual lean.
+    visual = re.sub(
+        r"\s*HAND RULE:.*?(?=COMPOSITION RULE:|$)",
+        " ",
+        visual,
+        flags=re.I | re.S,
     )
-    return " ".join(parts)[:1800]
+    visual = re.sub(
+        r"\s*COMPOSITION RULE:.*?(?=Hands empty|PROP RULE|WARDROBE|TOPIC|$)",
+        " ",
+        visual,
+        flags=re.I | re.S,
+    )
+    visual = re.sub(r"\s+", " ", visual).strip()
+    outfit = sanitize_skeleton_outfit(outfit, topic=topic, visual_brief=visual_brief)
+    sports = topic_allows_sports_props(topic, visual_brief, narration)
+    return compose_skeleton_still_prompt(
+        visual_description=visual,
+        outfit=outfit,
+        topic=topic,
+        catalyst_block=catalyst_block,
+        sports_topic=sports,
+        aspect_ratio=aspect_ratio,
+        budget=300,
+        cast_count=hosts,
+    )
+
+
+def strengthen_skeleton_edit_instruction(instruction: str) -> str:
+    """Bake one compact, provider-neutral identity contract into every edit."""
+    from skeleton_ai.prompt_compose import compact_identity_locks, compose_priority_prompt
+
+    text = re.sub(r"\s+", " ", str(instruction or "")).strip()
+    primary = text or "Preserve the scene and fix only the requested visual artifact."
+    return compose_priority_prompt(
+        primary=primary,
+        secondary=compact_identity_locks(),
+        budget=1500,
+    )
 
 
 def generate_still_edit(
@@ -329,7 +586,8 @@ def generate_still_edit(
     master_url: str = "",
     extra_refs: list[str] | None = None,
     seed: int = DEFAULT_SEED,
-    negative_prompt: str = NEG_EDIT,
+    negative_prompt: str = "",
+    cast_count: int = 1,
 ) -> dict[str, Any]:
     """Sync Seedream edit — one scene still from canonical master."""
     out_path = Path(out_path)
@@ -349,13 +607,14 @@ def generate_still_edit(
 
     _ensure_fal()
     image_urls = resolve_master_reference_urls(master_url=master_url, extra_refs=extra_refs)
+    neg = str(negative_prompt or "").strip() or negative_prompt_for_cast(cast_count)
     try:
         result = _queue_result(
             SEEDREAM_EDIT_ENDPOINT,
             {
-                "prompt": str(prompt or "")[:3500],
+                "prompt": str(prompt or "")[:300],
                 "image_urls": image_urls,
-                "negative_prompt": str(negative_prompt or NEG_EDIT)[:1500],
+                "negative_prompt": neg[:1500],
                 "image_size": "auto_2K",
                 "num_images": 1,
                 "seed": int(seed),

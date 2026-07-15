@@ -5,10 +5,39 @@ from dataclasses import dataclass
 from typing import Any, Literal
 from pathlib import Path
 import os
+import re
 
 PipelineKind = Literal["skeleton_host", "styled_t2i"]
 
 DEFAULT_RENDER_STYLE = "cinematic"
+# historical_18th_century rides the same styled_t2i QA/retry contract as
+# ultra_realism and is required for the history channels' period look.
+LAUNCH_RENDER_STYLE_KEYS = frozenset(
+    {"skeleton_host", "ultra_realism", "cinematic", "historical_18th_century"}
+)
+
+# Explicit spoken/style-picker names must resolve to a registry key before a
+# previous session default is considered. This prevents an old Skeleton job
+# from bleeding into an unrelated ultra-realistic, historical, or finance job.
+STYLE_TEXT_ALIASES: dict[str, tuple[str, ...]] = {
+    "skeleton_host": ("skeleton anatomical", "skeleton host", "skeleton style", "skeleton"),
+    "cinematic": ("cinematic", "film still", "documentary look"),
+    "ultra_realism": ("ultra realism", "ultra-realism", "ultrarealism", "photorealistic", "photo realistic"),
+    "historical_18th_century": ("18th century historical", "18th-century historical", "18th century", "1700s historical"),
+    "comic_realism": ("comic realism",), "comic_book": ("comic book",),
+    "bw_comic": ("b&w comic", "black and white comic", "black-and-white comic"),
+    "dark_comic": ("dark comic",), "dark_cartoon": ("dark cartoon",),
+    "adult_cartoon": ("adult cartoon",), "cute_anime": ("cute anime", "anime"),
+    "studio_ghibli": ("studio ghibli", "ghibli"), "pixar": ("pixar",),
+    "claymation": ("claymation", "clay animation"),
+    "disney_90s": ("90s disney", "1990s disney"), "simpsons": ("simpsons",),
+    "creepy_cartoon_v1": ("creepy cartoon v1", "creepy cartoon 1"),
+    "creepy_cartoon_v2": ("creepy cartoon v2", "creepy cartoon 2"),
+    "illustrated_book": ("illustrated book", "storybook"), "whiteboard": ("whiteboard",),
+    "lego": ("lego", "toy brick"), "minecraft": ("minecraft", "voxel"),
+    "low_poly": ("low poly", "low-poly"),
+    "hand_drawn_2d": ("2d hand-drawn", "hand drawn 2d", "hand-drawn 2d", "2d hand drawn"),
+}
 
 def _default_preview_root() -> Path:
     app_data = os.getenv("APP_DATA_DIR")
@@ -18,10 +47,20 @@ def _default_preview_root() -> Path:
 
 
 STYLE_PREVIEW_DIR = Path(os.getenv("STYLE_PREVIEW_DIR", str(_default_preview_root())))
-STYLE_PREVIEW_DIR.mkdir(parents=True, exist_ok=True)
+try:
+    STYLE_PREVIEW_DIR.mkdir(parents=True, exist_ok=True)
+except OSError:
+    from studio_agent.fs_paths import data_root, ensure_dir
+
+    STYLE_PREVIEW_DIR = ensure_dir(data_root() / "studio_agent_style_previews")
 
 STYLE_PREVIEW_VIDEO_DIR = Path(os.getenv("STYLE_PREVIEW_VIDEO_DIR", str(STYLE_PREVIEW_DIR / "video")))
-STYLE_PREVIEW_VIDEO_DIR.mkdir(parents=True, exist_ok=True)
+try:
+    STYLE_PREVIEW_VIDEO_DIR.mkdir(parents=True, exist_ok=True)
+except OSError:
+    from studio_agent.fs_paths import ensure_dir
+
+    STYLE_PREVIEW_VIDEO_DIR = ensure_dir(STYLE_PREVIEW_DIR / "video")
 
 STYLE_PREVIEW_SEED = 424242
 STYLE_PREVIEW_VERSION = "v2"
@@ -524,7 +563,12 @@ _register(RenderStyle(
 
 def list_render_styles() -> list[dict[str, Any]]:
     groups: dict[str, list[dict[str, Any]]] = {}
+    # Public launch intentionally exposes only the three production lanes that
+    # have a complete QA/retry contract.  The wider registry remains available
+    # internally for migration and future staged releases.
     for style in RENDER_STYLES.values():
+        if style.key not in LAUNCH_RENDER_STYLE_KEYS:
+            continue
         d = style.to_dict()
         # Include preview URL so frontend can render visual grid like the reference style galleries.
         # Previews generated on-demand (very cheap 1x Seedream per style) and cached.
@@ -552,15 +596,32 @@ def get_render_style(key: str) -> RenderStyle:
     )
 
 
+def explicit_render_style_from_text(user_text: str | None) -> str | None:
+    """Return a style key only when the user actually named an art style."""
+    text = " ".join(str(user_text or "").lower().replace("_", " ").split())
+    matches: list[tuple[int, str]] = []
+    for key, aliases in STYLE_TEXT_ALIASES.items():
+        for alias in aliases:
+            if re.search(rf"(?<![a-z0-9]){re.escape(alias)}(?![a-z0-9])", text):
+                matches.append((len(alias), key))
+    return max(matches, key=lambda item: item[0])[1] if matches else None
+
+
 def resolve_render_style(
     explicit: str | None,
     *,
     session_style: str | None = None,
+    user_text: str | None = None,
 ) -> RenderStyle:
-    for candidate in (explicit, session_style, DEFAULT_RENDER_STYLE):
+    # Natural-language style selection is a hard lock. The picker remains the
+    # fallback, never an invisible override of the user's newest request.
+    spoken = explicit_render_style_from_text(user_text)
+    for candidate in (spoken, explicit, session_style, DEFAULT_RENDER_STYLE):
         if candidate and str(candidate).strip():
             try:
-                return get_render_style(str(candidate).strip())
+                style = get_render_style(str(candidate).strip())
+                if style.key in LAUNCH_RENDER_STYLE_KEYS:
+                    return style
             except KeyError:
                 continue
     return RENDER_STYLES[DEFAULT_RENDER_STYLE]

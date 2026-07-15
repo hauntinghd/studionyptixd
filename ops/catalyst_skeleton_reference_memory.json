@@ -1,0 +1,65 @@
+{
+  "version": 1,
+  "channel_key": "mrskelewelly",
+  "ingested_at": "2026-07-06",
+  "source": "nyptid_channel_youtube_shorts",
+  "references": [
+    {
+      "video_id": "IOZIRg_aJkA",
+      "tier": "perfect",
+      "url": "https://youtube.com/shorts/IOZIRg_aJkA",
+      "title": "PERFECT — clothed skeleton in real environment",
+      "notes": "Single full-frame skeleton in a kid bedroom wearing gray tee, navy shorts, backpack, sneakers. Bones visible through glass shell. Exactly two hands. No diptych."
+    },
+    {
+      "video_id": "sMfXKfnbACo",
+      "tier": "ok",
+      "url": "https://youtube.com/shorts/sMfXKfnbACo",
+      "title": "OK — bare skeleton in cinematic room",
+      "notes": "Single continuous frame, neon blue glow, concrete room, one skeleton host, expressive eyes only in skull sockets (never ribcage eyes), no split layout."
+    },
+    {
+      "video_id": "ex0RCKEOpbA",
+      "tier": "moderate",
+      "url": "https://youtube.com/shorts/ex0RCKEOpbA",
+      "title": "MODERATE — wardrobe edit (doctor/scientist)",
+      "notes": "Skeleton dressed as scientist/doctor via image edit: lab coat, glasses, clipboard. Real bedroom/study environment. Wardrobe layered on glass shell."
+    }
+  ],
+  "style_bible": [
+    "MrSkeleWelly shorts use ONE continuous full-frame 9:16 shot with exactly one skeleton host.",
+    "Identity is always the canonical ivory skeleton inside a thin clear glass body shell — never human skin or flesh.",
+    "Wardrobe and props are image-edits ON the same skeleton: doctor coat, college kid outfit, backpack, lab gear — any style works.",
+    "Environments are real cinematic rooms (bedroom, study, concrete space) — not flat studio backdrops unless the beat demands it.",
+    "Lighting: moody cinematic mix — blue/cyan rim light, soft amber bone illumination along the spine only (never eyes or orbs in the chest), practical lamps when indoors.",
+    "Eyes: large realistic eyeballs in both sockets with iris and pupil — never hollow sockets.",
+    "Hands: exactly two hands, five fingers each — never duplicate, floating, or mirrored limbs.",
+    "Never split-screen, diptych, side-by-side panels, or before/after comparison layouts — they duplicate hands.",
+    "No readable text, watermarks, labels, or diagram callouts in the frame.",
+    "Glass shell hugs the body silhouette — no bell jar, capsule, dome, or display case."
+  ],
+  "visual_wins": [
+    "Single full-frame skeleton in a real environment passes review (IOZIRg_aJkA perfect reference).",
+    "Wardrobe edit on canonical master works for any role: college kid, doctor, scientist (ex0RCKEOpbA).",
+    "Bare skeleton with cinematic room lighting passes when composition stays single-frame (sMfXKfnbACo).",
+    "Preserve exact channel look on regenerate — fix only limb/layout artifacts.",
+    "Use xAI/Seedream image edit from canonical master reference, not T2I drift."
+  ],
+  "visual_watchouts": [
+    "Never split-screen or diptych — duplicates skeleton and creates extra hands.",
+    "Never edit-from a broken diptych still — delete and regenerate from canonical master.",
+    "Never side-by-side comparison panels or left/right contrast layouts.",
+    "Never third hand, floating hand, duplicate wrist, or mirrored limb.",
+    "Never replace skeleton with a human body when adding clothing.",
+    "Never flat teal studio backdrop when the beat needs a real room.",
+    "Never hollow eye sockets or missing eyeballs on the skull.",
+    "Never bell jar, capsule, dome, or glass container around the skeleton."
+  ],
+  "wardrobe_edit_rules": [
+    "Start from the canonical naked skeleton master reference.",
+    "Apply complete coherent garments over the glass shell: shirt, pants, shoes, accessories as requested.",
+    "Exposed cuffs and hems must still show glass-and-bone anatomy — no human skin at edges.",
+    "Doctor, college kid, athlete, or any persona is a wardrobe delta only — identity stays fixed.",
+    "Bulk wardrobe edits across scenes use the same master reference chain."
+  ]
+}

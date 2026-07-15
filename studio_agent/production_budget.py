@@ -36,13 +36,17 @@ class BudgetEstimate:
 
 EXPENSIVE_TOOLS = frozenset({
     "start_shortform_generate",
+    "expand_visual_proof_shortform",
     "start_longform_render",
+    "expand_longform_visual_proof",
     "finalize_longform_render",
     "generate_longform_thumbnails",
     "edit_production_scene_still",
     "edit_production_scenes_still",
     "regenerate_production_scene_still",
+    "regenerate_production_scene",
     "animate_production_scenes",
+    "repair_production_scene_animation",
     "finalize_production",
     "re_edit_production",
     "regenerate_longform_still",
@@ -51,24 +55,46 @@ EXPENSIVE_TOOLS = frozenset({
 
 DEFAULT_CAPS_USD = {
     "start_shortform_generate": 5.0,
-    "start_longform_render": 25.0,
-    "finalize_longform_render": 85.0,
+    "expand_visual_proof_shortform": 8.0,
+    "start_longform_render": 8.0,
+    "expand_longform_visual_proof": 12.0,
+    "finalize_longform_render": 35.0,
     "generate_longform_thumbnails": 1.0,
     "edit_production_scene_still": 0.25,
     "edit_production_scenes_still": 1.0,
     "regenerate_production_scene_still": 0.25,
+    "regenerate_production_scene": 2.0,
     "animate_production_scenes": 3.0,
+    "repair_production_scene_animation": 2.0,
     "finalize_production": 1.0,
     "re_edit_production": 1.5,
     "regenerate_longform_still": 0.25,
 }
 
 
+FALLBACK_USD = {
+    "seedream_v45_per_image": 0.04,
+    "seedream_v45_edit_per_image": 0.04,
+    "fal_minimax_per_1k_chars": 0.10,
+    "xai_tts_per_1m_chars": 15.00,
+    "kling_v21_standard_per_second": 0.056,
+    "kling_v21_pro_per_second": 0.098,
+    "pixverse_v6_per_second": 0.045,
+    "seedance_20_i2v_per_second": 0.03,
+    "ltx_098_distilled_per_second": 0.02,
+    "mmaudio_v2_per_second": 0.001,
+    "shortform_compose_allowance_usd": 0.05,
+}
+
+
 APPROVAL_REQUIRED_TOOLS = frozenset({
     "start_shortform_generate",
+    "expand_visual_proof_shortform",
     "start_longform_render",
+    "expand_longform_visual_proof",
     "set_production_scenes_animate",
     "animate_production_scenes",
+    "repair_production_scene_animation",
     "finalize_production",
     "finalize_longform_render",
 })
@@ -76,18 +102,22 @@ APPROVAL_REQUIRED_TOOLS = frozenset({
 
 TOOL_LANES = {
     "start_shortform_generate": "render",
+    "expand_visual_proof_shortform": "render",
     "start_longform_render": "render",
     "finalize_longform_render": "render",
     "generate_longform_thumbnails": "render",
     "edit_production_scene_still": "render",
     "edit_production_scenes_still": "render",
     "regenerate_production_scene_still": "render",
+    "regenerate_production_scene": "render",
     "regenerate_longform_still": "render",
     "animate_production_scenes": "render",
+    "repair_production_scene_animation": "render",
     "finalize_production": "render",
     "re_edit_production": "render",
     "analyze_reference_video": "analysis",
     "analyze_competitor_video": "analysis",
+    "retry_reference_analysis": "analysis",
     "build_scene_blueprint_from_reference": "analysis",
     "get_channel_analytics": "analysis",
 }
@@ -95,12 +125,22 @@ TOOL_LANES = {
 
 STAGE_GATES = {
     "start_shortform_generate": ["cost_preflight", "create_stills", "await_scene_review"],
+    "expand_visual_proof_shortform": [
+        "proof_approved",
+        "cost_preflight",
+        "create_remaining_stills",
+        "animate_selected_new_scenes",
+        "await_scene_review",
+    ],
     "edit_production_scene_still": ["cost_preflight", "edit_still", "await_scene_review"],
     "edit_production_scenes_still": ["cost_preflight", "batch_edit_stills", "await_scene_review"],
     "regenerate_production_scene_still": ["cost_preflight", "regenerate_still", "await_scene_review"],
+    "regenerate_production_scene": ["cost_preflight", "regenerate_still", "image_to_video", "await_animation_result"],
     "animate_production_scenes": ["scene_approval_required", "image_to_video", "await_animation_result"],
+    "repair_production_scene_animation": ["approved_still_preserved", "image_to_video", "sampled_frame_qa", "await_animation_result"],
     "finalize_production": ["compose", "package", "publish_ready_artifact"],
     "start_longform_render": ["cost_preflight", "outline", "create_stills", "await_chapter_review"],
+    "expand_longform_visual_proof": ["proof_approved", "cost_preflight", "gallery_stills", "await_chapter_review"],
     "finalize_longform_render": ["chapter_approval_required", "compose", "package"],
     "generate_longform_thumbnails": ["cost_preflight", "thumbnail_variants", "await_packaging_review"],
 }
@@ -148,8 +188,12 @@ def estimate_tool_cost(tool_name: str, args: dict[str, Any] | None = None) -> Bu
     mode = "explicit" if explicit_cap is not None else "default"
     if name == "start_shortform_generate":
         est, breakdown = _estimate_shortform_start(args)
+    elif name == "expand_visual_proof_shortform":
+        est, breakdown = _estimate_shortform_expand(args)
     elif name == "start_longform_render":
         est, breakdown = _estimate_longform_start(args)
+    elif name == "expand_longform_visual_proof":
+        est, breakdown = _estimate_longform_expand(args)
     elif name == "finalize_longform_render":
         est, breakdown = _estimate_longform_finalize(args)
     elif name == "generate_longform_thumbnails":
@@ -167,7 +211,7 @@ def estimate_tool_cost(tool_name: str, args: dict[str, Any] | None = None) -> Bu
         except Exception:
             count = 12
         count = max(1, min(60, count))
-        est, note = _priced_unit("seedream_v45_edit", fallback_key="seedream_v45_per_image", quantity=count)
+        est, note = _priced_unit("seedream_v45_edit", fallback_key="seedream_v45_edit_per_image", quantity=count)
         breakdown = {
             "seedream_v45_edit_images": count,
             "seedream_v45_edit_per_image": _unit_rate(est, count),
@@ -175,9 +219,28 @@ def estimate_tool_cost(tool_name: str, args: dict[str, Any] | None = None) -> Bu
             "pricing_note": note,
         }
     elif name in {"edit_production_scene_still", "regenerate_production_scene_still", "regenerate_longform_still"}:
-        est, note = _priced_unit("seedream_v45_edit", fallback_key="seedream_v45_per_image", quantity=1.0)
+        est, note = _priced_unit("seedream_v45_edit", fallback_key="seedream_v45_edit_per_image", quantity=1.0)
         breakdown = {"seedream_v45_edit_images": 1, "seedream_v45_edit_per_image": est, "pricing_note": note}
-    elif name == "animate_production_scenes":
+    elif name == "regenerate_production_scene":
+        still_est, still_note = _priced_unit(
+            "seedream_v45_edit",
+            fallback_key="seedream_v45_edit_per_image",
+            quantity=1.0,
+        )
+        seconds = _video_seconds(args, count=1, default_per_scene=5.0)
+        video_model = str(args.get("video_model") or args.get("model") or "seedance").strip().lower()
+        video_est, video_rate, video_note = _video_cost(video_model, seconds)
+        est = still_est + video_est
+        breakdown = {
+            "seedream_v45_edit_images": 1,
+            "seedream_v45_edit_usd": round(still_est, 4),
+            "video_seconds": seconds,
+            "video_model": video_model,
+            "video_usd_per_second": video_rate,
+            "video_usd": round(video_est, 4),
+            "pricing_note": [still_note, video_note],
+        }
+    elif name in {"animate_production_scenes", "repair_production_scene_animation"}:
         count = _scene_index_count(args, default=3)
         seconds = _video_seconds(args, count=count, default_per_scene=5.0)
         video_model = str(args.get("video_model") or args.get("model") or "seedance").strip().lower()
@@ -243,10 +306,12 @@ def durable_state_contract(tool_name: str, args: dict[str, Any] | None = None) -
     if name.startswith("start_shortform"):
         return {"kind": "shortform", "key": "job_id", "job_id": job_id or None, "must_persist": True}
     if name in {
+        "expand_visual_proof_shortform",
         "edit_production_scene_still",
         "edit_production_scenes_still",
         "regenerate_production_scene_still",
         "animate_production_scenes",
+        "repair_production_scene_animation",
         "finalize_production",
         "re_edit_production",
     }:
@@ -257,27 +322,50 @@ def durable_state_contract(tool_name: str, args: dict[str, Any] | None = None) -
 
 
 def _estimate_shortform_start(args: dict[str, Any]) -> tuple[float, dict[str, Any]]:
-    scenes = max(1, min(60, int(args.get("scene_count") or args.get("beats") or 12)))
-    full_auto = bool(args.get("_full_auto") or args.get("full_auto"))
-    animate = bool(args.get("animate", False)) and full_auto
-    stills, still_note = _priced_unit("seedream_v45_edit", fallback_key="seedream_v45_per_image", quantity=scenes)
+    # Every new Short is a one-still proof at this boundary. Remaining scenes
+    # have a separate, explicit expansion decision after Scene 1 animation.
+    scenes = 1
+    full_auto = False
+    animate = False
+    image_model = str(args.get("image_model_id") or args.get("image_model") or "").strip().lower()
+    if image_model in {"grok_imagine", "grok_imagine_quality"}:
+        still_rate = 0.10
+        stills = round(still_rate * scenes, 4)
+        still_note = "xai:grok-imagine-image-quality_per_edit_fallback"
+        still_model_note = "grok-imagine-image-quality"
+    elif image_model in {"grok_imagine_standard", "grok-imagine-image"}:
+        still_rate = 0.04
+        stills = round(still_rate * scenes, 4)
+        still_note = "xai:grok-imagine-image_per_edit_fallback"
+        still_model_note = "grok-imagine-image"
+    elif image_model in {"seedream_edit", "seedream_v45_edit"}:
+        stills, still_note = _priced_unit("seedream_v45_edit", fallback_key="seedream_v45_edit_per_image", quantity=scenes)
+        still_rate = _unit_rate(stills, scenes)
+        still_model_note = "seedream_v45_edit"
+    else:
+        stills, still_note = _priced_unit("seedream_v45_edit", fallback_key="seedream_v45_edit_per_image", quantity=scenes)
+        still_rate = _unit_rate(stills, scenes)
+        still_model_note = "seedream_v45_edit"
     requested_seconds = _video_seconds(args, count=scenes, default_per_scene=5.0)
     seconds = requested_seconds if animate else 0.0
     video_model = str(args.get("video_model") or "seedance").strip().lower()
     video, video_rate, video_note = _video_cost(video_model, seconds)
     script_chars = max(1000, int(args.get("script_char_count") or len(str(args.get("script") or "")) or scenes * 140))
-    tts_units = max(1.0, script_chars / 1000.0)
     if full_auto:
-        tts, tts_note = _priced_unit("minimax_speech", fallback_key="fal_minimax_per_1k_chars", quantity=tts_units)
+        tts, tts_note, tts_provider, tts_unit, tts_unit_rate = _estimate_tts(script_chars)
     else:
-        tts, tts_note = 0.0, "deferred_until_finalize"
+        tts, tts_note, tts_provider, tts_unit, tts_unit_rate = 0.0, "deferred_until_finalize", _tts_provider(), "char", 0.0
     cushion = _cushion_pct()
     total = (stills + video + tts) * (1.0 + cushion)
     return total, {
         "scene_count": scenes,
+        "visual_proof_only": True,
         "review_gate": not full_auto,
         "i2v_deferred_until_scene_approval": not full_auto,
-        "seedream_v45_edit_per_image": _unit_rate(stills, scenes),
+        "image_model": image_model or still_model_note,
+        "image_model_pricing_unit": still_model_note,
+        "still_usd_per_image": still_rate,
+        "seedream_v45_edit_per_image": _unit_rate(stills, scenes) if not image_model.startswith("grok") else 0.0,
         "stills_usd": round(stills, 4),
         "stills_pricing_note": still_note,
         "video_seconds": seconds,
@@ -287,9 +375,127 @@ def _estimate_shortform_start(args: dict[str, Any]) -> tuple[float, dict[str, An
         "video_usd": round(video, 4),
         "video_pricing_note": video_note,
         "tts_chars": script_chars,
-        "fal_minimax_per_1k_chars": _unit_rate(tts, tts_units) if tts else 0.0,
+        "tts_provider": tts_provider,
+        "tts_unit": tts_unit,
+        "tts_unit_rate": tts_unit_rate,
         "tts_allowance_usd": round(tts, 4),
         "tts_pricing_note": tts_note,
+        "cushion_pct": cushion,
+    }
+
+
+def _estimate_shortform_expand(args: dict[str, Any]) -> tuple[float, dict[str, Any]]:
+    """Estimate only the incremental work added to an approved proof short.
+
+    ``scene_count`` is the target total. ``existing_scene_count`` and
+    ``animate_scene_indices`` make the semantic command contract explicit, but
+    legacy callers that only send ``animate_policy`` remain supported.
+    """
+    job_id = str(args.get("job_id") or "").strip()
+    target_scene_count = max(2, min(60, int(args.get("scene_count") or 12)))
+    existing_scene_count = max(1, min(target_scene_count, int(args.get("existing_scene_count") or 1)))
+    image_model = str(args.get("image_model_id") or args.get("image_model") or "").strip().lower()
+    video_model = str(args.get("video_model") or args.get("model") or "").strip().lower()
+    spec_seconds_per_scene: float | None = None
+
+    try:
+        if job_id:
+            from studio_agent import jobs
+
+            ws = (jobs.ROOT / jobs.SKELETON_OUTPUT / job_id).resolve()
+            scenes_path = ws / "scenes.json"
+            spec_path = ws / "job_spec.json"
+            if scenes_path.is_file():
+                scenes = json.loads(scenes_path.read_text(encoding="utf-8"))
+                if isinstance(scenes, list) and scenes:
+                    actual_existing = len([scene for scene in scenes if isinstance(scene, dict)])
+                    if not args.get("existing_scene_count") and actual_existing:
+                        existing_scene_count = max(1, min(target_scene_count, actual_existing))
+            if spec_path.is_file():
+                spec = json.loads(spec_path.read_text(encoding="utf-8"))
+                if isinstance(spec, dict):
+                    image_model = image_model or str(spec.get("image_model_id") or spec.get("image_model") or "").strip().lower()
+                    video_model = video_model or str(spec.get("video_model") or "").strip().lower()
+                    spec_seconds_per_scene = _float(spec.get("seconds_per_scene"), None)
+    except Exception:
+        pass
+
+    additional_scene_count = max(0, target_scene_count - existing_scene_count)
+    if image_model in {"grok_imagine", "grok_imagine_quality", "grok-imagine-image-quality"}:
+        still_rate = 0.10
+        stills = round(still_rate * additional_scene_count, 4)
+        still_note = "xai:grok-imagine-image-quality_per_edit_fallback"
+        still_model_note = "grok-imagine-image-quality"
+    elif image_model in {"grok_imagine_standard", "grok-imagine-image"}:
+        still_rate = 0.04
+        stills = round(still_rate * additional_scene_count, 4)
+        still_note = "xai:grok-imagine-image_per_edit_fallback"
+        still_model_note = "grok-imagine-image"
+    else:
+        stills, still_note = _priced_unit(
+            "seedream_v45_edit",
+            fallback_key="seedream_v45_edit_per_image",
+            quantity=additional_scene_count,
+        )
+        still_rate = _unit_rate(stills, additional_scene_count)
+        still_model_note = image_model or "seedream_v45_edit"
+
+    new_scene_indices = list(range(existing_scene_count, target_scene_count))
+    raw_animate_indices = args.get("animate_scene_indices")
+    explicit_animation_targets = isinstance(raw_animate_indices, list)
+    if explicit_animation_targets:
+        animate_scene_indices = sorted({
+            int(index)
+            for index in raw_animate_indices[:60]
+            if str(index).strip().lstrip("-").isdigit()
+            and existing_scene_count <= int(index) < target_scene_count
+        })
+        animation_estimate_mode = "explicit_indices"
+    else:
+        policy = str(args.get("animate_policy") or "heroes").strip().lower()
+        animate_scene_indices = [] if policy == "none" else new_scene_indices
+        animation_estimate_mode = (
+            "legacy_policy_all" if policy == "all" else
+            "legacy_policy_none" if policy == "none" else
+            "legacy_heroes_upper_bound"
+        )
+
+    explicit_duration = _float(args.get("duration_seconds"), None)
+    explicit_per_scene = _float(args.get("seconds_per_scene"), None)
+    if explicit_per_scene is not None and explicit_per_scene > 0:
+        seconds_per_scene = explicit_per_scene
+    elif explicit_duration is not None and explicit_duration > 0:
+        seconds_per_scene = explicit_duration / float(target_scene_count)
+    elif spec_seconds_per_scene is not None and spec_seconds_per_scene > 0:
+        seconds_per_scene = spec_seconds_per_scene
+    else:
+        seconds_per_scene = 5.0
+    seconds_per_scene = max(1.0, min(60.0, float(seconds_per_scene)))
+    animated_seconds = round(len(animate_scene_indices) * seconds_per_scene, 4)
+    video_model = video_model or "seedance"
+    video, video_rate, video_note = _video_cost(video_model, animated_seconds)
+    cushion = _cushion_pct()
+    total = (stills + video) * (1.0 + cushion)
+    return total, {
+        "stage": "expand/proof_to_full_short",
+        "job_id": job_id or None,
+        "target_scene_count": target_scene_count,
+        "existing_scene_count": existing_scene_count,
+        "additional_scene_count": additional_scene_count,
+        "preserve_scene_indices": list(args.get("preserve_scene_indices") or [0]),
+        "animate_scene_indices": animate_scene_indices,
+        "animation_estimate_mode": animation_estimate_mode,
+        "image_model": still_model_note,
+        "still_usd_per_image": still_rate,
+        "stills_usd": round(stills, 4),
+        "stills_pricing_note": still_note,
+        "video_model": video_model,
+        "seconds_per_animated_scene": round(seconds_per_scene, 4),
+        "animated_new_scene_count": len(animate_scene_indices),
+        "animated_new_scene_seconds": animated_seconds,
+        "video_usd_per_second": video_rate,
+        "video_usd": round(video, 4),
+        "video_pricing_note": video_note,
         "cushion_pct": cushion,
     }
 
@@ -299,8 +505,8 @@ def _estimate_shortform_finalize(args: dict[str, Any]) -> tuple[float, dict[str,
     scene_count = max(1, min(60, int(args.get("scene_count") or 12)))
     total_seconds = _video_seconds(args, count=scene_count, default_per_scene=5.0)
     script_chars = max(1000, int(args.get("script_char_count") or 0))
-    sfx_enabled = bool(args.get("sfx_enabled", True))
-    background_music = str(args.get("background_music") or "auto").strip().lower()
+    sfx_enabled = bool(args.get("sfx_enabled", False))
+    background_music = str(args.get("background_music") or "off").strip().lower()
     try:
         if job_id:
             from studio_agent import jobs
@@ -310,25 +516,26 @@ def _estimate_shortform_finalize(args: dict[str, Any]) -> tuple[float, dict[str,
             spec_path = ws / "job_spec.json"
             scenes = json.loads(scenes_path.read_text(encoding="utf-8")) if scenes_path.exists() else []
             if isinstance(scenes, list) and scenes:
+                dict_scenes = [sc for sc in scenes[:60] if isinstance(sc, dict)]
                 scene_count = max(1, min(60, len(scenes)))
-                total_seconds = round(
-                    sum(float(sc.get("duration_sec") or 5.0) for sc in scenes[:60]),
-                    4,
-                )
-                script_chars = max(
-                    1000,
-                    sum(len(str(sc.get("narration") or "")) for sc in scenes[:60]),
-                )
+                if dict_scenes:
+                    total_seconds = round(
+                        sum(float(sc.get("duration_sec") or 5.0) for sc in dict_scenes),
+                        4,
+                    )
+                    script_chars = max(
+                        1000,
+                        sum(len(str(sc.get("narration") or "")) for sc in dict_scenes),
+                    )
             if spec_path.exists():
                 spec = json.loads(spec_path.read_text(encoding="utf-8"))
                 if isinstance(spec, dict):
                     sfx_enabled = bool(spec.get("sfx_enabled", sfx_enabled))
-                    background_music = str(spec.get("background_music") or background_music or "auto").strip().lower()
+                    background_music = str(spec.get("background_music") or background_music or "off").strip().lower()
     except Exception:
         pass
 
-    tts_units = max(1.0, script_chars / 1000.0)
-    tts, tts_note = _priced_unit("minimax_speech", fallback_key="fal_minimax_per_1k_chars", quantity=tts_units)
+    tts, tts_note, tts_provider, tts_unit, tts_unit_rate = _estimate_tts(script_chars)
     sfx_seconds = total_seconds if sfx_enabled else 0.0
     sfx, sfx_note = _priced_unit("mmaudio_v2", fallback_key="mmaudio_v2_per_second", quantity=sfx_seconds) if sfx_seconds else (0.0, "disabled")
     bgm_seconds = total_seconds if background_music not in {"", "off", "none", "no", "no background music"} else 0.0
@@ -343,14 +550,16 @@ def _estimate_shortform_finalize(args: dict[str, Any]) -> tuple[float, dict[str,
         "scene_count": scene_count,
         "estimated_duration_seconds": total_seconds,
         "tts_chars": script_chars,
-        "fal_minimax_per_1k_chars": _unit_rate(tts, tts_units),
+        "tts_provider": tts_provider,
+        "tts_unit": tts_unit,
+        "tts_unit_rate": tts_unit_rate,
         "tts_allowance_usd": round(tts, 4),
         "tts_pricing_note": tts_note,
         "sfx_enabled": sfx_enabled,
         "mmaudio_sfx_seconds": sfx_seconds,
         "mmaudio_sfx_usd": round(sfx, 4),
         "mmaudio_sfx_pricing_note": sfx_note,
-        "background_music": background_music or "auto",
+        "background_music": background_music or "off",
         "mmaudio_bgm_seconds": bgm_seconds,
         "mmaudio_bgm_usd": round(bgm, 4),
         "mmaudio_bgm_pricing_note": bgm_note,
@@ -365,19 +574,92 @@ def _estimate_longform_start(args: dict[str, Any]) -> tuple[float, dict[str, Any
         from long_form.pipeline import compute_render_cost
         from studio_agent.tools import _build_outline_from_args
 
-        channel = get_channel(str(args.get("channel_key") or "").strip())
+        channel = dict(get_channel(str(args.get("channel_key") or "").strip()))
+        selected_image_model = str(args.get("image_model_id") or "").strip()
+        if selected_image_model:
+            channel["image_model_default"] = selected_image_model
         outline = _build_outline_from_args(args)
         outline["motion_policy"] = str(args.get("motion_policy") or outline.get("motion_policy") or "balanced")
         if args.get("hero_motion_ratio") is not None:
             outline["hero_motion_ratio"] = max(0.0, min(1.0, float(args["hero_motion_ratio"])))
-        cost = compute_render_cost(channel, outline)
+        cost = compute_render_cost(
+            channel,
+            outline,
+            scenes_per_chapter_override=int(channel.get("scenes_per_chapter") or 0) or None,
+        )
+        projected = float(cost.get("all_in_usd") or cost.get("total_usd") or 0.0)
+        proof_only = bool(args.get("visual_proof_only", True))
+        if proof_only:
+            proof_still = float(cost.get("still_usd_per_image") or 0.0)
+            est = proof_still * (1.0 + _cushion_pct())
+            return est, {
+                "stage": "start/proof_still",
+                **cost,
+                "visual_proof_only": True,
+                "charged_now_usd": round(est, 4),
+                "projected_full_project_usd": round(projected, 2),
+                "paid_i2v_deferred": True,
+            }
         est = float(cost.get("stage_1_usd") or cost.get("total_usd") or 0.0)
-        return est, {"stage": "start/stills", **cost}
+        return est, {"stage": "start/stills", **cost, "projected_full_project_usd": round(projected, 2)}
     except Exception as exc:
         chapters = max(1, _chapter_count(args))
         scenes = chapters * 12
         est = scenes * _fallback("seedream_v45_per_image") * 1.15
         return est, {"fallback": str(exc)[:160], "chapters": chapters, "scene_count": scenes}
+
+
+def _estimate_longform_expand(args: dict[str, Any]) -> tuple[float, dict[str, Any]]:
+    """Gallery expansion after proof approval — this is where HR burns xAI/fal budget."""
+    job_id = str(args.get("job_id") or "").strip()
+    try:
+        from long_form import pipeline as lf
+        from long_form.prompts.channels import get_channel
+
+        state = lf.load_state(job_id) or {}
+        outline = state.get("outline") if isinstance(state.get("outline"), dict) else {}
+        channel = dict(get_channel(str(state.get("channel_key") or outline.get("channel_key") or "")))
+        image_model = str(outline.get("image_model_id") or channel.get("image_model_default") or "ernie_image").strip()
+        channel["image_model_default"] = image_model
+        chapters_path = lf._chapters_path(job_id) if hasattr(lf, "_chapters_path") else None
+        n_chapters = len(outline.get("chapters") or [])
+        if chapters_path and chapters_path.is_file():
+            import json as _json
+
+            chapters_data = _json.loads(chapters_path.read_text(encoding="utf-8"))
+            n_chapters = max(n_chapters, len(chapters_data.get("chapters") or []))
+        scenes_per = int(
+            state.get("scenes_per_chapter")
+            or outline.get("scenes_per_chapter")
+            or channel.get("scenes_per_chapter")
+            or 12
+        )
+        max_scenes = max(1, int(os.getenv("STUDIO_LONGFORM_MAX_SCENES", "144") or 144))
+        n_scenes = min(max_scenes, max(1, n_chapters * scenes_per))
+        # Proof still already rendered — bill the remaining gallery.
+        billable_scenes = max(0, n_scenes - 1)
+        cost = lf.compute_render_cost(
+            channel,
+            outline,
+            scenes_per_chapter_override=scenes_per,
+        )
+        still_per = float(cost.get("still_usd_per_image") or 0.04)
+        if image_model.lower().startswith("grok"):
+            still_per = 0.05 if "quality" in image_model.lower() else 0.02
+        est = still_per * billable_scenes * (1.0 + _cushion_pct())
+        return est, {
+            "stage": "expand_gallery",
+            "job_id": job_id,
+            "billable_scenes": billable_scenes,
+            "n_chapters": n_chapters,
+            "scenes_per_chapter": scenes_per,
+            "image_model": image_model,
+            "still_usd_per_image": still_per,
+            "projected_full_project_usd": round(float(cost.get("all_in_usd") or cost.get("total_usd") or 0.0), 2),
+        }
+    except Exception as exc:
+        est = 12.0 * (1.0 + _cushion_pct())
+        return est, {"fallback": str(exc)[:160], "job_id": job_id}
 
 
 def _estimate_longform_finalize(args: dict[str, Any]) -> tuple[float, dict[str, Any]]:
@@ -410,6 +692,8 @@ def _chapter_count(args: dict[str, Any]) -> int:
 
 
 def _scene_index_count(args: dict[str, Any], *, default: int) -> int:
+    if bool(args.get("visual_proof_only")):
+        return 1
     raw = args.get("scene_indices")
     if isinstance(raw, list) and raw:
         return max(1, min(60, len(raw)))
@@ -442,6 +726,19 @@ def _video_rate(video_model: str) -> float:
 
 def _video_cost(video_model: str, seconds: float) -> tuple[float, float, str]:
     model = str(video_model or "").strip().lower()
+    qty = max(0.0, seconds)
+    if model == "grok_imagine_video_15_1080p":
+        cost = round(0.25 * qty, 4)
+        return cost, _unit_rate(cost, qty), "xai:grok_imagine_video_15_1080p_per_second"
+    if model == "grok_imagine_video_15":
+        cost = round(0.08 * qty, 4)
+        return cost, _unit_rate(cost, qty), "xai:grok_imagine_video_15_per_second"
+    if model == "grok_imagine_video":
+        cost = round(0.05 * qty, 4)
+        return cost, _unit_rate(cost, qty), "xai:grok_imagine_video_per_second"
+    if model == "kling21_master":
+        cost = round(0.28 * qty, 4)
+        return cost, _unit_rate(cost, qty), "fallback:kling21_master_per_second"
     if model in {"kling_pro", "premium"} or ("kling" in model and "pro" in model):
         cost, note = _priced_unit("kling_v21_pro", fallback_key="kling_v21_pro_per_second", quantity=max(0.0, seconds))
         return cost, _unit_rate(cost, max(0.0, seconds)), note
@@ -474,19 +771,31 @@ def _fallback(key: str) -> float:
     try:
         from long_form import fal_pricing
 
-        return float(fal_pricing.FALLBACK_USD.get(key, 0.0) or 0.0)
+        live_fallback = float(fal_pricing.FALLBACK_USD.get(key, 0.0) or 0.0)
+        if live_fallback > 0:
+            return live_fallback
     except Exception:
-        return {
-            "seedream_v45_per_image": 0.04,
-            "fal_minimax_per_1k_chars": 0.10,
-            "kling_v21_standard_per_second": 0.056,
-            "kling_v21_pro_per_second": 0.098,
-            "pixverse_v6_per_second": 0.045,
-            "seedance_20_i2v_per_second": 0.03,
-            "ltx_098_distilled_per_second": 0.02,
-            "mmaudio_v2_per_second": 0.001,
-            "shortform_compose_allowance_usd": 0.05,
-        }.get(key, 0.0)
+        pass
+    return FALLBACK_USD.get(key, 0.0)
+
+
+def _tts_provider() -> str:
+    raw = str(os.getenv("STUDIO_TTS_PROVIDER", "xai") or "xai").strip().lower()
+    if raw in {"fal", "minimax", "fal_only", "minimax_only"}:
+        return "fal"
+    return "xai"
+
+
+def _estimate_tts(script_chars: int) -> tuple[float, str, str, str, float]:
+    provider = _tts_provider()
+    chars = max(1, int(script_chars or 1))
+    if provider == "xai":
+        unit = _fallback("xai_tts_per_1m_chars")
+        amount = round((unit * chars) / 1_000_000.0, 4)
+        return amount, "fallback:xai_tts_per_character", "xai", "char", round(unit / 1_000_000.0, 8)
+    units = max(1.0, chars / 1000.0)
+    amount, note = _priced_unit("minimax_speech", fallback_key="fal_minimax_per_1k_chars", quantity=units)
+    return amount, note, "fal", "1k_chars", _unit_rate(amount, units)
 
 
 def _priced_unit(key: str, *, fallback_key: str, quantity: float) -> tuple[float, str]:
@@ -523,3 +832,100 @@ def _float(value: Any, default: float | None = 0.0) -> float | None:
         return float(value)
     except Exception:
         return default
+
+
+MODEL_DISPLAY_NAMES = {
+    "grok_imagine": "Grok Imagine Quality",
+    "grok_imagine_standard": "Grok Imagine",
+    "grok-imagine-image": "Grok Imagine",
+    "grok-imagine-image-quality": "Grok Imagine Quality",
+    "seedream_edit": "Seedream 4.5 Edit",
+    "seedream_v45_edit": "Seedream 4.5 Edit",
+    "seedream45": "Seedream 4.5 T2I",
+    "seedream_v45": "Seedream 4.5 T2I",
+    "ernie_image": "ERNIE-Image",
+    "grok_imagine_video": "Grok Imagine Video",
+    "grok_imagine_video_15": "Grok Imagine Video 1.5",
+    "grok_imagine_video_15_1080p": "Grok Imagine Video 1.5 1080p",
+    "ltx_budget": "LTX 0.9.8 Budget",
+    "seedance": "Seedance 2.0",
+    "pixverse": "PixVerse V6",
+    "kling_pro": "Kling 2.1 Pro",
+    "kling21_standard": "Kling 2.1 Standard",
+}
+
+
+def _model_label(model_id: str) -> str:
+    clean = str(model_id or "").strip().lower()
+    return MODEL_DISPLAY_NAMES.get(clean, clean or "unknown")
+
+
+def format_shortform_cost_quote(
+    start_estimate: BudgetEstimate,
+    *,
+    finalize_estimate: BudgetEstimate | None = None,
+) -> str:
+    """Human-readable shortform quote grounded in production_budget math."""
+    breakdown = dict(start_estimate.breakdown or {})
+    image_model = str(breakdown.get("image_model") or breakdown.get("image_model_pricing_unit") or "")
+    video_model = str(breakdown.get("video_model") or "")
+    scenes = int(breakdown.get("scene_count") or 1)
+    seconds = float(breakdown.get("video_seconds") or breakdown.get("requested_video_seconds") or 0.0)
+    still_rate = float(breakdown.get("still_usd_per_image") or 0.0)
+    stills_usd = float(breakdown.get("stills_usd") or 0.0)
+    video_rate = float(breakdown.get("video_usd_per_second") or 0.0)
+    video_usd = float(breakdown.get("video_usd") or 0.0)
+    start_tts = float(breakdown.get("tts_allowance_usd") or 0.0)
+    cushion = float(breakdown.get("cushion_pct") or 0.0)
+    lines = [
+        "Cost estimate (grounded in your active Studio session models):",
+        "",
+        "Image generation:",
+        f"- {scenes} scene still(s) via {_model_label(image_model)}: ${stills_usd:.2f}"
+        + (f" (${still_rate:.3f}/image)" if still_rate else ""),
+        "",
+        "Video:",
+    ]
+    if seconds > 0 and video_usd > 0:
+        lines.append(
+            f"- {seconds:.0f}s {_model_label(video_model)} i2v: ${video_usd:.2f}"
+            + (f" (${video_rate:.3f}/sec)" if video_rate else "")
+        )
+    else:
+        lines.append(
+            f"- i2v deferred until scene approval ({_model_label(video_model)} selected in session)"
+        )
+    lines.extend(["", "Audio:"])
+    if start_tts > 0:
+        lines.append(
+            f"- Voiceover allowance at start: ${start_tts:.3f} ({breakdown.get('tts_provider') or 'tts'})"
+        )
+    finalize_usd = 0.0
+    if finalize_estimate is not None:
+        fin = dict(finalize_estimate.breakdown or {})
+        finalize_usd = float(finalize_estimate.estimated_usd or 0.0)
+        tts = float(fin.get("tts_allowance_usd") or 0.0)
+        if tts > 0:
+            lines.append(f"- Finalize narration ({fin.get('tts_provider') or 'tts'}): ${tts:.3f}")
+        sfx = float(fin.get("mmaudio_sfx_usd") or 0.0)
+        if sfx > 0:
+            lines.append(f"- SFX (mmaudio): ${sfx:.3f}")
+        bgm = float(fin.get("mmaudio_bgm_usd") or 0.0)
+        if bgm > 0:
+            lines.append(f"- Background music (mmaudio): ${bgm:.3f}")
+    elif breakdown.get("tts_pricing_note") == "deferred_until_finalize":
+        lines.append("- Voiceover/SFX finalize cost is deferred until you approve scenes and run finalize_production.")
+    total = float(start_estimate.estimated_usd or 0.0) + finalize_usd
+    lines.extend([
+        "",
+        f"Start-stage subtotal (incl. {cushion * 100:.0f}% cushion): ${float(start_estimate.estimated_usd or 0.0):.2f}",
+    ])
+    if finalize_estimate is not None:
+        lines.append(f"Finalize-stage subtotal (incl. cushion): ${finalize_usd:.2f}")
+    lines.append(f"Total grounded estimate: ${total:.2f}")
+    lines.extend([
+        "",
+        "Pricing source: Studio production_budget preflight using your session image_model_id + video_model.",
+        "Do not substitute other models unless they are the active session selections above.",
+    ])
+    return "\n".join(lines)

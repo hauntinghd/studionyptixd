@@ -1,37 +1,83 @@
 /**
  * Studio Agent — full-screen chat (Anthropic Claude + Rookcast skills).
  */
-import { useCallback, useContext, useEffect, useRef, useState, type ClipboardEvent } from 'react';
+import { useCallback, useContext, useEffect, useMemo, useRef, useState, type ClipboardEvent } from 'react';
 import {
-    ArrowLeft, ArrowUp, BookOpen, Brain, Check, ChevronsLeft, ChevronsRight, History, Loader2,
+    ArrowLeft, ArrowUp, BookOpen, Brain, Check, ChevronUp, ChevronsLeft, ChevronsRight, Clapperboard, History, ImageIcon, Loader2,
     MessageSquarePlus, Mic, MicOff, Palette, Paperclip, Play, RefreshCw, RotateCcw, Search, Shield,
     ShieldOff, Sparkles, Trash2, Users, Video, X, Zap,
 } from 'lucide-react';
+import AgentActivityTimeline, {
+    completeRunningSteps,
+    newThinkingStep,
+    type ActivityChild,
+    type ActivityStep,
+} from '../components/agent/AgentActivityTimeline';
+import AgentConceptCard, { type ConceptPlan } from '../components/agent/AgentConceptCard';
 import AgentJobDeliverable, { type SceneReplyPreset } from '../components/agent/AgentJobDeliverable';
+import { type ThumbnailReview } from '../components/agent/ThumbnailReviewCard';
 import AgentMessageBody from '../components/agent/AgentMessageBody';
 import AgentProductionRail from '../components/agent/AgentProductionRail';
 import AgentProgressBubble from '../components/agent/AgentProgressBubble';
 import AgentRenderDock from '../components/agent/AgentRenderDock';
 import AgentYouTubeConnect, { type ChannelRow } from '../components/agent/AgentYouTubeConnect';
+import DictationWaveform from '../components/agent/DictationWaveform';
 import { useAgentProductionJobs } from '../hooks/useAgentProductionJobs';
 import {
     type AgentJobSnapshot,
     type AgentJobTrack,
     type ProductionProgressUpdate,
+    agentJobPollUrl,
     cancelJob,
+    collectTracksFromTranscript,
+    collectTracksToRefresh,
+    isStaleDeadLongformPoll,
+    isStaleIdleLongformFailure,
+    isStaleLongformChapterFailure,
+    isGhostJobPollFailure,
+    isBlockedJobId,
+    isImplicitProductionCancel,
+    isTerminalJob,
+    shouldHideJobDeliverable,
+    stripStaleProductionArtifacts,
     lastSessionStorageKey,
     loadPersistedJobs,
     mergeJobTracks,
+    normalizeAgentJobKind,
     persistJobs,
+    pruneOrphanShortformTracks,
     rehydrateJobSnapshots,
+    stripGhostJobDeliverables,
 } from '../lib/agentProduction';
-import { streamAgentChat, toolLabel, type AgentChatAttachment, type AgentStreamEvent } from '../lib/streamAgentChat';
+import {
+    streamAgentChat,
+    toolActivityLabel,
+    toolLabel,
+    type AgentChatAttachment,
+    type AgentStreamEvent,
+    type AgentToolActivitySummary,
+} from '../lib/streamAgentChat';
 import { useSpeechDictation } from '../hooks/useSpeechDictation';
+import { applyPendingStudioBundleReload, ensureStudioFresh } from '../lib/studioClientSync';
+import { loadImageModelPref, saveImageModelPref } from '../lib/productionModelPrefs';
 import { AuthContext, resolveStudioBackendUrl } from '../shared';
 import { loadStudioHubState } from '../lib/studioHubState';
 import AgentModelPicker, { type AgentModelOption } from './AgentModelPicker';
 
 type ApprovalMode = 'auto' | 'confirm';
+
+/** Large chats + job reconcile can exceed 60s on Fly; allow retries on timeout and blips. */
+const SESSION_LOAD_TIMEOUT_MS = 120_000;
+const SESSION_LOAD_RETRIES = 2;
+const NETWORK_BLIP_RETRY_MS = 1800;
+const THINKING_RECOVER_MS = 90_000;
+const isNetworkBlip = (message: string) =>
+    /failed to fetch|networkerror|load failed|fetch resource|could not reach the backend/i.test(message);
+const SESSION_MESSAGE_TAIL = 120;
+const sessionResumePath = (sessionId: string, syncPending: boolean) =>
+    `/api/studio-agent/sessions/${sessionId}?sync_pending=${syncPending ? 'true' : 'false'}&message_tail=${SESSION_MESSAGE_TAIL}`;
+const sessionSyncPath = (sessionId: string) =>
+    `/api/studio-agent/sessions/${sessionId}/sync?message_tail=${SESSION_MESSAGE_TAIL}`;
 
 interface PendingAction {
     id: string;
@@ -44,7 +90,31 @@ interface ChatMessage {
     role: 'user' | 'assistant' | 'system';
     content: string;
     jobDeliverable?: AgentJobSnapshot;
+    thumbnailReview?: ThumbnailReview;
     productionUpdate?: ProductionProgressUpdate;
+}
+
+function deliverableDisplayText(messageText: string, snap?: AgentJobSnapshot) {
+    if (!snap || snap.kind !== 'cliplab') return messageText;
+    const jobType = String(snap.job_type || '').toLowerCase();
+    const isIngest = jobType === 'cliplab_ingest' || snap.job_id.startsWith('clipi_');
+    const isAnalyze = jobType === 'cliplab_analyze' || snap.job_id.startsWith('clipa_');
+    const isRender = jobType === 'cliplab_render' || snap.job_id.startsWith('clipr_');
+    if (snap.status === 'running') return 'ClipLab is working - track progress in the dock.';
+    if (snap.status === 'failed') return `ClipLab failed: ${snap.error || 'unknown error'}`;
+    if (isIngest) {
+        return 'ClipLab ingest is ready. The source video is loaded; continue to analyze and pick clip moments.';
+    }
+    if (isAnalyze) {
+        const count = snap.segment_count || snap.segments?.length || 0;
+        return `ClipLab analysis is ready. ${count} candidate segment(s) were found; continue to render the strongest 9:16 clips.`;
+    }
+    if (isRender) {
+        const clips = snap.clip_count || snap.clips?.length || 0;
+        const packages = snap.upload_package_count || snap.upload_packages?.length || 0;
+        return `ClipLab clips are ready. ${clips} clip(s) and ${packages} upload package(s) are available.`;
+    }
+    return 'ClipLab step is ready. Continue to the next ClipLab step.';
 }
 
 type VerificationStepStatus = 'pending' | 'running' | 'done' | 'error' | 'skipped';
@@ -65,7 +135,7 @@ interface SessionUiCache {
     dockDismissed: boolean;
 }
 
-const SESSION_UI_CACHE_VERSION = 1;
+const SESSION_UI_CACHE_VERSION = 2;
 const MAX_SESSION_UI_CACHE_ENTRIES = 30;
 const MAX_SESSION_UI_CACHE_MESSAGES = 160;
 const MAX_SESSION_UI_CACHE_MESSAGE_CHARS = 24000;
@@ -121,10 +191,73 @@ function trimCachedMessage(msg: ChatMessage): ChatMessage {
     };
 }
 
+function stripHeavyDeliverableCache(msg: ChatMessage, keepJobIds: Set<string>): ChatMessage {
+    const snap = msg.jobDeliverable;
+    if (!snap?.job_id || keepJobIds.has(snap.job_id)) return trimCachedMessage(msg);
+    return trimCachedMessage({
+        ...msg,
+        jobDeliverable: {
+            job_id: snap.job_id,
+            kind: snap.kind,
+            status: snap.status,
+            title: snap.title,
+            progress: snap.progress,
+            mp4_url: snap.mp4_url,
+            total_scenes: snap.total_scenes,
+            current_scene: snap.current_scene,
+            still_preview_urls: snap.still_preview_urls,
+            scenes: snap.scenes?.map((scene) => ({
+                index: scene.index,
+                duration_sec: scene.duration_sec,
+                still_preview_url: scene.still_preview_url,
+                has_clip: scene.has_clip,
+                approved_for_video: scene.approved_for_video,
+                approved_for_animation: scene.approved_for_animation,
+                animate: scene.animate,
+            })),
+            animation_pending_count: snap.animation_pending_count,
+            animation_complete_count: snap.animation_complete_count,
+        },
+    });
+}
+
+function reattachJobDeliverables(
+    messages: ChatMessage[],
+    deliverables: Map<string, AgentJobSnapshot>,
+): ChatMessage[] {
+    if (!deliverables.size) return messages;
+    const next = messages.map((msg) => ({ ...msg }));
+    for (const [jobId, snap] of deliverables) {
+        if (shouldHideJobDeliverable(snap, messages)) continue;
+        const existingIdx = next.findIndex((msg) => msg.jobDeliverable?.job_id === jobId);
+        if (existingIdx >= 0) {
+            next[existingIdx] = { ...next[existingIdx], jobDeliverable: snap };
+            continue;
+        }
+        for (let i = next.length - 1; i >= 0; i -= 1) {
+            const content = String(next[i].content || '');
+            const isExpansionQuestion = /How long do you want the finished short|Before I build the remaining scenes|motion.graphics\/effects, pacing/i.test(content);
+            if (next[i].role === 'assistant' && !isExpansionQuestion) {
+                next[i] = { ...next[i], jobDeliverable: snap };
+                break;
+            }
+        }
+    }
+    return next;
+}
+
 function sanitizeSessionUiCacheEntry(entry: SessionUiCache): SessionUiCache {
+    const trimmed = (entry.messages || []).slice(-MAX_SESSION_UI_CACHE_MESSAGES);
+    const keepJobIds = new Set<string>();
+    for (let i = trimmed.length - 1; i >= 0; i -= 1) {
+        const jobId = trimmed[i]?.jobDeliverable?.job_id;
+        if (jobId && !keepJobIds.has(jobId)) keepJobIds.add(jobId);
+    }
     return {
-        messages: (entry.messages || []).slice(-MAX_SESSION_UI_CACHE_MESSAGES).map(trimCachedMessage),
-        pending: entry.pending || [],
+        messages: stripGhostJobDeliverables(
+            trimmed.map((msg) => stripHeavyDeliverableCache(msg, keepJobIds)),
+        ),
+        pending: [],
         jobTracks: entry.jobTracks || [],
         dockDismissed: Boolean(entry.dockDismissed),
     };
@@ -164,20 +297,22 @@ interface AttachedFile {
     name: string;
     size: number;
     mimeType: string;
-    kind: 'image' | 'text' | 'binary';
+    kind: 'image' | 'text' | 'video' | 'binary';
 }
 
 interface AttachmentPayload {
     name: string;
     mime_type: string;
     size: number;
-    kind: 'image' | 'text' | 'binary';
+    kind: 'image' | 'text' | 'video' | 'binary';
     text?: string;
     data_url?: string;
+    server_path?: string;
 }
 
 const MAX_AGENT_IMAGE_ATTACHMENTS = 4;
 const MAX_AGENT_IMAGE_BYTES = 8 * 1024 * 1024;
+const MAX_AGENT_VIDEO_BYTES = 3 * 1024 * 1024 * 1024;
 
 function readFileAsDataUrl(file: File): Promise<string> {
     return new Promise((resolve, reject) => {
@@ -223,6 +358,10 @@ const FALLBACK_MODELS: AgentModelOption[] = [
         recommended: true,
         intelligence: 5,
         speed: 4,
+        prompt_price_per_m: 3.0,
+        completion_price_per_m: 15.0,
+        est_cost_10k_2k: 0.06,
+        context_length: 200_000,
         description: 'Default Studio runner for tool use and production planning.',
     },
     {
@@ -232,6 +371,10 @@ const FALLBACK_MODELS: AgentModelOption[] = [
         recommended: true,
         intelligence: 5,
         speed: 2,
+        prompt_price_per_m: 15.0,
+        completion_price_per_m: 75.0,
+        est_cost_10k_2k: 0.3,
+        context_length: 200_000,
         description: 'Highest-depth Claude runner for complex production sessions.',
     },
     {
@@ -241,14 +384,165 @@ const FALLBACK_MODELS: AgentModelOption[] = [
         recommended: true,
         intelligence: 4,
         speed: 5,
+        prompt_price_per_m: 1.0,
+        completion_price_per_m: 5.0,
+        est_cost_10k_2k: 0.02,
+        context_length: 200_000,
         description: 'Fast, lower-cost Claude runner for status checks and lightweight tool loops.',
+    },
+    // xAI Grok chat models (same key as speech dictation) — official docs.x.ai pricing
+    {
+        id: 'grok-4.5',
+        name: 'Grok 4.5',
+        provider: 'xAI',
+        recommended: true,
+        intelligence: 5,
+        speed: 4,
+        prompt_price_per_m: 2.0,
+        completion_price_per_m: 6.0,
+        est_cost_10k_2k: 0.032,
+        context_length: 500_000,
+        description: 'xAI flagship for code, agentic tool calling, and low-hallucination Studio runs.',
+    },
+    {
+        id: 'grok-4.3',
+        name: 'Grok 4.3',
+        provider: 'xAI',
+        recommended: true,
+        intelligence: 5,
+        speed: 4,
+        prompt_price_per_m: 1.25,
+        completion_price_per_m: 2.5,
+        est_cost_10k_2k: 0.0175,
+        context_length: 1_000_000,
+        description: 'Strong general-purpose Grok runner with 1M context and solid tool use.',
+    },
+    {
+        id: 'grok-4.20-0309-reasoning',
+        name: 'Grok 4.20 Reasoning',
+        provider: 'xAI',
+        recommended: true,
+        intelligence: 5,
+        speed: 3,
+        prompt_price_per_m: 1.25,
+        completion_price_per_m: 2.5,
+        est_cost_10k_2k: 0.0175,
+        context_length: 1_000_000,
+        description: 'Reasoning-optimized Grok 4.20 for deep planning and multi-step tool loops.',
+    },
+    {
+        id: 'grok-4.20-0309-non-reasoning',
+        name: 'Grok 4.20 Non-Reasoning',
+        provider: 'xAI',
+        recommended: true,
+        intelligence: 4,
+        speed: 5,
+        prompt_price_per_m: 1.25,
+        completion_price_per_m: 2.5,
+        est_cost_10k_2k: 0.0175,
+        context_length: 1_000_000,
+        description: 'Fast Grok 4.20 without extra reasoning overhead — good for light orchestration.',
+    },
+    {
+        id: 'grok-4.20-multi-agent-0309',
+        name: 'Grok 4.20 Multi-Agent',
+        provider: 'xAI',
+        intelligence: 5,
+        speed: 3,
+        prompt_price_per_m: 1.25,
+        completion_price_per_m: 2.5,
+        est_cost_10k_2k: 0.0175,
+        context_length: 1_000_000,
+        description: 'Multi-agent orchestration SKU for long context and agent loops.',
+    },
+    {
+        id: 'grok-build-0.1',
+        name: 'Grok Build 0.1',
+        provider: 'xAI',
+        selectable: false,
+        disabled: true,
+        disabled_reason: 'Grok Build 0.1 is not available as a Studio Agent runner.',
+        intelligence: 4,
+        speed: 4,
+        prompt_price_per_m: 1.0,
+        completion_price_per_m: 2.0,
+        est_cost_10k_2k: 0.014,
+        context_length: 256_000,
+        description: 'xAI code-focused model. Shown for catalog completeness but unavailable in Studio Agent.',
     },
 ];
 
 type ContentFormat = 'short' | 'long' | 'both';
 type ReasoningDepth = 'fast' | 'balanced' | 'deep';
 type CaptionMode = 'word' | 'off';
-type VideoModel = 'ltx_budget' | 'seedance' | 'pixverse' | 'kling_pro';
+type AgentMode = 'plan' | 'studio' | 'cliplab';
+
+function AgentModeMenu({
+    mode,
+    onSelect,
+    isAdmin = false,
+}: {
+    mode: AgentMode;
+    onSelect: (mode: AgentMode) => void;
+    isAdmin?: boolean;
+}) {
+    const [open, setOpen] = useState(false);
+    const options: Array<{ id: AgentMode; label: string; detail: string; icon: typeof Sparkles; tone: string }> = [
+        { id: 'plan', label: 'Plan & conversation', detail: 'Think, research, and refine. No production spend.', icon: BookOpen, tone: 'text-cyan-200' },
+        { id: 'studio', label: 'Production', detail: 'Generate, edit, animate, package, and export.', icon: Sparkles, tone: 'text-violet-200' },
+        ...(isAdmin ? [{ id: 'cliplab' as const, label: 'ClipLab', detail: 'Turn uploaded long videos into short clips.', icon: Clapperboard, tone: 'text-rose-200' }] : []),
+    ];
+    const active = options.find((item) => item.id === mode) || options[0];
+    const ActiveIcon = active.icon;
+    return (
+        <div className="relative">
+            {open && <button type="button" aria-label="Close mode menu" className="fixed inset-0 z-40" onClick={() => setOpen(false)} />}
+            {open && (
+                <div className="absolute bottom-full left-0 z-50 mb-2 w-64 overflow-hidden rounded-xl border border-white/10 bg-[#101015] p-1.5 shadow-2xl shadow-black/70">
+                    {options.map((item) => {
+                        const Icon = item.icon;
+                        return (
+                            <button
+                                key={item.id}
+                                type="button"
+                                onClick={() => { onSelect(item.id); setOpen(false); }}
+                                className={`flex w-full items-start gap-2 rounded-lg px-2.5 py-2 text-left transition hover:bg-white/[0.06] ${mode === item.id ? 'bg-white/[0.05]' : ''}`}
+                            >
+                                <Icon className={`mt-0.5 h-3.5 w-3.5 shrink-0 ${item.tone}`} />
+                                <span className="min-w-0">
+                                    <span className="block text-[11px] font-semibold text-white">{item.label}</span>
+                                    <span className="block text-[10px] leading-snug text-gray-500">{item.detail}</span>
+                                </span>
+                                {mode === item.id && <Check className="ml-auto mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-300" />}
+                            </button>
+                        );
+                    })}
+                </div>
+            )}
+            <button
+                type="button"
+                onClick={() => setOpen((value) => !value)}
+                className={`inline-flex items-center gap-1 rounded-lg border border-white/[0.07] bg-black/20 px-2 py-1 text-[10px] font-semibold transition hover:bg-white/[0.06] ${active.tone}`}
+                title="Choose planning, production, or ClipLab mode"
+            >
+                <ActiveIcon className="h-3 w-3" />
+                {mode === 'plan' ? 'Plan' : mode === 'studio' ? 'Production' : 'ClipLab'}
+                <ChevronUp className={`h-3 w-3 text-gray-500 transition ${open ? 'rotate-180' : ''}`} />
+            </button>
+        </div>
+    );
+}
+type CreativeModelProfile = {
+    id?: string;
+    label?: string;
+    provider?: string;
+    tier?: string;
+    summary?: string;
+    speed?: string;
+    estimated_unit_usd?: number;
+    billing_unit?: string;
+    enabled?: boolean;
+};
 
 const REASONING_OPTIONS: { id: ReasoningDepth; label: string; hint: string }[] = [
     { id: 'fast', label: 'Fast', hint: 'Quick answers, less deliberation' },
@@ -256,16 +550,84 @@ const REASONING_OPTIONS: { id: ReasoningDepth; label: string; hint: string }[] =
     { id: 'deep', label: 'Deep', hint: 'Thorough analysis before recommendations' },
 ];
 
-const VIDEO_MODEL_OPTIONS: { id: VideoModel; label: string; price: string; hint: string }[] = [
-    { id: 'ltx_budget', label: 'LTX Budget', price: 'lowest', hint: 'Cheapest full animation lane.' },
-    { id: 'seedance', label: 'Seedance 2.0', price: 'balanced', hint: 'Default balanced motion; falls back when needed.' },
-    { id: 'pixverse', label: 'Pixverse V6', price: 'standard+', hint: 'More permissive moderation for difficult scenes.' },
-    { id: 'kling_pro', label: 'Kling Pro', price: 'premium', hint: 'Best motion quality; highest cost and slower queue.' },
+const DEFAULT_IMAGE_MODEL = 'ernie_image';
+const DEFAULT_VIDEO_MODEL = 'seedance';
+
+const FALLBACK_IMAGE_MODELS: AgentModelOption[] = [
+    { id: 'seedream_edit', name: 'Seedream 4.5 Edit', provider: 'fal', recommended: true, intelligence: 5, speed: 4, estimated_unit_usd: 0.04, billing_unit: 'image', description: 'Canonical reference editing and high-fidelity stills.' },
+    { id: 'grok_imagine', name: 'Grok Imagine Quality', provider: 'xAI', intelligence: 5, speed: 5, estimated_unit_usd: 0.05, billing_unit: '1K image', description: '$0.05 per 1K output; $0.07 at 2K. Premium history still lane.' },
+    { id: 'grok_imagine_standard', name: 'Grok Imagine', provider: 'xAI', intelligence: 4, speed: 5, estimated_unit_usd: 0.02, billing_unit: 'image', description: '$0.02 per 1K or 2K output. Lower-cost Grok still lane.' },
+    { id: 'ernie_image', name: 'ERNIE-Image', provider: 'fal', intelligence: 4, speed: 5, estimated_unit_usd: 0.03, billing_unit: 'megapixel', description: '$0.03 per megapixel. Cost scales with output resolution.' },
 ];
 
-function normalizeVideoModel(value: unknown): VideoModel {
-    const raw = String(value || '').trim();
-    return VIDEO_MODEL_OPTIONS.some((opt) => opt.id === raw) ? raw as VideoModel : 'seedance';
+const FALLBACK_VIDEO_MODELS: AgentModelOption[] = [
+    { id: 'grok_imagine_video', name: 'Grok Imagine Video', provider: 'xAI', recommended: true, intelligence: 4, speed: 5, estimated_unit_usd: 0.05, billing_unit: 'second', description: '$0.05/sec at 720p. Cheapest Grok I2V lane.' },
+    { id: 'grok_imagine_video_15', name: 'Grok Imagine Video 1.5', provider: 'xAI', intelligence: 5, speed: 4, estimated_unit_usd: 0.08, billing_unit: 'second', description: '$0.08/sec at 720p. Higher quality Grok I2V.' },
+    { id: 'grok_imagine_video_15_1080p', name: 'Grok Imagine Video 1.5 1080p', provider: 'xAI', intelligence: 5, speed: 2, estimated_unit_usd: 0.25, billing_unit: 'second', description: '$0.25/sec at 1080p. Expensive final tests only.' },
+    { id: 'seedance', name: 'Seedance 2.0', provider: 'fal', intelligence: 5, speed: 4, description: 'Premium cinematic motion. Exact provider cost is included in the render preflight.' },
+    { id: 'pixverse', name: 'PixVerse V6', provider: 'fal', intelligence: 4, speed: 4, estimated_unit_usd: 0.045, billing_unit: 'second', description: '~$0.225 per 5s at 720p. Strong value and moderation fallback.' },
+    { id: 'kling_pro', name: 'Kling 2.1 Pro', provider: 'fal', intelligence: 5, speed: 3, estimated_unit_usd: 0.098, billing_unit: 'second', description: '~$0.49 per 5s at 720p. Premium hero-scene motion with model-specific prompt adapter.' },
+    { id: 'ltx_budget', name: 'LTX 13B Budget', provider: 'fal', intelligence: 3, speed: 5, description: 'Lowest-cost full-motion lane. Exact provider cost is included in the render preflight.' },
+];
+
+// These are the model keys with a real Studio Agent adapter: prompt compiler,
+// provider request shape, pricing ledger, fallback behavior, and QA. Do not
+// surface a catalog-only model that the short-form renderer cannot actually run.
+const SUPPORTED_AGENT_IMAGE_MODEL_IDS = new Set(['seedream_edit', 'grok_imagine', 'grok_imagine_standard', 'ernie_image']);
+const SUPPORTED_AGENT_VIDEO_MODEL_IDS = new Set(FALLBACK_VIDEO_MODELS.map((item) => item.id));
+
+const VIDEO_MODEL_OPTIONS = FALLBACK_VIDEO_MODELS.map((model) => ({
+    id: model.id,
+    label: model.name,
+    price: String(model.provider || ''),
+}));
+
+function normalizeVideoModel(value: unknown): string {
+    return String(value || '').trim() || DEFAULT_VIDEO_MODEL;
+}
+
+function isPersistedAgentSessionId(id: string | null | undefined): id is string {
+    return Boolean(id && id.startsWith('sa_'));
+}
+
+function speedStars(speed?: string): number {
+    const raw = String(speed || '').toLowerCase();
+    if (raw.includes('very')) return 5;
+    if (raw.includes('fast')) return 5;
+    if (raw.includes('balanced')) return 4;
+    if (raw.includes('medium')) return 3;
+    if (raw.includes('slow')) return 2;
+    return 3;
+}
+
+function tierStars(tier?: string): number {
+    const raw = String(tier || '').toLowerCase();
+    if (raw.includes('elite')) return 5;
+    if (raw.includes('premium')) return 4;
+    return 3;
+}
+
+function creativeModelOption(profile: CreativeModelProfile): AgentModelOption | null {
+    const id = String(profile.id || '').trim();
+    if (!id || profile.enabled === false) return null;
+    const cost = typeof profile.estimated_unit_usd === 'number'
+        ? `$${profile.estimated_unit_usd.toFixed(3).replace(/0+$/, '').replace(/\.$/, '')}/${profile.billing_unit || 'unit'}`
+        : '';
+    return {
+        id,
+        name: String(profile.label || id),
+        provider: String(profile.provider || 'Other').toUpperCase() === 'XAI' ? 'xAI' : String(profile.provider || 'Other'),
+        recommended: id.includes('grok') || id === DEFAULT_IMAGE_MODEL || id === 'kling21_standard',
+        intelligence: tierStars(profile.tier),
+        speed: speedStars(profile.speed),
+        estimated_unit_usd: typeof profile.estimated_unit_usd === 'number' ? profile.estimated_unit_usd : undefined,
+        billing_unit: String(profile.billing_unit || '').trim() || undefined,
+        description: [cost, profile.summary].filter(Boolean).join('. '),
+    };
+}
+
+function selectedModelLabel(models: AgentModelOption[], selectedId: string, fallback: string): string {
+    return models.find((m) => m.id === selectedId)?.name || selectedId || fallback;
 }
 
 interface RenderStyleOption {
@@ -283,6 +645,7 @@ interface RenderStyleOption {
 const FALLBACK_RENDER_STYLES: RenderStyleOption[] = [
     { key: 'cinematic', label: 'Cinematic', group: 'Realism' },
     { key: 'ultra_realism', label: 'Ultra realism', group: 'Realism' },
+    { key: 'historical_18th_century', label: '18th century historical', group: 'Realism' },
     { key: 'comic_book', label: 'Comic book (color)', group: 'Comic' },
     { key: 'bw_comic', label: 'B&W comic', group: 'Comic' },
     { key: 'studio_ghibli', label: 'Studio Ghibli', group: 'Animation' },
@@ -291,15 +654,21 @@ const FALLBACK_RENDER_STYLES: RenderStyleOption[] = [
     { key: 'skeleton_host', label: 'Skeleton (NYPTID mascot)', group: 'Niche' },
 ];
 
-function formatPendingArgs(args?: Record<string, unknown>): string {
+function formatPendingArgs(
+    args?: Record<string, unknown>,
+    styleCatalog?: RenderStyleOption[],
+): string {
     if (!args || !Object.keys(args).length) return '';
     const styleKey = String(args.render_style || '');
-    const topic = String(args.topic || '');
-    const brief = String(args.visual_brief || '');
+    const styleLabel =
+        styleCatalog?.find((s) => s.key === styleKey)?.label
+        || styleKey.replace(/_/g, ' ');
+    const topic = String(args.topic || args.title || args.video_title || '');
+    const sceneCount = args.scene_count ?? (args.visual_proof_only ? 1 : null);
     const parts: string[] = [];
-    if (styleKey) parts.push(`Art style: ${styleKey}`);
-    if (topic) parts.push(`Topic: ${topic}`);
-    if (brief) parts.push(`Brief: ${brief.slice(0, 160)}`);
+    if (styleKey) parts.push(`Art style: ${styleLabel}`);
+    if (topic) parts.push(`Video: ${topic}`);
+    if (sceneCount === 1 || args.visual_proof_only) parts.push('Mode: one still for approval');
     return parts.join(' · ') || JSON.stringify(args);
 }
 
@@ -311,7 +680,8 @@ interface SessionSummary {
     pending_count?: number;
     content_format?: string;
     reasoning_depth?: string;
-    video_model?: VideoModel;
+    image_model?: string;
+    video_model?: string;
     caption_mode?: CaptionMode;
     captions_enabled?: boolean;
     channel_id?: string;
@@ -326,6 +696,49 @@ const STARTER_PROMPTS = [
     'Long-form: outline a 12-min documentary, start render, and walk me through stills → finalize → download.',
     'Skeleton short: outcast + Seedance, teen in black hoodie — script, render, and deliver MP4 in this chat.',
 ];
+
+const CLIPLAB_STARTER_PROMPT =
+    'ClipLab: use my uploaded long video, study my channel + public demand, cut the best 9:16 clips with upload packages.';
+
+function mentionsClipLab(text: string) {
+    return /\bcliplab\b/i.test(String(text || '').trim());
+}
+
+function looksLikeIdeation(text: string) {
+    const low = String(text || '').trim().toLowerCase();
+    if (!low) return false;
+    if (/\b(?:render|generate|start|animate|finalize|export)\b.+\b(?:short|video|production)\b/i.test(low)) {
+        return false;
+    }
+    if (/\b(?:make|create|generate|render|produce|build)\b.+\b(?:short|short-form|shortform)\b/i.test(low)) {
+        return false;
+    }
+    const ideationSignals = [
+        'how would i',
+        'how should i',
+        'how could i',
+        'market research',
+        'niche research',
+        'channel strategy',
+        'youtube channel for',
+        'art style',
+        'brainstorm',
+        'ideation',
+        'using this video as reference',
+        'using this as reference',
+        'content like this',
+        'public youtube data',
+        'what niche',
+        'topic ideas',
+        "don't know what to make",
+        "dont know what to make",
+    ];
+    if (ideationSignals.some((phrase) => low.includes(phrase))) return true;
+    if (/\?/.test(low) && /\b(?:channel|niche|topic|style|market|research|audience)\b/i.test(low)) {
+        return true;
+    }
+    return false;
+}
 
 function formatSessionAge(updatedAt?: number) {
     if (!updatedAt) return '';
@@ -400,43 +813,621 @@ function pendingActionLabel(tool: string) {
 }
 
 const PENDING_ACTION_ID_RE = /act_[a-f0-9]{12}/gi;
+const SINGLETON_PRODUCTION_APPROVAL_TOOLS = new Set([
+    'start_shortform_generate',
+    'start_longform_render',
+]);
+const TITLE_STOPWORDS = new Set([
+    'the', 'and', 'for', 'with', 'that', 'this', 'when', 'they', 'them', 'you', 'your',
+    'into', 'from', 'short', 'video', 'scene', 'test', 'make', 'making', 'going', 'title',
+    'lets', 'let', 'will', 'we', 'one', 'exactly',
+]);
 
-function productionAlreadyApproved(
-    messages: Array<{ role?: string; content?: string }>,
-): boolean {
-    return messages.some(
-        (m) =>
-            m.role === 'user'
-            && (String(m.content || '').startsWith('[User approved start_shortform_generate]')
-                || String(m.content || '').startsWith('[User approved start_longform_render]')),
+function normalizeQuoteChars(text: string): string {
+    return String(text || '')
+        .replace(/\u201c/g, '"')
+        .replace(/\u201d/g, '"')
+        .replace(/\u2018/g, "'")
+        .replace(/\u2019/g, "'");
+}
+
+function titleKeywords(value: string): Set<string> {
+    return new Set(
+        String(value || '')
+            .toLowerCase()
+            .match(/[a-z0-9]+/g)
+            ?.filter((word) => word.length > 2 && !TITLE_STOPWORDS.has(word)) || [],
     );
+}
+
+function cleanTitleCandidate(value: string): string {
+    return String(value || '')
+        .trim()
+        .replace(/^[-:,. ]+|[-:,. ]+$/g, '')
+        .replace(/^(?:yes\.?|okay\.?|ok\.?|sure\.?|let'?s\s+see|let\s+us\s+see|maybe)\s*,?\s*/i, '')
+        .replace(/^(?:make|do|start)\s+/i, '')
+        .replace(/^[-:,. ]+|[-:,. ]+$/g, '');
+}
+
+function explicitTitleCandidate(text: string): string {
+    const value = normalizeQuoteChars(String(text || ''));
+    const quoted = Array.from(value.matchAll(/"([^"\n]{8,140})"/g))
+        .map((match) => cleanTitleCandidate(match[1] || ''))
+        .filter((candidate) => titleKeywords(candidate).size >= 2);
+    if (quoted.length) return quoted[quoted.length - 1];
+
+    // "yes make Why Men Suddenly… but only 30 seconds" — match backend extract_user_locked_title
+    const hard = value.match(
+        /\b(?:yes|yeah|yep|sure|ok(?:ay)?|go ahead)[,.]?\s+(?:make|render|produce)\s+(?!it\b|this\b|that\b)(.+?)(?:\s+but\s+only|\s+only\s+\d|\s*$)/i,
+    );
+    if (hard?.[1]) {
+        const cand = cleanTitleCandidate(hard[1].replace(/\s+but\s+only[\s\S]*$/i, ''));
+        if (titleKeywords(cand).size >= 2) return cand;
+    }
+
+    const patterns = [
+        /(?:one\s+still\s+for|still\s+for|short\s+for|video\s+for|make(?:\s+exactly)?\s+one\s+still\s+for)\s+(.{8,140}?)(?:\s+using|\s+with|\.|$)/gi,
+        /(?:title\s+(?:we'?re\s+going\s+to\s+go\s+with|is|it)\s*[:,]?\s*)([^.\n]{8,140})/gi,
+        /(?:we\s+will\s+do|we'?ll\s+do|let'?s\s+do|lets\s+do|if we are making|we are making|we're making)\s+([^.\n]{8,140})/gi,
+        /for\s+['"]?([^'".\n]{8,140})['"]?(?:\s+using|\s+with|\.|$)/gi,
+    ];
+    for (const pattern of patterns) {
+        const matches = Array.from(value.matchAll(pattern))
+            .map((match) => cleanTitleCandidate(match[1] || ''))
+            .filter((candidate) => titleKeywords(candidate).size >= 2);
+        if (matches.length) return matches[matches.length - 1];
+    }
+    return '';
+}
+
+function titleOverlapScore(left: string, right: string): number {
+    const leftWords = titleKeywords(left);
+    const rightWords = titleKeywords(right);
+    if (!leftWords.size || !rightWords.size) return 0;
+    let intersection = 0;
+    leftWords.forEach((word) => {
+        if (rightWords.has(word)) intersection += 1;
+    });
+    return intersection / Math.max(1, Math.min(leftWords.size, rightWords.size));
+}
+
+function canonicalProductionTopic(
+    messages: Array<{ role?: string; content?: string }>,
+    _actions: PendingAction[],
+): string {
+    // Only the latest user-requested title counts — never self-justify from pending.
+    return explicitTitleCandidate(latestUserText(messages));
+}
+
+function latestUserText(messages: Array<{ role?: string; content?: string }>, limit = 4): string {
+    return messages
+        .filter((m) => m.role === 'user')
+        .slice(-limit)
+        .map((m) => String(m.content || ''))
+        .join('\n');
+}
+
+/** Only the newest user turn — used for Approve-card freshness (never poison with prior research). */
+function latestSingleUserText(messages: Array<{ role?: string; content?: string }>): string {
+    const users = messages.filter((m) => m.role === 'user');
+    return String(users[users.length - 1]?.content || '');
+}
+
+function isStatusOrStatsQuery(text: string): boolean {
+    const compact = String(text || '').trim().toLowerCase().replace(/[?!.]+$/g, '');
+    if (['status', 'stats', 'stat', 'statistics', 'channel stats', 'my stats', 'check status', 'any update'].includes(compact)) {
+        return true;
+    }
+    return /\bstats?\b/i.test(compact) && compact.split(/\s+/).length <= 3;
+}
+
+function isProductionDiagnosticText(text: string): boolean {
+    const value = String(text || '').toLowerCase();
+    const startsNewProduction = /\b(?:let'?s|lets)\s+(?:do|make|produce|create|start|generate|render)\b/i.test(value)
+        || /\b(?:start|go ahead|do it|render|generate|make|begin)\b.*\b(?:it|this|video|render|production)\b/i.test(value);
+    if (startsNewProduction) return false;
+    return [
+        'wrong short',
+        'wrong video',
+        'wrong one',
+        'previous short',
+        'previous video',
+        'old short',
+        'old video',
+        'same video',
+        'same short',
+        'already made',
+        'already been made',
+        'why are you',
+        'why is it',
+        'what is causing',
+        "what's causing",
+        'causing it',
+        'stuck',
+        'do i need to start a new chat',
+        'need to start a new chat',
+        'trying to build',
+        'keeps trying',
+        'keep getting stuck',
+    ].some((term) => value.includes(term));
+}
+
+/** Research / demand turns must not keep a production Approve card. */
+function isResearchOnlyUserText(text: string): boolean {
+    const value = String(text || '').toLowerCase();
+    if (!value.trim()) return false;
+    // Hard commit escapes research-only filtering.
+    if (/\b(?:yes|yeah|yep)\b.+\b(?:make|render|generate|produce)\b/i.test(value)
+        || /\brender that plan\b/i.test(value)
+        || /\b(?:go ahead and|please)\s+(?:make|render|generate|produce)\b/i.test(value)
+        || /\b(?:render|generate|start production)\b.+\bnow\b/i.test(value)
+        || /\bapprove and run\b/i.test(value)) {
+        return false;
+    }
+    if (/\b(?:look at|pull|check)\b.+\b(?:data|stats|analytics|post|video)\b/i.test(value)) {
+        return true;
+    }
+    if (/\b(?:compare|balance)\b.+\b(?:short[- ]form|shorts|men|women|audience|niche)\b/i.test(value)) {
+        return true;
+    }
+    if (/\b(?:public (?:youtube )?data|live demand|what(?:'s| is) (?:working|performing|viral|trending)|niche (?:data|performance|demand)|search trends|view counts?|how (?:can|do) we make it better)\b/i.test(value)) {
+        return true;
+    }
+    if (/\b(?:research|analyze|analysis|competitor|channel (?:stats|analytics|data))\b/i.test(value)
+        && !/\b(?:render|approve|start production)\b.+\bnow\b/i.test(value)) {
+        return true;
+    }
+    // Soft "let's make … hows that?" is planning, not Approve.
+    if (/\b(?:let'?s|lets|maybe|what if|could we|should we)\b.+\b(?:make|create|do)\b.+\b(?:short|video|ad)\b/i.test(value)
+        && (/\?/.test(value) || /\b(?:how(?:'s|s)? that|how about|thoughts|instead|maybe|plan|concept)\b/i.test(value))) {
+        return true;
+    }
+    return false;
+}
+
+function latestAssistantText(messages: Array<{ role?: string; content?: string }>): string {
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
+        if (messages[i]?.role === 'assistant') return String(messages[i].content || '');
+    }
+    return '';
+}
+
+function pendingActionTitle(action: PendingAction): string {
+    const args = action.arguments || {};
+    return String(args.title || args.video_title || args.topic || '').trim();
+}
+
+/** Production Approve only valid after a hard commit on the latest user message. */
+function latestUserAllowsProductionPending(text: string): boolean {
+    const value = String(text || '').toLowerCase();
+    if (!value.trim()) return false;
+    if (/\b(?:yes|yeah|yep|sure|ok(?:ay)?|do it|go ahead)\b.+\b(?:make|render|generate|produce|start|build)\b/i.test(value)
+        || /\brender that plan\b/i.test(value)
+        || /\blooks good[,.]?\s*(?:make|render)\b/i.test(value)
+        || /\b(?:go ahead and|please)\s+(?:make|render|generate|produce|start)\b/i.test(value)
+        || /\b(?:render|generate|start production)\b.+\bnow\b/i.test(value)
+        || /\bapprove and run\b/i.test(value)
+        || /\bstart_shortform_generate\b/i.test(value)
+        || /\bstart_longform_render\b/i.test(value)
+        || /\b(?:just\s+)?(?:make|render|start|build)\s+it\b/i.test(value)) {
+        if (!/\b(?:how|what if|maybe|better|should we|could we)\b/i.test(value)) {
+            return true;
+        }
+    }
+    if (
+        /\bmake\s+(?:exactly\s+)?(?:one|1|a|single)\s+(?:still|scene|image|frame)\b/i.test(value)
+        || /\b(?:make|render|start|build|produce|generate)\s+(?:the\s+)?(?:very\s+)?(?:first|1st)\s+scene\b/i.test(value)
+        || /\b(?:make|render|start|build|produce|generate)\s+scene\s*(?:#?\s*1|one)\b/i.test(value)
+        || /\bvisual\s+proof\b/i.test(value)
+        || /\bproof\s+(?:still|image)\b/i.test(value)
+    ) {
+        return true;
+    }
+    return false;
+}
+
+function isResearchAssistantReply(text: string): boolean {
+    const value = String(text || '').toLowerCase();
+    const hits = ['public data', 'views', 'traction', 'performing', 'demand', 'niche', 'outperform', 'hits ', ' lands at ']
+        .filter((term) => value.includes(term)).length;
+    return hits >= 2;
+}
+
+function isStaleShortformPendingAction(
+    action: PendingAction,
+    messages: Array<{ role?: string; content?: string }>,
+    siblingPending: PendingAction[],
+    actionIndex: number,
+): boolean {
+    if (action.tool !== 'start_shortform_generate' && action.tool !== 'start_longform_render') return false;
+    // Critical: use ONLY the latest user turn. Joining prior research turns was
+    // marking fresh Approve cards stale and wiping them before click.
+    const latestText = latestSingleUserText(messages);
+    if (isStatusOrStatsQuery(latestText)) return true;
+    if (isProductionDiagnosticText(latestText)) return true;
+    // Absolute: no hard production commit on latest user turn → hide Approve.
+    if (!latestUserAllowsProductionPending(latestText)) return true;
+    if (isResearchOnlyUserText(latestText)) return true;
+    const asst = latestAssistantText(messages);
+    if (isResearchAssistantReply(asst) && !latestUserAllowsProductionPending(latestText)) return true;
+    // Research assistant that proposes one title but pending has a different competitor title.
+    if (isResearchAssistantReply(asst)) {
+        const proposed = asst.match(/let'?s make\s+[“"']([^”"']{8,140})[”"']/i)?.[1]
+            || asst.match(/let'?s make\s+"([^"]{8,140})"/i)?.[1]
+            || '';
+        const actionTitle = pendingActionTitle(action);
+        if (proposed && actionTitle && titleOverlapScore(proposed, actionTitle) < 0.5) {
+            return true;
+        }
+    }
+    const actionTitle = pendingActionTitle(action);
+    const args = action.arguments || {};
+    // One-still proof jobs are stale unless the latest user message asked for a single still.
+    if (args.visual_proof_only === true || Number(args.scene_count || 0) === 1) {
+        if (!/\b(?:one|1|single|first)\s+(?:still|scene|image|frame)\b|\bvisual\s+proof\b|\bproof\s+(?:still|image)\b/i.test(latestText)) {
+            return true;
+        }
+    }
+    // If the assistant just asked for approval, never hide the card on this turn.
+    if (/approve when you'?re ready|approval required|prepared production/i.test(asst)) {
+        return false;
+    }
+    if (!actionTitle) return false;
+    for (let i = actionIndex + 1; i < siblingPending.length; i += 1) {
+        const other = siblingPending[i];
+        if (!SINGLETON_PRODUCTION_APPROVAL_TOOLS.has(other.tool)) continue;
+        const otherTitle = pendingActionTitle(other);
+        if (otherTitle && titleOverlapScore(actionTitle, otherTitle) < 0.34) {
+            return true;
+        }
+    }
+    const canonicalTitle = explicitTitleCandidate(latestText);
+    // No user-requested title → after hard commit keep the prepared card.
+    if (!canonicalTitle) return false;
+    return titleOverlapScore(actionTitle, canonicalTitle) < 0.34;
+}
+
+function isNewProductionRequest(text: string): boolean {
+    const low = String(text || '').toLowerCase();
+    if (/\b(?:next video|next short|next one|the next short|new video|new short|plan the next|make a new|lets make a|let's make a)\b/.test(low)) {
+        return true;
+    }
+    return /\b(?:make|create|generate|render|produce|build)\b.+\b(?:short|video)\b/.test(low);
+}
+
+function priorProductionTitleFromMessages(
+    messages: Array<{ role?: string; content?: string; jobDeliverable?: AgentJobSnapshot }>,
+): string {
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
+        const snap = messages[i]?.jobDeliverable;
+        const title = String(snap?.title || '').trim();
+        if (title) return title;
+    }
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
+        const row = messages[i];
+        if (row?.role !== 'user') continue;
+        const explicit = explicitTitleCandidate(String(row.content || ''));
+        if (explicit) return explicit;
+    }
+    return '';
+}
+
+function userAffirmsAssistantTopic(text: string): boolean {
+    const low = String(text || '').toLowerCase();
+    return /\b(?:that topic|this topic|do that topic|we(?:'|')?ll do (?:that|this)|i like it|sounds good|go ahead and make|make the (?:very )?first scene|(?:the )?first scene|let'?s do (?:that|this))\b/.test(low);
+}
+
+function cleanOutlineTitleCandidate(raw: string): string {
+    const s = String(raw || '').replace(/\s+/g, ' ').trim().replace(/^[-:,.?! ]+|[-:,. ]+$/g, '');
+    const low = s.toLowerCase();
+    if (
+        low.includes('hook (')
+        || low.includes('main beat')
+        || low.includes('twist/close')
+        || low.includes('catalyst note')
+        || low.includes('0-3 sec')
+        || low.includes('25-45 sec')
+        || low.includes('skeleton outline')
+        || low.includes('concept plan')
+        || low.includes('not rendering yet')
+        || low.includes('render style')
+        || low.includes('seedream')
+        || low.includes('grok_imagine')
+        || low.includes('skeleton_host')
+    ) {
+        return '';
+    }
+    if (/\bscene\s*#?\s*\d+\b/i.test(low)) return '';
+    if (/^(?:yes make it|render that|make the first|go ahead and render)\b/i.test(low)) return '';
+    if (s.length < 10 || (s.match(/[A-Za-z0-9']+/g) || []).length < 3) return '';
+    return s.slice(0, 120);
+}
+
+function extractTitleFromAssistantText(text: string): string {
+    const body = String(text || '');
+    if (!body.trim()) return '';
+    const working = body.match(/\*\*Working title:\*\*\s*(.+)/i);
+    if (working?.[1]) {
+        const cleaned = cleanOutlineTitleCandidate(working[1]);
+        if (cleaned) return cleaned;
+    }
+    const skeleton = body.match(/Skeleton outline for \*\*([^*\n]{10,140})\*\*/i);
+    if (skeleton?.[1]) {
+        const cleaned = cleanOutlineTitleCandidate(skeleton[1]);
+        if (cleaned) return cleaned;
+    }
+    const hook = body.match(/\*\*Hook:\*\*\s*(.+)/i);
+    if (hook?.[1]) {
+        const hookLead = String(hook[1]).split(/[.!?]\s+/)[0] || '';
+        const cleaned = cleanOutlineTitleCandidate(hookLead) || hookLead.trim().slice(0, 120);
+        if (cleaned.length >= 10) return cleaned;
+    }
+    const bold = Array.from(body.matchAll(/\*\*([^*\n]{10,140})\*\*/g))
+        .map((match) => cleanOutlineTitleCandidate(match[1] || ''))
+        .filter(Boolean);
+    if (bold.length) return bold[bold.length - 1];
+    const patterns = [
+        /(?:working title|title|topic|outline)[:\s]+["“']?([^"'\n]{10,140})/i,
+        /(?:let'?s make|make)\s+["“']([^"'\n]{10,140})/i,
+    ];
+    for (const pattern of patterns) {
+        const match = body.match(pattern);
+        if (match?.[1]) {
+            const cleaned = cleanOutlineTitleCandidate(match[1]);
+            if (cleaned) return cleaned;
+        }
+    }
+    const block = body.match(/Skeleton outline[^\n]*\n+([^\n]{12,160})/i);
+    if (block?.[1]) {
+        const cleaned = cleanOutlineTitleCandidate(block[1]);
+        if (cleaned) return cleaned;
+    }
+    return '';
+}
+
+function extractTitleFromLatestAssistant(
+    messages: Array<{ role?: string; content?: string }>,
+): string {
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
+        const row = messages[i];
+        if (row?.role !== 'assistant') continue;
+        const title = extractTitleFromAssistantText(String(row.content || ''));
+        if (title) return title;
+    }
+    return '';
+}
+
+function resolveCurrentProductionTarget(
+    messages: Array<{ role?: string; content?: string }>,
+    lockedTitle = '',
+): string {
+    const latestText = latestUserText(messages);
+    if (userAffirmsAssistantTopic(latestText) || latestUserAllowsProductionPending(latestText)) {
+        const fromOutline = extractTitleFromLatestAssistant(messages);
+        if (fromOutline) return fromOutline;
+        const prior = priorProductionTitleFromMessages(messages);
+        const locked = String(lockedTitle || '').trim();
+        if (
+            latestUserAllowsProductionPending(latestText)
+            && locked
+            && prior
+            && titleOverlapScore(locked, prior) >= 0.75
+        ) {
+            return '';
+        }
+    }
+    const explicit = explicitTitleCandidate(latestText) || canonicalProductionTopic(messages, []);
+    if (explicit) return explicit;
+    return String(lockedTitle || '').trim();
+}
+
+function isStaleProductionJob(
+    title: string,
+    messages: Array<{ role?: string; content?: string; jobDeliverable?: AgentJobSnapshot }>,
+    lockedTitle = '',
+): boolean {
+    const jobTitle = String(title || '').trim();
+    if (!jobTitle) return false;
+    const latestText = latestUserText(messages);
+    if (isProductionDiagnosticText(latestText)) return true;
+    if (
+        /\b(?:make|render|start|build)\s+(?:the\s+)?(?:very\s+)?(?:first|1st)\s+scene\b/i.test(latestText)
+    ) {
+        const prior = priorProductionTitleFromMessages(messages);
+        if (prior && titleOverlapScore(jobTitle, prior) >= 0.75) {
+            const outline = extractTitleFromLatestAssistant(messages);
+            if (!outline || titleOverlapScore(jobTitle, outline) < 0.75) return true;
+        }
+    }
+    const target = resolveCurrentProductionTarget(messages, lockedTitle);
+    if (!target && latestUserAllowsProductionPending(latestText)) {
+        const priorTitle = priorProductionTitleFromMessages(messages);
+        if (priorTitle && titleOverlapScore(jobTitle, priorTitle) >= 0.75) return true;
+    }
+    if (target && titleOverlapScore(jobTitle, target) < 0.34) return true;
+    if (
+        target
+        && (latestUserAllowsProductionPending(latestText) || userAffirmsAssistantTopic(latestText))
+        && titleOverlapScore(jobTitle, target) < 0.75
+    ) {
+        return true;
+    }
+    const prior = priorProductionTitleFromMessages(messages);
+    if (isNewProductionRequest(latestText)) {
+        if (prior && titleOverlapScore(jobTitle, prior) >= 0.75) return true;
+    }
+    const canonical = canonicalProductionTopic(messages, []);
+    if (canonical && titleOverlapScore(jobTitle, canonical) < 0.34) return true;
+    if (
+        prior
+        && (latestUserAllowsProductionPending(latestText) || userAffirmsAssistantTopic(latestText))
+        && /\b(?:make|render|start|build)\s+(?:the\s+)?(?:very\s+)?(?:first|1st)\s+scene\b/i.test(latestText)
+        && titleOverlapScore(jobTitle, prior) >= 0.75
+        && (!target || titleOverlapScore(jobTitle, target) < 0.75)
+    ) {
+        return true;
+    }
+    if (!latestUserAllowsProductionPending(latestText)) {
+        if (prior && titleOverlapScore(jobTitle, prior) >= 0.75) {
+            if (
+                isResearchOnlyUserText(latestText)
+                || /\b(?:plan(?:ning)?|next(?:\s+one)?|similar to|retention|views|analytics|stats|what worked)\b/i.test(latestText)
+            ) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+function isStaleAwaitingSnapshot(
+    snap: AgentJobSnapshot | undefined,
+    messages: Array<{ role?: string; content?: string; jobDeliverable?: AgentJobSnapshot }>,
+): boolean {
+    if (!snap) return false;
+    if (snap.status !== 'awaiting_approval' && snap.status !== 'running') return false;
+    return isStaleProductionJob(String(snap.title || ''), messages);
+}
+
+function resolveAwaitingDeliverableSnap(
+    messages: Array<{ role?: string; content?: string; jobDeliverable?: AgentJobSnapshot }>,
+    snapshots: Record<string, AgentJobSnapshot>,
+): AgentJobSnapshot | undefined {
+    const byId = new Map<string, AgentJobSnapshot>();
+    for (const snap of Object.values(snapshots)) {
+        if (snap?.status === 'awaiting_approval' && snap.job_id) byId.set(snap.job_id, snap);
+    }
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
+        const snap = messages[i]?.jobDeliverable;
+        if (snap?.status === 'awaiting_approval' && snap.job_id && !byId.has(snap.job_id)) {
+            byId.set(snap.job_id, snap);
+        }
+    }
+    const fresh = [...byId.values()].filter((snap) => !isStaleAwaitingSnapshot(snap, messages));
+    if (!fresh.length) return undefined;
+    const latestComplete = [...messages].reverse().find((row) => {
+        const snap = row.jobDeliverable;
+        return snap?.status === 'complete' && Boolean(snap.mp4_url || snap.download_url);
+    })?.jobDeliverable;
+    if (latestComplete?.job_id) {
+        return fresh.find((snap) => snap.job_id === latestComplete.job_id) || undefined;
+    }
+    return fresh[0];
+}
+
+function pruneStaleJobTracks(
+    tracks: AgentJobTrack[],
+    messages: Array<{ role?: string; content?: string; jobDeliverable?: AgentJobSnapshot }>,
+    blockedJobIds: string[] = [],
+): AgentJobTrack[] {
+    return tracks.filter((track) => (
+        !isBlockedJobId(track.job_id, blockedJobIds)
+        && !isStaleProductionJob(String(track.title || ''), messages)
+    ));
+}
+
+function shouldSuppressProductionJob(
+    jobId: string,
+    title: string | undefined,
+    messages: Array<{ role?: string; content?: string; jobDeliverable?: AgentJobSnapshot }>,
+    blockedJobIds: string[] = [],
+    snapStatus?: string,
+): boolean {
+    if (isBlockedJobId(jobId, blockedJobIds)) {
+        return true;
+    }
+    const latestText = latestUserText(messages);
+    const sceneOneCommit = /\b(?:make|render|start|build|produce|generate)\s+(?:the\s+)?(?:very\s+)?(?:first|1st)\s+scene\b/i.test(latestText);
+    const hardCommit = latestUserAllowsProductionPending(latestText)
+        && !/\b(?:expand|rest of|remaining|full short|build the rest|render the rest)\b/i.test(latestText);
+    if (
+        snapStatus === 'complete'
+        && (sceneOneCommit || hardCommit)
+    ) {
+        return true;
+    }
+    return isStaleProductionJob(String(title || ''), messages);
+}
+
+function collectKnownProductionJobIds(
+    messages: Array<{ jobDeliverable?: AgentJobSnapshot }>,
+    tracks: AgentJobTrack[],
+    deliverables: Iterable<string>,
+): string[] {
+    const ids = new Set<string>();
+    for (const track of tracks) {
+        const id = String(track.job_id || '').trim();
+        if (id) ids.add(id);
+    }
+    for (const msg of messages) {
+        const id = String(msg.jobDeliverable?.job_id || '').trim();
+        if (id) ids.add(id);
+    }
+    for (const id of deliverables) {
+        const trimmed = String(id || '').trim();
+        if (trimmed) ids.add(trimmed);
+    }
+    return [...ids];
+}
+
+function keepSingleProductionPending(actions: PendingAction[], messages: Array<{ role?: string; content?: string }>): PendingAction[] {
+    const productionIndices = actions
+        .map((action, index) => ({ action, index }))
+        .filter(({ action }) => SINGLETON_PRODUCTION_APPROVAL_TOOLS.has(action.tool));
+    if (productionIndices.length <= 1) return actions;
+    const canonicalTitle = canonicalProductionTopic(messages, actions);
+    let keepIndex = productionIndices[productionIndices.length - 1].index;
+    if (canonicalTitle) {
+        keepIndex = productionIndices.reduce((best, row) => (
+            titleOverlapScore(pendingActionTitle(row.action), canonicalTitle)
+                > titleOverlapScore(pendingActionTitle(actions[best]), canonicalTitle)
+                ? row.index
+                : best
+        ), keepIndex);
+    }
+    return actions.filter((action, index) => {
+        if (!SINGLETON_PRODUCTION_APPROVAL_TOOLS.has(action.tool)) return true;
+        return index === keepIndex;
+    });
+}
+
+const OWNER_ONLY_PENDING_TOOLS = new Set([
+    'start_longform_render',
+    'expand_longform_visual_proof',
+    'generate_longform_thumbnails',
+    'finalize_longform_render',
+    'ingest_cliplab_attachment',
+    'analyze_cliplab_video',
+    'render_cliplab_segments',
+    'remix_cliplab_short',
+    'poll_cliplab_job',
+]);
+
+function filterOwnerOnlyPending(actions: PendingAction[], isAdmin: boolean): PendingAction[] {
+    if (isAdmin) return actions;
+    return actions.filter((action) => !OWNER_ONLY_PENDING_TOOLS.has(String(action.tool || '')));
+}
+
+function filterStalePendingActions(
+    actions: PendingAction[],
+    messages: Array<{ role?: string; content?: string }>,
+): PendingAction[] {
+    const fresh = actions.filter(
+        (action, index) => !isStaleShortformPendingAction(action, messages, actions, index),
+    );
+    return keepSingleProductionPending(fresh, messages);
 }
 
 function mergePendingFromTranscript(
     messages: Array<{ role?: string; content?: string; tool_call_id?: string }>,
     serverPending: PendingAction[],
 ): PendingAction[] {
-    if (serverPending.length > 0) return serverPending;
-    if (productionAlreadyApproved(messages)) return [];
-
-    const recovered = new Map<string, PendingAction>();
-    for (const m of messages) {
-        const text = String(m.content || '');
-        if (!text.includes('awaiting_user_approval')) continue;
-        try {
-            const parsed = JSON.parse(text) as { action_id?: string; status?: string };
-            const aid = String(parsed.action_id || '').trim();
-            if (!aid || parsed.status !== 'awaiting_user_approval') continue;
-            recovered.set(aid, {
-                id: aid,
-                tool: 'start_shortform_generate',
-                summary: 'Tap Sync chat first so the server loads full args, then Approve & run',
-            });
-        } catch {
-            /* ignore */
-        }
-    }
-    return Array.from(recovered.values());
+    const filteredServerPending = filterStalePendingActions(serverPending, messages);
+    if (filteredServerPending.length > 0) return filteredServerPending;
+    // Do not resurrect approval cards from raw transcript JSON. The backend is
+    // the only safe source of runnable approval state because users can change
+    // direction after a tool approval was originally prepared.
+    return [];
 }
 
 function transcriptMentionsPendingAction(messages: ChatMessage[]): boolean {
@@ -446,7 +1437,23 @@ function transcriptMentionsPendingAction(messages: ChatMessage[]): boolean {
 }
 
 function friendlyApiError(status: number, data: Record<string, unknown>, fallback: string) {
-    const detail = String(data?.detail || data?.error || fallback);
+    const rawDetail = data?.detail ?? data?.error ?? fallback;
+    const detail = typeof rawDetail === 'string'
+        ? rawDetail
+        : Array.isArray(rawDetail)
+          ? rawDetail
+              .map((item: unknown) => {
+                  if (typeof item === 'string') return item;
+                  if (item && typeof item === 'object' && 'msg' in (item as object)) {
+                      return String((item as { msg?: string }).msg || '');
+                  }
+                  return '';
+              })
+              .filter(Boolean)
+              .join('; ')
+          : rawDetail && typeof rawDetail === 'object'
+            ? JSON.stringify(rawDetail)
+            : String(rawDetail ?? fallback);
     if (status === 401 || status === 403) {
         return detail || 'Sign in required. Studio Agent needs Studio or Studio Pro (owners have unlimited access).';
     }
@@ -469,11 +1476,16 @@ function friendlyApiError(status: number, data: Record<string, unknown>, fallbac
         }
         return detail || 'Studio is at capacity (Claude + fal). Your request is queued — try again shortly.';
     }
+    if (status === 524 || status === 504) {
+        return (
+            detail
+            || 'Studio Agent timed out at the edge proxy before Fly responded. Your chat is preserved server-side — press Resume in a few seconds.'
+        );
+    }
     if (status === 429) {
         if (/queue/i.test(detail)) {
             return (
-                `${detail} — This is usually the RunPod API bridge (not your approve step). `
-                + 'Agent chat/approve uses Fly directly; use Sync chat and Approve & run.'
+                `${detail} — Chat runs on the Fly control plane and does not enter the RunPod production queue. Use Sync chat, then retry.`
             );
         }
         return detail || 'Too many requests — wait a moment and retry.';
@@ -482,31 +1494,43 @@ function friendlyApiError(status: number, data: Record<string, unknown>, fallbac
 }
 
 export default function AgentPanel({ onBack }: { onBack?: () => void }) {
-    const { session, ownerOverride } = useContext(AuthContext);
+    const { session, ownerOverride, supabase } = useContext(AuthContext);
+    const isAdminUser = Boolean(ownerOverride);
     const userCacheKey = String((session as any)?.user?.id || (session as any)?.user?.email || 'anon');
     const [sessionId, setSessionId] = useState<string | null>(null);
     const [model, setModel] = useState(FALLBACK_MODELS[0].id);
     const [modelCatalog, setModelCatalog] = useState<AgentModelOption[]>(FALLBACK_MODELS);
     const [modelPickerOpen, setModelPickerOpen] = useState(false);
+    const [imageModel, setImageModel] = useState(() => loadImageModelPref(DEFAULT_IMAGE_MODEL));
+    const [imageModelCatalog, setImageModelCatalog] = useState<AgentModelOption[]>(FALLBACK_IMAGE_MODELS);
+    const [imageModelPickerOpen, setImageModelPickerOpen] = useState(false);
+    const [videoModelCatalog, setVideoModelCatalog] = useState<AgentModelOption[]>(FALLBACK_VIDEO_MODELS);
+    const [videoModelPickerOpen, setVideoModelPickerOpen] = useState(false);
     const [approvalMode, setApprovalMode] = useState<ApprovalMode>('confirm');
     const [messages, setMessages] = useState<ChatMessage[]>([]);
     const [pending, setPending] = useState<PendingAction[]>([]);
+    const [conceptPlan, setConceptPlan] = useState<ConceptPlan | null>(null);
     const [draftsBySession, setDraftsBySession] = useState<Record<string, string>>({});
     const [attachments, setAttachments] = useState<AttachedFile[]>([]);
     const [attachmentPayload, setAttachmentPayload] = useState<Record<string, AttachmentPayload>>({});
     const [runningBySession, setRunningBySession] = useState<Record<string, string>>({});
     const [resuming, setResuming] = useState(false);
+    const [syncing, setSyncing] = useState(false);
     const [toolActivity, setToolActivity] = useState('');
-    const [verificationSteps, setVerificationSteps] = useState<AgentVerificationStep[]>([]);
+    const [activitySteps, setActivitySteps] = useState<ActivityStep[]>([]);
+    const [, setVerificationSteps] = useState<AgentVerificationStep[]>([]);
+    const activityStepRef = useRef(0);
     const [booting, setBooting] = useState(true);
+    const [creatingSession, setCreatingSession] = useState(false);
     const [history, setHistory] = useState<SessionSummary[]>([]);
     const [historyQuery, setHistoryQuery] = useState('');
     const [historyOpen, setHistoryOpen] = useState(true);
     const [productWebsite, setProductWebsite] = useState('');
-    const [contentFormat, setContentFormat] = useState<ContentFormat>('both');
+    const [contentFormat, setContentFormat] = useState<ContentFormat>('short');
     const [reasoningDepth, setReasoningDepth] = useState<ReasoningDepth>('balanced');
+    const [agentMode, setAgentMode] = useState<AgentMode>('plan');
     const [renderStyle, setRenderStyle] = useState('cinematic');
-    const [videoModel, setVideoModel] = useState<VideoModel>('seedance');
+    const [videoModel, setVideoModel] = useState(DEFAULT_VIDEO_MODEL);
     const [captionMode, setCaptionMode] = useState<CaptionMode>('word');
     const [, setAnimate] = useState(true); // internal for session compat / patch; UI toggle removed per request
     const [showStyleGrid, setShowStyleGrid] = useState(false);
@@ -517,17 +1541,41 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
     const [replyingTo, setReplyingTo] = useState<(AgentJobSnapshot & { scene_index?: number }) | null>(null);
     const [renderStyleCatalog, setRenderStyleCatalog] = useState<RenderStyleOption[]>(FALLBACK_RENDER_STYLES);
     const [activeStylePreview, setActiveStylePreview] = useState('');
+
+    // Art Style picker is live session state — retarget waiting Approve cards
+    // immediately so the user never approves a stale style.
+    useEffect(() => {
+        if (!renderStyle) return;
+        setPending((prev) => prev.map((action) => {
+            if (action.tool !== 'start_longform_render' && action.tool !== 'start_shortform_generate') {
+                return action;
+            }
+            const args = (action.arguments || {}) as Record<string, unknown>;
+            if (String(args.render_style || '') === renderStyle) return action;
+            return { ...action, arguments: { ...args, render_style: renderStyle } };
+        }));
+        setConceptPlan((prev) => (
+            prev && String(prev.visual_style || '') !== renderStyle
+                ? { ...prev, visual_style: renderStyle }
+                : prev
+        ));
+    }, [renderStyle]);
+
     const [error, setError] = useState('');
     const [queueHint, setQueueHint] = useState('');
     const [dictationPreview, setDictationPreview] = useState('');
     const scrollRef = useRef<HTMLDivElement>(null);
     const inputRef = useRef<HTMLTextAreaElement>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
+    const messagesRef = useRef<ChatMessage[]>([]);
+    const blockedJobIdsRef = useRef<string[]>([]);
+    const productionEpochRef = useRef(1);
     const stickToBottomRef = useRef(true);
     const sessionIdRef = useRef<string | null>(null);
     const jobSessionRef = useRef<Map<string, string>>(new Map());
-    const queuePollInFlightRef = useRef(false);
+    const deliverablesByJobRef = useRef<Map<string, AgentJobSnapshot>>(new Map());
     const sessionLoadSeqRef = useRef(0);
+    const autoSyncTimerRef = useRef<number | null>(null);
     const sessionUiCacheRef = useRef<Map<string, SessionUiCache>>(new Map());
     const [jobTracks, setJobTracks] = useState<AgentJobTrack[]>([]);
     const [dockDismissed, setDockDismissed] = useState(false);
@@ -537,6 +1585,18 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
     const [deleteTarget, setDeleteTarget] = useState<SessionSummary | null>(null);
     const userCancelledJobsRef = useRef<Set<string>>(new Set());
     const currentSessionRunning = Boolean(sessionId && runningBySession[sessionId]);
+    const chatSessionReady = isPersistedAgentSessionId(sessionId) && !creatingSession;
+    const latestVideoPreviewJobId = useMemo(() => {
+        for (let i = messages.length - 1; i >= 0; i -= 1) {
+            const jobId = messages[i]?.jobDeliverable?.job_id;
+            if (jobId) return jobId;
+        }
+        return null;
+    }, [messages]);
+    const visibleChatMessages = useMemo(
+        () => messages.filter((m) => m.role === 'user' || m.role === 'assistant'),
+        [messages],
+    );
     const input = sessionId ? draftsBySession[sessionId] || '' : '';
     const selectedChannel =
         youtubeChannels.find((ch) => channelMatchesSelection(ch, selectedChannelId, sessionChannel))
@@ -550,6 +1610,10 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
         const payload = attachmentPayload[f.id];
         return Boolean(payload && (payload.data_url || payload.text));
     });
+
+    useEffect(() => {
+        messagesRef.current = messages;
+    }, [messages]);
 
     const setInput = useCallback((next: string | ((prev: string) => string)) => {
         const sid = sessionIdRef.current;
@@ -611,10 +1675,52 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
     }, []);
 
     const isImplicitCancelFailure = useCallback((snap: AgentJobSnapshot) => (
-        snap.status === 'failed'
-        && /cancel+ed by user/i.test(String(snap.error || snap.stage_label || snap.stage || ''))
+        isImplicitProductionCancel(snap)
         && !userCancelledJobsRef.current.has(snap.job_id)
     ), []);
+
+    const dropGhostShortformTrack = useCallback((jobId?: string) => {
+        if (jobId) {
+            deliverablesByJobRef.current.delete(jobId);
+        } else {
+            for (const [id, snap] of [...deliverablesByJobRef.current.entries()]) {
+                if (isGhostJobPollFailure(snap)) {
+                    deliverablesByJobRef.current.delete(id);
+                }
+            }
+        }
+        setJobTracks((prev) => {
+            const next = jobId
+                ? prev.filter((j) => j.job_id !== jobId)
+                : prev.filter((j) => j.kind !== 'shortform');
+            const sid = sessionIdRef.current;
+            if (sid) persistJobs(sid, next);
+            return next;
+        });
+        setMessages((rows) => {
+            if (jobId) {
+                return rows.map((row): ChatMessage => (
+                    row.jobDeliverable?.job_id === jobId
+                        ? { role: row.role, content: row.content, productionUpdate: row.productionUpdate }
+                        : row
+                ));
+            }
+            return stripGhostJobDeliverables(rows);
+        });
+        setError((prev) => (
+            /Expecting value: line 1 column 1/i.test(prev)
+            || /Production result file was empty or invalid/i.test(prev)
+                ? ''
+                : prev
+        ));
+    }, []);
+
+    useEffect(() => {
+        const hasStale = messages.some((msg) => shouldHideJobDeliverable(msg.jobDeliverable, messages));
+        if (!hasStale) return;
+        setMessages((rows) => stripGhostJobDeliverables(rows));
+        dropGhostShortformTrack();
+    }, [messages, dropGhostShortformTrack]);
 
     useEffect(() => {
         sessionIdRef.current = sessionId;
@@ -653,6 +1759,19 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
         persistStoredSessionUiCache(userCacheKey, sessionUiCacheRef.current);
     }, [dockDismissed, jobTracks, messages, pending, sessionId, userCacheKey]);
 
+    useEffect(() => {
+        setPending((current) => {
+            const filtered = filterStalePendingActions(current, messages);
+            if (
+                filtered.length === current.length
+                && filtered.every((action, index) => action.id === current[index]?.id)
+            ) {
+                return current;
+            }
+            return filtered;
+        });
+    }, [messages]);
+
     // First-time Studio Agent greeting (only once per user, only for non-owners, and only if no channels connected).
     // This runs on initial mount of the agent experience.
     useEffect(() => {
@@ -690,10 +1809,35 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
     }, [session, ownerOverride, history.length, messages.length]);
 
     const getToken = useCallback(async () => {
-        const tok = session?.access_token;
-        if (!tok) throw new Error('Not signed in');
+        // Supabase access_token JWTs expire (~1h). UI can still show you signed in via
+        // user profile while the JWT is stale — mic/API must refresh first.
+        try {
+            if (supabase?.auth) {
+                const { data, error } = await supabase.auth.getSession();
+                if (!error) {
+                    let next = data.session;
+                    const expiresAt = Number(next?.expires_at || 0);
+                    const nowSec = Math.floor(Date.now() / 1000);
+                    // Refresh when missing, expired, or expiring within 2 minutes.
+                    if (!next?.access_token || (expiresAt > 0 && expiresAt <= nowSec + 120)) {
+                        const refreshed = await supabase.auth.refreshSession();
+                        if (!refreshed.error && refreshed.data.session?.access_token) {
+                            next = refreshed.data.session;
+                        }
+                    }
+                    const fresh = String(next?.access_token || '').trim();
+                    if (fresh) return fresh;
+                }
+            }
+        } catch {
+            /* fall through to context snapshot */
+        }
+        const tok = String(session?.access_token || '').trim();
+        if (!tok) {
+            throw new Error('Sign in required. Refresh Studio, then try again.');
+        }
         return tok;
-    }, [session?.access_token]);
+    }, [session?.access_token, supabase]);
 
     const ingestActiveJobs = useCallback(
         (raw: unknown, sid: string | null) => {
@@ -705,36 +1849,161 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                     title: String(j.title || ''),
                     started_at: Number(j.started_at || Date.now()),
                 }))
-                .filter((j) => j.job_id);
-            if (!normalized.length) return;
+                .filter((j) => j.job_id)
+                .filter((j) => !shouldSuppressProductionJob(j.job_id, j.title, messagesRef.current, blockedJobIdsRef.current));
+            if (!normalized.length) {
+                if (sid) {
+                    setJobTracks((prev) => {
+                        const pruned = pruneStaleJobTracks(prev, messagesRef.current, blockedJobIdsRef.current);
+                        persistJobs(sid, pruned);
+                        return pruned;
+                    });
+                }
+                return;
+            }
+            const hasReferenceJob = normalized.some((j) => j.kind === 'competitor');
             if (sid) {
                 for (const job of normalized) {
                     jobSessionRef.current.set(job.job_id, sid);
                 }
             }
             setJobTracks((prev) => {
-                const merged = mergeJobTracks(prev, normalized);
+                const pruned = hasReferenceJob
+                    ? prev.filter((j) => j.kind !== 'shortform')
+                    : prev;
+                const merged = mergeJobTracks(pruned, normalized);
                 if (sid) persistJobs(sid, merged);
                 return merged;
             });
+            if (hasReferenceJob) {
+                setMessages((rows) => stripGhostJobDeliverables(rows));
+            }
             setDockDismissed(false);
         },
         [],
     );
 
+    const mergeThumbnailReviewIntoDeliverable = useCallback((review: ThumbnailReview) => {
+        if (!review.review_id || !(review.candidate_urls || []).length) return;
+        const urls = review.candidate_urls || [];
+        setMessages((rows) => {
+            const cleaned = rows.filter((row) => row.thumbnailReview?.review_id !== review.review_id);
+            const findTarget = (predicate: (snap: AgentJobSnapshot) => boolean) => (
+                [...cleaned].map((row, index) => ({ row, index }))
+                    .reverse()
+                    .find(({ row }) => row.jobDeliverable && predicate(row.jobDeliverable))
+                    ?.index ?? -1
+            );
+            let targetIdx = -1;
+            if (review.job_id) {
+                targetIdx = findTarget((snap) => (
+                    snap.job_id === review.job_id
+                    || snap.job_id.slice(0, 8) === review.job_id!.slice(0, 8)
+                ));
+            }
+            if (targetIdx < 0) {
+                targetIdx = findTarget((snap) => (
+                    snap.status === 'complete'
+                    && Boolean(snap.mp4_url || snap.download_url)
+                ));
+            }
+            if (targetIdx < 0) {
+                targetIdx = findTarget((snap) => snap.kind === 'longform' || snap.kind === 'shortform');
+            }
+            if (targetIdx < 0) return cleaned;
+            const copy = [...cleaned];
+            const existing = copy[targetIdx].jobDeliverable!;
+            copy[targetIdx] = {
+                ...copy[targetIdx],
+                jobDeliverable: {
+                    ...existing,
+                    thumbnail_urls: urls,
+                    title: existing.title || review.title,
+                },
+            };
+            deliverablesByJobRef.current.set(existing.job_id, copy[targetIdx].jobDeliverable!);
+            return copy;
+        });
+        stickToBottomRef.current = true;
+    }, []);
+
+    const absorbThumbnailSnapshot = useCallback((snap: AgentJobSnapshot): boolean => {
+        const urls = snap.thumbnail_urls || [];
+        if (!snap.thumbnail_only || !urls.length) return false;
+        mergeThumbnailReviewIntoDeliverable({
+            review_id: snap.job_id,
+            job_id: snap.job_id,
+            title: snap.title,
+            candidate_urls: urls,
+        });
+        deliverablesByJobRef.current.delete(snap.job_id);
+        setJobTracks((prev) => {
+            const next = prev.filter((job) => job.job_id !== snap.job_id);
+            const sid = sessionIdRef.current;
+            if (sid) persistJobs(sid, next);
+            return next;
+        });
+        return true;
+    }, [mergeThumbnailReviewIntoDeliverable]);
+
     const appendJobDeliverable = useCallback((snap: AgentJobSnapshot) => {
+        if (absorbThumbnailSnapshot(snap)) return;
+        if (shouldSuppressProductionJob(snap.job_id, snap.title, messagesRef.current, blockedJobIdsRef.current)) {
+            dropGhostShortformTrack(snap.job_id);
+            return;
+        }
         const ownerSession = jobSessionRef.current.get(snap.job_id);
         if (ownerSession && ownerSession !== sessionIdRef.current) return;
+        if (isGhostJobPollFailure(snap)) {
+            dropGhostShortformTrack(snap.job_id);
+            return;
+        }
+        if (shouldHideJobDeliverable(snap, messagesRef.current)) {
+            return;
+        }
+        if (shouldSuppressProductionJob(
+            snap.job_id,
+            snap.title,
+            messagesRef.current,
+            blockedJobIdsRef.current,
+        )) {
+            return;
+        }
+        if (
+            (snap.status === 'awaiting_approval' || snap.status === 'running' || snap.status === 'complete')
+            && snap.kind === 'longform'
+        ) {
+            setMessages((rows) => rows.map((row) => {
+                const other = row.jobDeliverable;
+                if (!other || other.job_id === snap.job_id) return row;
+                if (other.kind !== 'longform' || other.status !== 'failed') return row;
+                const { jobDeliverable: _drop, ...rest } = row;
+                return rest;
+            }));
+            if (snap.status === 'awaiting_approval') setError('');
+        }
         if (isImplicitCancelFailure(snap)) return;
+        if (snap.kind === 'competitor' && snap.status === 'complete') {
+            for (const [id, cached] of [...deliverablesByJobRef.current.entries()]) {
+                if (cached.status === 'failed' && (cached.kind === 'competitor' || cached.kind === 'shortform' || isGhostJobPollFailure(cached))) {
+                    deliverablesByJobRef.current.delete(id);
+                }
+            }
+            setMessages((rows) => stripGhostJobDeliverables(rows));
+        }
         const referenceFacts = (() => {
             if (snap.kind !== 'competitor' || snap.status !== 'complete') return '';
             const facts: string[] = [];
+            const visual = String(snap.visual_summary || '').trim();
+            if (visual) facts.push(`observed look: ${visual.slice(0, 220)}`);
             if (snap.pacing?.avg_shot_sec != null) facts.push(`avg shot ${snap.pacing.avg_shot_sec}s`);
             if (snap.pacing?.cut_count != null) facts.push(`${snap.pacing.cut_count} cuts`);
             if (snap.pacing?.duration_sec != null) facts.push(`${snap.pacing.duration_sec}s duration`);
             if (snap.frame_count != null) facts.push(`${snap.frame_count} keyframes`);
-            const evidence = facts.length ? ` Extracted: ${facts.join(', ')}.` : '';
-            return `${evidence} Conclusion: use this pacing as reference evidence, then combine it with fresh channel analytics and public YouTube demand before generating the next script.`;
+            const warnings = snap.pacing_warnings || [];
+            if (warnings.length) facts.push(String(warnings[0]).slice(0, 180));
+            const evidence = facts.length ? ` Extracted: ${facts.join('; ')}.` : '';
+            return `${evidence} Conclusion: use the observed visual look plus pacing metrics as reference evidence — do not infer art style from the session Art Style picker.`;
         })();
         const label =
             snap.kind === 'competitor'
@@ -742,7 +2011,7 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                     ? `Reference analysis finished — format-specific pacing and blueprint signals are ready.${referenceFacts}`
                     : snap.status === 'failed'
                       ? `Reference analysis failed: ${snap.error || 'the analysis workspace could not be read.'}`
-                      : 'Reference analysis is still running.'
+                      : `Reference analysis in progress — ${String(snap.stage_label || snap.stage || 'working').replace(/_/g, ' ')} (${Math.max(0, Number(snap.progress || 0))}%).`
                 : snap.status === 'failed'
                   ? snap.error
                       ? `Production failed: ${snap.error}`
@@ -754,35 +2023,114 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                       ? 'Stills are ready — auto-finalize is exporting voice, sound, and MP4.'
                       : snap.kind === 'longform'
                         ? 'Your long-form stills are ready. Review the grid, then tap Finalize & export MP4.'
-                        : 'Your short-form scenes are ready. Review the grid, then approve animation or export MP4.'
+                        : Number(snap.animation_complete_count || 0) > 0
+                          ? 'Animation is ready in the card below — review the clip, then export MP4.'
+                          : Number(snap.animation_pending_count || 0) > 0
+                            ? 'Scenes approved — animation is queued. The clip will appear in this card when ready.'
+                            : 'Your short-form scenes are ready. Review the grid, then approve animation or export MP4.'
+                    : snap.status === 'running' && /animat/i.test(String(snap.stage || snap.stage_label || ''))
+                      ? 'Animating approved scenes — the clip will appear in this card when ready.'
                     : 'Your video is ready.';
+        deliverablesByJobRef.current.set(snap.job_id, snap);
         setMessages((m) => {
             const nextRow: ChatMessage = {
                 role: 'assistant' as const,
-                content: label,
+                content: deliverableDisplayText(label, snap),
                 jobDeliverable: snap,
             };
             let replaced = false;
             const withoutProgress = m.filter((row) => row.productionUpdate?.job_id !== snap.job_id);
+            const jobMatches = (existing?: AgentJobSnapshot) => {
+                if (!existing?.job_id || !snap.job_id) return false;
+                if (existing.job_id === snap.job_id) return true;
+                return existing.job_id.slice(0, 8) === snap.job_id.slice(0, 8);
+            };
+            const pinReviewCard = (
+                snap.kind === 'shortform'
+                && snap.status === 'awaiting_approval'
+            );
+            // For in-progress competitor analysis, update the latest running bubble
+            // in place so we don't stack "still running" clones every poll.
+            // Shortform review cards are re-pinned to the end so Scene 1 stays
+            // visible after later assistant text (audit / expand prompts).
             const next = withoutProgress.map((row) => {
-                if (row.jobDeliverable?.job_id !== snap.job_id) return row;
+                if (!jobMatches(row.jobDeliverable)) return row;
                 replaced = true;
+                if (pinReviewCard) {
+                    const { jobDeliverable: _drop, ...rest } = row;
+                    return rest as ChatMessage;
+                }
                 return nextRow;
             });
-            return replaced ? next : [...next, nextRow];
+            if (replaced) {
+                if (pinReviewCard) return [...next, nextRow];
+                return next;
+            }
+            if (
+                snap.kind === 'competitor'
+                && snap.status === 'running'
+            ) {
+                const runningIdx = [...next]
+                    .map((row, i) => ({ row, i }))
+                    .reverse()
+                    .find(({ row }) =>
+                        row.jobDeliverable?.kind === 'competitor'
+                        && row.jobDeliverable?.status === 'running',
+                    )?.i;
+                if (typeof runningIdx === 'number') {
+                    const copy = [...next];
+                    copy[runningIdx] = nextRow;
+                    return copy;
+                }
+            }
+            return [...next, nextRow];
         });
         setJobTracks((prev) => {
-            const next = prev.filter((j) => j.job_id !== snap.job_id);
             const sid = sessionIdRef.current;
-            if (sid) persistJobs(sid, next);
-            return next;
+            // Shortform review stays pollable so i2v clips land in the chat card.
+            const keepShortformReview = (
+                snap.kind === 'shortform'
+                && snap.status === 'awaiting_approval'
+            );
+            if (isTerminalJob(snap) && !keepShortformReview) {
+                let next = prev.filter((j) => j.job_id !== snap.job_id);
+                if (snap.kind === 'competitor' && snap.status === 'complete') {
+                    next = pruneOrphanShortformTracks(next, []);
+                }
+                if (sid) persistJobs(sid, next);
+                return next;
+            }
+            const merged = mergeJobTracks(prev, [{
+                job_id: snap.job_id,
+                kind: normalizeAgentJobKind(snap.job_id, snap.kind, snap.title),
+                title: snap.title,
+                started_at: Date.now(),
+            }]);
+            if (sid) persistJobs(sid, merged);
+            return merged;
         });
         stickToBottomRef.current = true;
-    }, [approvalMode, isImplicitCancelFailure]);
+    }, [absorbThumbnailSnapshot, approvalMode, dropGhostShortformTrack, isImplicitCancelFailure]);
 
     const upsertProgressLine = useCallback((update: ProductionProgressUpdate) => {
         const ownerSession = jobSessionRef.current.get(update.job_id);
         if (ownerSession && ownerSession !== sessionIdRef.current) return;
+        if (
+            isImplicitProductionCancel({
+                status: 'failed',
+                stage_label: update.stage_label,
+                stage: update.stage_label,
+                error: '',
+            })
+            && !userCancelledJobsRef.current.has(update.job_id)
+        ) {
+            setMessages((rows) => rows.filter((row) => row.productionUpdate?.job_id !== update.job_id));
+            return;
+        }
+        if (shouldSuppressProductionJob(update.job_id, update.title, messagesRef.current, blockedJobIdsRef.current)) {
+            setMessages((rows) => rows.filter((row) => row.productionUpdate?.job_id !== update.job_id));
+            return;
+        }
         setMessages((m) => {
             const idx = m.findIndex((row) => row.productionUpdate?.job_id === update.job_id);
             const row: ChatMessage = {
@@ -855,23 +2203,56 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
         tracks: jobTracks,
         pollResetKey,
         getToken,
+        shouldPollJobTrack: (track) => (
+            !shouldSuppressProductionJob(track.job_id, track.title, messagesRef.current, blockedJobIdsRef.current)
+        ),
         onProgress: upsertProgressLine,
+        onRunningPreview: appendJobDeliverable,
+        onGhostJobDropped: (track) => {
+            dropGhostShortformTrack(track.job_id);
+        },
         onJobComplete: (snap: AgentJobSnapshot) => {
             const ownerSession = jobSessionRef.current.get(snap.job_id);
             if (ownerSession && ownerSession !== sessionIdRef.current) return;
-            setDockDismissed(false);
+            setDockDismissed(true);
+            setJobTracks((prev) => {
+                const next = prev.filter((j) => j.job_id !== snap.job_id);
+                if (sessionId) persistJobs(sessionId, next);
+                return next;
+            });
+            setMessages((rows) => rows.filter((row) => row.productionUpdate?.job_id !== snap.job_id));
             appendJobDeliverable(snap);
         },
         onJobFailed: (snap: AgentJobSnapshot) => {
             const ownerSession = jobSessionRef.current.get(snap.job_id);
             if (ownerSession && ownerSession !== sessionIdRef.current) return;
+            if (isGhostJobPollFailure(snap) || shouldHideJobDeliverable(snap, messagesRef.current)) {
+                dropGhostShortformTrack(snap.job_id);
+                return;
+            }
+            if (isStaleLongformChapterFailure(snap) || isStaleIdleLongformFailure(snap)) {
+                setJobTracks((prev) => {
+                    const next = prev.filter((j) => j.job_id !== snap.job_id);
+                    if (sessionId) persistJobs(sessionId, next);
+                    return next;
+                });
+                setMessages((rows) => rows.filter((row) => row.productionUpdate?.job_id !== snap.job_id));
+                setError((prev) => (
+                    snap.error && prev.includes(snap.error) ? '' : prev
+                ));
+                return;
+            }
             if (isImplicitCancelFailure(snap)) {
                 setJobTracks((prev) => {
                     const next = prev.filter((j) => j.job_id !== snap.job_id);
                     if (sessionId) persistJobs(sessionId, next);
                     return next;
                 });
+                setMessages((rows) => rows.filter((row) => row.productionUpdate?.job_id !== snap.job_id));
                 setDockDismissed(true);
+                setError((prev) => (
+                    snap.error && prev.includes(snap.error) ? '' : prev
+                ));
                 return;
             }
             setPending([]);
@@ -883,6 +2264,47 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
         autoFinalizeLongform: approvalMode === 'auto',
         onAutoFinalizeStarted: handleFinalizeStarted,
     });
+
+    const awaitingDeliverableSnap = useMemo(
+        () => resolveAwaitingDeliverableSnap(messages, snapshots),
+        [messages, snapshots],
+    );
+
+    const failedDeliverableSnap = useMemo(() => {
+        for (const snap of Object.values(snapshots)) {
+            if (snap?.status === 'failed' && !isImplicitCancelFailure(snap)) return snap;
+        }
+        for (let i = messages.length - 1; i >= 0; i -= 1) {
+            const snap = messages[i]?.jobDeliverable;
+            if (snap?.status === 'failed' && !isImplicitCancelFailure(snap)) return snap;
+        }
+        return undefined;
+    }, [isImplicitCancelFailure, messages, snapshots]);
+
+    const resolvedDockSnap = awaitingDeliverableSnap?.status === 'awaiting_approval'
+        ? awaitingDeliverableSnap
+        : dockSnap?.status === 'failed'
+        ? dockSnap
+        : failedDeliverableSnap?.status === 'failed'
+          ? failedDeliverableSnap
+          : dockSnap;
+
+    const resolvedDockTrack = dockTrack ?? (resolvedDockSnap ? {
+        job_id: resolvedDockSnap.job_id,
+        kind: (resolvedDockSnap.kind || 'longform') as AgentJobTrack['kind'],
+        title: resolvedDockSnap.title,
+        started_at: Date.now(),
+    } : undefined);
+
+    const showRenderDock = Boolean(
+        resolvedDockTrack
+        && resolvedDockSnap
+        && !isImplicitCancelFailure(resolvedDockSnap)
+        && !isStaleAwaitingSnapshot(resolvedDockSnap, messages)
+        && !isStaleDeadLongformPoll(resolvedDockSnap)
+        && !isStaleIdleLongformFailure(resolvedDockSnap)
+        && (!dockDismissed || resolvedDockSnap.status === 'failed'),
+    );
 
 
     const appendDictation = useCallback((text: string) => {
@@ -899,47 +2321,61 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
     });
 
     const authFetch = useCallback(
-        async (path: string, init?: RequestInit & { timeoutMs?: number }) => {
+        async (path: string, init?: RequestInit & { timeoutMs?: number; retries?: number }) => {
             const tok = await getToken();
             const url = resolveStudioBackendUrl(path);
             const timeoutMs = init?.timeoutMs ?? 0;
-            const { timeoutMs: _omitTimeout, ...fetchInit } = init || {};
-            const ctrl = new AbortController();
-            const timer =
-                timeoutMs > 0
-                    ? window.setTimeout(() => ctrl.abort(), timeoutMs)
-                    : undefined;
-            try {
-                const res = await fetch(url, {
-                    ...fetchInit,
-                    signal: ctrl.signal,
-                    headers: {
-                        'Content-Type': 'application/json',
-                        Authorization: `Bearer ${tok}`,
-                        ...(fetchInit.headers || {}),
-                    },
-                });
-                const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
-                if (!res.ok) {
-                    throw new Error(friendlyApiError(res.status, data, res.statusText));
+            const retries = Math.max(0, Number(init?.retries ?? 0));
+            const { timeoutMs: _omitTimeout, retries: _omitRetries, ...fetchInit } = init || {};
+            let lastError: Error | null = null;
+            for (let attempt = 0; attempt <= retries; attempt++) {
+                const ctrl = new AbortController();
+                const timer =
+                    timeoutMs > 0
+                        ? window.setTimeout(() => ctrl.abort(), timeoutMs)
+                        : undefined;
+                try {
+                    const res = await fetch(url, {
+                        ...fetchInit,
+                        signal: ctrl.signal,
+                        headers: {
+                            'Content-Type': 'application/json',
+                            Authorization: `Bearer ${tok}`,
+                            ...(fetchInit.headers || {}),
+                        },
+                    });
+                    const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+                    if (!res.ok) {
+                        throw new Error(friendlyApiError(res.status, data, res.statusText));
+                    }
+                    return data;
+                } catch (e) {
+                    lastError = e as Error;
+                    const message = String((e as Error)?.message || e || '');
+                    if ((e as Error).name === 'AbortError' && attempt < retries) {
+                        await new Promise((r) => window.setTimeout(r, NETWORK_BLIP_RETRY_MS));
+                        continue;
+                    }
+                    if ((e as Error).name === 'AbortError') {
+                        throw new Error(
+                            `Studio Agent timed out after ${Math.round(timeoutMs / 1000)}s — retry Resume or open the chat from History.`,
+                        );
+                    }
+                    if (isNetworkBlip(message) && attempt < retries) {
+                        await new Promise((r) => window.setTimeout(r, NETWORK_BLIP_RETRY_MS * (attempt + 1)));
+                        continue;
+                    }
+                    if (isNetworkBlip(message)) {
+                        throw new Error(
+                            'Studio Agent could not reach the backend from this browser tab. Your chat is preserved; wait a moment and press Resume.',
+                        );
+                    }
+                    throw e;
+                } finally {
+                    if (timer) window.clearTimeout(timer);
                 }
-                return data;
-            } catch (e) {
-                if ((e as Error).name === 'AbortError') {
-                    throw new Error(
-                        `Studio Agent timed out after ${Math.round(timeoutMs / 1000)}s — retry Resume or open the chat from History.`,
-                    );
-                }
-                const message = String((e as Error)?.message || e || '');
-                if (/failed to fetch|networkerror|load failed|fetch resource/i.test(message)) {
-                    throw new Error(
-                        'Studio Agent could not reach the backend from this browser tab. Your chat is preserved; wait a moment and press Resume.',
-                    );
-                }
-                throw e;
-            } finally {
-                if (timer) window.clearTimeout(timer);
             }
+            throw lastError || new Error('Studio Agent request failed');
         },
         [getToken],
     );
@@ -977,7 +2413,56 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
 
     const lastSessionKey = lastSessionStorageKey(session?.user?.id);
 
-    const applySessionPayload = useCallback((raw: Record<string, unknown>) => {
+    const applyProductionLedger = useCallback((raw: Record<string, unknown>) => {
+        const prevBlocked = [...blockedJobIdsRef.current];
+        const prevEpoch = productionEpochRef.current;
+        if (Array.isArray(raw.blocked_job_ids)) {
+            blockedJobIdsRef.current = (raw.blocked_job_ids as unknown[])
+                .map((value) => String(value || '').trim())
+                .filter(Boolean);
+        }
+        const prodState = raw.production_state as { epoch?: number } | undefined;
+        const nextEpoch = Math.max(1, Number(prodState?.epoch || 1));
+        const sid = String(raw.session_id || sessionIdRef.current || '').trim();
+        const blockedChanged = blockedJobIdsRef.current.length !== prevBlocked.length
+            || blockedJobIdsRef.current.some((id, index) => id !== prevBlocked[index]);
+        const epochBumped = nextEpoch > prevEpoch;
+        productionEpochRef.current = nextEpoch;
+        if (epochBumped) {
+            for (const jobId of [...deliverablesByJobRef.current.keys()]) {
+                if (isBlockedJobId(jobId, blockedJobIdsRef.current)) {
+                    deliverablesByJobRef.current.delete(jobId);
+                }
+            }
+            if (sid) {
+                persistJobs(sid, []);
+                setJobTracks([]);
+                setDockDismissed(true);
+            }
+            setConceptPlan((prev) => {
+                if (!prev || prev.status !== 'started') return prev;
+                return { ...prev, status: 'confirmed' };
+            });
+        }
+        if (epochBumped || blockedChanged) {
+            setMessages((rows) => {
+                const stripped = stripStaleProductionArtifacts(
+                    rows,
+                    (jobId, title) => shouldSuppressProductionJob(
+                        jobId,
+                        title,
+                        rows,
+                        blockedJobIdsRef.current,
+                    ),
+                );
+                messagesRef.current = stripped;
+                return stripped;
+            });
+        }
+    }, []);
+
+    const applySessionPayload = useCallback((raw: Record<string, unknown>, opts?: { forceServer?: boolean }) => {
+        const forceServer = Boolean(opts?.forceServer);
         const sid = String(raw.session_id || '');
         if (sid) {
             sessionIdRef.current = sid;
@@ -988,6 +2473,7 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                 /* ignore */
             }
         }
+        applyProductionLedger(raw);
         const rawMessages = raw.messages;
         const hasServerMessages = Array.isArray(rawMessages);
         let effectiveMessages: ChatMessage[] | null = null;
@@ -997,38 +2483,138 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                 .filter((msg): msg is ChatMessage => Boolean(msg));
             const cached = sid ? sessionUiCacheRef.current.get(sid) : null;
             const serverMessageCount = Number(raw.message_count ?? msgs.length);
+            // Force server sync never falls back to local cache for transcript.
             effectiveMessages =
-                msgs.length === 0 && serverMessageCount > 0 && cached?.messages?.length
+                !forceServer && msgs.length === 0 && serverMessageCount > 0 && cached?.messages?.length
                     ? cached.messages
                     : msgs;
+            const skipGlobalDeliverables = Boolean(
+                raw.forked_from
+                || raw.context_ingested
+                || (Boolean(raw.skip_job_recovery) && Array.isArray(raw.active_jobs) && raw.active_jobs.length === 0 && msgs.length > 0),
+            );
+            const deliverableContext = [
+                ...(effectiveMessages || msgs),
+                ...messagesRef.current,
+                ...(cached?.messages || []),
+            ];
+            const preservedDeliverables = new Map<string, AgentJobSnapshot>();
+            const shouldPreserveDeliverable = (snap: AgentJobSnapshot) => {
+                if (forceServer && snap.status === 'running') return false;
+                if (shouldSuppressProductionJob(
+                    snap.job_id,
+                    snap.title,
+                    deliverableContext,
+                    blockedJobIdsRef.current,
+                )) {
+                    return false;
+                }
+                return !shouldHideJobDeliverable(snap, deliverableContext);
+            };
+            if (!skipGlobalDeliverables) {
+                for (const [jobId, snap] of deliverablesByJobRef.current.entries()) {
+                    if (shouldPreserveDeliverable(snap)) {
+                        preservedDeliverables.set(jobId, snap);
+                    }
+                }
+            }
+            for (const msg of messagesRef.current) {
+                const snap = msg.jobDeliverable;
+                if (snap?.job_id && shouldPreserveDeliverable(snap)) {
+                    preservedDeliverables.set(snap.job_id, snap);
+                }
+            }
+            for (const msg of cached?.messages || []) {
+                const snap = msg.jobDeliverable;
+                if (snap?.job_id && shouldPreserveDeliverable(snap)) {
+                    preservedDeliverables.set(snap.job_id, snap);
+                }
+            }
+            for (const msg of msgs) {
+                const snap = msg.jobDeliverable;
+                if (snap?.job_id && shouldPreserveDeliverable(snap)) {
+                    preservedDeliverables.set(snap.job_id, snap);
+                }
+            }
+            const transcriptForStale = effectiveMessages || msgs;
+            effectiveMessages = stripStaleProductionArtifacts(
+                stripGhostJobDeliverables(
+                    reattachJobDeliverables(effectiveMessages, preservedDeliverables),
+                ),
+                (jobId, title) => shouldSuppressProductionJob(
+                    jobId,
+                    title,
+                    transcriptForStale,
+                    blockedJobIdsRef.current,
+                ),
+            );
+            messagesRef.current = effectiveMessages;
             setMessages(effectiveMessages);
-        } else if (sid) {
+        } else if (sid && !forceServer) {
             const cached = sessionUiCacheRef.current.get(sid);
             if (cached?.messages?.length) {
                 effectiveMessages = cached.messages;
+                messagesRef.current = effectiveMessages;
                 setMessages(cached.messages);
             }
         }
         const serverPending = (raw.pending_actions as PendingAction[]) || [];
-        if (effectiveMessages) {
-            setPending(mergePendingFromTranscript(effectiveMessages, serverPending));
-        } else if (sid) {
-            const cached = sessionUiCacheRef.current.get(sid);
-            if (cached) setPending(cached.pending);
+        // Server is the only authority for pending when force-syncing.
+        const resolvedPending = forceServer
+            ? filterOwnerOnlyPending(
+                filterStalePendingActions(serverPending, effectiveMessages || messagesRef.current),
+                isAdminUser,
+            )
+            : effectiveMessages
+                ? filterOwnerOnlyPending(
+                    mergePendingFromTranscript(effectiveMessages, serverPending),
+                    isAdminUser,
+                )
+                : sid
+                    ? filterOwnerOnlyPending(
+                        filterStalePendingActions(
+                            sessionUiCacheRef.current.get(sid)?.pending || [],
+                            sessionUiCacheRef.current.get(sid)?.messages || [],
+                        ),
+                        isAdminUser,
+                    )
+                    : [];
+        setPending(resolvedPending);
+        if (forceServer && sid) {
+            sessionUiCacheRef.current.set(sid, {
+                messages: effectiveMessages || messagesRef.current,
+                pending: resolvedPending,
+                jobTracks: sessionUiCacheRef.current.get(sid)?.jobTracks || [],
+                dockDismissed: sessionUiCacheRef.current.get(sid)?.dockDismissed ?? true,
+            });
+            persistStoredSessionUiCache(userCacheKey, sessionUiCacheRef.current);
+        }
+        const rawConcept = (raw.pending_concept || raw.concept_plan) as ConceptPlan | null | undefined;
+        if (rawConcept && typeof rawConcept === 'object' && (rawConcept.title || rawConcept.id || rawConcept.format)) {
+            setConceptPlan(rawConcept);
+        } else if (!rawConcept || forceServer) {
+            setConceptPlan(null);
         }
         if (raw.model) setModel(String(raw.model));
+        if (raw.agent_mode === 'plan' || raw.agent_mode === 'studio' || raw.agent_mode === 'cliplab') {
+            const mode = raw.agent_mode as AgentMode;
+            setAgentMode(!isAdminUser && mode === 'cliplab' ? 'plan' : mode);
+        }
         if (raw.approval_mode === 'auto' || raw.approval_mode === 'confirm') {
             setApprovalMode(raw.approval_mode);
         }
         const fmt = raw.content_format as ContentFormat | undefined;
-        if (fmt === 'short' || fmt === 'long' || fmt === 'both') setContentFormat(fmt);
+        if (fmt === 'short' || fmt === 'long' || fmt === 'both') {
+            setContentFormat(!isAdminUser && fmt !== 'short' ? 'short' : fmt);
+        }
         const depth = raw.reasoning_depth as ReasoningDepth | undefined;
         if (depth === 'fast' || depth === 'balanced' || depth === 'deep') {
             setReasoningDepth(depth);
         }
         const rs = String(raw.render_style || '').trim();
         if (rs) setRenderStyle(rs);
-        setVideoModel(normalizeVideoModel(raw.video_model));
+        setImageModel(String(raw.image_model || raw.image_model_id || DEFAULT_IMAGE_MODEL).trim() || DEFAULT_IMAGE_MODEL);
+        setVideoModel(String(raw.video_model || DEFAULT_VIDEO_MODEL).trim() || DEFAULT_VIDEO_MODEL);
         const rawCaptionMode = String(raw.caption_mode || '').trim();
         if (rawCaptionMode === 'word' || rawCaptionMode === 'off') {
             setCaptionMode(rawCaptionMode);
@@ -1049,45 +2635,201 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
         } : null);
         const activeRuns = Array.isArray(raw.active_runs) ? raw.active_runs as SessionSummary['active_runs'] : [];
         const runLabel = activeRunLabel({ active_runs: activeRuns });
-        if (sid && runLabel) {
-            setRunningBySession((prev) => ({ ...prev, [sid]: runLabel }));
+        if (sid) {
+            // Critical: clear stuck "running" when server has no active runs.
+            // Old code only set running=true and never cleared → Sync looked like Resume stuck.
+            setRunningBySession((prev) => {
+                if (runLabel) return { ...prev, [sid]: runLabel };
+                if (!prev[sid]) return prev;
+                const next = { ...prev };
+                delete next[sid];
+                return next;
+            });
         }
-    }, [lastSessionKey]);
+        if (forceServer) {
+            setToolActivity('');
+            setActivitySteps([]);
+            setQueueHint('');
+        }
+    }, [applyProductionLedger, isAdminUser, lastSessionKey, userCacheKey]);
 
     const resumeSession = useCallback(
-        async (raw: Record<string, unknown>, opts?: { rehydrateJobs?: boolean }) => {
-            applySessionPayload(raw);
+        async (raw: Record<string, unknown>, opts?: { rehydrateJobs?: boolean; forceServer?: boolean }) => {
+            applySessionPayload(raw, { forceServer: opts?.forceServer });
+            const review = raw.thumbnail_review as ThumbnailReview | null | undefined;
+            if (review?.review_id && (review.candidate_urls || []).length) {
+                mergeThumbnailReviewIntoDeliverable(review);
+            }
             const sid = String(raw.session_id || '');
             if (!sid) return;
             const serverJobs = Array.isArray(raw.active_jobs) ? (raw.active_jobs as AgentJobTrack[]) : [];
-            const merged = mergeJobTracks(loadPersistedJobs(sid), serverJobs);
-            for (const job of merged) {
+            const persisted = opts?.forceServer
+                ? []
+                : pruneOrphanShortformTracks(loadPersistedJobs(sid), serverJobs);
+            const merged = pruneOrphanShortformTracks(
+                opts?.forceServer
+                    ? mergeJobTracks(serverJobs, collectTracksToRefresh([], messagesRef.current, blockedJobIdsRef.current))
+                    : mergeJobTracks(persisted, serverJobs),
+                serverJobs,
+            );
+            const tracksForSession = pruneStaleJobTracks(
+                merged.length
+                    ? merged
+                    : collectTracksToRefresh(
+                        collectTracksFromTranscript(messagesRef.current),
+                        messagesRef.current,
+                        blockedJobIdsRef.current,
+                    ),
+                messagesRef.current,
+                blockedJobIdsRef.current,
+            );
+            for (const job of tracksForSession) {
                 if (job.job_id) jobSessionRef.current.set(job.job_id, sid);
             }
-            if (!merged.length) return;
-            setJobTracks(merged);
-            persistJobs(sid, merged);
-            setDockDismissed(false);
+            // Always apply server job list (including empty) so Sync clears ghosts.
+            setJobTracks(tracksForSession);
+            persistJobs(sid, tracksForSession);
+            if (!tracksForSession.length) {
+                if (opts?.forceServer) setDockDismissed(true);
+                if (opts?.rehydrateJobs === false) return;
+            } else {
+                setDockDismissed(false);
+            }
             if (opts?.rehydrateJobs === false) return;
             try {
                 const tok = await getToken();
-                const { deliverables } = await rehydrateJobSnapshots(sid, merged, tok);
+                const tracksToRefresh = collectTracksToRefresh(tracksForSession, messagesRef.current, blockedJobIdsRef.current);
+                const { deliverables } = await rehydrateJobSnapshots(sid, tracksToRefresh, tok);
                 if (sessionIdRef.current !== sid) return;
-                for (const snap of deliverables) appendJobDeliverable(snap);
-                const terminal = new Set(deliverables.map((snap) => snap.job_id));
-                if (terminal.size) {
-                    setJobTracks((prev) => {
-                        const next = prev.filter((job) => !terminal.has(job.job_id));
-                        persistJobs(sid, next);
-                        return next;
+                const review = raw.thumbnail_review as ThumbnailReview | null | undefined;
+                const hasThumbnailReview = Boolean(review?.candidate_urls?.length);
+                const prunedTracks = tracksForSession.filter((track) => {
+                    const snap = deliverables.find((row) => row.job_id === track.job_id);
+                    if (isStaleLongformChapterFailure(snap)) return false;
+                    if (isStaleIdleLongformFailure(snap)) return false;
+                    if (isStaleDeadLongformPoll(snap)) return false;
+                    if (snap?.thumbnail_only) return false;
+                    if (hasThumbnailReview && snap?.status === 'failed' && snap.kind === 'longform') return false;
+                    return true;
+                });
+                if (prunedTracks.length !== tracksForSession.length) {
+                    setJobTracks(prunedTracks);
+                    persistJobs(sid, prunedTracks);
+                }
+                for (const snap of deliverables) {
+                    if (isStaleLongformChapterFailure(snap)) continue;
+                    if (shouldSuppressProductionJob(
+                        snap.job_id,
+                        snap.title,
+                        messagesRef.current,
+                        blockedJobIdsRef.current,
+                    )) continue;
+                    if (snap.status === 'failed' && snap.kind === 'longform' && hasThumbnailReview) continue;
+                    appendJobDeliverable(snap);
+                }
+                setPollResetKey((k) => k + 1);
+                const cachedDeliverableJobs = new Map<string, AgentJobTrack>();
+                for (const msg of messagesRef.current) {
+                    const jobId = msg.jobDeliverable?.job_id;
+                    if (!jobId) continue;
+                    cachedDeliverableJobs.set(jobId, {
+                        job_id: jobId,
+                        kind: msg.jobDeliverable?.kind || 'shortform',
+                        title: msg.jobDeliverable?.title,
                     });
+                }
+                const missingMp4 = [...cachedDeliverableJobs.values()].filter((track) => {
+                    const snap = messagesRef.current.find((msg) => msg.jobDeliverable?.job_id === track.job_id)?.jobDeliverable;
+                    return snap?.status === 'complete' && !snap?.mp4_url;
+                });
+                if (missingMp4.length) {
+                    const refreshed = await rehydrateJobSnapshots(sid, missingMp4, tok);
+                    for (const snap of refreshed.deliverables) appendJobDeliverable(snap);
                 }
             } catch {
                 /* polling optional on resume */
             }
         },
-        [applySessionPayload, appendJobDeliverable, getToken],
+        [applySessionPayload, appendJobDeliverable, mergeThumbnailReviewIntoDeliverable, getToken],
     );
+
+    /**
+     * True when the deployed frontend build differs from the one running.
+     * index.html is served no-cache, so fetching it always reflects the
+     * latest deploy; the hashed bundle name is the build identity.
+     */
+    const newerBuildAvailable = useCallback(async (): Promise<boolean> => {
+        try {
+            const current = document.querySelector<HTMLScriptElement>('script[src*="assets/index-"]');
+            const currentSrc = current?.src || '';
+            const match = currentSrc.match(/assets\/index-[\w-]+\.js/);
+            if (!match) return false; // dev server or unexpected layout
+            const res = await fetch(`/?sync=${Date.now()}`, { cache: 'no-store' });
+            if (!res.ok) return false;
+            const html = await res.text();
+            const deployed = html.match(/assets\/index-[\w-]+\.js/);
+            return Boolean(deployed && deployed[0] !== match[0]);
+        } catch {
+            return false;
+        }
+    }, []);
+
+    const syncSessionFromServer = useCallback(async (opts?: { quiet?: boolean }) => {
+        if (!sessionId) return;
+        if (!opts?.quiet) setSyncing(true);
+        setError('');
+        // Manual Sync doubles as a hard refresh: when a newer frontend build is
+        // deployed, reload the page so the user never needs Ctrl+Shift+R. Chat
+        // state lives server-side and rehydrates after the reload.
+        if (!opts?.quiet && (await newerBuildAvailable())) {
+            window.location.reload();
+            return;
+        }
+        try {
+            // Dedicated sync endpoint — prunes stale Approves, never rebuilds production pending.
+            let data: Record<string, unknown>;
+            try {
+                data = await authFetch(sessionSyncPath(sessionId), {
+                    method: 'POST',
+                    timeoutMs: SESSION_LOAD_TIMEOUT_MS,
+                    retries: SESSION_LOAD_RETRIES,
+                    headers: { 'Cache-Control': 'no-store' },
+                });
+            } catch {
+                // Fallback for older backend until POST /sync is live.
+                data = await authFetch(sessionResumePath(sessionId, true), {
+                    timeoutMs: SESSION_LOAD_TIMEOUT_MS,
+                    retries: SESSION_LOAD_RETRIES,
+                    headers: { 'Cache-Control': 'no-store' },
+                });
+            }
+            await resumeSession((data?.session as Record<string, unknown>) || {}, {
+                rehydrateJobs: true,
+                forceServer: true,
+            });
+        } finally {
+            if (!opts?.quiet) setSyncing(false);
+        }
+    }, [authFetch, newerBuildAvailable, resumeSession, sessionId]);
+
+    const scheduleAutoSync = useCallback((opts?: { delayMs?: number; rehydrateJobs?: boolean }) => {
+        if (!sessionId) return;
+        if (autoSyncTimerRef.current) window.clearTimeout(autoSyncTimerRef.current);
+        autoSyncTimerRef.current = window.setTimeout(() => {
+            autoSyncTimerRef.current = null;
+            void (async () => {
+                try {
+                    await syncSessionFromServer({ quiet: true });
+                } catch {
+                    /* background sync is best-effort */
+                }
+            })();
+        }, opts?.delayMs ?? 300);
+    }, [sessionId, syncSessionFromServer]);
+
+    useEffect(() => () => {
+        if (autoSyncTimerRef.current) window.clearTimeout(autoSyncTimerRef.current);
+    }, []);
 
     const refreshHistory = useCallback(async () => {
         const data = await authFetch('/api/studio-agent/sessions?limit=50');
@@ -1112,47 +2854,78 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
 
     const createNewSession = useCallback(
         async (pickModel: string) => {
-            const tempSid = `local_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
-            sessionIdRef.current = tempSid;
-            setSessionId(tempSid);
+            if (creatingSession) return;
+            const priorSessionId = isPersistedAgentSessionId(sessionIdRef.current)
+                ? sessionIdRef.current
+                : null;
+            setCreatingSession(true);
+            sessionIdRef.current = null;
+            setSessionId(null);
             setError('');
             setQueueHint('');
             setToolActivity('');
             setPending([]);
+            setConceptPlan(null);
             setMessages([]);
+            deliverablesByJobRef.current.clear();
+            blockedJobIdsRef.current = [];
+            productionEpochRef.current = 1;
             setJobTracks([]);
             setDockDismissed(true);
             setReplyingTo(null);
             setAttachments([]);
             setAttachmentPayload({});
-            const created = await authFetch('/api/studio-agent/sessions', {
-                method: 'POST',
-                body: JSON.stringify({
-                    model: pickModel,
-                    approval_mode: approvalMode,
-                    content_format: contentFormat,
-                    reasoning_depth: reasoningDepth,
-                    render_style: renderStyle,
-                    video_model: videoModel,
-                    caption_mode: captionMode,
-                    captions_enabled: captionMode !== 'off',
-                    channel_id: selectedChannel?.channel_id || '',
-                    registry_key: channelRegistryKey(selectedChannel),
-                    channel_title: selectedChannel?.title || '',
-                    product_website: productWebsite,
-                }),
-            });
-            applySessionPayload((created.session as Record<string, unknown>) || {});
-            setJobTracks([]);
-            setPollResetKey((k) => k + 1);
-            setDockDismissed(true);
-            const sid = String((created.session as Record<string, unknown>)?.session_id || '');
-            if (sid) sessionIdRef.current = sid;
-            if (sid) persistJobs(sid, []);
-            if (sid) setDraftsBySession((prev) => ({ ...prev, [sid]: '' }));
-            await refreshHistory();
+            try {
+                const created = await authFetch('/api/studio-agent/sessions', {
+                    method: 'POST',
+                    body: JSON.stringify({
+                        model: pickModel,
+                        approval_mode: approvalMode,
+                        content_format: isAdminUser ? contentFormat : 'short',
+                        reasoning_depth: reasoningDepth,
+                        render_style: renderStyle,
+                        image_model: imageModel,
+                        video_model: videoModel,
+                        caption_mode: captionMode,
+                        captions_enabled: captionMode !== 'off',
+                        channel_id: selectedChannel?.channel_id || '',
+                        registry_key: channelRegistryKey(selectedChannel),
+                        channel_title: selectedChannel?.title || '',
+                        product_website: productWebsite,
+                    }),
+                });
+                const sid = String((created.session as Record<string, unknown>)?.session_id || '');
+                if (!isPersistedAgentSessionId(sid)) {
+                    throw new Error('Studio Agent could not create a chat session. Try again.');
+                }
+                applySessionPayload((created.session as Record<string, unknown>) || {});
+                sessionIdRef.current = sid;
+                setSessionId(sid);
+                setJobTracks([]);
+                setPollResetKey((k) => k + 1);
+                setDockDismissed(true);
+                persistJobs(sid, []);
+                setDraftsBySession((prev) => ({ ...prev, [sid]: '' }));
+                await refreshHistory();
+            } catch (e) {
+                setError((e as Error).message);
+                if (priorSessionId) {
+                    sessionIdRef.current = priorSessionId;
+                    setSessionId(priorSessionId);
+                    const cached = sessionUiCacheRef.current.get(priorSessionId);
+                    if (cached) {
+                        messagesRef.current = cached.messages;
+                        setMessages(cached.messages);
+                        setPending(filterStalePendingActions(cached.pending, cached.messages));
+                        setJobTracks(cached.jobTracks);
+                        setDockDismissed(cached.dockDismissed);
+                    }
+                }
+            } finally {
+                setCreatingSession(false);
+            }
         },
-        [applySessionPayload, approvalMode, authFetch, captionMode, contentFormat, productWebsite, reasoningDepth, renderStyle, refreshHistory, selectedChannel, videoModel],
+        [applySessionPayload, approvalMode, authFetch, captionMode, contentFormat, creatingSession, imageModel, isAdminUser, productWebsite, reasoningDepth, renderStyle, refreshHistory, selectedChannel, videoModel],
     );
 
     const openSession = useCallback(
@@ -1163,8 +2936,9 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
             setSessionId(id);
             const cached = sessionUiCacheRef.current.get(id);
             if (cached) {
+                messagesRef.current = cached.messages;
                 setMessages(cached.messages);
-                setPending(cached.pending);
+                setPending([]);
                 setJobTracks(cached.jobTracks);
                 setDockDismissed(cached.dockDismissed);
             } else {
@@ -1175,17 +2949,21 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
             setResuming(true);
             setError('');
             try {
-                const data = await authFetch(`/api/studio-agent/sessions/${id}?sync_pending=false`, {
-                    timeoutMs: 60_000,
+                const data = await authFetch(sessionResumePath(id, false), {
+                    timeoutMs: SESSION_LOAD_TIMEOUT_MS,
+                    retries: SESSION_LOAD_RETRIES,
                 });
                 if (sessionLoadSeqRef.current !== loadSeq || sessionIdRef.current !== id) return;
                 await resumeSession((data?.session as Record<string, unknown>) || {}, {
-                    rehydrateJobs: false,
+                    rehydrateJobs: true,
                 });
+                setDockDismissed(false);
             } catch (e) {
                 if (sessionLoadSeqRef.current !== loadSeq || sessionIdRef.current !== id) return;
                 const msg = (e as Error).message || '';
-                if (cached && msg.includes('timed out after')) {
+                if (cached && (msg.includes('timed out after') || isNetworkBlip(msg))) {
+                    setQueueHint('Connection blip — showing your saved chat while Studio reconnects. Press Sync when back online.');
+                    scheduleAutoSync({ delayMs: 2500, rehydrateJobs: true });
                     return;
                 }
                 setError(msg);
@@ -1197,6 +2975,7 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
     );
 
     const reloadCurrentSession = useCallback(async () => {
+        // Cold resume / history reopen — separate from Sync chat (which uses force sync).
         const loadSeq = ++sessionLoadSeqRef.current;
         setResuming(true);
         setError('');
@@ -1215,24 +2994,52 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
             }
             if (!id) {
                 setError(
-                    'No chat to resume — pick your Wally West thread from History on the left, or start a new chat.',
+                    'No chat to resume — pick your thread from History on the left, or start a new chat.',
                 );
                 return;
             }
-            const data = await authFetch(`/api/studio-agent/sessions/${id}?sync_pending=true`, {
-                timeoutMs: 45_000,
-            });
+            // Prefer authoritative sync when we already have the session open.
+            let data: Record<string, unknown>;
+            if (sessionId && id === sessionId) {
+                try {
+                    data = await authFetch(sessionSyncPath(id), {
+                        method: 'POST',
+                        timeoutMs: SESSION_LOAD_TIMEOUT_MS,
+                        retries: SESSION_LOAD_RETRIES,
+                        headers: { 'Cache-Control': 'no-store' },
+                    });
+                } catch {
+                    data = await authFetch(sessionResumePath(id, true), {
+                        timeoutMs: SESSION_LOAD_TIMEOUT_MS,
+                        retries: SESSION_LOAD_RETRIES,
+                        headers: { 'Cache-Control': 'no-store' },
+                    });
+                }
+            } else {
+                data = await authFetch(sessionResumePath(id, true), {
+                    timeoutMs: SESSION_LOAD_TIMEOUT_MS,
+                    retries: SESSION_LOAD_RETRIES,
+                    headers: { 'Cache-Control': 'no-store' },
+                });
+            }
             if (sessionLoadSeqRef.current !== loadSeq) return;
             await resumeSession((data?.session as Record<string, unknown>) || {}, {
                 rehydrateJobs: true,
+                forceServer: true,
             });
         } catch (e) {
             if (sessionLoadSeqRef.current !== loadSeq) return;
-            setError((e as Error).message);
+            const msg = (e as Error).message || '';
+            if (messagesRef.current.length > 0 && (msg.includes('timed out after') || isNetworkBlip(msg))) {
+                setQueueHint('Still syncing your chat in the background — production rails update automatically.');
+                scheduleAutoSync({ delayMs: 1500, rehydrateJobs: true });
+                return;
+            }
+            setError(msg);
         } finally {
             if (sessionLoadSeqRef.current === loadSeq) setResuming(false);
         }
-    }, [authFetch, history, lastSessionKey, resumeSession, sessionId]);
+    }, [authFetch, history, lastSessionKey, resumeSession, scheduleAutoSync, sessionId]);
 
     const rolloverSession = useCallback(async () => {
         if (!sessionId || currentSessionRunning) return;
@@ -1258,6 +3065,64 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
         }
     }, [authFetch, clearSessionRunning, currentSessionRunning, markSessionRunning, refreshHistory, resumeSession, sessionId]);
 
+    const resetProductionInPlace = useCallback(async () => {
+        if (!sessionId || currentSessionRunning) return;
+        if (
+            !window.confirm(
+                'Reset production for this chat? Old renders and approve cards are cleared; your transcript and concept plan stay.',
+            )
+        ) {
+            return;
+        }
+        markSessionRunning(sessionId, 'Resetting production...');
+        setError('');
+        try {
+            const data = await authFetch(
+                `/api/studio-agent/sessions/${sessionId}/reset-production?message_tail=${SESSION_MESSAGE_TAIL}`,
+                { method: 'POST', body: JSON.stringify({}) },
+            );
+            deliverablesByJobRef.current.clear();
+            await resumeSession((data?.session as Record<string, unknown>) || {}, {
+                rehydrateJobs: false,
+                forceServer: true,
+            });
+            setPending([]);
+            setPollResetKey((k) => k + 1);
+        } catch (e) {
+            setError((e as Error).message);
+        } finally {
+            clearSessionRunning(sessionId);
+        }
+    }, [authFetch, clearSessionRunning, currentSessionRunning, markSessionRunning, resumeSession, sessionId]);
+
+    const forkSessionWithContext = useCallback(async (sourceSessionId?: string) => {
+        const fromId = String(sourceSessionId || sessionId || '').trim();
+        if (!fromId || currentSessionRunning) return;
+        if (
+            !window.confirm(
+                'Start a fresh chat with context from this thread? Channel setup and prior decisions carry over, but old renders and scene-review jobs do not.',
+            )
+        ) {
+            return;
+        }
+        markSessionRunning(fromId, 'Starting chat with context...');
+        setError('');
+        try {
+            const data = await authFetch(`/api/studio-agent/sessions/${fromId}/fork`, {
+                method: 'POST',
+            });
+            deliverablesByJobRef.current.clear();
+            await resumeSession((data?.session as Record<string, unknown>) || {}, {
+                rehydrateJobs: false,
+            });
+            await refreshHistory();
+        } catch (e) {
+            setError((e as Error).message);
+        } finally {
+            clearSessionRunning(fromId);
+        }
+    }, [authFetch, clearSessionRunning, currentSessionRunning, markSessionRunning, refreshHistory, resumeSession, sessionId]);
+
     useEffect(() => {
         if (!sessionId) return;
         const onVisible = () => {
@@ -1265,11 +3130,12 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
             const needsPendingSync =
                 pending.length === 0 && transcriptMentionsPendingAction(messages);
             if (pending.length === 0 && jobTracks.length === 0 && !needsPendingSync) return;
-            void reloadCurrentSession();
+            // Quiet server sync — never flip the Resume button to "Resuming…".
+            void syncSessionFromServer({ quiet: true }).catch(() => {});
         };
         document.addEventListener('visibilitychange', onVisible);
         return () => document.removeEventListener('visibilitychange', onVisible);
-    }, [sessionId, pending.length, jobTracks.length, messages, reloadCurrentSession]);
+    }, [sessionId, pending.length, jobTracks.length, messages, syncSessionFromServer]);
 
     const confirmDeleteSession = useCallback(
         async (id: string) => {
@@ -1309,7 +3175,37 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
             setBooting(true);
             setError('');
             try {
-                const modelData = await authFetch('/api/studio-agent/models');
+                // Do not serially block the conversation on three unrelated
+                // fetches. The general config endpoint is optional for Agent
+                // boot and may be slower than the Fly-hosted Agent API.
+                const modelsRequest = authFetch('/api/studio-agent/models', { timeoutMs: 12_000 });
+                const sessionsRequest = authFetch('/api/studio-agent/sessions?limit=50', { timeoutMs: 45_000, retries: SESSION_LOAD_RETRIES });
+                void authFetch('/api/config', { timeoutMs: 3500 })
+                    .then((configData) => {
+                        const creative = (configData?.creative_model_catalog || {}) as {
+                            image_models?: CreativeModelProfile[];
+                            video_models?: CreativeModelProfile[];
+                        };
+                    const imageOptions = (creative.image_models || [])
+                        .map(creativeModelOption)
+                        .filter((m): m is AgentModelOption => Boolean(m))
+                        .filter((m) => SUPPORTED_AGENT_IMAGE_MODEL_IDS.has(m.id));
+                    const videoOptions = (creative.video_models || [])
+                        .map(creativeModelOption)
+                        .filter((m): m is AgentModelOption => Boolean(m))
+                        .filter((m) => SUPPORTED_AGENT_VIDEO_MODEL_IDS.has(m.id));
+                        if (!cancelled) {
+                            // The remote creative catalog is intentionally partial: it only
+                            // advertises profiles supplied by this deployment.  Replacing the
+                            // baked-in list with it hid direct xAI Grok Imagine whenever the
+                            // catalog happened to contain only a FAL profile.  Merge instead,
+                            // so every model with a real Agent adapter remains selectable.
+                            if (imageOptions.length) setImageModelCatalog([...FALLBACK_IMAGE_MODELS, ...imageOptions].filter((m, i, arr) => arr.findIndex((x) => x.id === m.id) === i));
+                            if (videoOptions.length) setVideoModelCatalog([...FALLBACK_VIDEO_MODELS, ...videoOptions].filter((m, i, arr) => arr.findIndex((x) => x.id === m.id) === i));
+                        }
+                    })
+                    .catch(() => { /* baked picker catalog is already ready */ });
+                const [modelData, listData] = await Promise.all([modelsRequest, sessionsRequest]);
                 const catalog = (modelData?.models as AgentModelOption[]) || [];
                 const rec = (modelData?.recommended as string[]) || [];
                 let pickModel = FALLBACK_MODELS[0].id;
@@ -1330,7 +3226,6 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                         setModel(pickModel);
                     }
                 }
-                const listData = await authFetch('/api/studio-agent/sessions?limit=50');
                 const sessions = (listData?.sessions as SessionSummary[]) || [];
                 if (!cancelled) setHistory(sessions);
 
@@ -1342,22 +3237,33 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                 }
                 const resume = sessions.find((s) => s.session_id === lastId) || sessions[0];
                 if (!cancelled && resume?.session_id) {
-                    const data = await authFetch(`/api/studio-agent/sessions/${resume.session_id}?sync_pending=false`, {
-                        timeoutMs: 60_000,
+                    // Show the shell immediately; hydrate transcript in the background.
+                    if (!cancelled) setBooting(false);
+                    const data = await authFetch(sessionResumePath(resume.session_id, false), {
+                        timeoutMs: SESSION_LOAD_TIMEOUT_MS,
+                        retries: SESSION_LOAD_RETRIES,
                     });
                     if (!cancelled) {
                         await resumeSession((data?.session as Record<string, unknown>) || {});
                     }
-                } else if (!cancelled) {
+                    return;
+                }
+                if (!cancelled) setBooting(false);
+                if (!cancelled) {
                     const created = await authFetch('/api/studio-agent/sessions', {
                         method: 'POST',
                         body: JSON.stringify({
                             model: pickModel,
                             approval_mode: 'confirm',
-                            content_format: 'both',
-                            video_model: 'seedance',
+                            content_format: ownerOverride ? 'both' : 'short',
+                            image_model: loadImageModelPref(DEFAULT_IMAGE_MODEL),
+                            video_model: DEFAULT_VIDEO_MODEL,
                         }),
                     });
+                    const bootSid = String((created.session as Record<string, unknown>)?.session_id || '');
+                    if (!isPersistedAgentSessionId(bootSid)) {
+                        throw new Error('Studio Agent could not start a chat session. Try again.');
+                    }
                     applySessionPayload((created.session as Record<string, unknown>) || {});
                     setHistory([]);
                 }
@@ -1374,6 +3280,18 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
     useEffect(() => {
         if (!booting) inputRef.current?.focus();
     }, [booting]);
+
+    useEffect(() => {
+        const onOnline = () => {
+            setError((prev) => (isNetworkBlip(prev) ? '' : prev));
+            if (sessionId) {
+                setQueueHint('Back online — syncing your chat…');
+                scheduleAutoSync({ delayMs: 400, rehydrateJobs: true });
+            }
+        };
+        window.addEventListener('online', onOnline);
+        return () => window.removeEventListener('online', onOnline);
+    }, [scheduleAutoSync, sessionId]);
 
     useEffect(() => {
         let cancelled = false;
@@ -1400,11 +3318,13 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
     const patchSession = useCallback(
         async (patch: {
             model?: string;
+            agent_mode?: AgentMode;
             approval_mode?: ApprovalMode;
             content_format?: ContentFormat;
             reasoning_depth?: ReasoningDepth;
             render_style?: string;
-            video_model?: VideoModel;
+            image_model?: string;
+            video_model?: string;
             caption_mode?: CaptionMode;
             captions_enabled?: boolean;
             channel_id?: string;
@@ -1414,19 +3334,29 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
             animate?: boolean;
             product_website?: string;
         }) => {
-            if (!sessionId) return;
+            if (!isPersistedAgentSessionId(sessionId)) return;
             try {
                 await authFetch(`/api/studio-agent/sessions/${sessionId}`, {
                     method: 'PATCH',
                     body: JSON.stringify(patch),
                 });
-                await refreshHistory();
+                if (patch.render_style || patch.image_model || patch.video_model) {
+                    await syncSessionFromServer({ quiet: true });
+                } else {
+                    await refreshHistory();
+                }
             } catch (e) {
                 setError((e as Error).message);
             }
         },
-        [authFetch, refreshHistory, sessionId],
+        [authFetch, refreshHistory, sessionId, syncSessionFromServer],
     );
+
+    useEffect(() => {
+        if (isAdminUser) return;
+        if (agentMode === 'cliplab') setAgentMode('plan');
+        if (contentFormat !== 'short') setContentFormat('short');
+    }, [agentMode, contentFormat, isAdminUser]);
 
     useEffect(() => {
         if (!sessionId || !productWebsite) return;
@@ -1455,25 +3385,67 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
         if (match) {
             setSelectedChannelId(match.channel_id || '');
             setSessionChannel(match);
+            return;
         }
-    }, [selectedChannelId, sessionChannel]);
+        // A newly connected creator with exactly one channel should never be
+        // left in a "connected, but no channel selected" state.  Selecting it
+        // here persists the id/registry on the chat so Catalyst can use it on
+        // the very next natural-language request.
+        if (channels.length === 1) {
+            const onlyChannel = channels[0];
+            setSelectedChannelId(onlyChannel.channel_id || '');
+            setSessionChannel(onlyChannel);
+            if (sessionId) {
+                void patchSession({
+                    channel_id: onlyChannel.channel_id || '',
+                    registry_key: channelRegistryKey(onlyChannel),
+                    channel_title: onlyChannel.title || '',
+                });
+            }
+        }
+    }, [patchSession, selectedChannelId, sessionChannel, sessionId]);
 
     const buildOutboundMessage = useCallback(
         (text: string) => {
+            const trimmed = text.trim();
+            const clipLabTurn = agentMode === 'cliplab' || mentionsClipLab(trimmed);
+            const ideationTurn = !clipLabTurn && looksLikeIdeation(trimmed);
             const hasImages = attachments.some((f) => f.kind === 'image' && attachmentPayload[f.id]?.data_url);
-            const parts = [text.trim() || (hasImages ? 'Please analyze the attached image(s).' : '')];
+            const hasVideo = attachments.some((f) => f.kind === 'video' && attachmentPayload[f.id]?.server_path);
+            const defaultPrompt = hasImages
+                ? 'Please analyze the attached image(s).'
+                : hasVideo
+                    ? (clipLabTurn
+                        ? 'Use the attached video with ClipLab.'
+                        : ideationTurn
+                            ? 'I attached a reference video for planning context.'
+                            : '')
+                    : '';
+            const parts = [trimmed || defaultPrompt];
             for (const f of attachments) {
                 const payload = attachmentPayload[f.id];
                 if (!payload) continue;
                 if (payload.kind === 'text' && payload.text) {
                     parts.push(`\n\n[Attachment: ${f.name}]\n${payload.text.slice(0, 12000)}`);
+                } else if (payload.kind === 'video' && payload.server_path) {
+                    if (clipLabTurn) {
+                        parts.push(
+                            `\n\n[Video attachment ready for ClipLab: ${f.name}]\n`
+                            + 'Use ingest_cliplab_attachment, then analyze_cliplab_video for the selected channel and render the strongest clips with upload packages.',
+                        );
+                    } else {
+                        parts.push(
+                            `\n\n[Uploaded reference video: ${f.name}]\n`
+                            + `local_path: ${payload.server_path}`,
+                        );
+                    }
                 } else if (payload.kind === 'binary') {
                     parts.push(`\n\n[Attachment: ${f.name}]\n[Binary file, ${Math.round(f.size / 1024)}KB. Ask the user for a supported image or text file if visual/text access is required.]`);
                 }
             }
             return parts.join('');
         },
-        [attachmentPayload, attachments],
+        [agentMode, attachmentPayload, attachments],
     );
 
     const buildOutboundAttachments = useCallback((): AgentChatAttachment[] => {
@@ -1490,61 +3462,114 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
             }));
     }, [attachmentPayload, attachments]);
 
-    const pollQueueWhileLoading = useCallback(async () => {
-        if (queuePollInFlightRef.current) return;
-        queuePollInFlightRef.current = true;
-        try {
-            const snap = (await authFetch('/api/studio-agent/queue')) as {
-                queued?: boolean;
-                waiting?: number;
-                active_sessions?: number;
-                max_concurrent?: number;
-            };
-            if (snap?.queued) {
-                const wait = Number(snap.waiting || 0);
-                const active = Number(snap.active_sessions || 0);
-                const max = Number(snap.max_concurrent || 250);
-                setQueueHint(
-                    wait > 0
-                        ? `High load — ~${wait} ahead of you (${active}/${max} active). Claude + fal are queued…`
-                        : `High load — ${active}/${max} concurrent sessions. Waiting for a slot…`,
-                );
-            } else {
-                setQueueHint('');
-            }
-        } catch {
-            setQueueHint('');
-        } finally {
-            queuePollInFlightRef.current = false;
-        }
-    }, [authFetch]);
-
     const sendText = useCallback(
-        async (text: string) => {
+        async (text: string, modeOverride?: AgentMode) => {
             const trimmed = buildOutboundMessage(text);
-            if (!trimmed || !sessionId || runningBySession[sessionId]) return;
+            if (!trimmed || !chatSessionReady || runningBySession[sessionId!]) return;
             const activeSessionId = sessionId;
             setInput('');
             setAttachments([]);
             setAttachmentPayload({});
+            setPending([]);
+            setDictationPreview('');
             markSessionRunning(activeSessionId, 'Thinking...');
             setError('');
             setQueueHint('');
             setToolActivity('');
-            resetVerificationChecklist();
+            setActivitySteps([newThinkingStep('Thinking about your request')]);
+            activityStepRef.current = 0;
             stickToBottomRef.current = true;
             const readableAttachments = buildOutboundAttachments();
             const visibleUserText = text.trim()
                 || (readableAttachments.length ? `Please analyze the attached image${readableAttachments.length === 1 ? '' : 's'}.` : '');
-            setMessages((m) => [...m, { role: 'user', content: visibleUserText }]);
+            let effectiveMode = modeOverride || agentMode;
+            if (
+                effectiveMode === 'plan'
+                && (latestUserAllowsProductionPending(visibleUserText) || userAffirmsAssistantTopic(visibleUserText))
+            ) {
+                effectiveMode = 'studio';
+                setAgentMode('studio');
+                void patchSession({ agent_mode: 'studio' });
+            }
+            setMessages((m) => {
+                const next = [...m, { role: 'user' as const, content: visibleUserText }];
+                messagesRef.current = next;
+                return next;
+            });
+            if (
+                effectiveMode === 'plan'
+                || isNewProductionRequest(visibleUserText)
+                || isResearchOnlyUserText(visibleUserText)
+                || latestUserAllowsProductionPending(visibleUserText)
+                || userAffirmsAssistantTopic(visibleUserText)
+            ) {
+                const optimisticBlocked = collectKnownProductionJobIds(
+                    messagesRef.current,
+                    jobTracks,
+                    deliverablesByJobRef.current.keys(),
+                );
+                if (optimisticBlocked.length) {
+                    blockedJobIdsRef.current = [...new Set([
+                        ...blockedJobIdsRef.current,
+                        ...optimisticBlocked,
+                    ])];
+                }
+                const suppress = (jobId: string, title?: string, status?: string) => (
+                    shouldSuppressProductionJob(
+                        jobId,
+                        title,
+                        messagesRef.current,
+                        blockedJobIdsRef.current,
+                        status,
+                    )
+                );
+                setMessages((rows) => {
+                    const stripped = stripStaleProductionArtifacts(
+                        rows,
+                        (jobId, title) => suppress(jobId, title),
+                    );
+                    messagesRef.current = stripped.map((row) => {
+                        const snap = row.jobDeliverable;
+                        if (!snap?.job_id) return row;
+                        if (!suppress(snap.job_id, snap.title, snap.status)) return row;
+                        const { jobDeliverable: _drop, ...rest } = row;
+                        return rest as ChatMessage;
+                    });
+                    return messagesRef.current;
+                });
+                setJobTracks((prev) => {
+                    const pruned = pruneStaleJobTracks(prev, messagesRef.current, blockedJobIdsRef.current);
+                    if (activeSessionId) persistJobs(activeSessionId, pruned);
+                    if (!pruned.length) setDockDismissed(true);
+                    return pruned;
+                });
+                setPollResetKey((k) => k + 1);
+            }
             let completedCleanly = false;
-            const queuePoll = window.setInterval(() => {
+            const thinkingRecover = window.setTimeout(() => {
                 if (sessionIdRef.current !== activeSessionId) return;
-                void pollQueueWhileLoading();
-            }, 2500);
-            void pollQueueWhileLoading();
+                void (async () => {
+                    try {
+                        const refreshed = await authFetch(sessionResumePath(activeSessionId, false), {
+                            timeoutMs: 60_000,
+                            retries: SESSION_LOAD_RETRIES,
+                        });
+                        await resumeSession((refreshed?.session as Record<string, unknown>) || {}, {
+                            rehydrateJobs: true,
+                        });
+                        setQueueHint('Recovered your saved run after a slow connection — no need to resend.');
+                        setError('');
+                    } catch {
+                        setQueueHint('Still working server-side — press Sync if this hangs past 2 minutes.');
+                    } finally {
+                        clearSessionRunning(activeSessionId);
+                        setActivitySteps((prev) => completeRunningSteps(prev));
+                    }
+                })();
+            }, THINKING_RECOVER_MS);
             try {
                 const tok = await getToken();
+                void ensureStudioFresh(tok);
                 const onStreamEvent = (ev: AgentStreamEvent) => {
                     if (sessionIdRef.current !== activeSessionId) return;
                     if (ev.event === 'verification_step' && ev.step) {
@@ -1555,66 +3580,212 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                             required: ev.required !== false,
                         });
                     } else if (ev.event === 'tool_start' && ev.tool) {
-                        const label = toolLabel(ev.tool);
-                        updateVerificationStep('tool_evidence', {
-                            status: 'running',
-                            label: 'Run required data tools',
-                            detail: ev.awaiting_approval ? `Queued for approval: ${label}` : `Running: ${label}`,
-                        });
+                        const toolName = String(ev.tool);
+                        // Production starts are only shown if they succeed; blocked research turns stay quiet.
+                        if (/^start_(shortform|longform)/i.test(toolName)) {
+                            return;
+                        }
+                        const label = toolActivityLabel(
+                            toolName,
+                            String(ev.query || ''),
+                            String(ev.label || ''),
+                        );
+                        activityStepRef.current += 1;
                         setToolActivity(
                             ev.awaiting_approval
-                                ? `Queued for approval: ${toolLabel(ev.tool)}`
-                                : toolLabel(ev.tool),
+                                ? `Queued for approval — ${toolLabel(toolName)}`
+                                : label,
                         );
-                    } else if (ev.event === 'tool_end' && ev.tool) {
-                        const label = toolLabel(ev.tool);
-                        const failed = ev.status === 'error';
-                        updateVerificationStep('tool_evidence', {
-                            status: failed ? 'error' : 'done',
-                            label: 'Run required data tools',
-                            detail: failed ? `Failed: ${label}${ev.error ? ` - ${ev.error}` : ''}` : `Completed: ${label}`,
+                        setActivitySteps((prev) => {
+                            // Keep a single running poll/analyze step instead of stacking clones.
+                            const sameRunning = prev.find(
+                                (s) => s.status === 'running' && s.tool === toolName,
+                            );
+                            if (sameRunning) {
+                                return prev.map((s) =>
+                                    s.id === sameRunning.id ? { ...s, label } : s,
+                                );
+                            }
+                            const closed = completeRunningSteps(prev);
+                            return [
+                                ...closed,
+                                {
+                                    id: `tool-${toolName}-${Date.now()}-${activityStepRef.current}`,
+                                    kind: 'tool' as const,
+                                    label: ev.awaiting_approval
+                                        ? `Queued for approval — ${toolLabel(toolName)}`
+                                        : label,
+                                    tool: toolName,
+                                    startedAt: Date.now(),
+                                    status: 'running' as const,
+                                },
+                            ];
                         });
-                        setToolActivity(
-                            ev.status === 'error'
-                                ? `${toolLabel(ev.tool)} — error`
-                                : `${toolLabel(ev.tool)} — done`,
+                    } else if (ev.event === 'tool_end' && ev.tool) {
+                        const toolName = String(ev.tool);
+                        const errCode = String(ev.error || '');
+                        const skipped =
+                            ev.status === 'skipped'
+                            || errCode.startsWith('blocked_')
+                            || errCode === 'blocked_channel_analysis_turn';
+                        if (skipped) {
+                            // Drop intentional blocks from the timeline (not user-facing failures).
+                            setActivitySteps((prev) =>
+                                prev.filter((s) => !(s.tool === toolName && s.status === 'running')),
+                            );
+                            return;
+                        }
+                        const failed = ev.status === 'error';
+                        const summary = (ev.summary || {}) as AgentToolActivitySummary;
+                        const label = toolActivityLabel(
+                            toolName,
+                            String(ev.query || summary.query || ''),
+                            String(ev.label || summary.label || ''),
                         );
-                    } else if (ev.event === 'status' && ev.message) {
-                        setToolActivity(ev.message);
-                        if (/pulling/i.test(String(ev.message))) {
-                            updateVerificationStep('tool_evidence', {
-                                status: 'running',
-                                label: 'Run required data tools',
-                                detail: String(ev.message),
+                        setToolActivity(
+                            failed
+                                ? `${label} — error`
+                                : `${label} — done`,
+                        );
+                        setActivitySteps((prev) => {
+                            const now = Date.now();
+                            let matched = false;
+                            const next = prev.map((step) => {
+                                if (matched) return step;
+                                if (step.status === 'running' && (step.tool === toolName || step.kind === 'tool')) {
+                                    matched = true;
+                                    const children: ActivityChild[] = [...(step.children || [])];
+                                    const q = String(summary.query || ev.query || '').trim();
+                                    const count = summary.result_count;
+                                    if (q || typeof count === 'number' || summary.title) {
+                                        children.push({
+                                            id: `child-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+                                            title: String(summary.title || 'Searched'),
+                                            query: q || undefined,
+                                            resultCount: typeof count === 'number' ? count : undefined,
+                                            source: String(summary.source || ''),
+                                        });
+                                    }
+                                    return {
+                                        ...step,
+                                        label: label || step.label,
+                                        status: failed ? ('error' as const) : ('done' as const),
+                                        endedAt: now,
+                                        children: children.length ? children : step.children,
+                                        detail: failed
+                                            ? (errCode === 'error' ? 'Deep analysis incomplete — retrying or partial results used' : errCode)
+                                            : step.detail,
+                                    };
+                                }
+                                return step;
                             });
-                        } else if (/thinking/i.test(String(ev.message))) {
+                            if (!matched && !failed) {
+                                next.push({
+                                    id: `tool-end-${toolName}-${Date.now()}`,
+                                    kind: 'tool',
+                                    label,
+                                    tool: toolName,
+                                    startedAt: now - 1000,
+                                    endedAt: now,
+                                    status: 'done',
+                                });
+                            }
+                            return next;
+                        });
+                    } else if (ev.event === 'status' && ev.message) {
+                        const msg = String(ev.message);
+                        setToolActivity(msg);
+                        if (/thinking/i.test(msg)) {
+                            setActivitySteps((prev) => {
+                                const hasRunningThink = prev.some(
+                                    (s) => s.kind === 'thinking' && s.status === 'running',
+                                );
+                                if (hasRunningThink) return prev;
+                                return [...completeRunningSteps(prev), newThinkingStep('Thinking about your request')];
+                            });
                             updateVerificationStep('final_audit', {
                                 status: 'running',
                                 label: 'Audit final answer before replying',
                                 detail: 'Drafting from available context and preparing evidence audit.',
                             });
+                        } else if (/pulling|search|demand|live demand/i.test(msg)) {
+                            setActivitySteps((prev) => {
+                                const closed = completeRunningSteps(prev);
+                                return [
+                                    ...closed,
+                                    {
+                                        id: `status-${Date.now()}`,
+                                        kind: 'status' as const,
+                                        label: msg.replace(/\.\.\.$/, '').slice(0, 120),
+                                        startedAt: Date.now(),
+                                        status: 'running' as const,
+                                    },
+                                ];
+                            });
+                            updateVerificationStep('tool_evidence', {
+                                status: 'running',
+                                label: 'Run required data tools',
+                                detail: msg,
+                            });
                         }
                     } else if (ev.event === 'error') {
+                        setActivitySteps((prev) =>
+                            completeRunningSteps(prev).map((s, i, arr) =>
+                                i === arr.length - 1
+                                    ? { ...s, status: 'error' as const, detail: String(ev.message || 'error') }
+                                    : s,
+                            ),
+                        );
                         updateVerificationStep('final_audit', {
                             status: 'error',
                             label: 'Audit final answer before replying',
                             detail: String(ev.message || 'Studio Agent stream error'),
                         });
+                    } else if (ev.event === 'session_state') {
+                        applyProductionLedger(ev as Record<string, unknown>);
+                        if (Array.isArray(ev.active_jobs)) {
+                            ingestActiveJobs(ev.active_jobs, activeSessionId);
+                        }
                     } else if (ev.event === 'active_jobs' && Array.isArray(ev.jobs)) {
                         ingestActiveJobs(ev.jobs, activeSessionId);
+                        const jobs = ev.jobs as AgentJobTrack[];
+                        const shouldRehydrate = jobs.length > 0;
+                        scheduleAutoSync({ delayMs: 400, rehydrateJobs: shouldRehydrate });
+                    } else if (ev.event === 'job_snapshot' && ev.snapshot && typeof ev.snapshot === 'object') {
+                        const snap = ev.snapshot as AgentJobSnapshot;
+                        if (!shouldSuppressProductionJob(
+                            snap.job_id,
+                            snap.title,
+                            messagesRef.current,
+                            blockedJobIdsRef.current,
+                        )) {
+                            appendJobDeliverable(snap);
+                        }
+                    } else if (ev.event === 'thumbnail_review' && ev.review && typeof ev.review === 'object') {
+                        mergeThumbnailReviewIntoDeliverable(ev.review as ThumbnailReview);
                     } else if (ev.event === 'pending_actions' && Array.isArray(ev.actions)) {
-                        setPending(ev.actions as PendingAction[]);
+                        setPending(filterStalePendingActions(ev.actions as PendingAction[], messagesRef.current));
+                        // Do NOT auto-sync immediately — sync was pruning Approve before click.
+                    } else if (ev.event === 'concept_plan' && ev.plan && typeof ev.plan === 'object') {
+                        setConceptPlan(ev.plan as ConceptPlan);
                     }
                 };
 
                 let data: Record<string, unknown>;
                 try {
+                    // Always push live picker state on every turn so the backend cannot
+                    // estimate against stale session defaults.
                     data = await streamAgentChat(sessionId, trimmed, tok, {
                         onEvent: onStreamEvent,
                         replyTo: replyingTo ? { job_id: replyingTo.job_id, kind: replyingTo.kind, scene_index: replyingTo.scene_index } : undefined,
                         attachments: readableAttachments,
                         captions_enabled: captionMode !== 'off',
                         caption_mode: captionMode,
+                        render_style: renderStyle,
+                        image_model: imageModel,
+                        image_model_id: imageModel,
+                        video_model: videoModel,
+                        agent_mode: effectiveMode,
                         channel: selectedChannel ? {
                             channel_id: selectedChannel.channel_id || '',
                             registry_key: channelRegistryKey(selectedChannel),
@@ -1622,10 +3793,21 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                         } : null,
                     });
                 } catch (streamError) {
+                    const recoverSessionAfterStreamDrop = async () => {
+                        try {
+                            return await authFetch(sessionResumePath(activeSessionId, false), {
+                                timeoutMs: 60_000,
+                                retries: SESSION_LOAD_RETRIES,
+                            });
+                        } catch {
+                            return await authFetch(sessionResumePath(activeSessionId, true), {
+                                timeoutMs: SESSION_LOAD_TIMEOUT_MS,
+                                retries: SESSION_LOAD_RETRIES,
+                            });
+                        }
+                    };
                     try {
-                        const refreshed = await authFetch(`/api/studio-agent/sessions/${activeSessionId}?sync_pending=true`, {
-                            timeoutMs: 120_000,
-                        });
+                        const refreshed = await recoverSessionAfterStreamDrop();
                         await resumeSession((refreshed?.session as Record<string, unknown>) || {}, {
                             rehydrateJobs: true,
                         });
@@ -1634,9 +3816,15 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                             `Studio Agent connection dropped and the recovery refresh could not reach the backend. Your chat is preserved; press Resume in a few seconds. ${String((streamError as Error).message || (refreshError as Error).message || '')}`,
                         );
                     }
-                    throw new Error(
-                        `Studio Agent connection dropped, but the backend kept working and I reloaded the saved chat. Press Resume in a few seconds if the answer is still running. ${String((streamError as Error).message || '')}`,
-                    );
+                    // The stream can be interrupted while the server-side run
+                    // continues (deploys, proxy rebalancing, mobile network).
+                    // We already recovered the authoritative session above, so
+                    // do not turn a successful recovery into a red error banner
+                    // or force the creator to press Resume manually.
+                    setQueueHint('Reconnected — Studio is continuing from the saved run.');
+                    scheduleAutoSync({ delayMs: 1200, rehydrateJobs: true });
+                    completedCleanly = true;
+                    return;
                 }
                 setReplyingTo(null); // clear reply after send
                 const q = data?.queue as { waited_sec?: number; queue_position?: number } | undefined;
@@ -1653,7 +3841,10 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                     return;
                 }
                 const reply = String(data?.assistant_message || '').trim();
-                const nextPending = (data?.pending_actions as PendingAction[]) || [];
+                const nextPending = filterStalePendingActions(
+                    (data?.pending_actions as PendingAction[]) || [],
+                    messagesRef.current,
+                );
                 updateVerificationStep('final_audit', {
                     status: 'done',
                     label: 'Audit final answer before replying',
@@ -1664,7 +3855,11 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                             : 'Backend completed without a usable assistant message.',
                 });
                 if (reply) {
-                    setMessages((m) => [...m, { role: 'assistant', content: reply }]);
+                    setMessages((m) => {
+                        const next = [...m, { role: 'assistant' as const, content: reply }];
+                        messagesRef.current = next;
+                        return next;
+                    });
                 } else if (nextPending.length > 0) {
                     setMessages((m) => [
                         ...m,
@@ -1678,9 +3873,20 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                     setError('Agent returned an empty reply. Try again or pick a different model.');
                 }
                 setPending(nextPending);
+                const nextConcept = (data?.pending_concept || data?.concept_plan) as ConceptPlan | null | undefined;
+                if (nextConcept && typeof nextConcept === 'object') {
+                    setConceptPlan(nextConcept);
+                } else if (nextPending.length === 0 && !nextConcept && data && 'concept_plan' in data && !data.concept_plan) {
+                    // keep existing card unless server cleared it
+                }
+                applyProductionLedger(data);
                 ingestActiveJobs(data?.active_jobs, activeSessionId);
                 await refreshHistory();
-                completedCleanly = Boolean(reply || nextPending.length > 0);
+                // If Approve is waiting, skip auto-sync so force_sync cannot wipe the card.
+                if (nextPending.length === 0) {
+                    scheduleAutoSync({ delayMs: 0, rehydrateJobs: true });
+                }
+                completedCleanly = Boolean(reply || nextPending.length > 0 || nextConcept);
             } catch (e) {
                 if (sessionIdRef.current !== activeSessionId) return;
                 updateVerificationStep('final_audit', {
@@ -1691,12 +3897,20 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                 setError((e as Error).message);
                 setQueueHint('');
             } finally {
-                window.clearInterval(queuePoll);
+                window.clearTimeout(thinkingRecover);
                 clearSessionRunning(activeSessionId);
                 if (sessionIdRef.current === activeSessionId) {
                     setToolActivity('');
+                    setActivitySteps((prev) => completeRunningSteps(prev));
+                    // Keep the professional timeline visible briefly after the reply lands.
+                    window.setTimeout(() => {
+                        if (sessionIdRef.current === activeSessionId) {
+                            setActivitySteps([]);
+                        }
+                    }, 5000);
                     if (completedCleanly) {
                         setVerificationSteps([]);
+                        applyPendingStudioBundleReload();
                     }
                 }
             }
@@ -1710,11 +3924,13 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
             getToken,
             ingestActiveJobs,
             markSessionRunning,
-            pollQueueWhileLoading,
             refreshHistory,
             resetVerificationChecklist,
             resumeSession,
+            chatSessionReady,
             runningBySession,
+            scheduleAutoSync,
+            agentMode,
             selectedChannel,
             sessionId,
             updateVerificationStep,
@@ -1722,6 +3938,21 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
     );
 
     const sendMessage = useCallback(() => sendText(input), [input, sendText]);
+
+    const commitConceptPlan = useCallback(() => {
+        const title = String(conceptPlan?.title || '').trim();
+        const dur = Number(conceptPlan?.duration_sec || 0);
+        const durationHint = dur > 0 ? `, only ${dur} seconds` : '';
+        const msg = title
+            ? `yes make it — render that plan for "${title}"${durationHint}`
+            : 'yes make it — render that plan';
+        // A click is explicit concept approval. Collapse immediately while the
+        // production approval/result arrives rather than leaving a giant card.
+        setConceptPlan((current) => current ? { ...current, status: 'confirmed' } : current);
+        setAgentMode('studio');
+        void patchSession({ agent_mode: 'studio' });
+        void sendText(msg, 'studio');
+    }, [conceptPlan, patchSession, sendText]);
 
     const onPickFiles = useCallback(async (files: FileList | File[] | null) => {
         if (!files?.length) return;
@@ -1731,9 +3962,11 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
         for (const file of Array.from(files)) {
             const id = `f_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
             const isImage = file.type.startsWith('image/');
+            const isVideo = file.type.startsWith('video/')
+                || /\.(mp4|mov|mkv|webm|m4v)$/i.test(file.name);
             const isText = file.type.startsWith('text/')
                 || /\.(md|txt|json|csv|py|ts|tsx|js|jsx|yaml|yml)$/i.test(file.name);
-            const kind: AttachedFile['kind'] = isImage ? 'image' : isText ? 'text' : 'binary';
+            const kind: AttachedFile['kind'] = isImage ? 'image' : isVideo ? 'video' : isText ? 'text' : 'binary';
             const name = file.name || 'pasted-image.png';
             if (isImage) {
                 if (imageCount >= MAX_AGENT_IMAGE_ATTACHMENTS) {
@@ -1760,6 +3993,35 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                     kind,
                     text: await file.text(),
                 };
+            } else if (isVideo) {
+                if (!isPersistedAgentSessionId(sessionId)) {
+                    setError('Open or create a Studio Agent chat before attaching a video.');
+                    continue;
+                }
+                if (file.size > MAX_AGENT_VIDEO_BYTES) {
+                    setError(`${name} is too large. Keep Studio Agent video attachments under 3GB for now.`);
+                    continue;
+                }
+                const tok = await getToken();
+                const form = new FormData();
+                form.append('file', file);
+                const res = await fetch(resolveStudioBackendUrl(`/api/studio-agent/sessions/${sessionId}/attachments/video`), {
+                    method: 'POST',
+                    headers: { Authorization: `Bearer ${tok}` },
+                    body: form,
+                });
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok) {
+                    setError(typeof data.detail === 'string' ? data.detail : `Video upload failed (${res.status})`);
+                    continue;
+                }
+                payload[id] = {
+                    name,
+                    mime_type: file.type || 'video/mp4',
+                    size: file.size,
+                    kind,
+                    server_path: String(data.path || ''),
+                };
             } else {
                 payload[id] = {
                     name,
@@ -1773,7 +4035,7 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
         setAttachments((a) => [...a, ...next]);
         setAttachmentPayload(payload);
         if (fileInputRef.current) fileInputRef.current.value = '';
-    }, [attachmentPayload, attachments]);
+    }, [attachmentPayload, attachments, getToken, sessionId]);
 
     const onPasteIntoInput = useCallback((e: ClipboardEvent<HTMLTextAreaElement>) => {
         const clipboard = e.clipboardData;
@@ -1802,23 +4064,25 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
         void onPickFiles(files);
     }, [onPickFiles]);
 
-    const syncSessionFromServer = useCallback(async () => {
-        if (!sessionId) return;
-        const data = await authFetch(`/api/studio-agent/sessions/${sessionId}?sync_pending=true`, {
-            timeoutMs: 120_000,
-        });
-        await resumeSession((data?.session as Record<string, unknown>) || {});
-    }, [authFetch, resumeSession, sessionId]);
-
     const approveAction = useCallback(
         async (actionId: string) => {
             if (!sessionId || currentSessionRunning) return;
             const approved = pending.find((a) => a.id === actionId);
+            const approvedIndex = pending.findIndex((a) => a.id === actionId);
+            if (
+                approved
+                && isStaleShortformPendingAction(approved, messagesRef.current, pending, approvedIndex)
+            ) {
+                setPending((p) => p.filter((a) => a.id !== actionId));
+                setError('Blocked stale production approval. Sync chat, then approve the current title.');
+                return;
+            }
             markSessionRunning(sessionId, 'Approving action...');
             setError('');
             stickToBottomRef.current = true;
             try {
-                await syncSessionFromServer();
+                // Do NOT sync-before-approve. force_sync was pruning the pending action
+                // (or racing it) so Approve never reached start_shortform_generate.
                 const data = await authFetch(`/api/studio-agent/sessions/${sessionId}/approve`, {
                     method: 'POST',
                     body: JSON.stringify({ action_id: actionId }),
@@ -1828,13 +4092,18 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                 const approvedAction = data?.approved_action as {
                     tool?: string;
                     error?: string;
+                    result_preview?: string;
                 } | undefined;
                 if (approvedAction?.error) {
                     setError(`${approvedAction.tool || 'Action'} failed: ${approvedAction.error}`);
                 }
                 const reply = String(data?.assistant_message || '').trim();
                 if (reply) {
-                    setMessages((m) => [...m, { role: 'assistant', content: reply }]);
+                    setMessages((m) => {
+                        const next = [...m, { role: 'assistant' as const, content: reply }];
+                        messagesRef.current = next;
+                        return next;
+                    });
                 } else if (approvedAction?.error) {
                     setMessages((m) => [
                         ...m,
@@ -1852,17 +4121,27 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                         },
                     ]);
                 }
-                setPending((data?.pending_actions as PendingAction[]) || []);
+                setPending(filterStalePendingActions(
+                    (data?.pending_actions as PendingAction[]) || [],
+                    messagesRef.current,
+                ));
                 ingestActiveJobs(data?.active_jobs, sessionId);
                 setDockDismissed(false);
+                // Refresh AFTER start so the new job is on the session — not before.
+                scheduleAutoSync({ delayMs: 400, rehydrateJobs: true });
             } catch (e) {
                 setError((e as Error).message);
-                if (approved) setPending((p) => [...p, approved]);
+                if (
+                    approved
+                    && !isStaleShortformPendingAction(approved, messagesRef.current, pending, approvedIndex)
+                ) {
+                    setPending((p) => filterStalePendingActions([...p, approved], messagesRef.current));
+                }
             } finally {
                 clearSessionRunning(sessionId);
             }
         },
-        [authFetch, clearSessionRunning, currentSessionRunning, ingestActiveJobs, markSessionRunning, pending, sessionId, syncSessionFromServer],
+        [authFetch, clearSessionRunning, currentSessionRunning, ingestActiveJobs, markSessionRunning, pending, scheduleAutoSync, sessionId],
     );
 
     const rejectAction = useCallback(
@@ -1875,17 +4154,23 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                     body: JSON.stringify({ action_id: actionId, reason: 'Rejected by user' }),
                 });
                 setPending((p) => p.filter((a) => a.id !== actionId));
+                dropGhostShortformTrack();
+                setMessages((rows) => stripGhostJobDeliverables(rows));
+                setError('');
+                scheduleAutoSync({ delayMs: 0, rehydrateJobs: false });
             } catch (e) {
                 setError((e as Error).message);
+                scheduleAutoSync({ delayMs: 0 });
             } finally {
                 clearSessionRunning(sessionId);
             }
         },
-        [authFetch, clearSessionRunning, currentSessionRunning, markSessionRunning, sessionId],
+        [authFetch, clearSessionRunning, currentSessionRunning, dropGhostShortformTrack, markSessionRunning, scheduleAutoSync, sessionId],
     );
 
     const handleRetryProduction = useCallback(async () => {
-        if (!sessionId || currentSessionRunning || retryingProduction) return;
+        if (!sessionId || retryingProduction) return;
+        if (currentSessionRunning && dockSnap?.status === 'running') return;
         setRetryingProduction(true);
         setError('');
         setToolActivity('Retrying production…');
@@ -1922,25 +4207,56 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
             setRetryingProduction(false);
             setToolActivity('');
         }
-    }, [authFetch, currentSessionRunning, retryingProduction, sessionId]);
+    }, [authFetch, currentSessionRunning, dockSnap?.status, retryingProduction, sessionId]);
 
-    const handleCancelProduction = useCallback(async () => {
-        if (!dockTrack?.job_id || cancellingProduction) return;
-        userCancelledJobsRef.current.add(dockTrack.job_id);
+    const handleCancelProduction = useCallback(async (jobId?: string, kind: string = 'shortform') => {
+        const targetId = jobId || dockTrack?.job_id;
+        const targetKind = jobId ? kind : (dockTrack?.kind || 'shortform');
+        if (!targetId || cancellingProduction) return;
+        userCancelledJobsRef.current.add(targetId);
         setCancellingProduction(true);
         try {
             const tok = await getToken();
-            await cancelJob(dockTrack.job_id, dockTrack.kind, tok, sessionId);
+            await cancelJob(targetId, targetKind, tok, sessionId);
+            setJobTracks((prev) => {
+                const merged = mergeJobTracks(prev, [{
+                    job_id: targetId,
+                    kind: normalizeAgentJobKind(targetId, targetKind),
+                    started_at: Date.now(),
+                }]);
+                if (sessionId) persistJobs(sessionId, merged);
+                return merged;
+            });
+            const pollCancel = async (attempt = 0): Promise<void> => {
+                if (!sessionId || attempt > 12) return;
+                const pollTok = await getToken();
+                const res = await fetch(agentJobPollUrl(targetId, targetKind as AgentJobTrack['kind'], sessionId), {
+                    headers: { Authorization: `Bearer ${pollTok}` },
+                });
+                const data = (await res.json().catch(() => ({}))) as AgentJobSnapshot;
+                if (!res.ok) return;
+                appendJobDeliverable(data);
+                if (!isTerminalJob(data)) {
+                    await new Promise((resolve) => window.setTimeout(resolve, 2000));
+                    return pollCancel(attempt + 1);
+                }
+            };
+            await pollCancel();
             setMessages((m) => [
                 ...m,
-                { role: 'assistant' as const, content: 'Cancelling the render — it will stop at the next scene. No further fal spend.' },
+                { role: 'assistant' as const, content: 'Cancelling the render — it will stop at the next scene. No further provider spend.' },
             ]);
         } catch (e) {
             setError((e as Error).message);
         } finally {
             setCancellingProduction(false);
         }
-    }, [cancellingProduction, dockTrack, getToken, sessionId]);
+    }, [appendJobDeliverable, cancellingProduction, dockTrack, getToken, sessionId]);
+
+    const visiblePending = filterOwnerOnlyPending(
+        filterStalePendingActions(pending, messages),
+        isAdminUser,
+    );
 
     if (booting) {
         return (
@@ -1956,11 +4272,43 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                 open={modelPickerOpen}
                 models={modelCatalog}
                 selectedId={model}
+                title="Choose a runner model"
+                subtitle="Used for planning, tool calls, and production orchestration. Claude via Anthropic · Grok via xAI."
+                searchPlaceholder="Search Claude, Grok, providers, or costs..."
                 onSelect={(id) => {
                     setModel(id);
                     patchSession({ model: id });
                 }}
                 onClose={() => setModelPickerOpen(false)}
+            />
+            <AgentModelPicker
+                open={imageModelPickerOpen}
+                models={imageModelCatalog}
+                selectedId={imageModel}
+                title="Choose an image model"
+                subtitle="Used for stills, scene images, and thumbnails on short-form and long-form renders. Your pick is saved on this chat and sent on every turn."
+                statusText={`${imageModelCatalog.length} image models available through Studio providers`}
+                searchPlaceholder="Search image models, providers, or costs..."
+                onSelect={(id) => {
+                    setImageModel(id);
+                    patchSession({ image_model: id });
+                    saveImageModelPref(id);
+                }}
+                onClose={() => setImageModelPickerOpen(false)}
+            />
+            <AgentModelPicker
+                open={videoModelPickerOpen}
+                models={videoModelCatalog}
+                selectedId={videoModel}
+                title="Choose an image-to-video model"
+                subtitle="Used when approved stills animate into motion clips (short-form and long-form). Your pick is saved on this chat."
+                statusText={`${videoModelCatalog.length} video models available through Studio providers`}
+                searchPlaceholder="Search video models, providers, or costs..."
+                onSelect={(id) => {
+                    setVideoModel(id);
+                    patchSession({ video_model: id });
+                }}
+                onClose={() => setVideoModelPickerOpen(false)}
             />
             {deleteTarget && (
                 <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/65 px-4 backdrop-blur-sm">
@@ -2023,11 +4371,12 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                         </div>
                         <button
                             type="button"
-                            onClick={() => createNewSession(model)}
-                            className="mb-2 flex h-10 w-full items-center gap-2 rounded-xl bg-white/[0.08] px-3 text-sm font-semibold text-white transition hover:bg-white/[0.12]"
+                            disabled={creatingSession}
+                            onClick={() => void createNewSession(model)}
+                            className="mb-2 flex h-10 w-full items-center gap-2 rounded-xl bg-white/[0.08] px-3 text-sm font-semibold text-white transition hover:bg-white/[0.12] disabled:opacity-40"
                         >
-                            <MessageSquarePlus className="h-4 w-4" />
-                            New chat
+                            {creatingSession ? <Loader2 className="h-4 w-4 animate-spin" /> : <MessageSquarePlus className="h-4 w-4" />}
+                            {creatingSession ? 'Starting chat…' : 'New chat'}
                         </button>
                         <label className="flex h-9 items-center gap-2 rounded-xl border border-white/[0.06] bg-black/30 px-3 text-gray-500 focus-within:border-white/15 focus-within:text-gray-300">
                             <Search className="h-3.5 w-3.5" />
@@ -2077,6 +4426,14 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                                     </button>
                                     <button
                                         type="button"
+                                        title="New chat with prior context (no old renders)"
+                                        onClick={() => void forkSessionWithContext(s.session_id)}
+                                        className="shrink-0 rounded-lg px-1.5 py-2 text-gray-500 opacity-0 transition hover:bg-violet-500/15 hover:text-violet-200 group-hover:opacity-100"
+                                    >
+                                        <RotateCcw className="h-3.5 w-3.5" />
+                                    </button>
+                                    <button
+                                        type="button"
                                         title="Delete chat"
                                         onClick={() => setDeleteTarget(s)}
                                         className="shrink-0 rounded-lg px-1.5 py-2 text-gray-500 opacity-70 transition hover:bg-rose-500/15 hover:text-rose-300 group-hover:opacity-100"
@@ -2100,10 +4457,11 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                             <button
                                 type="button"
                                 title="New chat"
-                                onClick={() => createNewSession(model)}
-                                className="grid h-10 w-10 place-items-center rounded-xl text-gray-400 transition hover:bg-violet-500/15 hover:text-violet-200"
+                                disabled={creatingSession}
+                                onClick={() => void createNewSession(model)}
+                                className="grid h-10 w-10 place-items-center rounded-xl text-gray-400 transition hover:bg-violet-500/15 hover:text-violet-200 disabled:opacity-40"
                             >
-                                <MessageSquarePlus className="h-4 w-4" />
+                                {creatingSession ? <Loader2 className="h-4 w-4 animate-spin" /> : <MessageSquarePlus className="h-4 w-4" />}
                             </button>
                             <button
                                 type="button"
@@ -2145,25 +4503,50 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                     <div className="ml-auto flex flex-wrap items-center gap-2">
                         <button
                             type="button"
-                            title="Reload chat from server (transcript, pending approvals, renders). Works even if the agent was stuck loading."
-                            disabled={resuming || booting}
-                            onClick={() => void reloadCurrentSession()}
+                            title={sessionId
+                                ? 'Sync this chat and pull the latest Studio update (auto hard-refresh when a new build is live).'
+                                : 'Reopen the last Studio Agent chat from the server.'}
+                            disabled={resuming || syncing || booting}
+                            onClick={() => {
+                                if (sessionId) void syncSessionFromServer();
+                                else void reloadCurrentSession();
+                            }}
                             className="inline-flex items-center gap-1 rounded-lg border border-white/[0.06] px-2 py-1 text-[9px] font-semibold uppercase text-gray-400 transition hover:bg-white/[0.06] hover:text-white disabled:opacity-40"
                         >
-                            <RefreshCw className={`h-3 w-3 ${resuming ? 'animate-spin' : ''}`} />
-                            {resuming ? 'Resuming…' : 'Resume'}
+                            <RefreshCw className={`h-3 w-3 ${syncing || resuming ? 'animate-spin' : ''}`} />
+                            {syncing ? 'Syncing…' : resuming ? 'Loading…' : sessionId ? 'Sync' : 'Reload'}
+                        </button>
+                        <button
+                            type="button"
+                            title="Fresh chat with prior context — no old renders"
+                            disabled={currentSessionRunning || !chatSessionReady}
+                            onClick={() => void forkSessionWithContext()}
+                            className="inline-flex items-center gap-1 rounded-lg border border-white/[0.06] px-2 py-1 text-[9px] font-semibold uppercase text-gray-400 transition hover:bg-violet-500/15 hover:text-violet-200 disabled:opacity-40"
+                        >
+                            <RotateCcw className="h-3 w-3" />
+                            With context
+                        </button>
+                        <button
+                            type="button"
+                            title="Clear stuck renders and approve cards for this chat"
+                            disabled={currentSessionRunning || !chatSessionReady || !sessionId}
+                            onClick={() => void resetProductionInPlace()}
+                            className="inline-flex items-center gap-1 rounded-lg border border-amber-500/25 px-2 py-1 text-[9px] font-semibold uppercase text-amber-200/90 transition hover:bg-amber-500/10 disabled:opacity-40"
+                        >
+                            <RotateCcw className="h-3 w-3" />
+                            Reset prod
                         </button>
                         <button
                             type="button"
                             title="Roll transcript into a new session"
-                            disabled={currentSessionRunning || !sessionId}
+                            disabled={currentSessionRunning || !chatSessionReady}
                             onClick={() => void rolloverSession()}
-                            className="inline-flex items-center gap-1 rounded-lg border border-white/[0.06] px-2 py-1 text-[9px] font-semibold uppercase text-gray-400 transition hover:bg-violet-500/15 hover:text-violet-200 disabled:opacity-40"
+                            className="inline-flex items-center gap-1 rounded-lg border border-white/[0.06] px-2 py-1 text-[9px] font-semibold uppercase text-gray-400 transition hover:bg-white/[0.06] hover:text-white disabled:opacity-40"
                         >
-                            <RotateCcw className="h-3 w-3" />
+                            <History className="h-3 w-3" />
                             Roll over
                         </button>
-                        {/* Decluttered: removed Short/Long/Auto tabs (user request). Agent now infers from chat text ("make a 45s short about X" or "12-min documentary"). This makes the header much cleaner. */}
+                        {/* Workflow mode lives in the composer so this header stays focused on session controls. */}
                         <div
                             className="flex items-center gap-0.5 rounded-lg border border-white/[0.06] bg-white/[0.02] p-0.5"
                             title="How deeply Claude reasons"
@@ -2189,6 +4572,8 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                                 </button>
                             ))}
                         </div>
+                        {agentMode === 'studio' && (
+                            <>
                         {/* Visual Style Grid - Seedream stills + on-demand i2v motion previews */}
                         <div className="relative">
                             <button
@@ -2244,7 +4629,17 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                                                                 onMouseLeave={() => setActiveStylePreview('')}
                                                                 onClick={() => {
                                                                     setRenderStyle(s.key);
-                                                                    void patchSession({ render_style: s.key });
+                                                                    if (s.key === 'skeleton_host') {
+                                                                        setImageModel('grok_imagine');
+                                                                        setVideoModel('grok_imagine_video');
+                                                                        void patchSession({
+                                                                            render_style: s.key,
+                                                                            image_model: 'grok_imagine',
+                                                                            video_model: 'grok_imagine_video',
+                                                                        });
+                                                                    } else {
+                                                                        void patchSession({ render_style: s.key });
+                                                                    }
                                                                     setShowStyleGrid(false);
                                                                     setActiveStylePreview('');
                                                                 }}
@@ -2300,7 +4695,7 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                             )}
                         </div>
                         <label
-                            className="inline-flex items-center gap-1.5 rounded-lg border border-white/[0.06] bg-white/[0.02] px-2 py-0.5 text-[9px] font-semibold uppercase text-cyan-100"
+                            className="hidden"
                             title="Image-to-video model. Stills remain locked to Seedream 4.5."
                         >
                             <Video className="h-3 w-3 text-cyan-300" />
@@ -2320,6 +4715,8 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                                 ))}
                             </select>
                         </label>
+                            </>
+                        )}
                         <button
                             type="button"
                             onClick={() => {
@@ -2410,7 +4807,15 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                     </div>
                 </header>
 
-                <AgentProductionRail tracks={jobTracks} snapshots={snapshots} />
+                {/* Plan is a strict no-production workspace. Existing render
+                    cards remain durable server-side, but cannot be presented
+                    as a new action while the user is planning. */}
+                <AgentProductionRail
+                    tracks={agentMode === 'plan'
+                        ? jobTracks.filter((track) => track.kind !== 'longform' && track.kind !== 'shortform')
+                        : jobTracks}
+                    snapshots={snapshots}
+                />
 
                 {false && messages.length === 0 && !currentSessionRunning && (
                     <div className="flex flex-1 items-center justify-center">
@@ -2448,6 +4853,16 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                 {error && (
                     <div className="mx-auto mb-2 flex w-full max-w-3xl shrink-0 items-start gap-2 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2">
                         <p className="flex-1 text-xs leading-relaxed text-red-200">{error}</p>
+                        {/production failed|LFRenderError|start_longform_render failed/i.test(error) ? (
+                            <button
+                                type="button"
+                                disabled={retryingProduction}
+                                onClick={() => void handleRetryProduction()}
+                                className="shrink-0 rounded-md border border-red-400/35 bg-red-500/15 px-2 py-1 text-[10px] font-semibold text-red-100 hover:bg-red-500/25 disabled:opacity-50"
+                            >
+                                {retryingProduction ? 'Retrying…' : 'Retry'}
+                            </button>
+                        ) : null}
                         <button
                             type="button"
                             onClick={() => setError('')}
@@ -2457,65 +4872,10 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                         </button>
                     </div>
                 )}
-                {(dictation.error || dictationPreview) && (
-                    <p
-                        className={`mb-2 shrink-0 rounded-lg border px-3 py-2 text-xs leading-relaxed ${
-                            dictation.error
-                                ? 'border-amber-500/30 bg-amber-500/10 text-amber-100'
-                                : 'border-violet-500/20 bg-violet-500/5 text-violet-100'
-                        }`}
-                    >
-                        {dictation.error || dictationPreview}
+                {dictation.error && (
+                    <p className="mb-2 shrink-0 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs leading-relaxed text-amber-100">
+                        {dictation.error}
                     </p>
-                )}
-
-                {(verificationSteps.length > 0 || toolActivity) && (
-                    <div className="mx-auto mb-2 w-full max-w-3xl shrink-0 rounded-xl border border-cyan-400/20 bg-cyan-500/[0.06] px-3 py-2 shadow-lg shadow-black/20">
-                        <div className="flex items-center justify-between gap-3">
-                            <p className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wider text-cyan-100">
-                                <Shield className="h-3.5 w-3.5 text-cyan-300" />
-                                Verification checklist
-                            </p>
-                            <p className="truncate text-[11px] text-cyan-100/80">
-                                {toolActivity || 'Required before Studio Agent replies'}
-                            </p>
-                        </div>
-                        {verificationSteps.length > 0 && (
-                            <div className="mt-2 grid gap-1">
-                                {verificationSteps.map((row, index) => (
-                                    <div
-                                        key={row.id}
-                                        className={`flex items-start gap-2 rounded-lg border px-2 py-1.5 text-[11px] ${
-                                            row.status === 'error'
-                                                ? 'border-red-400/25 bg-red-500/10 text-red-100'
-                                            : row.status === 'done'
-                                                ? 'border-emerald-400/20 bg-emerald-500/10 text-emerald-100'
-                                            : row.status === 'skipped'
-                                                ? 'border-white/10 bg-white/[0.03] text-gray-400'
-                                            : row.status === 'running'
-                                                ? 'border-cyan-400/25 bg-cyan-500/10 text-cyan-100'
-                                            : 'border-white/10 bg-black/20 text-gray-200'
-                                        }`}
-                                    >
-                                        <span className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full border border-current text-[9px] font-semibold">
-                                            {row.status === 'done' ? '✓' : row.status === 'error' ? '!' : index + 1}
-                                        </span>
-                                        <div className="min-w-0 flex-1">
-                                            <div className="flex items-center justify-between gap-2">
-                                                <span className="truncate font-medium">{row.label}</span>
-                                                <span className="shrink-0 text-[10px] uppercase tracking-wider text-white/35">
-                                                    {row.status}
-                                                </span>
-                                            </div>
-                                            {row.detail && (
-                                                <p className="mt-0.5 line-clamp-2 text-white/55">{row.detail}</p>
-                                            )}
-                                        </div>
-                                    </div>
-                                ))}
-                            </div>
-                        )}
-                    </div>
                 )}
 
                 <div
@@ -2524,23 +4884,23 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                     className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-2 sm:px-3"
                 >
                     <div className="mx-auto max-w-4xl space-y-4 pb-8 pt-4">
-                        {messages.length === 0 && (
+                        {visibleChatMessages.length === 0 && (
                             <div className="flex min-h-[56vh] flex-col items-center justify-center px-4 text-center">
                                 {/* Ultra-premium Hero */}
-                                <div className="mb-5 flex h-14 w-14 items-center justify-center rounded-2xl border border-white/10 bg-white/[0.06]">
-                                    <Sparkles className="h-7 w-7 text-white" />
+                                <div className="mb-4 flex h-20 w-20 items-center justify-center rounded-[28px] bg-gradient-to-br from-violet-500/50 via-cyan-400/40 to-violet-500/50 ring-[6px] ring-white/10 shadow-[0_0_80px_rgba(139,92,246,0.25)]">
+                                    <Sparkles className="h-10 w-10 text-white drop-shadow-lg" />
                                 </div>
-                                <div className="mb-1.5 inline-flex items-center gap-2 rounded-full border border-white/20 bg-white/5 py-1 pl-2 pr-3 text-[9px] font-semibold uppercase tracking-[1.8px] text-white/70">
+                                <div className="mb-2 inline-flex items-center gap-2.5 rounded-full border border-white/20 bg-white/5 py-1 pl-2.5 pr-4 text-[10px] font-semibold uppercase tracking-[2.5px] text-white/70">
                                     <div className="flex items-center gap-1.5 rounded-full bg-emerald-500/20 px-2 py-px text-emerald-400">
                                         <div className="h-1 w-1 rounded-full bg-emerald-400 animate-pulse" /> LIVE
                                     </div>
                                     PREMIUM REAL-TIME VIDEO STUDIO
                                 </div>
-                                <h1 className="text-4xl font-semibold tracking-tight text-white sm:text-5xl">What do you want to create?</h1>
-                                <p className="mb-1 max-w-[620px] text-[12px] leading-relaxed text-gray-400 sm:text-[13px]">
-                                    This is the experience your plan unlocks. The agent doesn&apos;t just generate — it <span className="text-white font-medium">builds your video live inside this chat</span>. You watch every decision, every still, every motion clip, every audio layer appear in real time. Full transparency. Full control. Premium quality, delivered visibly.
+                                <h1 className="mb-3 text-[42px] font-semibold leading-none tracking-[-2.2px] text-white sm:text-[48px]">What are we shipping today?</h1>
+                                <p className="mb-1 max-w-[620px] text-[15px] leading-relaxed text-gray-400">
+                                    This is the experience your plan unlocks. The agent doesn&apos;t just generate — it <span className="font-medium text-white">builds your video live inside this chat</span>. You watch every decision, every still, every motion clip, every audio layer appear in real time. Full transparency. Full control. Premium quality, delivered visibly.
                                 </p>
-                                <div className="mb-3 mt-1 flex items-center gap-2 text-[9px] text-white/50 sm:gap-3">
+                                <div className="mb-5 mt-1 flex items-center gap-3 text-[10px] text-white/50">
                                     <div>Sub-second updates</div>
                                     <div className="h-px w-3 bg-white/20" />
                                     <div>Per-scene creative control</div>
@@ -2550,21 +4910,31 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
 
                                 {/* Premium, luxurious starter journeys */}
                                 <div className="grid w-full max-w-[720px] grid-cols-1 gap-2 sm:grid-cols-2">
-                                    {STARTER_PROMPTS.map((p, index) => {
-                                        const icons = [Video, BookOpen, Users, Zap];
-                                        const labels = ["VIRAL SHORTS", "REFERENCE-LED", "LONG-FORM DOCS", "SIGNATURE STYLE"];
-                                        const sub = [
-                                            "Audit → rank → script → render live",
-                                            "Paste any video → blueprint + build",
-                                            "Outline → chapter stills → finalize",
-                                            "Outcast + Seedance in one flow"
-                                        ];
+                                    {(agentMode === 'cliplab' ? [CLIPLAB_STARTER_PROMPT, ...STARTER_PROMPTS] : STARTER_PROMPTS).map((p, index) => {
+                                        const icons = [Video, BookOpen, Users, Zap, Sparkles];
+                                        const labels = agentMode === 'cliplab'
+                                            ? ['CLIPLAB', 'VIRAL SHORTS', 'REFERENCE-LED', 'LONG-FORM DOCS', 'SIGNATURE STYLE']
+                                            : ['VIRAL SHORTS', 'REFERENCE-LED', 'LONG-FORM DOCS', 'SIGNATURE STYLE'];
+                                        const sub = agentMode === 'cliplab'
+                                            ? [
+                                                'Upload long video → clips + packaging',
+                                                'Audit → rank → script → render live',
+                                                'Paste any video → blueprint + build',
+                                                'Outline → chapter stills → finalize',
+                                                'Outcast + Seedance in one flow',
+                                            ]
+                                            : [
+                                                'Audit → rank → script → render live',
+                                                'Paste any video → blueprint + build',
+                                                'Outline → chapter stills → finalize',
+                                                'Outcast + Seedance in one flow',
+                                            ];
                                         const Icon = icons[index % icons.length];
                                         return (
                                             <button
                                                 key={index}
                                                 type="button"
-                                                disabled={!sessionId}
+                                                disabled={!chatSessionReady}
                                                 onClick={() => sendText(p)}
                                                 className="group relative flex min-h-[132px] flex-col items-start gap-2 overflow-hidden rounded-2xl border border-white/10 bg-[#0a0a0f] p-4 text-left transition-all hover:border-white/25 hover:bg-[#111117] active:scale-[0.985] disabled:opacity-40"
                                             >
@@ -2591,18 +4961,33 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
 
                             </div>
                         )}
-                        {messages
-                            .filter((m) => m.role === 'user' || m.role === 'assistant')
-                            .map((m, i) => {
+                        {visibleChatMessages.map((m, i) => {
                                 if (m.productionUpdate) {
+                                    const update = m.productionUpdate;
+                                    if (
+                                        isImplicitProductionCancel({
+                                            status: 'failed',
+                                            stage_label: update.stage_label,
+                                            stage: update.stage_label,
+                                            error: '',
+                                        })
+                                        || shouldSuppressProductionJob(
+                                            update.job_id,
+                                            update.title,
+                                            messages,
+                                            blockedJobIdsRef.current,
+                                        )
+                                    ) {
+                                        return null;
+                                    }
                                     return (
                                         <AgentProgressBubble
-                                            key={`progress-${m.productionUpdate.job_id}-${i}`}
-                                            update={m.productionUpdate}
+                                            key={`progress-${update.job_id}-${i}`}
+                                            update={update}
                                         />
                                     );
                                 }
-                                const text = String(m.content ?? '');
+                                const text = deliverableDisplayText(String(m.content ?? ''), m.jobDeliverable);
                                 if (!text.trim() && !m.jobDeliverable) return null;
 
                                 const isUser = m.role === 'user';
@@ -2628,15 +5013,54 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                                             ) : null}
 
                                             {/* The magic: rich live production card appears right inside the chat thread */}
-                                            {m.jobDeliverable && (
+                                            {m.jobDeliverable
+                                                && !shouldHideJobDeliverable(m.jobDeliverable, messages)
+                                                && !shouldSuppressProductionJob(
+                                                    m.jobDeliverable.job_id,
+                                                    m.jobDeliverable.title,
+                                                    messages,
+                                                    blockedJobIdsRef.current,
+                                                    m.jobDeliverable.status,
+                                                )
+                                                && !(agentMode === 'plan'
+                                                    && (m.jobDeliverable.kind === 'longform' || m.jobDeliverable.kind === 'shortform')
+                                                    && !m.jobDeliverable.thumbnail_only) && (
                                                 <div className="mt-2 -mx-1">
                                                     <AgentJobDeliverable
                                                         snapshot={m.jobDeliverable}
+                                                        sessionId={sessionId}
+                                                        enableVideoPreview={
+                                                            m.jobDeliverable.job_id === latestVideoPreviewJobId
+                                                            || m.jobDeliverable.status === 'running'
+                                                            || m.jobDeliverable.status === 'awaiting_approval'
+                                                            || (
+                                                                m.jobDeliverable.status === 'complete'
+                                                                && Boolean(m.jobDeliverable.mp4_url)
+                                                            )
+                                                        }
+                                                        captionsEnabled={captionMode !== 'off'}
+                                                        onCancel={
+                                                            m.jobDeliverable.kind === 'shortform'
+                                                            && m.jobDeliverable.status === 'running'
+                                                            && m.jobDeliverable.running !== false
+                                                                ? () => void handleCancelProduction(
+                                                                    m.jobDeliverable!.job_id,
+                                                                    m.jobDeliverable!.kind,
+                                                                )
+                                                                : undefined
+                                                        }
+                                                        cancelling={cancellingProduction}
                                                         onFinalizeStarted={(jid, jobs) =>
                                                             handleFinalizeStarted(jid, jobs)
                                                         }
                                                         onReply={handleReplyToJob}
                                                         onSnapshotUpdate={appendJobDeliverable}
+                                                        onRetry={
+                                                            m.jobDeliverable.status === 'failed'
+                                                                ? () => void handleRetryProduction()
+                                                                : undefined
+                                                        }
+                                                        retrying={retryingProduction}
                                                     />
                                                 </div>
                                             )}
@@ -2644,21 +5068,23 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                                     </div>
                                 );
                             })}
-                        {currentSessionRunning && (
-                            <div className="max-w-[92%] space-y-2 rounded-3xl rounded-bl-lg border border-cyan-400/15 bg-cyan-400/[0.04] px-4 py-3 text-sm text-gray-200 sm:max-w-[82%]">
-                                <div className="flex items-center gap-2.5">
-                                    <Loader2 className="h-4 w-4 animate-spin text-cyan-300" />
-                                    <span className="font-medium">
-                                        {queueHint || toolActivity || 'Thinking through your request...'}
-                                    </span>
-                                    <span className="flex gap-1" aria-hidden="true">
-                                        <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-cyan-300" />
-                                        <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-cyan-300 [animation-delay:150ms]" />
-                                        <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-cyan-300 [animation-delay:300ms]" />
-                                    </span>
-                                </div>
+                        {(currentSessionRunning || activitySteps.length > 0) && (
+                            <div
+                                className="max-w-[92%] space-y-3 rounded-2xl border border-white/[0.06] bg-white/[0.02] px-4 py-3 sm:max-w-[82%]"
+                                title={toolActivity || undefined}
+                            >
+                                {queueHint && (
+                                    <p className="text-[11px] text-amber-200/80">{queueHint}</p>
+                                )}
+                                {activitySteps.length > 0 && <AgentActivityTimeline steps={activitySteps} />}
+                                {currentSessionRunning && activitySteps.length === 0 && (
+                                    <div className="flex items-center gap-2 text-[13px] text-gray-400">
+                                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                        <span>{toolActivity || 'Thinking about your request'}</span>
+                                    </div>
+                                )}
                                 {dockSnap && dockSnap.running !== false && !dockDismissed ? (
-                                    <p className="text-cyan-300/90">
+                                    <p className="text-[12px] text-cyan-300/90">
                                         {dockSnap.stage_label} · {dockSnap.progress}%
                                         {dockSnap.total_scenes
                                             ? ` · scene ${dockSnap.current_scene || 0}/${dockSnap.total_scenes}`
@@ -2670,40 +5096,54 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                     </div>
                 </div>
 
-                {pending.length > 0 && (
-                    <div className="relative z-30 mx-auto w-full max-w-3xl shrink-0 border-t-2 border-amber-500/60 bg-gradient-to-t from-[#1a1408] to-[#12100a] px-3 py-3 shadow-[0_-12px_40px_rgba(0,0,0,0.65)]">
-                        <div className="mb-2 flex items-center justify-between gap-2">
-                            <p className="flex items-center gap-1.5 text-xs font-semibold text-amber-100">
-                                <Zap className="h-4 w-4 text-amber-400" />
-                                Approval required — tap the green button to run production
+                {conceptPlan
+                    && (agentMode !== 'plan' || conceptPlan.status === 'ready_for_review')
+                    && (conceptPlan.title || conceptPlan.format || conceptPlan.id) && (
+                    <div className="relative z-30 mx-auto mb-1 w-full max-w-3xl shrink-0 px-3">
+                        <AgentConceptCard
+                            plan={conceptPlan}
+                            disabled={Boolean(currentSessionRunning)}
+                            onCommit={commitConceptPlan}
+                            onDismiss={() => setConceptPlan(null)}
+                        />
+                    </div>
+                )}
+
+                {visiblePending.length > 0 && (
+                    <div className="relative z-30 mx-auto mb-1 w-full max-w-3xl shrink-0 px-3">
+                        <div className="rounded-xl border border-amber-500/35 bg-[#140f08]/95 px-2.5 py-2 shadow-lg shadow-black/30">
+                        <div className="mb-1.5 flex items-center justify-between gap-2">
+                            <p className="flex items-center gap-1.5 text-[11px] font-semibold text-amber-100">
+                                <Zap className="h-3.5 w-3.5 text-amber-400" />
+                                Approval required
                             </p>
                             <button
                                 type="button"
-                                disabled={resuming}
-                                onClick={() => void reloadCurrentSession()}
-                                className="shrink-0 rounded-lg border border-amber-500/30 px-2 py-1 text-[10px] font-semibold text-amber-200 hover:bg-amber-500/15 disabled:opacity-50"
+                                disabled={syncing || resuming || !sessionId}
+                                onClick={() => void syncSessionFromServer()}
+                                className="shrink-0 rounded-md border border-amber-500/25 px-2 py-0.5 text-[10px] font-semibold text-amber-200 hover:bg-amber-500/15 disabled:opacity-50"
                             >
-                                {resuming ? 'Syncing…' : 'Sync chat'}
+                                {syncing ? 'Syncing…' : 'Sync chat'}
                             </button>
                         </div>
-                        <div className="space-y-2">
-                            {pending.map((a) => (
+                        <div className="space-y-1.5">
+                            {visiblePending.map((a) => (
                                 <div
                                     key={a.id}
-                                    className="rounded-xl border border-amber-500/35 bg-black/40 p-3"
+                                    className="rounded-lg border border-amber-500/25 bg-black/30 p-2"
                                 >
-                                    <p className="text-sm font-semibold text-white">
+                                    <p className="text-xs font-semibold text-white">
                                         {pendingActionLabel(a.tool)}
                                     </p>
-                                    <p className="mt-1 line-clamp-3 text-[11px] text-gray-400">
-                                        {formatPendingArgs(a.arguments) || a.summary || JSON.stringify(a.arguments)}
+                                    <p className="mt-0.5 line-clamp-1 text-[10px] text-gray-400">
+                                        {formatPendingArgs(a.arguments, renderStyleCatalog) || a.summary || JSON.stringify(a.arguments)}
                                     </p>
-                                    <div className="mt-3 flex flex-wrap gap-2">
+                                    <div className="mt-2 flex gap-2">
                                         <button
                                             type="button"
                                             disabled={currentSessionRunning}
                                             onClick={() => approveAction(a.id)}
-                                            className="inline-flex min-h-11 flex-1 items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 py-2.5 text-sm font-bold text-white shadow-lg shadow-emerald-900/40 transition hover:bg-emerald-500 disabled:opacity-50"
+                                            className="inline-flex min-h-9 flex-1 items-center justify-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-bold text-white transition hover:bg-emerald-500 disabled:opacity-50"
                                         >
                                             {currentSessionRunning ? (
                                                 <Loader2 className="h-4 w-4 animate-spin" />
@@ -2716,7 +5156,7 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                                             type="button"
                                             disabled={currentSessionRunning}
                                             onClick={() => rejectAction(a.id)}
-                                            className="inline-flex min-h-11 items-center justify-center gap-1 rounded-xl border border-white/15 px-4 py-2.5 text-xs font-semibold text-gray-300 hover:bg-white/[0.06]"
+                                            className="inline-flex min-h-9 items-center justify-center gap-1 rounded-lg border border-white/15 px-3 py-1.5 text-xs font-semibold text-gray-300 hover:bg-white/[0.06]"
                                         >
                                             <X className="h-4 w-4" />
                                             Reject
@@ -2724,6 +5164,7 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                                     </div>
                                 </div>
                             ))}
+                        </div>
                         </div>
                         <p className="mt-2 text-center text-[10px] text-amber-200/70">
                             Not the shield toggle below — use Approve & run above.
@@ -2746,7 +5187,7 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                                             className="h-9 w-9 rounded-lg border border-white/10 object-cover"
                                         />
                                     )}
-                                    {f.kind === 'image' ? 'Image: ' : f.kind === 'text' ? 'File: ' : 'Unsupported: '}
+                                    {f.kind === 'image' ? 'Image: ' : f.kind === 'text' ? 'File: ' : f.kind === 'video' ? 'Video: ' : 'Unsupported: '}
                                     {f.name}
                                     <button
                                         type="button"
@@ -2790,19 +5231,37 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                     )}
 
                     <div className="rounded-[26px] border border-white/[0.12] bg-[#111113] shadow-2xl shadow-black/50">
+                        {(dictation.listening || dictation.transcribing) && (
+                            <div className="flex items-center gap-3 border-b border-white/[0.05] px-3 pt-2.5 pb-1.5">
+                                <DictationWaveform
+                                    active={dictation.listening}
+                                    levels={dictation.levels}
+                                    className="min-w-0 flex-1"
+                                />
+                                <span className="shrink-0 text-[10px] font-medium uppercase tracking-wide text-rose-300/80">
+                                    {dictation.transcribing ? 'Transcribing' : 'Live'}
+                                </span>
+                            </div>
+                        )}
+                        {dictationPreview && (dictation.listening || dictation.transcribing) && (
+                            <p className="line-clamp-2 px-4 pt-2 text-[12px] leading-relaxed text-gray-400">
+                                <span className="text-gray-600">Transcript · </span>
+                                {dictationPreview}
+                            </p>
+                        )}
                         <textarea
                             ref={inputRef}
                             className="max-h-36 min-h-[52px] w-full resize-none bg-transparent px-4 pt-3.5 text-sm text-white placeholder:text-gray-600 focus:outline-none"
                             placeholder={
                                 dictation.listening
-                                    ? 'Listening… tap mic to stop'
+                                    ? 'Speak naturally — waves show the mic is hearing you'
                                     : dictation.transcribing
-                                      ? 'Transcribing your voice…'
+                                      ? 'Finishing transcript…'
                                       : 'Talk to the agent — type, dictate (mic), or kick off a video'
                             }
                             rows={1}
                             value={input}
-                            disabled={!sessionId || dictation.transcribing}
+                            disabled={!chatSessionReady || dictation.transcribing}
                             onChange={(e) => setInput(e.target.value)}
                             onPaste={onPasteIntoInput}
                             onKeyDown={(e) => {
@@ -2817,7 +5276,7 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                                 ref={fileInputRef}
                                 type="file"
                                 multiple
-                                accept="image/*,.txt,.md,.json,.csv,.py,.ts,.tsx,.js,.jsx,.yaml,.yml"
+                                accept="image/*,video/*,.mp4,.mov,.mkv,.webm,.m4v,.txt,.md,.json,.csv,.py,.ts,.tsx,.js,.jsx,.yaml,.yml"
                                 className="hidden"
                                 onChange={(e) => onPickFiles(e.target.files)}
                             />
@@ -2829,21 +5288,31 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                             >
                                 <Paperclip className="h-4 w-4" />
                             </button>
+                            <AgentModeMenu
+                                mode={agentMode}
+                                isAdmin={isAdminUser}
+                                onSelect={(next) => {
+                                    setAgentMode(next);
+                                    void patchSession({ agent_mode: next });
+                                }}
+                            />
                             <button
                                 type="button"
-                                disabled={!sessionId || !dictation.supported || dictation.transcribing || currentSessionRunning}
+                                disabled={!chatSessionReady || !dictation.supported || dictation.transcribing || currentSessionRunning}
                                 onClick={() => dictation.toggle()}
-                                className={`rounded-lg p-2 transition ${
+                                className={`relative rounded-lg p-2 transition ${
                                     dictation.listening
-                                        ? 'bg-rose-600/20 text-rose-300 ring-1 ring-rose-500/40'
+                                        ? 'bg-rose-600/25 text-rose-200 ring-1 ring-rose-500/50 shadow-[0_0_18px_rgba(244,63,94,0.25)]'
                                         : 'text-gray-400 hover:bg-white/[0.06] hover:text-white'
                                 } disabled:opacity-40`}
                                 title={
-                                    dictation.engine === 'record'
-                                        ? 'Voice dictation (record then transcribe — Firefox)'
-                                        : dictation.engine === 'webspeech'
-                                          ? 'Voice dictation (live)'
-                                          : 'Voice dictation not supported'
+                                    dictation.engine === 'live-xai'
+                                        ? 'Voice dictation (live xAI Grok STT)'
+                                        : dictation.engine === 'record'
+                                          ? 'Voice dictation (record then xAI transcribe)'
+                                          : dictation.engine === 'webspeech'
+                                            ? 'Voice dictation (browser speech)'
+                                            : 'Voice dictation not supported'
                                 }
                             >
                                 {dictation.listening ? (
@@ -2854,6 +5323,13 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                                     <Mic className="h-4 w-4" />
                                 )}
                             </button>
+                            {dictation.listening && (
+                                <DictationWaveform
+                                    active
+                                    levels={dictation.levels}
+                                    className="hidden h-6 max-w-[88px] sm:flex"
+                                />
+                            )}
                             <button
                                 type="button"
                                 onClick={() => setModelPickerOpen(true)}
@@ -2887,10 +5363,36 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                                     </>
                                 )}
                             </button>
+                            {(agentMode === 'studio' || agentMode === 'plan') && (
+                                <>
+                                    <button
+                                        type="button"
+                                        onClick={() => setImageModelPickerOpen(true)}
+                                        className="inline-flex max-w-[150px] items-center gap-1.5 rounded-lg px-2 py-1.5 text-[11px] font-medium text-cyan-100 transition hover:bg-cyan-500/10"
+                                        title="Image model for stills, scenes, and thumbnails (short-form and long-form)."
+                                    >
+                                        <ImageIcon className="h-3.5 w-3.5 shrink-0 text-cyan-300" />
+                                        <span className="truncate">
+                                            {selectedModelLabel(imageModelCatalog, imageModel, 'Image')}
+                                        </span>
+                                    </button>
+                                    <button
+                                        type="button"
+                                        onClick={() => setVideoModelPickerOpen(true)}
+                                        className="inline-flex max-w-[150px] items-center gap-1.5 rounded-lg px-2 py-1.5 text-[11px] font-medium text-cyan-100 transition hover:bg-cyan-500/10"
+                                        title="Video model for image-to-video animation (short-form and long-form motion)."
+                                    >
+                                        <Video className="h-3.5 w-3.5 shrink-0 text-cyan-300" />
+                                        <span className="truncate">
+                                            {selectedModelLabel(videoModelCatalog, videoModel, 'Video')}
+                                        </span>
+                                    </button>
+                                </>
+                            )}
                             <div className="flex-1" />
                             <button
                                 type="button"
-                                disabled={currentSessionRunning || (!input.trim() && !hasReadableAttachment) || !sessionId}
+                                disabled={currentSessionRunning || (!input.trim() && !hasReadableAttachment) || !chatSessionReady}
                                 onClick={sendMessage}
                                 className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-emerald-600 text-black transition hover:bg-emerald-500 disabled:opacity-40"
                             >
@@ -2901,10 +5403,10 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                 </div>
             </div>
             </div>
-            {!dockDismissed ? (
+            {showRenderDock ? (
                 <AgentRenderDock
-                    track={dockTrack ?? null}
-                    snapshot={dockSnap}
+                    track={resolvedDockTrack ?? null}
+                    snapshot={resolvedDockSnap}
                     accessToken={session?.access_token}
                     onRetry={handleRetryProduction}
                     retrying={retryingProduction}

@@ -21,6 +21,7 @@ from datetime import date, datetime, timezone, timedelta
 from pathlib import Path
 from urllib.parse import quote, urlparse, unquote, parse_qs, urlencode
 from fastapi import FastAPI, UploadFile, File, Form, BackgroundTasks, HTTPException, Depends, Request, Query
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from typing import Optional
@@ -720,6 +721,26 @@ configure_reference_video_audit_hooks(
 
 
 app = FastAPI(title="NYPTID Studio Engine", version="3.0")
+app.add_middleware(
+    CORSMiddleware,
+    # Studio is a separate frontend origin and sends Bearer-authenticated
+    # requests. Without this middleware its OPTIONS preflight can reach a
+    # route with no OPTIONS handler and surface as a misleading network error.
+    allow_origins=[
+        "https://studio.nyptidindustries.com",
+        "https://billing.nyptidindustries.com",
+        "https://invoicer.nyptidindustries.com",
+        "https://nyptid-studio.fly.dev",
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://localhost:8080",
+        "http://127.0.0.1:8080",
+    ],
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "Cache-Control"],
+    max_age=86400,
+)
 configure_backend_runtime(app)
 
 jobs: dict = {}
@@ -18551,6 +18572,9 @@ mount_router(
     app,
     build_studio_agent_router(
         require_auth=require_auth,
+        # Required for live dictation WebSocket auth (query/auth-frame token).
+        # Without this, WS always returns "Sign in required" even for valid sessions.
+        get_current_user=get_current_user,
         is_admin_check=_is_admin_user,
         lane_access_check=lambda user: bool((_public_lane_access_for_user(user) or {}).get("studio_agent")),
     )
@@ -19714,6 +19738,36 @@ def _price_id_for_plan_id(plan_id: str) -> str:
     return ""
 
 
+_TY_PROMO_ENSURED: set[str] = set()
+
+
+def _ensure_ty_beta_promotion(stripe_price_id: str) -> None:
+    """Ensure TY one-time 100%-off first-month code exists for studio_pro_1k checkout."""
+    price_id = str(stripe_price_id or "").strip()
+    if not price_id or not STRIPE_SECRET_KEY:
+        return
+    if price_id in _TY_PROMO_ENSURED:
+        return
+    try:
+        existing = stripe_lib.PromotionCode.list(code="TY", limit=1)
+        if existing.data:
+            _TY_PROMO_ENSURED.add(price_id)
+            return
+        coupon = stripe_lib.Coupon.create(
+            percent_off=100,
+            duration="once",
+            name="TY — 1 month free Studio Pro",
+        )
+        stripe_lib.PromotionCode.create(
+            coupon=coupon.id,
+            code="TY",
+            max_redemptions=1,
+        )
+        _TY_PROMO_ENSURED.add(price_id)
+    except Exception:
+        pass
+
+
 async def _create_stripe_membership_checkout(user: dict, plan: str, price_usd: float) -> str:
     if not STRIPE_SECRET_KEY:
         raise HTTPException(500, "Stripe not configured")
@@ -19758,6 +19812,10 @@ async def _create_stripe_membership_checkout(user: dict, plan: str, price_usd: f
         "metadata": {"user_id": user["id"], "plan": normalized_plan},
         "subscription_data": {"metadata": {"user_id": user["id"], "plan": normalized_plan}},
     }
+    if normalized_plan == "studio_pro_1k":
+        if stripe_price_id:
+            _ensure_ty_beta_promotion(stripe_price_id)
+        checkout_payload["allow_promotion_codes"] = True
     checkout_payload["customer_email"] = user["email"]
     session = stripe_lib.checkout.Session.create(**checkout_payload)
     if not session.url:

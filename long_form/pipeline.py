@@ -17,7 +17,7 @@ fallback locally — auto-detected). Layout:
     stills/scene_NNNN.png            — ernie-image scenes
     audio/chapter_NN.mp3             — per-chapter MiniMax narration
     audio/narration.mp3              — concat'd full narration
-    audio/ambient.mp3                — mmaudio loop (4 min, tiled at compose)
+    audio/ambient.mp3                — mmaudio loop (30s max, stream-looped at compose)
     audio/mix.mp3                    — narration + ambient mixdown
     thumbnails/thumb_N.png           — seedream candidate thumbnails
     LongForm_<job_id>.mp4            — final 1080p60 output
@@ -27,7 +27,7 @@ Cost budget for HR 9-hour sleep doc (per channel registry $73 estimate):
     - 540 ernie-image scenes × $0.03 ≈ $16.20
     - 65k-word fal MiniMax speech-02-hd ≈ $39.00 (390k chars × $0.10/1k)
     - 3 seedream v4.5 thumbnails × $0.04 ≈ $0.12
-    - 1 mmaudio-v2 4-min ambient bed ≈ $0.05
+    - 1 mmaudio-v2 30s ambient bed ≈ $0.03
     - subtotal ≈ $64.40, with retry overhead → ~$73 envelope
 
 Casey's HR feedback rule (feedback_hr_premium_fal_tts.md): TTS MUST be fal
@@ -36,10 +36,12 @@ MiniMax — NOT Edge — Egypt 9H Edge-TTS shipped and Casey called it bad.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import os
 import re
 import subprocess
+import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -73,6 +75,7 @@ LF_OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
 
 # fal endpoints used by this pipeline.
 SEEDREAM_URL = "https://fal.run/fal-ai/bytedance/seedream/v4.5/text-to-image"
+SEEDREAM_EDIT_URL = "https://fal.run/fal-ai/bytedance/seedream/v4.5/edit"
 ERNIE_URL = "https://fal.run/fal-ai/ernie-image"
 MINIMAX_TTS_URL = "https://fal.run/fal-ai/minimax/speech-02-hd"
 # mmaudio-v2 has TWO variants; we want the text-to-audio one for ambient
@@ -90,6 +93,49 @@ _lf_jobs_status: dict[str, dict[str, Any]] = {}
 # the GC sometimes cancels them mid-render (we hit this exact bug on ZT short
 # Phase 4.5b — see lesson #2 in the 2026-05-08 handoff).
 _lf_running_tasks: set[asyncio.Task] = set()
+
+
+def _spawn_lf_background_coro(coro, job_id: str) -> asyncio.Task | None:
+    """Run inline on RunPod; otherwise schedule on the active API loop."""
+    worker_mode = str(os.getenv("STUDIO_RUNPOD_WORKER_MODE") or "").strip().lower()
+    if worker_mode in {"1", "true", "yes", "on"}:
+        # A RunPod Serverless handler is synchronous and must own the complete
+        # production stage before returning.  Running inline also avoids
+        # creating an orphaned task that dies when the job process is recycled.
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            asyncio.run(coro)
+        else:
+            # The current RunPod SDK invokes sync handlers from its own asyncio
+            # loop. asyncio.run cannot nest there, so use a joined thread with
+            # its own loop while keeping the handler synchronous to completion.
+            errors: list[BaseException] = []
+
+            def _run() -> None:
+                try:
+                    asyncio.run(coro)
+                except BaseException as exc:  # propagate stage failure verbatim
+                    errors.append(exc)
+
+            thread = threading.Thread(
+                target=_run,
+                name=f"studio-runpod-longform-{job_id}",
+            )
+            thread.start()
+            thread.join()
+            if errors:
+                raise errors[0]
+        return None
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError as exc:
+        raise LFRenderError("no running event loop") from exc
+    task = loop.create_task(coro)
+    _lf_running_tasks.add(task)
+    task.add_done_callback(_lf_running_tasks.discard)
+    _lf_jobs_status.setdefault(job_id, {})["_task"] = task
+    return task
 
 
 class LFRenderError(RuntimeError):
@@ -259,7 +305,14 @@ def compute_render_cost(
 
     # ── sleep_doc (HR 9hr) ────────────────────────────────────────────────
     if pipeline_kind == "sleep_doc":
-        scenes_per_chapter = scenes_per_chapter_override or 30
+        # Match the render path's precedence (outline > channel > default) so
+        # the kickoff estimate reflects what will actually be billed.
+        scenes_per_chapter = int(
+            scenes_per_chapter_override
+            or (outline or {}).get("scenes_per_chapter")
+            or channel.get("scenes_per_chapter")
+            or 30
+        )
         n_scenes = n_chapters * scenes_per_chapter
         target_sec = float((outline or {}).get("target_duration_sec", 0) or 0)
         if target_sec <= 0:
@@ -268,7 +321,22 @@ def compute_render_cost(
         total_vo_chars = total_words * 5
         vo_k = total_vo_chars / 1000.0
 
-        still_per = FAL_PRICING_USD["ernie_per_image"]
+        image_model = str(channel.get("image_model_default") or "ernie_image").strip().lower()
+        if image_model in {"grok_imagine", "grok_imagine_quality", "grok-imagine-image-quality"}:
+            still_per = 0.05
+            still_key = "stills_grok_imagine_quality"
+        elif image_model in {"grok_imagine_standard", "grok-imagine-image"}:
+            still_per = 0.02
+            still_key = "stills_grok_imagine"
+        elif image_model in {"seedream_45", "seedream_edit", "seedream_v45"}:
+            still_per, _ = _fal_unit_cost(
+                pricing, "seedream_v45", fallback_key="seedream_v45_per_image", quantity=1.0
+            )
+            still_key = "stills_seedream"
+        else:
+            # ERNIE is billed per megapixel; the sleep-doc renderer requests 1920x1080.
+            still_per = FAL_PRICING_USD["ernie_per_image"] * (1920 * 1080 / 1_000_000)
+            still_key = "stills_ernie"
         seed_per, _ = _fal_unit_cost(
             pricing, "seedream_v45", fallback_key="seedream_v45_per_image", quantity=1.0
         )
@@ -278,34 +346,48 @@ def compute_render_cost(
             fallback_key="mmaudio_v2_per_second",
             quantity=30.0,
         )
-        fal_narr, _ = _fal_unit_cost(
-            pricing,
-            "minimax_speech",
-            fallback_key="fal_minimax_per_1k_chars",
-            quantity=vo_k,
-        )
+        voice_provider = str(channel.get("voice_provider_default") or "xai").strip().lower()
+        if voice_provider == "xai":
+            narration_key = "xai_narration"
+            narration_cost = round(vo_k * 0.015, 2)  # official xAI: $15 / 1M input chars
+        else:
+            narration_key = "fal_minimax_narration"
+            narration_cost, _ = _fal_unit_cost(
+                pricing,
+                "minimax_speech",
+                fallback_key="fal_minimax_per_1k_chars",
+                quantity=vo_k,
+            )
 
         breakdown = {
-            "stills_ernie": round(n_scenes * still_per, 2),
+            still_key: round(n_scenes * still_per, 2),
             "thumbnails_seedream": round(3 * seed_per, 2),
-            "fal_minimax_narration": round(fal_narr, 2),
+            narration_key: round(narration_cost, 2),
             "mmaudio_ambient_bed": round(sfx_ambient, 2),
         }
-        stage_1 = breakdown["stills_ernie"] + breakdown["thumbnails_seedream"]
-        stage_2 = breakdown["fal_minimax_narration"] + breakdown["mmaudio_ambient_bed"]
-        fal_sub = stage_1 + stage_2
+        stage_1 = breakdown[still_key] + breakdown["thumbnails_seedream"]
+        stage_2 = breakdown[narration_key] + breakdown["mmaudio_ambient_bed"]
+        fal_sub = stage_1 + breakdown["mmaudio_ambient_bed"]
+        non_fal = {narration_key: breakdown[narration_key]} if voice_provider == "xai" else {}
+        if voice_provider != "xai":
+            fal_sub += breakdown[narration_key]
         return _cost_meta({
             "stage_1_usd": with_cushion(stage_1),
             "stage_2_usd": with_cushion(stage_2),
             "total_usd": with_cushion(fal_sub),
             "fal_subtotal_usd": round(fal_sub, 2),
-            "non_fal_usd": 0.0,
-            "all_in_usd": round(fal_sub, 2),
+            "non_fal_usd": round(sum(non_fal.values()), 2),
+            "all_in_usd": round(fal_sub + sum(non_fal.values()), 2),
             "breakdown": breakdown,
-            "non_fal_breakdown": {},
+            "non_fal_breakdown": non_fal,
             "n_scenes": n_scenes,
             "n_chapters": n_chapters,
             "pipeline_kind": pipeline_kind,
+            "image_model": image_model,
+            "voice_provider": voice_provider,
+            "still_usd_per_image": round(still_per, 5),
+            "paid_i2v_usd": 0.0,
+            "motion_policy": "stills",
         })
 
     # Unknown pipeline_kind — preserve channel registry fallback.
@@ -401,6 +483,11 @@ def get_status(job_id: str) -> dict[str, Any] | None:
             "error": st.get("error", ""),
             "started_at": st.get("started_at", 0),
             "updated_at": st.get("updated_at", 0),
+            "narration_done": st.get("narration_done", 0),
+            "narration_total": st.get("narration_total", 0),
+            "scene_done": st.get("scenes_generated", 0),
+            "scene_total": st.get("scenes_generated", 0),
+            "detail": st.get("stage_detail", ""),
         }
         _lf_jobs_status[job_id] = entry
     out = dict(entry)
@@ -433,6 +520,39 @@ def list_recent_jobs(limit: int = 20) -> list[dict[str, Any]]:
         rows.append((ts, st))
     rows.sort(key=lambda r: r[0], reverse=True)
     return [r[1] for r in rows[:limit]]
+
+
+_GALLERY_RESUME_PHASES = frozenset({"scenes"})
+_FINALIZE_RESUME_PHASES = frozenset({
+    "narration", "ambient", "thumbnails", "compose",
+    "scene_assembly", "i2v", "vo", "sfx", "finalizing",
+})
+
+
+def resume_stalled_jobs(*, limit: int = 30) -> list[str]:
+    """Re-spawn background work killed by Fly redeploy or machine restart."""
+    resumed: list[str] = []
+    for st in list_recent_jobs(limit=limit):
+        job_id = str(st.get("job_id") or "").strip()
+        if not job_id:
+            continue
+        phase = str(st.get("phase") or "")
+        try:
+            if phase in _GALLERY_RESUME_PHASES and st.get("proof_scene_approved"):
+                expand_visual_proof(job_id)
+                resumed.append(job_id)
+            elif phase in _FINALIZE_RESUME_PHASES:
+                start_finalize(job_id)
+                resumed.append(job_id)
+            elif phase == "failed":
+                job_dir = _ensure_job_dir(job_id)
+                narration = job_dir / "audio" / "narration.mp3"
+                if narration.is_file() and narration.stat().st_size > 8192:
+                    start_finalize(job_id)
+                    resumed.append(job_id)
+        except Exception:
+            continue
+    return resumed
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -522,6 +642,12 @@ Target chapter duration: {chapter_minutes} minutes
 Target word count: ~{target_words} words (at {wpm} wpm)
 Number of scene-images for this chapter: {scenes_per_chapter}
 
+RETENTION STRUCTURE (required even for calm/sleep delivery): hook an unresolved historical question, build rising
+action, make the central conflict concrete, show the comeback/reversal or consequence, then land a final rising
+action and payoff. Keep the voice gentle; conflict means narrative causality and stakes, not loud editing.
+Every scene prompt must depict the exact narration beat with period-accurate people, architecture, clothing, props,
+geography, season, and time of day. Never use a generic history tableau when a specific visual can be shown.
+
 Return strict JSON, NO markdown fences, with this exact shape:
 {{
   "chapter_index": {chapter_index},
@@ -535,12 +661,174 @@ Return strict JSON, NO markdown fences, with this exact shape:
 }}
 """
 
+CHAPTER_NARRATION_PROMPT_TEMPLATE = """You are writing a single chapter of a long-form documentary.
+
+Channel context (locked grammar):
+{channel_system_prompt}
+
+Visual style for this channel:
+{visual_style}
+
+Documentary title: {outline_title}
+Hook: {outline_hook}
+Chapter index: {chapter_index} of {chapter_count}
+Chapter title: {chapter_title}
+Chapter synopsis: {chapter_synopsis}
+Target chapter duration: {chapter_minutes} minutes
+Target word count: ~{target_words} words (at {wpm} wpm)
+
+RETENTION STRUCTURE (required even for calm/sleep delivery): hook an unresolved historical question, build rising
+action, make the central conflict concrete, show the comeback/reversal or consequence, then land a final rising
+action and payoff. Keep the voice gentle; conflict means narrative causality and stakes, not loud editing.
+
+Return ONLY the narration prose (~{target_words} words, multiple paragraphs).
+No JSON, no markdown fences, no commentary, no scene prompts.
+"""
+
+CHAPTER_SCENES_PROMPT_TEMPLATE = """You are planning still-image prompts for one chapter of a long-form documentary.
+
+Channel context (locked grammar):
+{channel_system_prompt}
+
+Visual style for this channel:
+{visual_style}
+
+Documentary title: {outline_title}
+Chapter index: {chapter_index} of {chapter_count}
+Chapter title: {chapter_title}
+Number of scene-images required: {scenes_per_chapter}
+
+Every scene prompt must depict the exact narration beat with period-accurate people, architecture, clothing, props,
+geography, season, and time of day. Never use a generic history tableau when a specific visual can be shown.
+
+Narration for this chapter (map prompts in chronological order):
+{narration_excerpt}
+
+Return strict JSON only, NO markdown fences:
+{{
+  "scene_prompts": [
+    "<scene 1 image prompt — 20-40 words. Concrete visual: subject + environment + lighting + framing. Apply the channel visual style. NO text, NO watermarks, NO logos.>",
+    ... exactly {scenes_per_chapter} total ...
+  ]
+}}
+"""
+
 
 def _strip_json_fences(s: str) -> str:
     s = s.strip().strip("`").strip()
     if s.lower().startswith("json"):
         s = s[4:].strip()
     return s
+
+
+def _chapter_narration_token_budget(target_words: int) -> int:
+    return max(1200, min(32768, int(target_words * 1.45) + 512))
+
+
+def _chapter_scenes_token_budget(scenes_per_chapter: int) -> int:
+    return max(800, min(8192, scenes_per_chapter * 90 + 512))
+
+
+def _parse_chapter_json(raw: str, *, chapter_index: int) -> dict:
+    cleaned = _strip_json_fences(raw)
+    try:
+        data = json.loads(cleaned)
+        if isinstance(data, dict):
+            return data
+    except json.JSONDecodeError:
+        pass
+    try:
+        from json_repair import repair_json
+
+        repaired = repair_json(cleaned, return_objects=True)
+        if isinstance(repaired, dict):
+            return repaired
+        if isinstance(repaired, str):
+            data = json.loads(repaired)
+            if isinstance(data, dict):
+                return data
+    except Exception:
+        pass
+    raise LFRenderError(
+        f"chapter {chapter_index} JSON parse failed; raw: {cleaned[:300]}"
+    )
+
+
+def _gen_chapter_narration(
+    grok,
+    *,
+    channel: dict,
+    outline: dict,
+    chapter_index: int,
+    chapter_count: int,
+    chapter_title: str,
+    chapter_synopsis: str,
+    chapter_minutes: int,
+    target_words: int,
+    wpm: int,
+) -> str:
+    sys = (
+        f"{channel.get('system_prompt', '')}\n\n"
+        f"Visual style: {channel.get('visual_style', '')}\n\n"
+        "Return narration prose only. No JSON, no markdown fences, no commentary."
+    )
+    user = CHAPTER_NARRATION_PROMPT_TEMPLATE.format(
+        channel_system_prompt=channel.get("system_prompt", ""),
+        visual_style=channel.get("visual_style", ""),
+        outline_title=outline.get("title", ""),
+        outline_hook=outline.get("hook", ""),
+        chapter_index=chapter_index,
+        chapter_count=chapter_count,
+        chapter_title=chapter_title,
+        chapter_synopsis=chapter_synopsis,
+        chapter_minutes=chapter_minutes,
+        target_words=target_words,
+        wpm=wpm,
+    )
+    narration_budget = _chapter_narration_token_budget(target_words)
+    raw = grok.complete(sys, user, max_tokens=narration_budget, temperature=0.65)
+    narration = _strip_json_fences(raw).strip()
+    if not narration:
+        raise LFRenderError(f"chapter {chapter_index} narration empty")
+    return narration
+
+
+def _gen_chapter_scene_prompts(
+    grok,
+    *,
+    channel: dict,
+    outline: dict,
+    chapter_index: int,
+    chapter_count: int,
+    chapter_title: str,
+    narration: str,
+    scenes_per_chapter: int,
+) -> list[str]:
+    excerpt = narration if len(narration) <= 12000 else (
+        narration[:6000] + "\n\n[... middle omitted for brevity ...]\n\n" + narration[-4000:]
+    )
+    sys = (
+        f"{channel.get('system_prompt', '')}\n\n"
+        f"Visual style: {channel.get('visual_style', '')}\n\n"
+        "Output strict JSON only. No markdown fences, no commentary."
+    )
+    user = CHAPTER_SCENES_PROMPT_TEMPLATE.format(
+        channel_system_prompt=channel.get("system_prompt", ""),
+        visual_style=channel.get("visual_style", ""),
+        outline_title=outline.get("title", ""),
+        chapter_index=chapter_index,
+        chapter_count=chapter_count,
+        chapter_title=chapter_title,
+        scenes_per_chapter=scenes_per_chapter,
+        narration_excerpt=excerpt,
+    )
+    scenes_budget = _chapter_scenes_token_budget(scenes_per_chapter)
+    raw = grok.complete(sys, user, max_tokens=scenes_budget, temperature=0.55)
+    data = _parse_chapter_json(raw, chapter_index=chapter_index)
+    prompts = [str(p) for p in (data.get("scene_prompts") or []) if str(p).strip()]
+    if not prompts:
+        raise LFRenderError(f"chapter {chapter_index} scene_prompts empty")
+    return prompts
 
 
 def _gen_chapter(
@@ -561,49 +849,38 @@ def _gen_chapter(
     ch = chapters[chapter_index]
     chapter_minutes = max(1, int(ch.get("minutes", 1)))
     target_words = chapter_minutes * wpm
+    chapter_title = str(ch.get("title", f"Chapter {chapter_index + 1}"))
 
-    sys = (
-        f"{channel.get('system_prompt', '')}\n\n"
-        f"Visual style: {channel.get('visual_style', '')}\n\n"
-        "Output strict JSON only. No markdown fences, no commentary."
-    )
-    user = CHAPTER_PROMPT_TEMPLATE.format(
-        channel_system_prompt=channel.get("system_prompt", ""),
-        visual_style=channel.get("visual_style", ""),
-        outline_title=outline.get("title", ""),
-        outline_hook=outline.get("hook", ""),
+    # Always split narration + scene prompts — combined JSON blobs truncate on sleep-doc prose.
+    narration = _gen_chapter_narration(
+        grok,
+        channel=channel,
+        outline=outline,
         chapter_index=chapter_index,
         chapter_count=chapter_count,
-        chapter_title=ch.get("title", f"Chapter {chapter_index + 1}"),
-        chapter_synopsis=ch.get("synopsis", ""),
+        chapter_title=chapter_title,
+        chapter_synopsis=str(ch.get("synopsis", "")),
         chapter_minutes=chapter_minutes,
         target_words=target_words,
         wpm=wpm,
+    )
+    scene_prompts = _gen_chapter_scene_prompts(
+        grok,
+        channel=channel,
+        outline=outline,
+        chapter_index=chapter_index,
+        chapter_count=chapter_count,
+        chapter_title=chapter_title,
+        narration=narration,
         scenes_per_chapter=scenes_per_chapter,
     )
-
-    raw = grok.complete(sys, user, max_tokens=16000, temperature=0.65)
-    raw = _strip_json_fences(raw)
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError as e:
-        raise LFRenderError(f"chapter {chapter_index} JSON parse failed: {e}; raw: {raw[:300]}")
-
-    # Normalize.
-    out = {
-        "chapter_index": int(data.get("chapter_index", chapter_index)),
-        "title": str(data.get("title", ch.get("title", ""))),
-        "narration": str(data.get("narration", "") or "").strip(),
-        "word_count": int(data.get("word_count", 0) or 0),
-        "scene_prompts": [str(p) for p in (data.get("scene_prompts") or []) if str(p).strip()],
+    return {
+        "chapter_index": chapter_index,
+        "title": chapter_title,
+        "narration": narration,
+        "word_count": len(narration.split()),
+        "scene_prompts": scene_prompts,
     }
-    if not out["narration"]:
-        raise LFRenderError(f"chapter {chapter_index} narration empty")
-    if not out["scene_prompts"]:
-        raise LFRenderError(f"chapter {chapter_index} scene_prompts empty")
-    if out["word_count"] == 0:
-        out["word_count"] = len(out["narration"].split())
-    return out
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -616,7 +893,46 @@ def _gen_scene_image(prompt: str, out_path: Path, *, image_model: str = "ernie")
     Casey wants higher fidelity at 4× cost."""
     if out_path.exists() and out_path.stat().st_size > 1024:
         return out_path
-    if image_model == "seedream_45":
+    normalized = str(image_model or "ernie_image").strip().lower()
+    if normalized in {
+        "grok_imagine", "grok_imagine_quality", "grok-imagine-image-quality",
+        "grok_imagine_standard", "grok-imagine-image",
+    }:
+        api_key = str(os.environ.get("XAI_API_KEY") or "").strip()
+        if not api_key:
+            raise LFRenderError("xAI image generation requires XAI_API_KEY")
+        xai_model = (
+            "grok-imagine-image-quality"
+            if normalized in {"grok_imagine", "grok_imagine_quality", "grok-imagine-image-quality"}
+            else "grok-imagine-image"
+        )
+        with httpx.Client(timeout=240, follow_redirects=True) as client:
+            response = client.post(
+                "https://api.x.ai/v1/images/generations",
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                json={
+                    "model": xai_model,
+                    "prompt": str(prompt or "")[:759],
+                    "n": 1,
+                    "response_format": "b64_json",
+                    "aspect_ratio": "16:9",
+                    "resolution": "1k",
+                },
+            )
+        if response.status_code not in (200, 201):
+            raise LFRenderError(f"{xai_model} {response.status_code}: {response.text[:300]}")
+        item = ((response.json() or {}).get("data") or [{}])[0] or {}
+        encoded = str(item.get("b64_json") or "").strip()
+        remote_url = str(item.get("url") or "").strip()
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        if encoded:
+            out_path.write_bytes(base64.b64decode(encoded))
+        elif remote_url:
+            _download(remote_url, out_path, timeout_s=120)
+        else:
+            raise LFRenderError(f"{xai_model} returned no image data")
+        return out_path
+    if normalized in {"seedream_45", "seedream_edit", "seedream_v45"}:
         url = SEEDREAM_URL
         payload = {"prompt": prompt, "image_size": {"width": 1920, "height": 1080}}
     else:
@@ -633,6 +949,92 @@ def _gen_scene_image(prompt: str, out_path: Path, *, image_model: str = "ernie")
     return out_path
 
 
+def _outline_uses_skeleton(outline: dict[str, Any] | None) -> bool:
+    """True only for Studio's explicit canonical-skeleton render style."""
+    data = outline or {}
+    blob = " ".join(
+        str(data.get(key) or "")
+        for key in ("render_style", "render_style_lock", "visual_style")
+    ).lower()
+    return "skeleton" in blob or "mrskelewelly" in blob or "mr skelewelly" in blob
+
+
+def _gen_skeleton_longform_scene(
+    prompt: str,
+    out_path: Path,
+    *,
+    topic: str = "",
+    locked_outfit: str = "",
+) -> Path:
+    """Reference-edit + QA one 16:9 skeleton long-form still.
+
+    A long-form job may contain hundreds of scenes, so a single artifact cannot
+    be allowed to silently enter its review gallery. Every still is compared to
+    the canonical master; one failed frame gets one fresh canonical retry and a
+    second failure is excluded from the render rather than being normalized as
+    acceptable output.
+    """
+    from skeleton_ai.canonical_edit import (
+        build_scene_edit_prompt,
+        generate_still_edit,
+        resolve_master_reference_local,
+    )
+    from studio_agent.visual_qa import audit_skeleton_still
+
+    out_path = Path(out_path)
+    outfit = locked_outfit or (
+        "no clothing; full clear glass shell and ivory skeleton visible; empty hands; no jewelry"
+    )
+    reference = resolve_master_reference_local()
+
+    def _audit(force: bool = False) -> dict[str, Any]:
+        return audit_skeleton_still(
+            out_path,
+            reference=reference,
+            locked_outfit=outfit,
+            force=force,
+        )
+
+    if out_path.exists() and out_path.stat().st_size > 1024:
+        existing = _audit()
+        if existing.get("status") == "pass" and existing.get("pass") is True:
+            return out_path
+        rejected = out_path.parent / "rejected_stills" / f"{out_path.stem}_cached_rejected.png"
+        rejected.parent.mkdir(parents=True, exist_ok=True)
+        rejected.unlink(missing_ok=True)
+        out_path.replace(rejected)
+
+    compiled = build_scene_edit_prompt(
+        topic=topic,
+        visual_description=prompt,
+        outfit=outfit,
+        visual_brief="Long-form cinematic scene using the canonical skeleton host",
+        aspect_ratio="16:9",
+        cast_count=1,
+    )
+    # Honor the universal ≤300-char visual fix contract.
+    from studio_agent.visual_fix_contract import PROMPT_CHAR_BUDGET
+
+    compiled = compiled[:PROMPT_CHAR_BUDGET]
+    rejected_reports: list[str] = []
+    for attempt in (1, 2):
+        generate_still_edit(compiled, out_path, seed=420042 + attempt)
+        qa = _audit(force=True)
+        if qa.get("status") == "pass" and qa.get("pass") is True:
+            return out_path
+        rejected = out_path.parent / "rejected_stills" / f"{out_path.stem}_attempt{attempt}.png"
+        rejected.parent.mkdir(parents=True, exist_ok=True)
+        rejected.unlink(missing_ok=True)
+        if out_path.is_file():
+            out_path.replace(rejected)
+        rejected_reports.append(str(qa.get("summary") or "semantic still QA failed")[:300])
+
+    raise LFRenderError(
+        f"skeleton long-form still {out_path.name} blocked by semantic QA after two attempts: "
+        + " | ".join(rejected_reports)
+    )
+
+
 def _gen_scenes_batch(
     chapters: list[dict],
     stills_dir: Path,
@@ -640,6 +1042,9 @@ def _gen_scenes_batch(
     *,
     on_progress: Callable[[int, int], None] | None = None,
     concurrency: int = 4,
+    skeleton_style: bool = False,
+    topic: str = "",
+    locked_outfit: str = "",
 ) -> list[Path]:
     """Generate every scene image in chapters[*].scene_prompts in parallel.
 
@@ -648,21 +1053,51 @@ def _gen_scenes_batch(
     """
     tasks: list[tuple[int, str, Path]] = []
     scenes_per_chapter = len(chapters[0].get("scene_prompts") or []) if chapters else 0
+    max_scenes = max(1, int(os.environ.get("STUDIO_LONGFORM_MAX_SCENES", "144") or 144))
     for ch in chapters:
         ch_idx = int(ch.get("chapter_index", 0))
         for local_idx, prompt in enumerate(ch.get("scene_prompts") or []):
             global_idx = ch_idx * scenes_per_chapter + local_idx
+            if global_idx >= max_scenes:
+                break
             out = stills_dir / f"scene_{global_idx:04d}.png"
             tasks.append((global_idx, prompt, out))
 
     total = len(tasks)
     out_paths: list[Path] = []
     done = 0
+    pending: list[tuple[int, str, Path]] = []
+    for gi, prompt, out in tasks:
+        try:
+            if out.is_file() and out.stat().st_size > 4096:
+                out_paths.append(out)
+                done += 1
+                continue
+        except Exception:
+            pass
+        pending.append((gi, prompt, out))
+    if on_progress and done > 0:
+        on_progress(done, total)
+    if not pending:
+        out_paths.sort(key=lambda p: int(re.search(r"scene_(\d+)", p.name).group(1)))
+        return out_paths
     with ThreadPoolExecutor(max_workers=concurrency) as ex:
-        future_to_task = {
-            ex.submit(_gen_scene_image, prompt, out, image_model=image_model): (gi, out)
-            for gi, prompt, out in tasks
-        }
+        if skeleton_style:
+            future_to_task = {
+                ex.submit(
+                    _gen_skeleton_longform_scene,
+                    prompt,
+                    out,
+                    topic=topic,
+                    locked_outfit=locked_outfit,
+                ): (gi, out)
+                for gi, prompt, out in pending
+            }
+        else:
+            future_to_task = {
+                ex.submit(_gen_scene_image, prompt, out, image_model=image_model): (gi, out)
+                for gi, prompt, out in pending
+            }
         for fut in as_completed(future_to_task):
             gi, out = future_to_task[fut]
             try:
@@ -747,6 +1182,36 @@ def _gen_minimax_chapter(
     return out_path
 
 
+def _gen_xai_chapter(
+    text: str,
+    out_path: Path,
+    *,
+    voice_id: str = "rex",
+) -> Path:
+    """Render a chapter with the owner's xAI API key, chunked and resumable."""
+    if out_path.exists() and out_path.stat().st_size > 4096:
+        return out_path
+    from skeleton_ai.voice_xai import synthesize
+
+    clean = str(text or "").strip()
+    if not clean:
+        raise LFRenderError("xAI narration text is empty")
+    parts = _chunk_text(clean, max_chars=4000)
+    part_paths: list[Path] = []
+    for i, part in enumerate(parts):
+        pp = out_path.with_name(f"{out_path.stem}_xai_p{i:03d}.mp3")
+        if not (pp.exists() and pp.stat().st_size > 2048):
+            synthesize(text=part, out_path=pp, voice_id=voice_id, speed=0.92)
+        part_paths.append(pp)
+    if len(part_paths) == 1:
+        part_paths[0].replace(out_path)
+    else:
+        _ffmpeg_concat_audio(part_paths, out_path)
+        for pp in part_paths:
+            pp.unlink(missing_ok=True)
+    return out_path
+
+
 def _chunk_text(text: str, *, max_chars: int = 4500) -> list[str]:
     """Split text on paragraph boundaries so each chunk <= max_chars."""
     paras = re.split(r"\n\n+", text.strip())
@@ -790,13 +1255,66 @@ DEFAULT_AMBIENT_PROMPT = (
     "cinematic, no drums, no percussion, continuous drone, bedtime atmosphere"
 )
 
+_BGM_OFF = {"off", "none", "no", "no background music"}
 
-def _gen_ambient(out_path: Path, *, prompt: str = DEFAULT_AMBIENT_PROMPT, duration_sec: int = 240) -> Path:
-    """4-min sleep ambient loop. ffmpeg tiles it to full narration length
-    during compose."""
+
+def resolve_background_music(outline: dict, channel: dict) -> str:
+    """Pick BGM mode for finalize. Channel default upgrades legacy 'off' jobs."""
+    bgm = str(outline.get("background_music") or "auto").strip() or "auto"
+    if bgm.lower() in _BGM_OFF:
+        channel_default = str(channel.get("default_background_music") or "").strip()
+        if channel_default and channel_default.lower() not in _BGM_OFF:
+            bgm = channel_default
+    return bgm
+
+
+def resolve_ambient_prompt(*, bgm_choice: str, channel: dict, outline: dict) -> str:
+    """Build the mmaudio prompt for the ambient bed under narration."""
+    outline_brief = str(outline.get("sound_design_brief") or "").strip()
+    channel_brief = str(channel.get("sound_design") or "").strip()
+    bed_suffix = (
+        "Long-form cinematic ambient bed, instrumental only, no vocals, "
+        "no lyrics, low-volume under narration."
+    )
+    if bgm_choice.lower() in _BGM_OFF:
+        brief = outline_brief or channel_brief
+        return (
+            (f"{brief}. " if brief else "")
+            + "Very subtle natural room tone and sparse sound effects only, "
+            "no music, no melody, no vocals, no lyrics."
+        )
+    if bgm_choice.lower() not in {"", "auto"}:
+        brief = outline_brief or channel_brief
+        parts = [p for p in (brief, f"Background music direction: {bgm_choice}.", bed_suffix) if p]
+        return " ".join(parts)
+    base = str(channel.get("ambient_bed_prompt") or DEFAULT_AMBIENT_PROMPT).strip() or DEFAULT_AMBIENT_PROMPT
+    if outline_brief and outline_brief != channel_brief:
+        return f"{outline_brief}. {base}"
+    return base
+
+
+def resolve_ken_burns(outline: dict, channel: dict) -> tuple[bool, bool]:
+    """Sleep-history channels always Ken-Burns stills even if outline flags are stale."""
+    channel_key = str(channel.get("key") or "").strip().lower()
+    motion_policy = str(outline.get("motion_policy") or "").strip().lower()
+    if channel_key == "history_rewind" or motion_policy == "stills":
+        return True, bool(outline.get("light_shake_enabled", True))
+    return (
+        bool(outline.get("ken_burns_enabled", True)),
+        bool(outline.get("light_shake_enabled", False)),
+    )
+
+
+MMAUDIO_MAX_DURATION_SEC = 30
+
+
+def _gen_ambient(out_path: Path, *, prompt: str = DEFAULT_AMBIENT_PROMPT, duration_sec: int = 30) -> Path:
+    """Short ambient loop (fal mmaudio caps duration at 30s). ffmpeg stream-loops
+    it under the full narration during compose."""
     if out_path.exists() and out_path.stat().st_size > 1024:
         return out_path
-    data = _fal_post(MMAUDIO_URL, {"prompt": prompt, "duration": duration_sec}, timeout_s=240)
+    duration = max(1, min(int(duration_sec or 30), MMAUDIO_MAX_DURATION_SEC))
+    data = _fal_post(MMAUDIO_URL, {"prompt": prompt, "duration": duration}, timeout_s=120)
     url = (data.get("audio") or {}).get("url") or data.get("audio_url")
     if not url:
         raise LFRenderError(f"mmaudio response missing audio url: {data}")
@@ -808,6 +1326,117 @@ def _gen_ambient(out_path: Path, *, prompt: str = DEFAULT_AMBIENT_PROMPT, durati
 # Phase 5 — seedream thumbnails (3 candidates from channel thumbnail_style)
 # ─────────────────────────────────────────────────────────────────────────────
 
+# Cache of channel_id -> (fetched_at, [thumbnail urls]). The channel's real
+# published covers change rarely; refreshing every 6h keeps the style current
+# without hammering the RSS feed on every candidate render.
+_channel_thumb_ref_cache: dict[str, tuple[float, list[str]]] = {}
+_CHANNEL_THUMB_REF_TTL_S = 6 * 3600
+
+
+def channel_reference_thumbnails(channel: dict, max_refs: int = 3) -> list[str]:
+    """Return public CDN URLs of the channel's real published thumbnails.
+
+    This is how thumbnail generation stays in the creator's actual style
+    instead of a hand-written prompt: the latest published covers are pulled
+    (no auth — YouTube RSS feed + i.ytimg.com) and fed to Seedream *edit* as
+    style references. Self-updating: as the channel's look evolves, so do the
+    references. Fails soft to [] so the T2I fallback still renders."""
+    channel_id = str(channel.get("channel_id") or "").strip()
+    if not channel_id.startswith("UC"):
+        return []
+    cached = _channel_thumb_ref_cache.get(channel_id)
+    if cached and (time.time() - cached[0]) < _CHANNEL_THUMB_REF_TTL_S:
+        return list(cached[1][:max_refs])
+    refs: list[str] = []
+    try:
+        with httpx.Client(timeout=15, follow_redirects=True) as c:
+            feed = c.get(
+                f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
+            )
+            feed.raise_for_status()
+            video_ids = re.findall(r"<yt:videoId>([\w-]{6,20})</yt:videoId>", feed.text)
+            for vid in video_ids:
+                if len(refs) >= max_refs:
+                    break
+                # maxresdefault is 1280x720; hqdefault (480x360, letterboxed)
+                # would skew the edit toward 4:3, so it is not used.
+                url = f"https://i.ytimg.com/vi/{vid}/maxresdefault.jpg"
+                try:
+                    head = c.head(url)
+                    if head.status_code == 200:
+                        refs.append(url)
+                except Exception:
+                    continue
+    except Exception as exc:
+        print(f"[thumbnails] channel reference fetch failed for {channel_id}: {exc}")
+        return []
+    _channel_thumb_ref_cache[channel_id] = (time.time(), refs)
+    return list(refs[:max_refs])
+
+
+def thumbnail_display_title(title: str) -> str:
+    """Short on-image title in the channel's real cover style.
+
+    The SEO title ("The Rise and Fall of the Mongol Empire | Full Documentary |
+    9 Hours | History for Sleep") is what YouTube shows under the video; the
+    cover itself only says "THE MONGOL EMPIRE". Rendering the full SEO title on
+    the image is what produced the banner-strip / badge clutter Casey rejected."""
+    core = str(title or "").split("|", 1)[0].strip().rstrip(".")
+    m = re.match(r"^the\s+(?:rise\s+and\s+fall|history|story)\s+of\s+(the\s+)?(.+)$", core, re.I)
+    if m:
+        core = ("The " if m.group(1) else "") + m.group(2).strip()
+    return core or str(title or "").strip()
+
+
+def _thumbnail_via_channel_references(
+    prompt: str,
+    refs: list[str],
+    out: Path,
+    *,
+    timeout_s: int = 180,
+) -> bool:
+    """Render one thumbnail with the channel's real covers as style anchors.
+
+    Returns True on success; False lets the caller fall back to plain T2I."""
+    styled_prompt = (
+        "The attached images are this channel's real published YouTube thumbnails — "
+        "they are the ONLY style authority. Create ONE NEW 16:9 thumbnail for the new "
+        "video below that belongs unmistakably to the same set: same art style, "
+        "rendering technique, color grade, lighting, and composition language. "
+        "Title text must copy the references' treatment exactly — same typeface "
+        "feel, size, placement, and restraint; keep it as short as the references keep "
+        "theirs. STRICT: the ONLY text on the image is the short title; add NOTHING "
+        "the references do not use (no corner badges, no banner strips, no subtitle "
+        "rows, no taglines, no duration text, no logos). New subject and scene for "
+        "the new title; identical channel identity.\n\n"
+        f"{prompt}"
+    )
+    try:
+        data = _fal_post(
+            SEEDREAM_EDIT_URL,
+            {
+                "prompt": styled_prompt,
+                "image_urls": list(refs),
+                "image_size": {"width": 1920, "height": 1080},
+                "num_images": 1,
+                "negative_prompt": (
+                    "collage, grid of images, split frame, watermark, "
+                    "garbled text, misspelled words, extra badges"
+                ),
+            },
+            timeout_s=timeout_s,
+        )
+        images = data.get("images") or []
+        img_url = (images[0] or {}).get("url", "") if images else ""
+        if not img_url:
+            return False
+        _download(img_url, out, timeout_s=120)
+        return True
+    except Exception as exc:
+        print(f"[thumbnails] reference-styled render failed, falling back to T2I: {exc}")
+        return False
+
+
 def _gen_thumbnails(channel: dict, outline: dict, thumbs_dir: Path, count: int = 3) -> list[Path]:
     """Generate N thumbnail candidates. PR #132: bumped resolution to
     1920x1080 (was 1280x720) for higher-fidelity covers + dropped the
@@ -817,6 +1446,10 @@ def _gen_thumbnails(channel: dict, outline: dict, thumbs_dir: Path, count: int =
     base_prompt = (channel.get("thumbnail_style_prompt") or channel.get("visual_style") or "").strip()
     title = (outline.get("title") or "").strip()
     out_paths: list[Path] = []
+    # The channel's own published covers are the ground-truth style. When they
+    # are reachable, every candidate is rendered as an edit against them; the
+    # hand-written style prompt only carries subject/variant direction.
+    refs = channel_reference_thumbnails(channel)
     # Subject-prominent variants only (no wide-establishing shots).
     variant_hints = [
         "Medium portrait composition, subject filling 40-50% of frame, dramatic key light.",
@@ -826,6 +1459,17 @@ def _gen_thumbnails(channel: dict, outline: dict, thumbs_dir: Path, count: int =
     for i in range(count):
         out = thumbs_dir / f"thumb_{i + 1}.png"
         if out.exists() and out.stat().st_size > 1024:
+            out_paths.append(out)
+            continue
+        if refs and _thumbnail_via_channel_references(
+            (
+                f"Short on-image title (render exactly this text): {thumbnail_display_title(title)}.\n"
+                f"Full video topic for the scene: {title}.\n"
+                f"Composition variant: {variant_hints[i % len(variant_hints)]}"
+            ),
+            refs,
+            out,
+        ):
             out_paths.append(out)
             continue
         full_prompt = (
@@ -955,6 +1599,35 @@ def _list_scenes_sorted(stills_dir: Path) -> list[Path]:
     return [p for _, p in matches]
 
 
+def _sum_chapter_audio_durations(audio_dir: Path) -> float:
+    total = 0.0
+    for part in sorted(audio_dir.glob("chapter_*.mp3")):
+        if part.is_file() and part.stat().st_size > 512:
+            total += _ffprobe_dur(part)
+    return total
+
+
+def _resolve_narration_duration_sec(narration: Path, *, job_id: str | None = None) -> float:
+    """Use the longest trustworthy narration duration (fixes truncated concat probes)."""
+    probe = _ffprobe_dur(narration)
+    candidates = [probe] if probe > 0 else []
+    if job_id:
+        st = load_state(job_id) or {}
+        stored = float(st.get("narration_duration_sec") or 0)
+        if stored > 0:
+            candidates.append(stored)
+        audio_dir = _ensure_job_dir(job_id) / "audio"
+        chapter_sum = _sum_chapter_audio_durations(audio_dir)
+        if chapter_sum > 0:
+            candidates.append(chapter_sum)
+    if not candidates:
+        return 0.0
+    best = max(candidates)
+    if probe > 0 and best > probe * 1.25:
+        return best
+    return best
+
+
 def _compose_slideshow(
     stills: list[Path],
     narration: Path,
@@ -962,16 +1635,24 @@ def _compose_slideshow(
     out_path: Path,
     *,
     fps: int = 60,
+    ken_burns_enabled: bool = True,
+    light_shake_enabled: bool = False,
+    job_id: str | None = None,
 ) -> Path:
     """Full slideshow compose: scenes held for narration_total/scene_count
     seconds each, ambient mixed under narration at -16dB."""
-    narr_sec = _ffprobe_dur(narration)
+    narr_sec = _resolve_narration_duration_sec(narration, job_id=job_id)
     if narr_sec <= 0:
         raise LFRenderError("narration has zero duration")
     scene_count = len(stills)
     if scene_count == 0:
         raise LFRenderError("no scene stills to compose")
     per_scene = narr_sec / scene_count
+    if per_scene < 0.25:
+        raise LFRenderError(
+            f"narration duration {narr_sec:.1f}s too short for {scene_count} scenes "
+            f"(probe={_ffprobe_dur(narration):.1f}s) — check audio/narration.mp3 concat"
+        )
 
     # Mix audio: ambient stream-looped + narration, longest=narration
     mix_path = out_path.with_name(out_path.stem + "_mix.mp3")
@@ -1001,22 +1682,37 @@ def _compose_slideshow(
         p = str(s.resolve()).replace("\\", "/")
         lines.append(f"file '{p}'")
         lines.append(f"duration {per_scene:.4f}")
-    # ffmpeg concat-demuxer quirk: repeat last image without duration line.
+    # Repeat final still once (concat demuxer requirement) with explicit output -t cap below.
     last = str(stills[-1].resolve()).replace("\\", "/")
     lines.append(f"file '{last}'")
     concat_file.write_text("\n".join(lines), encoding="utf-8")
 
+    base_filter = (
+        "scale=2200:1238:force_original_aspect_ratio=increase,"
+        "crop=2200:1238,"
+    )
+    if ken_burns_enabled:
+        # Time-based expressions reset naturally at each still's hold interval.
+        # The optional emphasis is only two pixels and occurs briefly every three minutes.
+        shake = "+if(lt(mod(it,180),0.7),sin(it*20)*2,0)" if light_shake_enabled else ""
+        motion_filter = (
+            f"zoompan=z='1.02+0.055*(0.5-0.5*cos(2*PI*mod(it,{per_scene:.4f})/{per_scene:.4f}))':"
+            f"x='(iw-iw/zoom)/2+sin(it/7)*8{shake}':"
+            f"y='(ih-ih/zoom)/2+cos(it/9)*5{shake}':d=1:s=1920x1080:fps={fps},"
+        )
+    else:
+        motion_filter = "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,"
+        base_filter = ""
     cmd_v = [
         "ffmpeg", "-hide_banner", "-loglevel", "warning", "-y",
         "-f", "concat", "-safe", "0", "-i", str(concat_file),
         "-i", str(final_audio),
         "-vf",
-        "scale=1920:1080:force_original_aspect_ratio=decrease,"
-        "pad=1920:1080:(ow-iw)/2:(oh-ih)/2,format=yuv420p,fps=" + str(fps),
+        base_filter + motion_filter + "format=yuv420p,fps=" + str(fps),
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "26", "-g", "300",
         "-c:a", "aac", "-b:a", "192k",
         "-movflags", "+faststart",
-        "-shortest",
+        "-t", f"{narr_sec:.3f}",
         str(out_path),
     ]
     r2 = subprocess.run(cmd_v, capture_output=True, text=True)
@@ -1139,17 +1835,35 @@ async def run_sleep_doc_pipeline(
             scene_done=done, scene_total=total,
         )
 
+    # A long-form job begins with one proof still by default. Planning all
+    # chapters is free of image spend; rendering the gallery is not. Keep the
+    # complete chapter plan on disk so approval can expand from the exact same
+    # scene-zero reference rather than starting a second, drifting job.
+    proof_only = bool(outline.get("visual_proof_only"))
+    scene_chapters = chapters
+    if proof_only:
+        first = dict(chapters[0])
+        first["scene_prompts"] = list(first.get("scene_prompts") or [])[:1]
+        scene_chapters = [first]
     stills = await loop.run_in_executor(
         None,
         lambda: _gen_scenes_batch(
-            chapters, stills_dir, image_model,
+            scene_chapters, stills_dir, image_model,
             on_progress=_on_scene_progress,
             concurrency=4,
+            skeleton_style=_outline_uses_skeleton(outline),
+            topic=str(outline.get("title") or outline.get("topic") or ""),
+            locked_outfit=str(
+                outline.get("locked_outfit")
+                or "simple dark turtleneck and dark trousers"
+            ),
         ),
     )
     if not stills:
         raise LFRenderError("scene gen produced no stills")
     state["scenes_generated"] = len(stills)
+    state["visual_proof_only"] = proof_only
+    state["proof_scene_approved"] = False
     state["percent"] = 45
     save_state(job_id, state)
 
@@ -1220,21 +1934,29 @@ async def finalize_sleep_doc_pipeline(job_id: str) -> None:
     save_state(job_id, state)
 
     chapter_mp3s: list[Path] = []
-    voice_id = channel.get("voice_id_default") or "English_Trustworthy_Man"
+    voice_provider = str(channel.get("voice_provider_default") or "xai").strip().lower()
+    voice_id = channel.get("voice_id_default") or ("rex" if voice_provider == "xai" else "English_Trustworthy_Man")
 
     for i, ch in enumerate(chapters):
         out = audio_dir / f"chapter_{int(ch['chapter_index']):02d}.mp3"
         if not (out.exists() and out.stat().st_size > 4096):
+            generator = _gen_xai_chapter if voice_provider == "xai" else _gen_minimax_chapter
             await loop.run_in_executor(
                 None,
-                lambda c=ch, o=out: _gen_minimax_chapter(c["narration"], o, voice_id=voice_id),
+                lambda c=ch, o=out, g=generator: g(c["narration"], o, voice_id=voice_id),
             )
         chapter_mp3s.append(out)
         # Narration phase = 46-78%
         pct = 46 + int(32 * (i + 1) / max(1, len(chapters)))
+        state["phase"] = "narration"
+        state["narration_done"] = i + 1
+        state["narration_total"] = len(chapters)
+        state["percent"] = pct
+        save_state(job_id, state)
         update_status(
             job_id, phase="narration", percent=pct,
             narration_done=i + 1, narration_total=len(chapters),
+            detail=f"Voiceover — chapter {i + 1}/{len(chapters)}",
         )
 
     narration_full = audio_dir / "narration.mp3"
@@ -1250,19 +1972,14 @@ async def finalize_sleep_doc_pipeline(job_id: str) -> None:
     state["phase"] = "ambient"
     save_state(job_id, state)
     ambient = audio_dir / "ambient.mp3"
-    bgm_choice = str(outline.get("background_music") or "auto").strip()
+    bgm_choice = resolve_background_music(outline, channel)
+    outline["background_music"] = bgm_choice
+    state["outline"] = outline
+    save_state(job_id, state)
+    ambient_prompt = resolve_ambient_prompt(
+        bgm_choice=bgm_choice, channel=channel, outline=outline
+    )
     sound_brief = str(outline.get("sound_design_brief") or channel.get("sound_design") or "").strip()
-    if bgm_choice.lower() in {"off", "none", "no", "no background music"}:
-        ambient_prompt = (
-            f"{sound_brief}. " if sound_brief else ""
-        ) + "Very subtle natural room tone and sparse sound effects only, no music, no melody, no vocals, no lyrics."
-    elif sound_brief or bgm_choice.lower() not in {"", "auto"}:
-        ambient_prompt = (
-            f"{sound_brief}. Background music direction: {bgm_choice}. "
-            "Long-form cinematic ambient bed, instrumental only, no vocals, no lyrics, low-volume under narration."
-        )
-    else:
-        ambient_prompt = DEFAULT_AMBIENT_PROMPT
     await loop.run_in_executor(None, lambda: _gen_ambient(ambient, prompt=ambient_prompt))
     state["sound_design"] = {
         "sfx_enabled": bool(outline.get("sfx_enabled", True)),
@@ -1293,10 +2010,20 @@ async def finalize_sleep_doc_pipeline(job_id: str) -> None:
 
     title_slug = _slugify(outline.get("title", "longform"))
     out_mp4 = _final_mp4_path(job_id, title_slug)
-    fps = int(channel.get("fps") or 60)
+    fps = int(channel.get("fps") or outline.get("fps") or 30)
+    ken_burns, light_shake = resolve_ken_burns(outline, channel)
     await loop.run_in_executor(
         None,
-        lambda: _compose_slideshow(stills, narration_full, ambient, out_mp4, fps=fps),
+        lambda: _compose_slideshow(
+            stills,
+            narration_full,
+            ambient,
+            out_mp4,
+            fps=fps,
+            ken_burns_enabled=ken_burns,
+            light_shake_enabled=light_shake,
+            job_id=job_id,
+        ),
     )
 
     state["mp4_path"] = str(out_mp4.relative_to(LF_OUTPUT_ROOT))
@@ -1307,6 +2034,12 @@ async def finalize_sleep_doc_pipeline(job_id: str) -> None:
     state["finished_at"] = time.time()
     save_state(job_id, state)
     update_status(job_id, phase="done", percent=100)
+    try:
+        from studio_agent import jobs as agent_jobs
+
+        agent_jobs._build_longform_package(job_id)
+    except Exception:
+        pass
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1374,6 +2107,17 @@ def regenerate_sleep_doc_still(job_id: str, scene_idx: int,
     from long_form.prompts.channels import get_channel
     channel = get_channel(state["channel_key"])
     image_model = channel.get("image_model_default", "ernie")
+    outline = state.get("outline") or {}
+    if _outline_uses_skeleton(outline):
+        return _gen_skeleton_longform_scene(
+            prompt,
+            out,
+            topic=str(outline.get("title") or outline.get("topic") or ""),
+            locked_outfit=str(
+                outline.get("locked_outfit")
+                or "simple dark turtleneck and dark trousers"
+            ),
+        )
     return _gen_scene_image(prompt, out, image_model=image_model)
 
 
@@ -1419,7 +2163,20 @@ async def _run_render(job_id: str, channel: dict, outline: dict) -> None:
         update_status(job_id, phase="failed", error=st["error"])
         return
     try:
-        await runner(job_id, channel, outline)
+        if pipeline_kind == "sleep_doc":
+            await runner(
+                job_id,
+                channel,
+                outline,
+                scenes_per_chapter=int(
+                    outline.get("scenes_per_chapter")
+                    or channel.get("scenes_per_chapter")
+                    or 20
+                ),
+                wpm=int(outline.get("wpm") or channel.get("wpm") or 120),
+            )
+        else:
+            await runner(job_id, channel, outline)
     except Exception as e:
         msg = f"{type(e).__name__}: {e}"
         st = load_state(job_id) or {}
@@ -1428,7 +2185,12 @@ async def _run_render(job_id: str, channel: dict, outline: dict) -> None:
         update_status(job_id, phase="failed", error=msg)
 
 
-def start_render(channel: dict, outline: dict) -> str:
+def start_render(
+    channel: dict,
+    outline: dict,
+    *,
+    requested_job_id: str | None = None,
+) -> str:
     """Public API — kick the stills phase of a render. Returns job_id
     immediately; pipeline runs in the asyncio background and pauses at
     state.phase='awaiting_approval' after generating all stills. Casey
@@ -1437,7 +2199,11 @@ def start_render(channel: dict, outline: dict) -> str:
     Caller polls /jobs/{id}/status — phase=='awaiting_approval' is the gate."""
     if not isinstance(outline, dict) or not outline.get("chapters"):
         raise LFRenderError("outline must include a non-empty 'chapters' list")
-    job_id = _new_job_id()
+    requested = str(requested_job_id or "").strip()
+    if requested and len(requested) <= 48 and requested.replace("_", "").isalnum():
+        job_id = requested
+    else:
+        job_id = _new_job_id()
     _ensure_job_dir(job_id)
     state = {
         "job_id": job_id,
@@ -1452,12 +2218,91 @@ def start_render(channel: dict, outline: dict) -> str:
     save_state(job_id, state)
     update_status(job_id, phase="queued", percent=0, started_at=time.time())
 
-    # Spawn background task with strong-ref retention to prevent GC cancel.
-    task = asyncio.create_task(_run_render(job_id, channel, outline))
-    _lf_running_tasks.add(task)
-    task.add_done_callback(_lf_running_tasks.discard)
-    _lf_jobs_status[job_id]["_task"] = task
+    _spawn_lf_background_coro(_run_render(job_id, channel, outline), job_id)
     return job_id
+
+
+async def _expand_visual_proof(job_id: str) -> None:
+    """Render the remaining gallery only after the user accepts scene zero."""
+    state = load_state(job_id) or {}
+    outline = state.get("outline") if isinstance(state.get("outline"), dict) else {}
+    if not outline:
+        raise LFRenderError(f"no outline for job {job_id}")
+    from long_form.prompts.channels import get_channel
+    channel = dict(get_channel(str(state.get("channel_key") or "")))
+    if str(outline.get("image_model_id") or "").strip():
+        channel["image_model_default"] = str(outline["image_model_id"]).strip()
+    style_lock = str(outline.get("render_style_lock") or "").strip()
+    if style_lock:
+        channel["visual_style"] = f"{style_lock} {channel.get('visual_style') or ''}".strip()
+    chapters_path = _chapters_path(job_id)
+    if not chapters_path.is_file():
+        raise LFRenderError("chapters.json missing; cannot expand proof")
+    chapters = list((json.loads(chapters_path.read_text(encoding="utf-8")) or {}).get("chapters") or [])
+    if not chapters:
+        raise LFRenderError("no chapters available to expand proof")
+    stills_dir = _ensure_job_dir(job_id) / "stills"
+    loop = asyncio.get_running_loop()
+    existing = len(_list_scenes_sorted(stills_dir))
+    resume_pct = 15
+    if existing > 1:
+        # Keep UI honest when resuming after a redeploy mid-gallery.
+        resume_pct = min(44, 15 + int(30 * existing / max(existing + 50, 1)))
+    state.update({
+        "phase": "scenes",
+        "proof_scene_approved": True,
+        "percent": resume_pct,
+        "visual_proof_only": False,
+        "scenes_generated": existing,
+    })
+    outline["visual_proof_only"] = False
+    state["outline"] = outline
+    save_state(job_id, state)
+    update_status(
+        job_id, phase="scenes", percent=resume_pct,
+        scene_done=existing,
+        detail=f"Resuming gallery — {existing} scenes on disk",
+    )
+
+    def _on_scene_progress(done: int, total: int) -> None:
+        pct = 15 + int(30 * done / max(1, total))
+        update_status(
+            job_id, phase="scenes", percent=pct,
+            scene_done=done, scene_total=total,
+            detail=f"Building gallery — {done}/{total} scenes",
+        )
+
+    stills = await loop.run_in_executor(
+        None,
+        lambda: _gen_scenes_batch(
+            chapters, stills_dir, channel.get("image_model_default", "ernie"), concurrency=4,
+            on_progress=_on_scene_progress,
+            skeleton_style=_outline_uses_skeleton(outline),
+            topic=str(outline.get("title") or outline.get("topic") or ""),
+            locked_outfit=str(outline.get("locked_outfit") or "simple dark turtleneck and dark trousers"),
+        ),
+    )
+    if not stills:
+        raise LFRenderError("proof expansion produced no stills")
+    state.update({"phase": "awaiting_approval", "percent": 45, "scenes_generated": len(stills), "visual_proof_only": False})
+    save_state(job_id, state)
+    update_status(job_id, phase="awaiting_approval", percent=45)
+
+
+def expand_visual_proof(job_id: str) -> None:
+    state = load_state(job_id) or {}
+    phase = str(state.get("phase") or "")
+    if phase == "scenes" and state.get("proof_scene_approved"):
+        # Gallery expansion already accepted — keep polling progress.
+        entry = _lf_jobs_status.get(job_id) or {}
+        task = entry.get("_task")
+        if task is None or getattr(task, "done", lambda: True)():
+            _spawn_lf_background_coro(_expand_visual_proof(job_id), job_id)
+        return
+    if phase == "awaiting_approval" and bool(state.get("visual_proof_only")):
+        _spawn_lf_background_coro(_expand_visual_proof(job_id), job_id)
+        return
+    raise LFRenderError("job is not awaiting approval of a one-scene long-form proof")
 
 
 async def _run_finalize(job_id: str) -> None:
@@ -1513,10 +2358,7 @@ def start_finalize(job_id: str) -> None:
             f"finalize requires one of {sorted(allowed)}"
         )
     update_status(job_id, phase="finalizing", percent=int(state.get("percent") or 73))
-    task = asyncio.create_task(_run_finalize(job_id))
-    _lf_running_tasks.add(task)
-    task.add_done_callback(_lf_running_tasks.discard)
-    _lf_jobs_status.setdefault(job_id, {})["_task"] = task
+    _spawn_lf_background_coro(_run_finalize(job_id), job_id)
 
 
 def cancel_render(job_id: str) -> dict:
@@ -1580,8 +2422,13 @@ def regenerate_thumbnail(
     ).strip()
     title = (outline.get("title") or "").strip()
 
+    # A user revision ("make it darker", "less text") must stay on-brand, so
+    # the channel's real covers anchor the style even for custom prompts.
+    refs = channel_reference_thumbnails(channel)
+
     if custom_prompt and custom_prompt.strip():
         full_prompt = custom_prompt.strip()
+        ref_prompt = full_prompt
     else:
         # Wider variant pool than the original 3 in _gen_thumbnails so
         # regenerating a bad tile actually gives Casey something different.
@@ -1599,19 +2446,25 @@ def regenerate_thumbnail(
             f"{base_prompt}\n\nDocumentary title context: {title}.\n\n"
             f"Composition variant: {variant}"
         )
+        ref_prompt = (
+            f"Short on-image title (render exactly this text): {thumbnail_display_title(title)}.\n"
+            f"Full video topic for the scene: {title}.\n"
+            f"Composition variant: {variant}"
+        )
 
-    data = _fal_post(
-        SEEDREAM_URL,
-        {"prompt": full_prompt, "image_size": {"width": 1280, "height": 720}},
-        timeout_s=180,
-    )
-    images = data.get("images") or []
-    if not images:
-        raise LFRenderError(f"thumbnail gen returned no images: {data}")
-    img_url = images[0].get("url", "")
-    if not img_url:
-        raise LFRenderError(f"thumbnail gen response missing url: {data}")
-    _download(img_url, out, timeout_s=120)
+    if not (refs and _thumbnail_via_channel_references(ref_prompt, refs, out)):
+        data = _fal_post(
+            SEEDREAM_URL,
+            {"prompt": full_prompt, "image_size": {"width": 1280, "height": 720}},
+            timeout_s=180,
+        )
+        images = data.get("images") or []
+        if not images:
+            raise LFRenderError(f"thumbnail gen returned no images: {data}")
+        img_url = images[0].get("url", "")
+        if not img_url:
+            raise LFRenderError(f"thumbnail gen response missing url: {data}")
+        _download(img_url, out, timeout_s=120)
 
     # Update state.thumbnails_generated so /jobs/{id} reports the right count
     # if this regeneration adds a new index beyond what was originally generated.

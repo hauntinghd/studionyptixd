@@ -112,6 +112,7 @@ def build_core_router(
             "billing_source_precedence": ["monthly", "topup"],
             "requires_topup": credit_state["requires_topup"],
             "credit_month": credit_state["month_key"],
+            "unlimited": is_admin,
             "demo_access": has_demo,
             "demo_price_id": demo_pro_price_id,
             "demo_coming_soon": (not product_demo_public_enabled),
@@ -288,6 +289,11 @@ def build_media_router(
 
     @router.get("/api/status/{job_id}")
     async def job_status(job_id: str):
+        return await job_status_handler(job_id)
+
+    # Alias used by CatalystPanel + some production panels (historical path).
+    @router.get("/api/job/{job_id}")
+    async def job_status_alias(job_id: str):
         return await job_status_handler(job_id)
 
     @router.get("/api/download/{filename}")

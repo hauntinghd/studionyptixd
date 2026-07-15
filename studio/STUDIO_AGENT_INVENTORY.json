@@ -1,0 +1,2611 @@
+{
+  "source": "studio_agent/tools.py tool_schemas() + render_styles + studio/skills",
+  "tool_count": 53,
+  "approval_required_tools": [
+    "animate_production_scenes",
+    "finalize_longform_render",
+    "finalize_production",
+    "ingest_cliplab_attachment",
+    "remix_cliplab_short",
+    "render_cliplab_segments",
+    "run_build_script",
+    "set_production_scenes_animate",
+    "start_longform_render",
+    "start_shortform_generate",
+    "write_project_file"
+  ],
+  "tool_groups": {
+    "knowledge_skills": [
+      "list_skills",
+      "load_skill"
+    ],
+    "channel_docs_memory": [
+      "load_channel_docs",
+      "list_studio_channels",
+      "get_perpetual_memory",
+      "remember_channel_preference"
+    ],
+    "youtube_oauth_analytics": [
+      "youtube_oauth_status",
+      "list_youtube_channels",
+      "get_channel_analytics",
+      "refresh_channel_intelligence"
+    ],
+    "public_research_demand": [
+      "search_youtube_public",
+      "get_public_search_trends",
+      "recommend_video_topics"
+    ],
+    "reference_competitor": [
+      "analyze_reference_video",
+      "analyze_competitor_video",
+      "retry_reference_analysis",
+      "build_scene_blueprint_from_reference"
+    ],
+    "shortform_production": [
+      "list_skeleton_video_models",
+      "list_skeleton_categories",
+      "create_skeleton_category",
+      "list_render_styles",
+      "start_shortform_generate",
+      "list_production_scenes",
+      "edit_production_scene_still",
+      "edit_production_scenes_still",
+      "regenerate_production_scene_still",
+      "set_production_scenes_animate",
+      "set_production_scene_duration",
+      "animate_production_scenes",
+      "finalize_production",
+      "re_edit_production",
+      "record_production_feedback",
+      "poll_render_job"
+    ],
+    "longform_production": [
+      "start_longform_render",
+      "generate_longform_thumbnails",
+      "finalize_longform_render"
+    ],
+    "product_ads": [
+      "ingest_product_reference"
+    ],
+    "cliplab": [
+      "ingest_cliplab_attachment",
+      "analyze_cliplab_video",
+      "render_cliplab_segments",
+      "remix_cliplab_short",
+      "poll_cliplab_job"
+    ],
+    "archival_media_audio": [
+      "fetch_archival_for_video",
+      "resolve_archival_asset",
+      "search_archival_media",
+      "search_music",
+      "search_sfx"
+    ],
+    "billing_pricing": [
+      "get_studio_credits",
+      "get_fal_pricing",
+      "estimate_shortform_render_cost"
+    ],
+    "project_files_build": [
+      "read_project_file",
+      "write_project_file",
+      "run_build_script"
+    ],
+    "other": []
+  },
+  "tools": [
+    {
+      "name": "list_skills",
+      "description": "List all Rookcast skill slugs imported into studio/skills/.",
+      "approval_required": false,
+      "required_params": [],
+      "params": {}
+    },
+    {
+      "name": "load_skill",
+      "description": "Load a Rookcast SKILL.md playbook by slug (e.g. script-writing, thumbnail-design).",
+      "approval_required": false,
+      "required_params": [
+        "slug"
+      ],
+      "params": {
+        "slug": {
+          "type": "string",
+          "description": "Skill folder name",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "companion": {
+          "type": "string",
+          "description": "Optional companion file e.g. beat-anatomy.md",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        }
+      }
+    },
+    {
+      "name": "load_channel_docs",
+      "description": "Load CHANNEL.md and/or FLOW.md for a Studio channel key.",
+      "approval_required": false,
+      "required_params": [
+        "channel_key"
+      ],
+      "params": {
+        "channel_key": {
+          "type": "string",
+          "description": "",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "doc": {
+          "type": "string",
+          "description": "",
+          "enum": [
+            "CHANNEL",
+            "FLOW",
+            "both"
+          ],
+          "default": "both",
+          "minimum": null,
+          "maximum": null
+        }
+      }
+    },
+    {
+      "name": "list_studio_channels",
+      "description": "List long-form channel keys from long_form/prompts/channels.py registry.",
+      "approval_required": false,
+      "required_params": [],
+      "params": {}
+    },
+    {
+      "name": "read_project_file",
+      "description": "Read a text file under the repo root (paths must stay inside workspace).",
+      "approval_required": false,
+      "required_params": [
+        "relative_path"
+      ],
+      "params": {
+        "relative_path": {
+          "type": "string",
+          "description": "",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "max_chars": {
+          "type": "integer",
+          "description": "",
+          "enum": null,
+          "default": 12000,
+          "minimum": null,
+          "maximum": null
+        }
+      }
+    },
+    {
+      "name": "write_project_file",
+      "description": "Write or overwrite a text file under studio/ or long_form/ (approval in confirm mode).",
+      "approval_required": true,
+      "required_params": [
+        "relative_path",
+        "content"
+      ],
+      "params": {
+        "relative_path": {
+          "type": "string",
+          "description": "",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "content": {
+          "type": "string",
+          "description": "",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        }
+      }
+    },
+    {
+      "name": "start_longform_render",
+      "description": "Queue a long-form render via the Studio pipeline. Requires channel_key + outline JSON. Spends fal credits.",
+      "approval_required": true,
+      "required_params": [
+        "channel_key",
+        "title",
+        "topic"
+      ],
+      "params": {
+        "channel_key": {
+          "type": "string",
+          "description": "",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "title": {
+          "type": "string",
+          "description": "",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "topic": {
+          "type": "string",
+          "description": "",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "chapters_json": {
+          "type": "string",
+          "description": "JSON string: {title, chapters:[{title, beats}]}",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "motion_policy": {
+          "type": "string",
+          "description": "Long-form motion budget. balanced animates about 35% hero scenes; economy about 15%; stills uses local cinematic motion; full runs i2v on every scene.",
+          "enum": [
+            "full",
+            "balanced",
+            "economy",
+            "stills"
+          ],
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "hero_motion_ratio": {
+          "type": "number",
+          "description": "Optional exact 0-1 fraction of scenes that receive paid i2v.",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "render_style": {
+          "type": "string",
+          "description": "Studio art-style key. This becomes a strict production-wide lock across every chapter, scene, still, animation prompt, and thumbnail.",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "max_budget_usd": {
+          "type": "number",
+          "description": "Hard preflight budget cap. Studio refuses to start if estimated provider spend is higher.",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "sfx_enabled": {
+          "type": "boolean",
+          "description": "Whether to include sound design / ambient SFX in the long-form render. Default false to avoid hidden paid audio spend.",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "sound_design_brief": {
+          "type": "string",
+          "description": "Long-form sound direction: ambience, SFX motifs, soundscape, tension beds, product sounds, etc.",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "background_music": {
+          "type": "string",
+          "description": "Music bed direction, or off/no background music.",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        }
+      }
+    },
+    {
+      "name": "list_skeleton_video_models",
+      "description": "List selectable i2v models for Skeleton AI shorts. Image stills are ALWAYS canonical Seedream 4.5 edit (not selectable). User picks video only.",
+      "approval_required": false,
+      "required_params": [],
+      "params": {}
+    },
+    {
+      "name": "list_skeleton_categories",
+      "description": "List Skeleton AI script categories: 20 YouTube-aligned built-ins (outcast, people_blogs, gaming, \u00e2\u20ac\u00a6) plus this user's custom categories. Call before start_shortform_generate when category is non-obvious.",
+      "approval_required": false,
+      "required_params": [],
+      "params": {}
+    },
+    {
+      "name": "create_skeleton_category",
+      "description": "Create a custom Skeleton AI category for this user (e.g. outcast, true crime lane, channel-specific tone). Returns the new category_key.",
+      "approval_required": false,
+      "required_params": [
+        "label"
+      ],
+      "params": {
+        "label": {
+          "type": "string",
+          "description": "Display name e.g. Outcast",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "key": {
+          "type": "string",
+          "description": "Optional slug; auto-generated if omitted",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "tagline": {
+          "type": "string",
+          "description": "",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "system_prompt": {
+          "type": "string",
+          "description": "Optional Grok system tone; auto-generated from label if omitted",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "seed_ideas": {
+          "type": "array",
+          "description": "",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        }
+      }
+    },
+    {
+      "name": "list_render_styles",
+      "description": "List Studio shortform render styles (cinematic, comic book, Ghibli, skeleton host, etc.). ALWAYS pass render_style to start_shortform_generate \u00e2\u20ac\u201d default to the user's session picker unless they explicitly choose another. skeleton_host = Skeleton niche art style. Returns visual preview URLs for a gallery grid (like the reference style cards).",
+      "approval_required": false,
+      "required_params": [],
+      "params": {}
+    },
+    {
+      "name": "generate_longform_thumbnails",
+      "description": "Generate or reprompt 1-3 thumbnails for a longform job (user chooses for A/B test). feedback for reprompt (e.g. 'more dramatic lighting, teal/orange grade, teaser not spoiler, match the video tone exactly'). Uses Seedream edit for cheap iterations. Pulls from channel style. After user approves, download the package.txt (title/tags/desc + exact timestamps).",
+      "approval_required": false,
+      "required_params": [
+        "job_id"
+      ],
+      "params": {
+        "job_id": {
+          "type": "string",
+          "description": "",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "count": {
+          "type": "integer",
+          "description": "1-3 thumbnails",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "feedback": {
+          "type": "string",
+          "description": "Reprompt instruction for edit",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "max_budget_usd": {
+          "type": "number",
+          "description": "Hard preflight budget cap for thumbnail generation.",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        }
+      }
+    },
+    {
+      "name": "ingest_product_reference",
+      "description": "Create a durable product-reference manifest for a software or physical-product advertisement. Uses images attached in the current chat and/or safely crawls a public product website for dedicated product images. If website_url is omitted, use the product website saved on the user's Studio profile. Call before start_shortform_generate for product ads.",
+      "approval_required": false,
+      "required_params": [],
+      "params": {
+        "website_url": {
+          "type": "string",
+          "description": "Official product or landing-page URL.",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "use_attached_images": {
+          "type": "boolean",
+          "description": "Use product images attached in this chat.",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "product_name": {
+          "type": "string",
+          "description": "",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "product_description": {
+          "type": "string",
+          "description": "",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        }
+      }
+    },
+    {
+      "name": "start_shortform_generate",
+      "description": "Queue a styled shortform render (9:16, ~12 beats). REQUIRED: render_style from list_render_styles or the user's session Art Style picker. category_key is a Skeleton content lane, not the selected YouTube channel key. For MrSkeleWelly psychology shorts, use human_limits. Default cinematic/photoreal for documentaries and real people \u00e2\u20ac\u201d NOT skeleton unless render_style=skeleton_host. Comic/history/anime/etc. each have their own T2I look. Call list_skeleton_video_models for video_model; list_skeleton_categories for script tone. If the user asks for one still, one image, one scene, first still/image, visual proof, or to approve the look before a full short, pass visual_proof_only=true and scene_count=1. After starting (for non-skeleton styles), the job goes to a review gate where you can use the scene control tools (list_production_scenes, edit_production_scene_still with V4.5 edit, set_production_scenes_animate, animate_production_scenes, etc.) for full creative control.",
+      "approval_required": true,
+      "required_params": [
+        "category_key",
+        "topic",
+        "video_model",
+        "render_style"
+      ],
+      "params": {
+        "render_style": {
+          "type": "string",
+          "description": "e.g. cinematic, comic_book, studio_ghibli, skeleton_host. Must match user session unless they override in chat.",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "category_key": {
+          "type": "string",
+          "description": "Skeleton script/content lane e.g. human_limits, outcast, people_blogs, custom_my_lane. Do not pass a YouTube channel/registry key here.",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "topic": {
+          "type": "string",
+          "description": "",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "script": {
+          "type": "string",
+          "description": "Optional pre-written script",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "scene_count": {
+          "type": "integer",
+          "description": "Planned number of scenes/beats. Used for hard cost preflight before any provider spend.",
+          "enum": null,
+          "default": null,
+          "minimum": 1,
+          "maximum": 60
+        },
+        "duration_seconds": {
+          "type": "number",
+          "description": "Planned total runtime in seconds. Used for full-auto animation cost preflight.",
+          "enum": null,
+          "default": null,
+          "minimum": 1,
+          "maximum": null
+        },
+        "seconds_per_scene": {
+          "type": "number",
+          "description": "Fallback per-scene animation duration when total duration is not known.",
+          "enum": null,
+          "default": null,
+          "minimum": 1,
+          "maximum": null
+        },
+        "video_model": {
+          "type": "string",
+          "description": "i2v model for motion clips. Use ltx_budget when full animation must be cheaper.",
+          "enum": [
+            "ltx_budget",
+            "seedance",
+            "pixverse",
+            "kling_pro",
+            "kling21_standard",
+            "pixverse_v6",
+            "pixverse_c1",
+            "kling21_pro",
+            "veo3_fast",
+            "kling21_master",
+            "grok_imagine_video",
+            "grok_imagine_video_15",
+            "grok_imagine_video_15_1080p"
+          ],
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "image_model_id": {
+          "type": "string",
+          "description": "Image model for still generation. Inherit the user's session picker unless they override it in chat.",
+          "enum": [
+            "grok_imagine",
+            "grok_imagine_standard",
+            "imagen4_fast",
+            "imagen4_preview",
+            "imagen4_ultra",
+            "recraft_v4",
+            "seedream45",
+            "ernie_image",
+            "flux_2_pro",
+            "nano_banana_pro",
+            "recraft_v4_pro",
+            "flux_lora_skeleton"
+          ],
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "visual_brief": {
+          "type": "string",
+          "description": "Scene-level creative lock: characters, era, wardrobe, palette, composition notes \u00e2\u20ac\u201d applied every beat.",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "visual_proof_only": {
+          "type": "boolean",
+          "description": "Hard safety gate for model/prompt tests. If true, Studio generates exactly one still, does not animate, and stops for user approval before any remaining scenes are generated.",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "product_reference_id": {
+          "type": "string",
+          "description": "Reference id returned by ingest_product_reference. Studio then uses reference editing so the real product remains visually locked in every advertisement scene.",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "animate": {
+          "type": "boolean",
+          "description": "Default animate flag for the initial plan. Individual scenes can be toggled later with set_production_scenes_animate for precise control (recommended for docs and custom pacing).",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "captions_enabled": {
+          "type": "boolean",
+          "description": "Whether to burn captions into the Short. Default true. If true, captions must be word-level unless the user explicitly asks for another mode.",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "caption_mode": {
+          "type": "string",
+          "description": "Caption mode for burned captions. Use word for one caption per spoken word in sync. Use off only when the user explicitly says no captions.",
+          "enum": [
+            "word",
+            "off"
+          ],
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "sfx_enabled": {
+          "type": "boolean",
+          "description": "Generate and mix per-scene sound effects/ambience during finalization. Default false to avoid hidden paid audio spend; enable only when the user explicitly asks for sound design.",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "sound_design_brief": {
+          "type": "string",
+          "description": "Global sound design direction: ambience, hits, risers, whooshes, product sounds, or emotional tone.",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "background_music": {
+          "type": "string",
+          "description": "Background music direction. Use off by default to avoid hidden paid audio spend; set a music direction only when the user explicitly asks.",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "_full_auto": {
+          "type": "boolean",
+          "description": "If true, bypass review gate and auto-finalize (faster but less control). Default false for creative work.",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "max_budget_usd": {
+          "type": "number",
+          "description": "Hard preflight budget cap for this render. Studio refuses to start if the estimated provider spend is above this amount.",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        }
+      }
+    },
+    {
+      "name": "list_production_scenes",
+      "description": "For a shortform production job (after start_shortform_generate), list all scenes with their current still, animate flag, duration, status, and preview info. Use this to inspect before editing or selectively animating. Essential for giving users full creative control over exactly which scenes get motion and iterating with V4.5 edits.",
+      "approval_required": false,
+      "required_params": [
+        "job_id"
+      ],
+      "params": {
+        "job_id": {
+          "type": "string",
+          "description": "The shortform job_id returned by start_shortform_generate",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        }
+      }
+    },
+    {
+      "name": "edit_production_scene_still",
+      "description": "Use Seedream V4.5 *edit* (image-to-image edit) to modify ONE specific scene's still with natural language. Example: 'make the background a rainy cyberpunk alley at night, add neon reflections on the wet ground'. This is the primary way to get pixel-perfect creative control and iterate a scene until it is exactly right before deciding to animate it. Use scope='character' to change only the subject/mannequin/skeleton, scope='background' to preserve the subject and change only the world, or scope='props' for held items/screens/objects. The previous clip (if any) is invalidated so you can re-animate after the edit.",
+      "approval_required": false,
+      "required_params": [
+        "job_id",
+        "scene_index",
+        "instruction"
+      ],
+      "params": {
+        "job_id": {
+          "type": "string",
+          "description": "",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "scene_index": {
+          "type": "integer",
+          "description": "0-based index of the scene/beat to edit",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "instruction": {
+          "type": "string",
+          "description": "Natural language description of the desired change. Will be applied via V4.5 edit on the current still.",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "scope": {
+          "type": "string",
+          "description": "What to edit while preserving everything else. Use character first, then background for identity-consistent multi-pass scenes.",
+          "enum": [
+            "character",
+            "background",
+            "props",
+            "full"
+          ],
+          "default": "full",
+          "minimum": null,
+          "maximum": null
+        },
+        "max_budget_usd": {
+          "type": "number",
+          "description": "Hard preflight budget cap for this scene edit.",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        }
+      }
+    },
+    {
+      "name": "edit_production_scenes_still",
+      "description": "Use Seedream V4.5 edit to apply the same visual change to MULTIPLE shortform scene stills. Use this when the user says every scene/all scenes or gives a global wardrobe/character rule. Example: 'put the skeleton in a proper doctor's uniform, black pants, white T-shirt, white tux coat'. This edits stills only and does not animate/finalize; the user must review the updated stills first.",
+      "approval_required": false,
+      "required_params": [
+        "job_id",
+        "instruction"
+      ],
+      "params": {
+        "job_id": {
+          "type": "string",
+          "description": "",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "instruction": {
+          "type": "string",
+          "description": "Natural language change to apply to each target scene.",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "scene_indices": {
+          "type": "array",
+          "description": "0-based scene indices to edit. Omit or pass empty to edit every scene.",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "scope": {
+          "type": "string",
+          "description": "Use character for wardrobe/body/pose edits, background for location-only edits.",
+          "enum": [
+            "character",
+            "background",
+            "props",
+            "full"
+          ],
+          "default": "character",
+          "minimum": null,
+          "maximum": null
+        },
+        "max_budget_usd": {
+          "type": "number",
+          "description": "Hard preflight budget cap for the full batch.",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        }
+      }
+    },
+    {
+      "name": "regenerate_production_scene_still",
+      "description": "Catalyst-audited scene regenerate. Preserves exact channel style while fixing artifacting (extra hands, split-screen diptychs). Prefer this when the user clicks Regenerate or reports limb/layout artifacts.",
+      "approval_required": false,
+      "required_params": [
+        "job_id",
+        "scene_index"
+      ],
+      "params": {
+        "job_id": {
+          "type": "string",
+          "description": "",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "scene_index": {
+          "type": "integer",
+          "description": "",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "reason": {
+          "type": "string",
+          "description": "Optional user note about why the still is being regenerated (artifact details).",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "max_budget_usd": {
+          "type": "number",
+          "description": "Hard preflight budget cap for this still regeneration.",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        }
+      }
+    },
+    {
+      "name": "set_production_scenes_animate",
+      "description": "Precisely control animation per scene for a shortform job. Set animate=true/false on specific scene indices (or all). This is how you achieve 'animate exactly 20 minutes out of a 30-minute piece' or 'only animate these three hero scenes'. Non-animated scenes will use a tasteful Ken Burns push in the final compose.",
+      "approval_required": true,
+      "required_params": [
+        "job_id",
+        "animate"
+      ],
+      "params": {
+        "job_id": {
+          "type": "string",
+          "description": "",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "scene_indices": {
+          "type": "array",
+          "description": "List of 0-based scene indices to affect. Omit or pass empty to affect all scenes.",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "animate": {
+          "type": "boolean",
+          "description": "",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        }
+      }
+    },
+    {
+      "name": "set_production_scene_duration",
+      "description": "Override the duration (in seconds) for one or more specific scenes. Useful for pacing control \u00e2\u20ac\u201d shorter for punchy beats, longer for emotional moments.",
+      "approval_required": false,
+      "required_params": [
+        "job_id",
+        "scene_index",
+        "duration_sec"
+      ],
+      "params": {
+        "job_id": {
+          "type": "string",
+          "description": "",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "scene_index": {
+          "type": "integer",
+          "description": "",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "duration_sec": {
+          "type": "number",
+          "description": "Target duration for this scene's clip/hold (e.g. 3.5, 7.0)",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        }
+      }
+    },
+    {
+      "name": "animate_production_scenes",
+      "description": "Run i2v animation (using the job's video_model) on specific scenes only, or all scenes currently marked animate=true. Call this after editing stills with edit_production_scene_still until they are perfect. You can iterate: edit still -> animate only that scene -> review -> edit again -> re-animate only that one. For visual_proof_only jobs, pass scene_indices=[0] and animate exactly that approved proof scene.",
+      "approval_required": true,
+      "required_params": [
+        "job_id"
+      ],
+      "params": {
+        "job_id": {
+          "type": "string",
+          "description": "",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "scene_indices": {
+          "type": "array",
+          "description": "Specific scenes to animate right now. If omitted, animates every scene that has animate=true.",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "max_budget_usd": {
+          "type": "number",
+          "description": "Hard preflight budget cap for this animation batch.",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        }
+      }
+    },
+    {
+      "name": "finalize_production",
+      "description": "After the stills are perfect and you have set exactly which scenes should be animated (and their durations), call this to generate any missing motion, do the final VO, captions, mixing, and produce the deliverable MP4. Supports mixed animated + Ken-Burns scenes in one video for perfect pacing control.",
+      "approval_required": true,
+      "required_params": [
+        "job_id"
+      ],
+      "params": {
+        "job_id": {
+          "type": "string",
+          "description": "",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "max_budget_usd": {
+          "type": "number",
+          "description": "Hard preflight budget cap for final compose/missing motion.",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        }
+      }
+    },
+    {
+      "name": "re_edit_production",
+      "description": "THE PREFERRED TOOL for reply-to re-edit requests ('re-edit this video', 'fix the pacing/story/CTA/packaging on the one you just made', 'make the editing proper on the short you showed me', etc.). Takes the *exact same prior production* (job_id + its existing stills/clips/scenes.json/video the user already saw), records the re-edit instruction, and re-finalizes a new version with improved editing, pacing, storytelling, instruction-matched captions (captions off when requested; otherwise word-level captions by default), visual-narration lockstep, and a clear subscribe CTA at the end \u00e2\u20ac\u201d *without* throwing away the video and regenerating everything from scratch. The LLM should usually call list_production_scenes (or list_longform_scenes) + any needed targeted edit_production_scene_still / set_*_duration first, then call this. Only creates a full new generation if the user explicitly asks to 'start over' or 'change the entire visual style'.",
+      "approval_required": false,
+      "required_params": [
+        "job_id",
+        "instruction"
+      ],
+      "params": {
+        "job_id": {
+          "type": "string",
+          "description": "The exact job_id from the reply_to context or the video card the user is replying to.",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "instruction": {
+          "type": "string",
+          "description": "The user's full re-edit request (e.g. 'make the pacing tighter, one word per caption on every scene, strong subscribe CTA at the very end, better story flow on the police station beat').",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "kind": {
+          "type": "string",
+          "description": "shortform or longform (defaults to shortform).",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "max_budget_usd": {
+          "type": "number",
+          "description": "Hard preflight budget cap for the re-edit pass.",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        }
+      }
+    },
+    {
+      "name": "run_build_script",
+      "description": "Run an allowlisted long_form build script (approval in confirm mode). Example: long_form/build_cryptic_ctr_ss_rook.py --preview",
+      "approval_required": true,
+      "required_params": [
+        "script"
+      ],
+      "params": {
+        "script": {
+          "type": "string",
+          "description": "Path under long_form/ e.g. build_cryptic_ctr_ss_rook.py",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "args": {
+          "type": "array",
+          "description": "CLI args e.g. ['--preview']",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        }
+      }
+    },
+    {
+      "name": "youtube_oauth_status",
+      "description": "Explain Studio YouTube OAuth scopes and how to connect channels in Settings.",
+      "approval_required": false,
+      "required_params": [],
+      "params": {}
+    },
+    {
+      "name": "list_youtube_channels",
+      "description": "List OAuth-connected YouTube channels with harvest/analytics status.",
+      "approval_required": false,
+      "required_params": [],
+      "params": {}
+    },
+    {
+      "name": "get_perpetual_memory",
+      "description": "Read durable Studio Agent memory for this user and optionally a specific YouTube channel. Use before channel strategy, packaging, visual defaults, and production planning.",
+      "approval_required": false,
+      "required_params": [],
+      "params": {
+        "channel_id": {
+          "type": "string",
+          "description": "",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "registry_key": {
+          "type": "string",
+          "description": "",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        }
+      }
+    },
+    {
+      "name": "remember_channel_preference",
+      "description": "Persist a durable user/channel preference, rule, lesson, or strategy note. Use when the user says remember/always/never, when analytics reveals a lesson, or after production feedback changes the channel playbook.",
+      "approval_required": false,
+      "required_params": [
+        "note"
+      ],
+      "params": {
+        "note": {
+          "type": "string",
+          "description": "",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "scope": {
+          "type": "string",
+          "description": "",
+          "enum": [
+            "global",
+            "channel"
+          ],
+          "default": "channel",
+          "minimum": null,
+          "maximum": null
+        },
+        "channel_id": {
+          "type": "string",
+          "description": "",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "registry_key": {
+          "type": "string",
+          "description": "",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "title": {
+          "type": "string",
+          "description": "",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "kind": {
+          "type": "string",
+          "description": "preference, rule, visual_style, packaging, pacing, lesson, strategy",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "importance": {
+          "type": "integer",
+          "description": "",
+          "enum": null,
+          "default": 4,
+          "minimum": null,
+          "maximum": null
+        }
+      }
+    },
+    {
+      "name": "get_studio_credits",
+      "description": "Unified credit wallet balance, plan, recent ledger. Use before expensive renders; tell user to top up in Studio Wallet when low.",
+      "approval_required": false,
+      "required_params": [],
+      "params": {}
+    },
+    {
+      "name": "get_channel_analytics",
+      "description": "Channel intelligence: Catalyst harvest + live YouTube Analytics (90d Reporting API: views, CTR, AVD, per-video retention rows when available, Shorts-specific latest-vs-winner comparison, top titles, series arcs) and latest upload velocity when OAuth is connected. If video_level_retention_available is false, do not infer which specific video had high AVD.",
+      "approval_required": false,
+      "required_params": [],
+      "params": {
+        "channel_id": {
+          "type": "string",
+          "description": "",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "registry_key": {
+          "type": "string",
+          "description": "long_form channel key e.g. cryptic_science",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "focus": {
+          "type": "string",
+          "description": "Use latest_upload when the user asks about the current/latest posted video or short.",
+          "enum": [
+            "general",
+            "latest_upload"
+          ],
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        }
+      }
+    },
+    {
+      "name": "search_youtube_public",
+      "description": "Search public YouTube for niche demand and reference candidates. Always call this for 14-30 day / fresh / current demand requests. Uses YouTube Data API publishedAfter via the days parameter (7-90) for recent-momentum uploads, plus a separate 365-day order=viewCount top-performer pass. Returns hydrated title/channel/views/likes/published_at/support_label. Does not return private analytics like AVD or retention.",
+      "approval_required": false,
+      "required_params": [
+        "query"
+      ],
+      "params": {
+        "query": {
+          "type": "string",
+          "description": "Search phrase, e.g. 'government fugitives documentary YouTube'",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "max_results": {
+          "type": "integer",
+          "description": "",
+          "enum": null,
+          "default": 8,
+          "minimum": null,
+          "maximum": null
+        },
+        "days": {
+          "type": "integer",
+          "description": "Recent-momentum publishedAfter window in days (7-90). Use 14 for tight 14-30 day reads, 30 default. Top performers still use a 365-day viewCount pass.",
+          "enum": null,
+          "default": 30,
+          "minimum": null,
+          "maximum": null
+        },
+        "order": {
+          "type": "string",
+          "description": "Legacy hint; demand research always merges recent + top performers inside the days window.",
+          "enum": [
+            "relevance",
+            "date",
+            "viewCount"
+          ],
+          "default": "date",
+          "minimum": null,
+          "maximum": null
+        },
+        "fresh": {
+          "type": "boolean",
+          "description": "Bypass cache and run live date+viewCount search for current/trending demand.",
+          "enum": null,
+          "default": true,
+          "minimum": null,
+          "maximum": null
+        }
+      }
+    },
+    {
+      "name": "get_public_search_trends",
+      "description": "Public YouTube search demand (last 30 days) + predicted topic scores. Use registry_key to bias queries to a channel niche. Returned videos include hydrated public stats when available; do not call something trending/high-volume unless support_label and hydrated stats justify it.",
+      "approval_required": false,
+      "required_params": [],
+      "params": {
+        "query": {
+          "type": "string",
+          "description": "",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "registry_key": {
+          "type": "string",
+          "description": "",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "days": {
+          "type": "integer",
+          "description": "",
+          "enum": null,
+          "default": 30,
+          "minimum": null,
+          "maximum": null
+        },
+        "fresh": {
+          "type": "boolean",
+          "description": "Bypass public-search cache for current/latest/live trend requests; costs fresh YouTube quota.",
+          "enum": null,
+          "default": false,
+          "minimum": null,
+          "maximum": null
+        }
+      }
+    },
+    {
+      "name": "get_fal_pricing",
+      "description": "Fetch live fal.ai Platform API pricing for image/i2v/TTS endpoints. Supplemental only \u2014 prefer estimate_shortform_render_cost for user-facing short quotes.",
+      "approval_required": false,
+      "required_params": [],
+      "params": {
+        "endpoints": {
+          "type": "array",
+          "description": "Optional fal endpoint ids e.g. fal-ai/flux-pro/v1.1",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        }
+      }
+    },
+    {
+      "name": "estimate_shortform_render_cost",
+      "description": "Grounded USD estimate for a shortform render using the user's active session image_model_id and video_model. REQUIRED before quoting per-short production cost \u2014 never invent LTX/Seedream pricing from memory.",
+      "approval_required": false,
+      "required_params": [],
+      "params": {
+        "duration_seconds": {
+          "type": "number",
+          "description": "Target finished short length in seconds (e.g. 20).",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "scene_count": {
+          "type": "integer",
+          "description": "Number of scene stills to generate. Defaults from duration (~5s/scene).",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "animate": {
+          "type": "boolean",
+          "description": "Include i2v animation cost. Default true for full short estimates.",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "include_finalize": {
+          "type": "boolean",
+          "description": "Include finalize_production narration/SFX allowance. Default true.",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "visual_proof_only": {
+          "type": "boolean",
+          "description": "One-scene proof mode (1 still, no multi-scene spread).",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "image_model_id": {
+          "type": "string",
+          "description": "Optional override. Defaults to session image model picker.",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "video_model": {
+          "type": "string",
+          "description": "Optional override. Defaults to session i2v model picker.",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        }
+      }
+    },
+    {
+      "name": "ingest_cliplab_attachment",
+      "description": "Internal/admin ClipLab: ingest the latest uploaded video attachment from this Studio Agent chat as a long-form source, transcribe it, and create a ClipLab video_id. Use this first when the user uploads a long recording and asks Studio Agent to find/produce clips. This does not use Studio short-form render styles because it cuts existing footage.",
+      "approval_required": true,
+      "required_params": [],
+      "params": {
+        "attachment_path": {
+          "type": "string",
+          "description": "Optional server-persisted attachment path. Usually omit and use the latest video attachment.",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "channel_id": {
+          "type": "string",
+          "description": "Selected YouTube channel id for Catalyst learning context.",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "registry_key": {
+          "type": "string",
+          "description": "Studio channel registry key for Catalyst learning context.",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        }
+      }
+    },
+    {
+      "name": "analyze_cliplab_video",
+      "description": "ClipLab: analyze an already-ingested long video/short by ClipLab video_id and return ranked 9:16 clip candidates. Use after the user uploads/pulls a source in ClipLab or gives a ClipLab video_id. Logs candidates into Catalyst training data. Do not apply generated short-form style presets; this is clip selection from existing footage.",
+      "approval_required": false,
+      "required_params": [
+        "video_id",
+        "prompt"
+      ],
+      "params": {
+        "video_id": {
+          "type": "string",
+          "description": "ClipLab video_id, e.g. vid_... or yt_...",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "prompt": {
+          "type": "string",
+          "description": "What to find: hooks, tension, controversy, emotional peaks, stream highlights, etc.",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "max_segments": {
+          "type": "integer",
+          "description": "",
+          "enum": null,
+          "default": 12,
+          "minimum": null,
+          "maximum": null
+        },
+        "channel_id": {
+          "type": "string",
+          "description": "Selected YouTube channel id for Catalyst learning context.",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "registry_key": {
+          "type": "string",
+          "description": "Studio channel registry key for Catalyst learning context.",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "provider": {
+          "type": "string",
+          "description": "ClipLab provider. Use opus only for owner/admin OpusClip testing; local keeps Studio's native Catalyst pipeline.",
+          "enum": [
+            "auto",
+            "local",
+            "opus",
+            "hybrid"
+          ],
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        }
+      }
+    },
+    {
+      "name": "render_cliplab_segments",
+      "description": "ClipLab: render selected analyzed segments into 9:16 clips with face-track reframe and captions. Requires an analyze_cliplab_video job_id and selected segment indices. Does not use generated-scene short-form styles or image-to-video styles.",
+      "approval_required": true,
+      "required_params": [
+        "video_id",
+        "analyze_job_id",
+        "segment_indices"
+      ],
+      "params": {
+        "video_id": {
+          "type": "string",
+          "description": "",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "analyze_job_id": {
+          "type": "string",
+          "description": "",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "segment_indices": {
+          "type": "array",
+          "description": "",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "burn_captions": {
+          "type": "boolean",
+          "description": "",
+          "enum": null,
+          "default": true,
+          "minimum": null,
+          "maximum": null
+        },
+        "channel_id": {
+          "type": "string",
+          "description": "",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "registry_key": {
+          "type": "string",
+          "description": "",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        }
+      }
+    },
+    {
+      "name": "remix_cliplab_short",
+      "description": "ClipLab Remix Lab: polish an already-cut 9:16 short with blurred background, captions, color, and pacing treatment. Use when the user uploads an Opus-style clip and wants Studio to make it feel native/viral.",
+      "approval_required": true,
+      "required_params": [
+        "video_id"
+      ],
+      "params": {
+        "video_id": {
+          "type": "string",
+          "description": "",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "style_preset": {
+          "type": "string",
+          "description": "",
+          "enum": [
+            "clean_viral",
+            "empire",
+            "empire_magnates",
+            "documentary",
+            "streamer",
+            "high_energy"
+          ],
+          "default": "clean_viral",
+          "minimum": null,
+          "maximum": null
+        },
+        "caption_style": {
+          "type": "string",
+          "description": "",
+          "enum": [
+            "bold",
+            "minimal",
+            "empire"
+          ],
+          "default": "bold",
+          "minimum": null,
+          "maximum": null
+        },
+        "edit_intensity": {
+          "type": "string",
+          "description": "",
+          "enum": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "default": "medium",
+          "minimum": null,
+          "maximum": null
+        },
+        "background_mode": {
+          "type": "string",
+          "description": "",
+          "enum": [
+            "blur",
+            "solid"
+          ],
+          "default": "blur",
+          "minimum": null,
+          "maximum": null
+        },
+        "burn_captions": {
+          "type": "boolean",
+          "description": "",
+          "enum": null,
+          "default": true,
+          "minimum": null,
+          "maximum": null
+        },
+        "channel_id": {
+          "type": "string",
+          "description": "",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "notes": {
+          "type": "string",
+          "description": "",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        }
+      }
+    },
+    {
+      "name": "poll_cliplab_job",
+      "description": "Poll a ClipLab ingest/analyze/render/remix job and return persisted segments, clips, errors, or remix output.",
+      "approval_required": false,
+      "required_params": [
+        "job_id"
+      ],
+      "params": {
+        "job_id": {
+          "type": "string",
+          "description": "",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        }
+      }
+    },
+    {
+      "name": "fetch_archival_for_video",
+      "description": "Get archival B-roll matched to THIS exact video: per-scene queries from topic + scene blueprint, fan-out Internet Archive (Prelinger/stock), LOC film, NASA video, Wikimedia, NPS, FBI. Resolves direct MP4/download URLs. Call after build_scene_blueprint_from_reference or with topic + registry_key. Use BEFORE fal generation \u00e2\u20ac\u201d Lume/Magnates docs are ~90% archival stills+B-roll.",
+      "approval_required": false,
+      "required_params": [
+        "topic"
+      ],
+      "params": {
+        "topic": {
+          "type": "string",
+          "description": "Exact video topic",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "title": {
+          "type": "string",
+          "description": "",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "registry_key": {
+          "type": "string",
+          "description": "long_form channel e.g. cryptic_science",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "preset": {
+          "type": "string",
+          "description": "",
+          "enum": [
+            "history",
+            "documentary",
+            "science",
+            "criminal",
+            "nature",
+            "all"
+          ],
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "blueprint_job_id": {
+          "type": "string",
+          "description": "scene blueprint job_id from analyze_reference_video flow",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "production_job_id": {
+          "type": "string",
+          "description": "Stable id for manifest path (defaults to blueprint_job_id)",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "limit_per_scene": {
+          "type": "integer",
+          "description": "",
+          "enum": null,
+          "default": 5,
+          "minimum": null,
+          "maximum": null
+        },
+        "resolve_downloads": {
+          "type": "boolean",
+          "description": "Resolve direct file URLs (IA mp4, NASA assets, etc.)",
+          "enum": null,
+          "default": true,
+          "minimum": null,
+          "maximum": null
+        }
+      }
+    },
+    {
+      "name": "resolve_archival_asset",
+      "description": "Resolve direct download URLs for one archival search hit (pass the asset object from fetch_archival_for_video or search_archival_media).",
+      "approval_required": false,
+      "required_params": [
+        "source"
+      ],
+      "params": {
+        "source": {
+          "type": "string",
+          "description": "",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "id": {
+          "type": "string",
+          "description": "",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "title": {
+          "type": "string",
+          "description": "",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "page_url": {
+          "type": "string",
+          "description": "",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "download_url": {
+          "type": "string",
+          "description": "",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "media_type": {
+          "type": "string",
+          "description": "",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        }
+      }
+    },
+    {
+      "name": "search_archival_media",
+      "description": "Quick single-query archival search. For a full video shot list use fetch_archival_for_video instead (per-scene, direct downloads).",
+      "approval_required": false,
+      "required_params": [
+        "query"
+      ],
+      "params": {
+        "query": {
+          "type": "string",
+          "description": "",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "preset": {
+          "type": "string",
+          "description": "Curated source set. Omit to use 'documentary'.",
+          "enum": [
+            "history",
+            "documentary",
+            "science",
+            "criminal",
+            "nature",
+            "all"
+          ],
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "sources": {
+          "type": "array",
+          "description": "Explicit sources (overrides preset).",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "limit_per_source": {
+          "type": "integer",
+          "description": "",
+          "enum": null,
+          "default": 8,
+          "minimum": null,
+          "maximum": null
+        }
+      }
+    },
+    {
+      "name": "analyze_reference_video",
+      "description": "Analyze a reference video from YouTube (yt-dlp) or from an uploaded Studio Agent attachment (local_path). Extracts metadata, scene keyframes, cut timeline pacing, and audio for transcription. Poll poll_render_job(kind=competitor), then build_scene_blueprint_from_reference.",
+      "approval_required": false,
+      "required_params": [],
+      "params": {
+        "url": {
+          "type": "string",
+          "description": "YouTube video URL",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "local_path": {
+          "type": "string",
+          "description": "Server path to an uploaded reference video from this chat attachment.",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "source_name": {
+          "type": "string",
+          "description": "Display name for uploaded reference files.",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "scene_threshold": {
+          "type": "number",
+          "description": "",
+          "enum": null,
+          "default": 0.3,
+          "minimum": null,
+          "maximum": null
+        },
+        "max_frames": {
+          "type": "integer",
+          "description": "",
+          "enum": null,
+          "default": 40,
+          "minimum": null,
+          "maximum": null
+        },
+        "content_format": {
+          "type": "string",
+          "description": "Analyze with Shorts metrics or long-form documentary metrics.",
+          "enum": [
+            "short",
+            "long"
+          ],
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        }
+      }
+    },
+    {
+      "name": "analyze_competitor_video",
+      "description": "Alias of analyze_reference_video (competitor/outlier study).",
+      "approval_required": false,
+      "required_params": [
+        "url"
+      ],
+      "params": {
+        "url": {
+          "type": "string",
+          "description": "YouTube video URL",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "scene_threshold": {
+          "type": "number",
+          "description": "Scene-cut sensitivity (0.2 = more frames, 0.4 = fewer).",
+          "enum": null,
+          "default": 0.3,
+          "minimum": null,
+          "maximum": null
+        },
+        "max_frames": {
+          "type": "integer",
+          "description": "",
+          "enum": null,
+          "default": 32,
+          "minimum": null,
+          "maximum": null
+        },
+        "content_format": {
+          "type": "string",
+          "description": "Analyze with Shorts metrics or long-form documentary metrics.",
+          "enum": [
+            "short",
+            "long"
+          ],
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        }
+      }
+    },
+    {
+      "name": "retry_reference_analysis",
+      "description": "Re-run failed reference-analysis stages (transcript, vision, storytelling) on an existing competitor job_id without re-uploading. Use when transcript/vision/story failed but keyframes or pacing already exist. Poll poll_render_job(kind=competitor) is not required \u2014 this returns the refreshed analysis payload immediately.",
+      "approval_required": false,
+      "required_params": [
+        "job_id"
+      ],
+      "params": {
+        "job_id": {
+          "type": "string",
+          "description": "competitor analysis job_id from analyze_reference_video",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "stages": {
+          "type": "array",
+          "description": "Stages to retry; defaults to all failed/missing stages.",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        }
+      }
+    },
+    {
+      "name": "build_scene_blueprint_from_reference",
+      "description": "After analyze_reference_video completes: map keyframes + pacing into per-scene rows (1\u00e2\u20ac\u201c5 characters), Seedream v4.5 edit fields, i2v duration, BGM cues, audio mix.",
+      "approval_required": false,
+      "required_params": [
+        "job_id",
+        "topic"
+      ],
+      "params": {
+        "job_id": {
+          "type": "string",
+          "description": "",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "topic": {
+          "type": "string",
+          "description": "",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "channel_style": {
+          "type": "string",
+          "description": "",
+          "enum": [
+            "premium_doc",
+            "viral_short",
+            "story_manhwa"
+          ],
+          "default": "premium_doc",
+          "minimum": null,
+          "maximum": null
+        },
+        "characters_per_scene": {
+          "type": "integer",
+          "description": "1 for skeleton host; up to 5 for ensemble/cast channels.",
+          "enum": null,
+          "default": 1,
+          "minimum": null,
+          "maximum": null
+        },
+        "visual_brief": {
+          "type": "string",
+          "description": "",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "target_scene_count": {
+          "type": "integer",
+          "description": "",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        }
+      }
+    },
+    {
+      "name": "recommend_video_topics",
+      "description": "For creators who don't know what to film: merge channel analytics (if connected), growth playbook, and public search trends into ranked topic + niche recommendations. Does not imply Skeleton AI \u00e2\u20ac\u201d recommend format-appropriate pipelines (short script, long-form, reference blueprint, or skeleton only if user wants that visual).",
+      "approval_required": false,
+      "required_params": [],
+      "params": {
+        "registry_key": {
+          "type": "string",
+          "description": "",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "channel_id": {
+          "type": "string",
+          "description": "",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "niche_query": {
+          "type": "string",
+          "description": "",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "days": {
+          "type": "integer",
+          "description": "",
+          "enum": null,
+          "default": 30,
+          "minimum": null,
+          "maximum": null
+        }
+      }
+    },
+    {
+      "name": "search_music",
+      "description": "Search free Creative Commons music (Jamendo) for background tracks. Returns direct audio download URLs.",
+      "approval_required": false,
+      "required_params": [
+        "query"
+      ],
+      "params": {
+        "query": {
+          "type": "string",
+          "description": "",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "instrumental": {
+          "type": "boolean",
+          "description": "",
+          "enum": null,
+          "default": false,
+          "minimum": null,
+          "maximum": null
+        },
+        "limit": {
+          "type": "integer",
+          "description": "",
+          "enum": null,
+          "default": 12,
+          "minimum": null,
+          "maximum": null
+        }
+      }
+    },
+    {
+      "name": "search_sfx",
+      "description": "Search free sound effects (Freesound, CC0 by default for attribution-free commercial use).",
+      "approval_required": false,
+      "required_params": [
+        "query"
+      ],
+      "params": {
+        "query": {
+          "type": "string",
+          "description": "",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "cc0_only": {
+          "type": "boolean",
+          "description": "",
+          "enum": null,
+          "default": true,
+          "minimum": null,
+          "maximum": null
+        },
+        "limit": {
+          "type": "integer",
+          "description": "",
+          "enum": null,
+          "default": 12,
+          "minimum": null,
+          "maximum": null
+        }
+      }
+    },
+    {
+      "name": "finalize_longform_render",
+      "description": "After stills gate (phase awaiting_approval): run voice, SFX, thumbnails, and MP4 composite. Returns job_id to poll via Studio production monitor.",
+      "approval_required": true,
+      "required_params": [
+        "job_id"
+      ],
+      "params": {
+        "job_id": {
+          "type": "string",
+          "description": "",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "max_budget_usd": {
+          "type": "number",
+          "description": "Hard preflight budget cap for final long-form render.",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        }
+      }
+    },
+    {
+      "name": "refresh_channel_intelligence",
+      "description": "Re-sync a connected YouTube channel into Catalyst harvest (analytics, packaging/retention learnings). Run after new uploads or when recommendations feel stale.",
+      "approval_required": false,
+      "required_params": [
+        "channel_id"
+      ],
+      "params": {
+        "channel_id": {
+          "type": "string",
+          "description": "YouTube channel ID",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        }
+      }
+    },
+    {
+      "name": "record_production_feedback",
+      "description": "Log what worked or failed on a published video for NYPTID model improvement. Internal training signal only \u00e2\u20ac\u201d never sold to advertisers.",
+      "approval_required": false,
+      "required_params": [
+        "channel_id",
+        "outcome"
+      ],
+      "params": {
+        "channel_id": {
+          "type": "string",
+          "description": "",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "video_id": {
+          "type": "string",
+          "description": "",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "outcome": {
+          "type": "string",
+          "description": "e.g. breakout, underperformed, strong_retention, weak_packaging",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "notes": {
+          "type": "string",
+          "description": "",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "views": {
+          "type": "integer",
+          "description": "",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "ctr_percent": {
+          "type": "number",
+          "description": "",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        }
+      }
+    },
+    {
+      "name": "poll_render_job",
+      "description": "Poll job status by job_id and kind. Use kind='competitor' for analyze_competitor_video to surface live progress stages.",
+      "approval_required": false,
+      "required_params": [
+        "job_id",
+        "kind"
+      ],
+      "params": {
+        "job_id": {
+          "type": "string",
+          "description": "",
+          "enum": null,
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        },
+        "kind": {
+          "type": "string",
+          "description": "",
+          "enum": [
+            "longform",
+            "shortform",
+            "competitor",
+            "cliplab"
+          ],
+          "default": null,
+          "minimum": null,
+          "maximum": null
+        }
+      }
+    }
+  ],
+  "render_styles": [
+    {
+      "key": "cinematic",
+      "label": "Cinematic",
+      "group": "Realism",
+      "pipeline": "styled_t2i",
+      "description": "Premium documentary / film still \u2014 natural lighting, shallow depth, photoreal humans.",
+      "preview_url": "/api/studio-agent/style-preview/cinematic",
+      "preview_video_url": "/api/studio-agent/style-preview/cinematic/video",
+      "preview_ready": false,
+      "preview_video_ready": false
+    },
+    {
+      "key": "ultra_realism",
+      "label": "Ultra realism",
+      "group": "Realism",
+      "pipeline": "styled_t2i",
+      "description": "Hyperreal / ultra-detailed photographic render.",
+      "preview_url": "/api/studio-agent/style-preview/ultra_realism",
+      "preview_video_url": "/api/studio-agent/style-preview/ultra_realism/video",
+      "preview_ready": false,
+      "preview_video_ready": false
+    },
+    {
+      "key": "historical_18th_century",
+      "label": "18th century historical",
+      "group": "Realism",
+      "pipeline": "styled_t2i",
+      "description": "Period-accurate 1700s oil-painting / engraving historical illustration.",
+      "preview_url": "/api/studio-agent/style-preview/historical_18th_century",
+      "preview_video_url": "/api/studio-agent/style-preview/historical_18th_century/video",
+      "preview_ready": false,
+      "preview_video_ready": false
+    },
+    {
+      "key": "comic_realism",
+      "label": "Comic realism",
+      "group": "Comic",
+      "pipeline": "styled_t2i",
+      "description": "Painterly comic with realistic proportions and lighting.",
+      "preview_url": "/api/studio-agent/style-preview/comic_realism",
+      "preview_video_url": "/api/studio-agent/style-preview/comic_realism/video",
+      "preview_ready": false,
+      "preview_video_ready": false
+    },
+    {
+      "key": "comic_book",
+      "label": "Comic book (color)",
+      "group": "Comic",
+      "pipeline": "styled_t2i",
+      "description": "Modern color comic \u2014 DC/Marvel dynamic linework (ZeroTier-class).",
+      "preview_url": "/api/studio-agent/style-preview/comic_book",
+      "preview_video_url": "/api/studio-agent/style-preview/comic_book/video",
+      "preview_ready": false,
+      "preview_video_ready": false
+    },
+    {
+      "key": "bw_comic",
+      "label": "B&W comic",
+      "group": "Comic",
+      "pipeline": "styled_t2i",
+      "description": "Black and white comic ink \u2014 noir graphic novel.",
+      "preview_url": "/api/studio-agent/style-preview/bw_comic",
+      "preview_video_url": "/api/studio-agent/style-preview/bw_comic/video",
+      "preview_ready": false,
+      "preview_video_ready": false
+    },
+    {
+      "key": "dark_comic",
+      "label": "Dark comic",
+      "group": "Comic",
+      "pipeline": "styled_t2i",
+      "description": "Moody, high-contrast dark comic aesthetic.",
+      "preview_url": "/api/studio-agent/style-preview/dark_comic",
+      "preview_video_url": "/api/studio-agent/style-preview/dark_comic/video",
+      "preview_ready": false,
+      "preview_video_ready": false
+    },
+    {
+      "key": "dark_cartoon",
+      "label": "Dark cartoon",
+      "group": "Animation",
+      "pipeline": "styled_t2i",
+      "description": "Stylized dark cartoon \u2014 bold shapes, moody palette.",
+      "preview_url": "/api/studio-agent/style-preview/dark_cartoon",
+      "preview_video_url": "/api/studio-agent/style-preview/dark_cartoon/video",
+      "preview_ready": false,
+      "preview_video_ready": false
+    },
+    {
+      "key": "adult_cartoon",
+      "label": "Adult cartoon",
+      "group": "Animation",
+      "pipeline": "styled_t2i",
+      "description": "Mature animated sitcom / late-night cartoon tone (not explicit).",
+      "preview_url": "/api/studio-agent/style-preview/adult_cartoon",
+      "preview_video_url": "/api/studio-agent/style-preview/adult_cartoon/video",
+      "preview_ready": false,
+      "preview_video_ready": false
+    },
+    {
+      "key": "cute_anime",
+      "label": "Cute anime",
+      "group": "Animation",
+      "pipeline": "styled_t2i",
+      "description": "Soft anime \u2014 large eyes, pastel-friendly, kawaii-adjacent.",
+      "preview_url": "/api/studio-agent/style-preview/cute_anime",
+      "preview_video_url": "/api/studio-agent/style-preview/cute_anime/video",
+      "preview_ready": false,
+      "preview_video_ready": false
+    },
+    {
+      "key": "studio_ghibli",
+      "label": "Studio Ghibli",
+      "group": "Animation",
+      "pipeline": "styled_t2i",
+      "description": "Hand-painted Ghibli-inspired warmth and wonder.",
+      "preview_url": "/api/studio-agent/style-preview/studio_ghibli",
+      "preview_video_url": "/api/studio-agent/style-preview/studio_ghibli/video",
+      "preview_ready": false,
+      "preview_video_ready": false
+    },
+    {
+      "key": "pixar",
+      "label": "Pixar",
+      "group": "Animation",
+      "pipeline": "styled_t2i",
+      "description": "3D animated feature film \u2014 Pixar-grade appeal lighting.",
+      "preview_url": "/api/studio-agent/style-preview/pixar",
+      "preview_video_url": "/api/studio-agent/style-preview/pixar/video",
+      "preview_ready": false,
+      "preview_video_ready": false
+    },
+    {
+      "key": "claymation",
+      "label": "Claymation",
+      "group": "Animation",
+      "pipeline": "styled_t2i",
+      "description": "Handmade stop-motion clay look \u2014 tactile models, fingerprints, miniature sets.",
+      "preview_url": "/api/studio-agent/style-preview/claymation",
+      "preview_video_url": "/api/studio-agent/style-preview/claymation/video",
+      "preview_ready": false,
+      "preview_video_ready": false
+    },
+    {
+      "key": "disney_90s",
+      "label": "90s Disney",
+      "group": "Animation",
+      "pipeline": "styled_t2i",
+      "description": "1990s Disney Renaissance hand-drawn animation.",
+      "preview_url": "/api/studio-agent/style-preview/disney_90s",
+      "preview_video_url": "/api/studio-agent/style-preview/disney_90s/video",
+      "preview_ready": false,
+      "preview_video_ready": false
+    },
+    {
+      "key": "simpsons",
+      "label": "Simpsons",
+      "group": "Animation",
+      "pipeline": "styled_t2i",
+      "description": "Yellow-skin satirical sitcom cartoon.",
+      "preview_url": "/api/studio-agent/style-preview/simpsons",
+      "preview_video_url": "/api/studio-agent/style-preview/simpsons/video",
+      "preview_ready": false,
+      "preview_video_ready": false
+    },
+    {
+      "key": "creepy_cartoon_v1",
+      "label": "Creepy cartoon v1",
+      "group": "Animation",
+      "pipeline": "styled_t2i",
+      "description": "Unsettling cartoon \u2014 off-kilter proportions, liminal dread.",
+      "preview_url": "/api/studio-agent/style-preview/creepy_cartoon_v1",
+      "preview_video_url": "/api/studio-agent/style-preview/creepy_cartoon_v1/video",
+      "preview_ready": false,
+      "preview_video_ready": false
+    },
+    {
+      "key": "creepy_cartoon_v2",
+      "label": "Creepy cartoon v2",
+      "group": "Animation",
+      "pipeline": "styled_t2i",
+      "description": "Creepier variant \u2014 sharper shadows, more dread.",
+      "preview_url": "/api/studio-agent/style-preview/creepy_cartoon_v2",
+      "preview_video_url": "/api/studio-agent/style-preview/creepy_cartoon_v2/video",
+      "preview_ready": false,
+      "preview_video_ready": false
+    },
+    {
+      "key": "illustrated_book",
+      "label": "Illustrated book",
+      "group": "Specialty",
+      "pipeline": "styled_t2i",
+      "description": "Premium children's / literary book illustration spread.",
+      "preview_url": "/api/studio-agent/style-preview/illustrated_book",
+      "preview_video_url": "/api/studio-agent/style-preview/illustrated_book/video",
+      "preview_ready": false,
+      "preview_video_ready": false
+    },
+    {
+      "key": "whiteboard",
+      "label": "Whiteboard",
+      "group": "Specialty",
+      "pipeline": "styled_t2i",
+      "description": "Explainer whiteboard doodle \u2014 markers on white surface.",
+      "preview_url": "/api/studio-agent/style-preview/whiteboard",
+      "preview_video_url": "/api/studio-agent/style-preview/whiteboard/video",
+      "preview_ready": false,
+      "preview_video_ready": false
+    },
+    {
+      "key": "lego",
+      "label": "LEGO",
+      "group": "Specialty",
+      "pipeline": "styled_t2i",
+      "description": "LEGO brick diorama \u2014 minifigures and studded plastic world.",
+      "preview_url": "/api/studio-agent/style-preview/lego",
+      "preview_video_url": "/api/studio-agent/style-preview/lego/video",
+      "preview_ready": false,
+      "preview_video_ready": false
+    },
+    {
+      "key": "minecraft",
+      "label": "Minecraft",
+      "group": "Specialty",
+      "pipeline": "styled_t2i",
+      "description": "Blocky voxel Minecraft-style world.",
+      "preview_url": "/api/studio-agent/style-preview/minecraft",
+      "preview_video_url": "/api/studio-agent/style-preview/minecraft/video",
+      "preview_ready": false,
+      "preview_video_ready": false
+    },
+    {
+      "key": "low_poly",
+      "label": "Low poly",
+      "group": "Specialty",
+      "pipeline": "styled_t2i",
+      "description": "Low-poly 3D art \u2014 faceted minimalist 3D.",
+      "preview_url": "/api/studio-agent/style-preview/low_poly",
+      "preview_video_url": "/api/studio-agent/style-preview/low_poly/video",
+      "preview_ready": false,
+      "preview_video_ready": false
+    },
+    {
+      "key": "hand_drawn_2d",
+      "label": "2D hand-drawn",
+      "group": "Specialty",
+      "pipeline": "styled_t2i",
+      "description": "Traditional 2D hand-drawn animation frame.",
+      "preview_url": "/api/studio-agent/style-preview/hand_drawn_2d",
+      "preview_video_url": "/api/studio-agent/style-preview/hand_drawn_2d/video",
+      "preview_ready": false,
+      "preview_video_ready": false
+    },
+    {
+      "key": "skeleton_host",
+      "label": "Skeleton (Anatomical)",
+      "group": "Niche",
+      "pipeline": "skeleton_host",
+      "description": "Its own niche: canonical ivory bone + glass-shell host for comparison / explainer shorts. Pick this art style when you want the skeleton look \u2014 same as Cryptic Science format.",
+      "preview_url": "/api/studio-agent/style-preview/skeleton_host",
+      "preview_video_url": "/api/studio-agent/style-preview/skeleton_host/video",
+      "preview_ready": false,
+      "preview_video_ready": false
+    }
+  ],
+  "skills": [
+    "ai-host-setup",
+    "audio-mix-assembly",
+    "authentic-setting",
+    "broll-selection",
+    "captions",
+    "channel-onboarding",
+    "character-continuity",
+    "compliance-preflight",
+    "composite-character",
+    "description-writing",
+    "gimp-image-editing",
+    "heygen-avatar-video",
+    "heygen-translate",
+    "image-generation",
+    "image-to-video",
+    "import-existing-channel",
+    "outlier-mining",
+    "performance-analysis",
+    "photoreal-vs-cinematic",
+    "reference-channel",
+    "script-writing",
+    "skill-customization",
+    "storyboard",
+    "thumbnail-design",
+    "title-creation",
+    "voice-tts"
+  ],
+  "channel_keys_detected": [
+    "cryptic_science",
+    "empire_magnates",
+    "hidden_cortex",
+    "history_rewind",
+    "lacuna",
+    "lexi_manhwa",
+    "lofi_radio",
+    "pb_live",
+    "zerotier"
+  ],
+  "session_controls": {
+    "approval_mode": [
+      "confirm",
+      "auto"
+    ],
+    "reasoning_depth": [
+      "fast",
+      "balanced",
+      "deep"
+    ],
+    "content_format": [
+      "short",
+      "long",
+      "auto"
+    ],
+    "caption_mode": [
+      "word",
+      "off"
+    ],
+    "captions_enabled": [
+      true,
+      false
+    ],
+    "art_style": "session render_style picker; must match list_render_styles keys",
+    "image_model": "session image model picker; see start_shortform_generate.image_model_id enum",
+    "video_model_i2v": "session I2V picker; see start_shortform_generate.video_model enum",
+    "channel_select": "SELECT CHANNEL UI + list_youtube_channels / list_studio_channels",
+    "product_website": "profile product URL for ads / ingest_product_reference"
+  },
+  "notes": [
+    "Market research does NOT require a connected YouTube channel (public tools only).",
+    "Connected channel enables get_channel_analytics / private retention.",
+    "APPROVAL_REQUIRED tools need user confirm when approval_mode=confirm.",
+    "start_shortform_generate requires render_style, category_key, topic, video_model.",
+    "Prefer get_public_search_trends alone for Live Demand (quota survival); avoid dual public search."
+  ]
+}

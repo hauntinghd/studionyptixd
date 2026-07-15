@@ -4730,14 +4730,7 @@ def _youtube_extract_public_channel_page_rows(html: str) -> list[dict]:
     return rows
 
 
-def _youtube_extract_public_channel_rows_with_ytdlp(channel_url: str, channel_id: str, max_results: int = 100) -> list[dict]:
-    page_url = _youtube_channel_videos_page_url(channel_url, channel_id)
-    if not page_url or _youtube_ytdlp_module is None:
-        return []
-    try:
-        info = _youtube_ytdlp_extract_info_blocking(page_url)
-    except Exception:
-        return []
+def _youtube_channel_playlist_rows_from_ytdlp_info(info: dict | None, *, max_results: int = 100) -> list[dict]:
     entries = [dict(v or {}) for v in list((info or {}).get("entries") or []) if isinstance(v, dict)]
     rows: list[dict] = []
     for entry in entries[: max(1, min(int(max_results or 100), 250))]:
@@ -4763,6 +4756,80 @@ def _youtube_extract_public_channel_rows_with_ytdlp(channel_url: str, channel_id
             }
         )
     return rows
+
+
+def _yt_dlp_extract_channel_playlist_flat_blocking(
+    channel_url: str,
+    channel_id: str,
+    *,
+    max_results: int = 100,
+) -> list[dict]:
+    """Fast channel /videos tab listing via flat playlist extract (not full per-video metadata)."""
+    page_url = _youtube_channel_videos_page_url(channel_url, channel_id)
+    if not page_url:
+        return []
+    limit = max(1, min(int(max_results or 100), 50))
+    yt_dlp_bin = shutil.which("yt-dlp")
+    if yt_dlp_bin:
+        cmd = [
+            yt_dlp_bin,
+            "--dump-single-json",
+            "--no-warnings",
+            "--skip-download",
+            "--flat-playlist",
+            f"--playlist-end={limit}",
+            "--ignore-errors",
+            "--add-header",
+            (
+                "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36"
+            ),
+            page_url,
+        ]
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=45)
+            if proc.returncode == 0 and str(proc.stdout or "").strip():
+                info = json.loads(proc.stdout)
+                if isinstance(info, dict) and info:
+                    rows = _youtube_channel_playlist_rows_from_ytdlp_info(info, max_results=limit)
+                    if rows:
+                        return rows
+        except Exception:
+            pass
+    if _youtube_ytdlp_module is not None:
+        opts = {
+            "quiet": True,
+            "no_warnings": True,
+            "skip_download": True,
+            "extract_flat": "in_playlist",
+            "playlistend": limit,
+            "ignoreerrors": True,
+            "http_headers": {
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/135.0.0.0 Safari/537.36"
+                )
+            },
+        }
+        try:
+            with _youtube_ytdlp_module.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(page_url, download=False) or {}
+            if isinstance(info, dict) and info:
+                rows = _youtube_channel_playlist_rows_from_ytdlp_info(info, max_results=limit)
+                if rows:
+                    return rows
+        except Exception:
+            pass
+    return []
+
+
+def _youtube_extract_public_channel_rows_with_ytdlp(channel_url: str, channel_id: str, max_results: int = 100) -> list[dict]:
+    return _yt_dlp_extract_channel_playlist_flat_blocking(
+        channel_url,
+        channel_id,
+        max_results=max_results,
+    )
 
 
 def _youtube_merge_public_video_rows(primary_rows: list[dict] | None, supplemental_rows: list[dict] | None) -> list[dict]:
@@ -4795,24 +4862,46 @@ def _youtube_merge_public_video_rows(primary_rows: list[dict] | None, supplement
     return merged_rows
 
 
+def _youtube_channel_rows_have_views(rows: list[dict] | None) -> bool:
+    return any(int(float((row or {}).get("views", 0) or 0) or 0) > 0 for row in list(rows or []))
+
+
 async def _youtube_fetch_public_channel_page_videos(
     access_token: str,
     *,
     channel_url: str = "",
     channel_id: str = "",
     max_results: int = 100,
+    hydrate_metadata: bool = True,
 ) -> list[dict]:
     page_url = _youtube_channel_videos_page_url(channel_url, channel_id)
     if not page_url:
         return []
+    capped = max(1, min(int(max_results or 100), 100))
+    fast_channel_pick = capped <= 12
+
+    async def _flat_ytdlp_rows() -> list[dict]:
+        return await asyncio.to_thread(
+            _yt_dlp_extract_channel_playlist_flat_blocking,
+            channel_url,
+            channel_id,
+            max_results=capped,
+        )
+
+    if fast_channel_pick:
+        page_rows = await _flat_ytdlp_rows()
+        if page_rows:
+            return page_rows[:capped]
+
     try:
-        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+        async with httpx.AsyncClient(timeout=12 if fast_channel_pick else 30, follow_redirects=True) as client:
             resp = await client.get(
                 page_url,
                 headers={"User-Agent": "Mozilla/5.0", "Accept-Language": "en-US,en;q=0.9"},
             )
         if resp.status_code != 200:
-            return []
+            page_rows = await _flat_ytdlp_rows()
+            return page_rows[:capped] if page_rows else []
         page_rows = _youtube_extract_public_channel_page_rows(resp.text)
         if not page_rows:
             video_ids = _youtube_extract_video_ids_from_channel_page(resp.text)
@@ -4829,22 +4918,16 @@ async def _youtube_fetch_public_channel_page_videos(
                 if str(video_id or "").strip()
             ]
         if not page_rows:
-            page_rows = _youtube_extract_public_channel_rows_with_ytdlp(
-                channel_url=channel_url,
-                channel_id=channel_id,
-                max_results=max_results,
-            )
+            page_rows = await _flat_ytdlp_rows()
         if not page_rows:
             return []
-        page_rows = page_rows[: max(1, min(int(max_results or 100), 100))]
-        if not any(int(float((row or {}).get("views", 0) or 0) or 0) > 0 for row in page_rows):
-            ytdlp_rows = _youtube_extract_public_channel_rows_with_ytdlp(
-                channel_url=channel_url,
-                channel_id=channel_id,
-                max_results=max_results,
-            )
+        page_rows = page_rows[:capped]
+        if not _youtube_channel_rows_have_views(page_rows):
+            ytdlp_rows = await _flat_ytdlp_rows()
             if ytdlp_rows:
                 page_rows = _youtube_merge_public_video_rows(page_rows, ytdlp_rows)
+        if not hydrate_metadata or _youtube_channel_rows_have_views(page_rows):
+            return page_rows
         page_ids = [str((row or {}).get("video_id", "") or "").strip() for row in list(page_rows or []) if str((row or {}).get("video_id", "") or "").strip()]
         hydrated_rows: list[dict] = []
         if page_ids:
@@ -4876,11 +4959,8 @@ async def _youtube_fetch_public_channel_page_videos(
             merged_rows.append(merged)
         return merged_rows
     except Exception:
-        return _youtube_extract_public_channel_rows_with_ytdlp(
-            channel_url=channel_url,
-            channel_id=channel_id,
-            max_results=max_results,
-        )
+        page_rows = await _flat_ytdlp_rows()
+        return page_rows[:capped] if page_rows else []
 
 
 def _youtube_caption_language_candidates(language: str = "en") -> list[str]:

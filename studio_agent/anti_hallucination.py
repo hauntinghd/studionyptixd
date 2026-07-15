@@ -97,6 +97,15 @@ _CURRENT_INFO_RE = re.compile(
     re.IGNORECASE,
 )
 
+_PUBLIC_SEARCH_DENIAL_RE = re.compile(
+    r"\b("
+    r"(?:don't|do not) have a tool\b.{0,120}\b(?:filter|date range|date filtering|14-30|publishedafter)|"
+    r"does(?:n't| not) expose granular date|"
+    r"manual verification|screenshot their view counts|two options:"
+    r")\b",
+    re.IGNORECASE | re.DOTALL,
+)
+
 _FAKE_LIVE_DATA_RE = re.compile(
     r"\b("
     r"fresh search|live refresh|live search|verified current|current as of|as of today|"
@@ -130,7 +139,7 @@ _TOOL_NARRATION_RE = re.compile(r"(?im)^\s*Tool:\s*([a-zA-Z_][\w.-]*)\b")
 
 _SPECIFIC_RETENTION_CLAIM_RE = re.compile(
     r"\b("
-    r"(?:50|51|52|53|54|55|56|57|58|59|60|6[0-9])\s*%?\s*(?:avd|average view|retention)|"
+    r"(?:100|[1-9]?\d)\s*%?\s*(?:avd|average view|average percentage viewed|retention)|"
     r"high[- ]retention (?:short|video)|specific video .*?(?:avd|retention)|"
     r"video .*?(?:hit|has|had|got|gets).*?(?:avd|retention)|"
     r"there'?s definitely a video|i should be seeing that data|i should be able to pull"
@@ -138,12 +147,34 @@ _SPECIFIC_RETENTION_CLAIM_RE = re.compile(
     re.IGNORECASE,
 )
 
+_UNSUPPORTED_PERFORMANCE_PERCENT_RE = re.compile(
+    r"\b(?:hit|had|has|at|reached|drove|with)\s+(100|[1-9]?\d(?:\.\d+)?)%\s+"
+    r"(?:average view percentage|average percentage viewed|avd|retention|ctr|completion)",
+    re.IGNORECASE,
+)
+
+_OUTCOME_GUARANTEE_RE = re.compile(
+    r"\b(?:"
+    r"keeps? (?:the )?(?:character|identity|subject) perfectly consistent|"
+    r"won'?t hurt (?:ctr|retention|views?|performance)|"
+    r"will not hurt (?:ctr|retention|views?|performance)|"
+    r"guarantees? (?:consistency|views?|retention|performance|results?)|"
+    r"flawless(?:ly)? (?:consistent|artifact[- ]?free)"
+    r")\b",
+    re.IGNORECASE,
+)
+
 _PRODUCTION_COMPLETE_RE = re.compile(
     r"\b("
-    r"production (?:is )?complete|render (?:is )?complete|video (?:is )?ready|"
+    r"production (?:is )?complete|render (?:is )?complete|"
     r"re-?edit (?:is )?complete|i (?:fixed|rebuilt|recomposed) (?:that|the) .*?(?:video|production)|"
-    r"download (?:the )?(?:mp4|video)|your .*? is ready"
+    r"download (?:the )?mp4|your (?:finished )?(?:video|short|render|production) is ready"
     r")\b",
+    re.IGNORECASE,
+)
+
+_REFERENCE_VIDEO_ACTION_RE = re.compile(
+    r"\b(?:download|watch|analyze|analyse|study|break down|see)\b.+\b(?:that|this|the|specific)\s+video\b",
     re.IGNORECASE,
 )
 
@@ -243,6 +274,7 @@ _SEARCH_TOOLS = {
     "recommend_video_topics",
     "analyze_reference_video",
     "analyze_competitor_video",
+    "retry_reference_analysis",
     "fetch_archival_for_video",
     "web_search",
     "web_fetch",
@@ -267,6 +299,7 @@ _ACTION_TOOLS = {
     "set_production_scenes_animate",
     "set_production_scene_duration",
     "animate_production_scenes",
+    "repair_production_scene_animation",
     "finalize_production",
     "finalize_longform_render",
     "record_production_feedback",
@@ -430,10 +463,47 @@ def _commitment_without_execution(text: str, tool_fires: Sequence[ToolFire]) -> 
     if not match:
         return None
     commitment = match.group(0).strip()
+    low_commit = commitment.lower()
+    public_demand_tools = {"get_public_search_trends", "search_youtube_public", "recommend_video_topics"}
+    if _latest_tool_succeeded(tool_fires, public_demand_tools) and any(
+        term in low_commit for term in ("pull", "fetch", "search", "look", "public youtube", "youtube data")
+    ):
+        return None
+    if re.search(r"\b(?:download|watch)\b.+\bvideo\b", commitment, re.IGNORECASE):
+        reference_tools = {"analyze_reference_video", "analyze_competitor_video", "poll_render_job"}
+        return None if _latest_tool_succeeded(tool_fires, reference_tools) else commitment
     if _ACTION_COMMITMENT_RE.search(commitment):
         return None if _latest_tool_succeeded(tool_fires, _ACTION_TOOLS) else commitment
     evidence_tools = _SEARCH_TOOLS | _CHANNEL_DATA_TOOLS
     return None if _latest_tool_succeeded(tool_fires, evidence_tools) else commitment
+
+
+def _user_requires_channel_evidence(user_text: str) -> bool:
+    """True when the user explicitly asked for connected-channel analytics."""
+    try:
+        from studio_agent import store
+    except Exception:
+        store = None
+    if store and store.is_connected_channel_performance_request(user_text):
+        return True
+    low = str(user_text or "").lower()
+    if any(
+        phrase in low
+        for phrase in (
+            "channel analytics",
+            "channel data",
+            "my channel",
+            "our channel",
+            "connected channel",
+            "channel performance",
+            "latest video",
+            "latest short",
+            "current video",
+            "posted on the channel",
+        )
+    ):
+        return True
+    return bool(re.search(r"\b(?:pull|get|fetch)\b.+\b(?:channel|analytics)\b", low))
 
 
 def _router_layer(
@@ -441,6 +511,7 @@ def _router_layer(
     assistant_text: str,
     user_text: str,
     tool_fires: Sequence[ToolFire],
+    conversational_mode: bool = False,
 ) -> LayerCheck:
     blockers: list[str] = []
     textual_tools = _textual_tool_names(assistant_text)
@@ -453,7 +524,16 @@ def _router_layer(
                 + ", ".join(missing)
             )
 
-    if _FAKE_LIVE_DATA_RE.search(assistant_text) and not _has_any_tool(tool_fires, _SEARCH_TOOLS | _CHANNEL_DATA_TOOLS):
+    evidence_tools_fired = _has_any_tool(tool_fires, _SEARCH_TOOLS | _CHANNEL_DATA_TOOLS)
+    evidence_tools_ok = evidence_tools_fired and _latest_tool_succeeded(
+        tool_fires,
+        _SEARCH_TOOLS | _CHANNEL_DATA_TOOLS,
+    )
+
+    if _PUBLIC_SEARCH_DENIAL_RE.search(assistant_text):
+        blockers.append("denied search_youtube_public date-window capability that Studio already provides")
+
+    if _FAKE_LIVE_DATA_RE.search(assistant_text) and not evidence_tools_fired:
         blockers.append("claimed fresh/live/current data without a search, reference, or channel analytics tool")
 
     if _FAKE_TOOL_PROGRESS_RE.search(assistant_text) and not _has_any_tool(
@@ -461,13 +541,27 @@ def _router_layer(
     ):
         blockers.append("claimed backend tool/search work was running without executed tool evidence")
 
-    if _CURRENT_INFO_RE.search(user_text or "") and not _has_any_tool(tool_fires, _SEARCH_TOOLS | _CHANNEL_DATA_TOOLS):
+    if (
+        not conversational_mode
+        and _CURRENT_INFO_RE.search(user_text or "")
+        and not evidence_tools_ok
+    ):
         grounded_refusal = bool(re.search(r"\bneed (?:a |the )?(?:live|search|reference|channel|analytics|data|tool)\b", _lower(assistant_text)))
         if not grounded_refusal and len(assistant_text.strip()) > 40:
             blockers.append("answered a current/latest request without routing to a current data tool first")
 
-    if _CHANNEL_DATA_CLAIM_RE.search(assistant_text) and not _has_any_tool(tool_fires, _CHANNEL_DATA_TOOLS):
+    if (
+        _CHANNEL_DATA_CLAIM_RE.search(assistant_text)
+        and not _has_any_tool(tool_fires, _CHANNEL_DATA_TOOLS)
+        and not _CHANNEL_DATA_CLAIM_RE.search(user_text or "")
+    ):
         blockers.append("claimed channel analytics/performance evidence without a channel-data tool")
+
+    metric_match = _UNSUPPORTED_PERFORMANCE_PERCENT_RE.search(assistant_text)
+    if metric_match and not _has_any_tool(tool_fires, _CHANNEL_DATA_TOOLS):
+        claimed_percent = metric_match.group(1)
+        if not re.search(rf"\b{re.escape(claimed_percent)}%", user_text or "", re.IGNORECASE):
+            blockers.append("claimed an exact performance percentage without analytics evidence or a user-supplied metric")
 
     if _SPECIFIC_RETENTION_CLAIM_RE.search(assistant_text) and _analytics_retention_unavailable(tool_fires):
         blockers.append("claimed or implied specific video-level AVD/retention while analytics tool lacked video-level retention rows")
@@ -479,18 +573,23 @@ def _engineer_layer(
     *,
     assistant_text: str,
     tool_fires: Sequence[ToolFire],
+    conversational_mode: bool = False,
 ) -> LayerCheck:
     blockers: list[str] = []
     warnings: list[str] = []
 
-    if _PRODUCTION_COMPLETE_RE.search(assistant_text) and not _production_completed_this_turn(tool_fires):
+    if (
+        _PRODUCTION_COMPLETE_RE.search(assistant_text)
+        and not _REFERENCE_VIDEO_ACTION_RE.search(assistant_text)
+        and not _production_completed_this_turn(tool_fires)
+    ):
         blockers.append("claimed production/re-edit completion without a completed production tool result")
 
     if _ACTION_LANGUAGE_RE.search(assistant_text) and not _latest_tool_succeeded(tool_fires, _ACTION_TOOLS):
         warnings.append("used action language without a successful action-taking Studio tool in the turn")
 
     commitment = _commitment_without_execution(assistant_text, tool_fires)
-    if commitment:
+    if commitment and not conversational_mode:
         blockers.append(f"promised execution without firing a matching tool: {commitment!r}")
 
     for pattern, expected_tools, label in _COUNT_CLAIM_RULES:
@@ -516,6 +615,9 @@ def _auditor_layer(
     user_text: str,
 ) -> LayerCheck:
     blockers: list[str] = []
+    guarantee = _OUTCOME_GUARANTEE_RE.search(assistant_text)
+    if guarantee:
+        blockers.append(f"made an unsupported outcome/consistency guarantee: {guarantee.group(0)}")
     posted = _mentions_posted_empire_topic(assistant_text)
     if posted and _RECOMMENDATION_RE.search(assistant_text):
         user_allows_old_topic = bool(re.search(r"\b(remake|re-edit|reference|analyz|compare|use as signal)\b", _lower(user_text)))
@@ -547,6 +649,7 @@ def five_layer_audit(
     assistant_text: str,
     user_text: str,
     tool_fires: Sequence[ToolFire],
+    conversational_mode: bool = False,
 ) -> FiveLayerAudit:
     report = AuditReport()
     text = assistant_text or ""
@@ -564,8 +667,17 @@ def five_layer_audit(
         )
 
     first_four = (
-        _router_layer(assistant_text=text, user_text=user_text, tool_fires=tool_fires),
-        _engineer_layer(assistant_text=text, tool_fires=tool_fires),
+        _router_layer(
+            assistant_text=text,
+            user_text=user_text,
+            tool_fires=tool_fires,
+            conversational_mode=conversational_mode,
+        ),
+        _engineer_layer(
+            assistant_text=text,
+            tool_fires=tool_fires,
+            conversational_mode=conversational_mode,
+        ),
         _auditor_layer(assistant_text=text, user_text=user_text),
         _corrector_layer(assistant_text=text),
     )
@@ -586,12 +698,14 @@ def audit_turn(
     assistant_text: str,
     user_text: str,
     tool_fires: Sequence[ToolFire],
+    conversational_mode: bool = False,
 ) -> AuditReport:
     """Backward-compatible final turn audit used by the Studio Agent runner."""
     return five_layer_audit(
         assistant_text=assistant_text,
         user_text=user_text,
         tool_fires=tool_fires,
+        conversational_mode=conversational_mode,
     ).report
 
 
@@ -601,6 +715,13 @@ def guard_text(assistant_text: str, report: AuditReport) -> str:
         return assistant_text
 
     joined = " ".join(report.blocked_claims).lower()
+    if "promised execution" in joined and any(
+        term in joined for term in ("reference", "download", "watch", "analyze", "video")
+    ):
+        return (
+            "I should run analyze_reference_video on that video now instead of narrating the download. "
+            "If the backend already returned a job_id, I need to poll it until the analysis is complete."
+        )
     if "production" in joined or "re-edit" in joined or "render" in joined:
         return (
             "I should not call that complete yet. The edit/render needs to stay visible as an in-progress job "
@@ -614,18 +735,19 @@ def guard_text(assistant_text: str, report: AuditReport) -> str:
             "Empire Magnates videos as performance/style evidence and avoid recommending them as new work."
         )
 
-    if "channel" in joined or "analytics" in joined:
-        if "video-level avd" in joined or "video-level retention" in joined:
-            return (
-                "I cannot name an exact high-AVD winner from this tool result yet because per-video retention rows "
-                "are unavailable. I need YouTube Analytics OAuth with video-level retention rows before claiming a "
-                "specific winner. I should continue from the available selected-channel snapshot/public data, make "
-                "that limitation explicit, and avoid inventing a specific winner."
-            )
+    if "denied search_youtube_public date-window capability" in joined:
         return (
-            "The required channel analytics tool did not run in this turn, so I cannot make a grounded performance "
-            "claim from it. Retry this request with the selected channel still attached; Studio should route through "
-            "the forced channel-data preflight and then answer from that tool result."
+            "I should use search_youtube_public/get_public_search_trends with the days parameter "
+            "(7-90 day publishedAfter window for recent momentum, plus a 365-day top-performer pass) "
+            "instead of claiming date filtering is unavailable."
+        )
+
+    if "fresh/live/current" in joined or "current/latest" in joined or (
+        "search" in joined and "without a search" in joined
+    ):
+        return (
+            "I need a live/search/reference result before presenting that as current. I will verify it first, "
+            "then answer from the evidence."
         )
 
     if "browse" in joined or "youtube" in joined:
@@ -634,10 +756,18 @@ def guard_text(assistant_text: str, report: AuditReport) -> str:
             "If the search tool fails, I need to report the exact quota, auth, or network limitation."
         )
 
-    if "fresh/live/current" in joined or "current/latest" in joined or "search" in joined:
+    if "video-level avd" in joined or "video-level retention" in joined:
         return (
-            "I need a live/search/reference result before presenting that as current. I will verify it first, "
-            "then answer from the evidence."
+            "I cannot name an exact high-AVD winner from this tool result yet because per-video retention rows "
+            "are unavailable. I need YouTube Analytics OAuth with video-level retention rows before claiming a "
+            "specific winner. I should continue from the available selected-channel snapshot/public data, make "
+            "that limitation explicit, and avoid inventing a specific winner."
+        )
+    if "claimed channel analytics/performance evidence without a channel-data tool" in joined:
+        return (
+            "The required channel analytics tool did not run in this turn, so I cannot make a grounded performance "
+            "claim from it. Retry this request with the selected channel still attached; Studio should route through "
+            "the forced channel-data preflight and then answer from that tool result."
         )
 
     if "promised execution" in joined:

@@ -7,7 +7,10 @@ from typing import Any
 
 import httpx
 
+from studio_agent import model_registry
+
 OPENROUTER_BASE = "https://openrouter.ai/api/v1"
+XAI_BASE = os.getenv("XAI_BASE_URL", "https://api.x.ai/v1").rstrip("/")
 DEFAULT_MODEL = os.getenv("STUDIO_AGENT_MODEL", "claude-sonnet-4-6")
 PRIMARY_PROVIDER = os.getenv("STUDIO_AGENT_PRIMARY_PROVIDER", os.getenv("STUDIO_AGENT_LLM_PROVIDER", "anthropic")).strip().lower()
 ANTHROPIC_BASE = os.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com/v1").rstrip("/")
@@ -16,13 +19,9 @@ _ANTHROPIC_FALLBACK_MODELS_ENV = os.getenv("ANTHROPIC_FALLBACK_MODELS", "").stri
 
 
 def _normalize_anthropic_model(model: str) -> str:
-    """Convert stale/alias model names to stable Anthropic Messages API IDs."""
+    """Normalize formatting aliases without changing the selected model version."""
     model = model.strip()
     aliases = {
-        "anthropic/claude-3-5-haiku-latest": "claude-haiku-4-5-20251001",
-        "claude-3-5-haiku-latest": "claude-haiku-4-5-20251001",
-        "claude-3-5-haiku-20241022": "claude-haiku-4-5-20251001",
-        "anthropic/claude-3-5-haiku-20241022": "claude-haiku-4-5-20251001",
         "anthropic/claude-haiku-4-5": "claude-haiku-4-5-20251001",
         "claude-haiku-4-5": "claude-haiku-4-5-20251001",
         "claude-4.5-haiku": "claude-haiku-4-5-20251001",
@@ -33,10 +32,6 @@ def _normalize_anthropic_model(model: str) -> str:
         "claude-opus-4.8": "claude-opus-4-8",
         "anthropic/claude-fable-5": "claude-fable-5",
         "claude-fable-5": "claude-fable-5",
-        "anthropic/claude-sonnet-4": "claude-sonnet-4-6",
-        "claude-sonnet-4": "claude-sonnet-4-6",
-        "anthropic/claude-4-sonnet": "claude-sonnet-4-6",
-        "claude-4-sonnet": "claude-sonnet-4-6",
         "anthropic/claude-sonnet-4-6": "claude-sonnet-4-6",
         "claude-sonnet-4.6": "claude-sonnet-4-6",
         "sonnet": "claude-sonnet-4-6",
@@ -63,17 +58,23 @@ ANTHROPIC_FALLBACK_KEEP_RECENT_MESSAGES = int(os.getenv("ANTHROPIC_FALLBACK_KEEP
 ANTHROPIC_FALLBACK_MAX_MESSAGE_CHARS = int(os.getenv("ANTHROPIC_FALLBACK_MAX_MESSAGE_CHARS", "2500"))
 ANTHROPIC_FALLBACK_MAX_SYSTEM_CHARS = int(os.getenv("ANTHROPIC_FALLBACK_MAX_SYSTEM_CHARS", "10000"))
 ANTHROPIC_FALLBACK_HARD_PROMPT_CHAR_BUDGET = int(os.getenv("ANTHROPIC_FALLBACK_HARD_PROMPT_CHAR_BUDGET", "36000"))
-ANTHROPIC_FALLBACK_TOOL_CHAR_BUDGET = int(os.getenv("ANTHROPIC_FALLBACK_TOOL_CHAR_BUDGET", "12000"))
+ANTHROPIC_FALLBACK_TOOL_CHAR_BUDGET = int(os.getenv("ANTHROPIC_FALLBACK_TOOL_CHAR_BUDGET", "32000"))
 
-# Curated models with tool-use support; full list via GET /models.
+# Curated models with tool-use support; full list via GET /models (Anthropic + xAI + OpenRouter).
 RECOMMENDED_MODELS = [
     "claude-sonnet-4-6",
     "claude-opus-4-8",
     "claude-haiku-4-5-20251001",
     "claude-fable-5",
+    "grok-4.5",
+    "grok-4.3",
+    "grok-4.20-0309-reasoning",
+    "grok-4.20-0309-non-reasoning",
 ]
 
-# Display metadata for Studio Agent model picker (merged with live OpenRouter pricing).
+# Static USD / 1M tokens when the provider /models response omits pricing.
+# Prefer live API pricing when present. Sources: Anthropic + xAI public pricing tables.
+# Display metadata for Studio Agent model picker (merged with live API pricing).
 CURATED_META: dict[str, dict[str, Any]] = {
     "claude-sonnet-4-6": {
         "name": "Claude Sonnet 4.6",
@@ -82,6 +83,9 @@ CURATED_META: dict[str, dict[str, Any]] = {
         "recommended": True,
         "intelligence": 5,
         "speed": 4,
+        "context_length": 200_000,
+        "prompt_price_per_m": 3.0,
+        "completion_price_per_m": 15.0,
     },
     "claude-opus-4-8": {
         "name": "Claude Opus 4.8",
@@ -90,6 +94,9 @@ CURATED_META: dict[str, dict[str, Any]] = {
         "recommended": True,
         "intelligence": 5,
         "speed": 2,
+        "context_length": 200_000,
+        "prompt_price_per_m": 15.0,
+        "completion_price_per_m": 75.0,
     },
     "claude-haiku-4-5-20251001": {
         "name": "Claude Haiku 4.5",
@@ -98,6 +105,9 @@ CURATED_META: dict[str, dict[str, Any]] = {
         "recommended": True,
         "intelligence": 4,
         "speed": 5,
+        "context_length": 200_000,
+        "prompt_price_per_m": 1.0,
+        "completion_price_per_m": 5.0,
     },
     "claude-fable-5": {
         "name": "Claude Fable 5",
@@ -106,6 +116,121 @@ CURATED_META: dict[str, dict[str, Any]] = {
         "recommended": False,
         "intelligence": 5,
         "speed": 3,
+        "context_length": 200_000,
+        "prompt_price_per_m": 3.0,
+        "completion_price_per_m": 15.0,
+    },
+    # xAI Grok chat models (api.x.ai) — same key as speech dictation / Imagine when configured
+    "grok-4.5": {
+        "name": "Grok 4.5",
+        "provider": "xAI",
+        "description": "xAI flagship for code, agentic tool calling, and low-hallucination Studio runs.",
+        "recommended": True,
+        "intelligence": 5,
+        "speed": 4,
+        "context_length": 500_000,
+        "prompt_price_per_m": 2.0,
+        "completion_price_per_m": 6.0,
+    },
+    "grok-4.3": {
+        "name": "Grok 4.3",
+        "provider": "xAI",
+        "description": "Strong general-purpose Grok runner with 1M context and solid tool use.",
+        "recommended": True,
+        "intelligence": 5,
+        "speed": 4,
+        "context_length": 1_000_000,
+        "prompt_price_per_m": 1.25,
+        "completion_price_per_m": 2.50,
+    },
+    "grok-4.20-0309-reasoning": {
+        "name": "Grok 4.20 Reasoning",
+        "provider": "xAI",
+        "description": "Reasoning-optimized Grok 4.20 for deep planning and multi-step tool loops.",
+        "recommended": True,
+        "intelligence": 5,
+        "speed": 3,
+        "context_length": 1_000_000,
+        "prompt_price_per_m": 1.25,
+        "completion_price_per_m": 2.50,
+    },
+    "grok-4.20-0309-non-reasoning": {
+        "name": "Grok 4.20 Non-Reasoning",
+        "provider": "xAI",
+        "description": "Fast Grok 4.20 without extra reasoning overhead — good for light orchestration.",
+        "recommended": True,
+        "intelligence": 4,
+        "speed": 5,
+        "context_length": 1_000_000,
+        "prompt_price_per_m": 1.25,
+        "completion_price_per_m": 2.50,
+    },
+    "grok-4.20-multi-agent-0309": {
+        "name": "Grok 4.20 Multi-Agent",
+        "provider": "xAI",
+        "description": "Multi-agent orchestration SKU for long context and agent loops.",
+        "recommended": False,
+        "intelligence": 5,
+        "speed": 3,
+        "context_length": 1_000_000,
+        "prompt_price_per_m": 1.25,
+        "completion_price_per_m": 2.50,
+    },
+    # Code API (chat-completions compatible) — official docs.x.ai pricing
+    "grok-build-0.1": {
+        "name": "Grok Build 0.1",
+        "provider": "xAI",
+        "description": "xAI code-focused model (Code API pricing). Solid for tool-heavy agent loops.",
+        "recommended": False,
+        "intelligence": 4,
+        "speed": 4,
+        "context_length": 256_000,
+        "prompt_price_per_m": 1.0,
+        "completion_price_per_m": 2.0,
+    },
+    "grok-4": {
+        "name": "Grok 4",
+        "provider": "xAI",
+        "description": "Earlier Grok 4 flagship (if enabled on your xAI account).",
+        "recommended": False,
+        "intelligence": 5,
+        "speed": 3,
+        "context_length": 256_000,
+        "prompt_price_per_m": 3.0,
+        "completion_price_per_m": 15.0,
+    },
+    "grok-3": {
+        "name": "Grok 3",
+        "provider": "xAI",
+        "description": "Legacy Grok 3 chat model when available on the account.",
+        "recommended": False,
+        "intelligence": 4,
+        "speed": 4,
+        "context_length": 131_072,
+        "prompt_price_per_m": 2.0,
+        "completion_price_per_m": 10.0,
+    },
+    "grok-3-mini": {
+        "name": "Grok 3 Mini",
+        "provider": "xAI",
+        "description": "Cheapest Grok chat SKU for quick status / light tool loops.",
+        "recommended": False,
+        "intelligence": 3,
+        "speed": 5,
+        "context_length": 131_072,
+        "prompt_price_per_m": 0.30,
+        "completion_price_per_m": 0.50,
+    },
+    "grok-3-mini-fast": {
+        "name": "Grok 3 Mini Fast",
+        "provider": "xAI",
+        "description": "Fast mini Grok for high-volume lightweight turns.",
+        "recommended": False,
+        "intelligence": 3,
+        "speed": 5,
+        "context_length": 131_072,
+        "prompt_price_per_m": 0.30,
+        "completion_price_per_m": 0.50,
     },
     "anthropic/claude-sonnet-4": {
         "name": "Claude Sonnet 4",
@@ -183,12 +308,16 @@ CURATED_META: dict[str, dict[str, Any]] = {
 
 
 def _provider_from_id(model_id: str) -> str:
-    slug = model_id.split("/")[0] if "/" in model_id else model_id
+    mid = str(model_id or "").strip()
+    if mid.lower().startswith("grok-") or mid.lower().startswith("x-ai/") or mid.lower().startswith("xai/"):
+        return "xAI"
+    slug = mid.split("/")[0] if "/" in mid else mid
     labels = {
         "openai": "OpenAI",
         "anthropic": "Anthropic",
         "google": "Google",
         "x-ai": "xAI",
+        "xai": "xAI",
         "deepseek": "DeepSeek",
         "moonshotai": "Moonshot",
         "meta-llama": "Meta",
@@ -201,7 +330,13 @@ def _provider_from_id(model_id: str) -> str:
         "bytedance": "ByteDance",
         "cohere": "Cohere",
         "perplexity": "Perplexity",
+        "claude-haiku-4-5-20251001": "Anthropic",
+        "claude-sonnet-4-6": "Anthropic",
+        "claude-opus-4-8": "Anthropic",
+        "claude-fable-5": "Anthropic",
     }
+    if slug.lower().startswith("claude"):
+        return "Anthropic"
     return labels.get(slug, slug.replace("-", " ").title())
 
 
@@ -253,48 +388,253 @@ def _infer_intelligence(model_id: str, prompt_ppm: float | None) -> int | None:
 
 
 def _catalog_row(mid: str, live_row: dict[str, Any]) -> dict[str, Any]:
-    meta = CURATED_META.get(mid, {})
+    meta = CURATED_META.get(mid, {}) or CURATED_META.get(_normalize_xai_model(mid), {})
     pricing = live_row.get("pricing") if isinstance(live_row.get("pricing"), dict) else {}
-    prompt_ppm = _price_per_mtok(pricing.get("prompt"))
-    completion_ppm = _price_per_mtok(pricing.get("completion"))
+    # Prefer live API pricing; fall back to curated static tables for perfect UI cost display.
+    prompt_ppm = _price_per_mtok(pricing.get("prompt") or pricing.get("input"))
+    completion_ppm = _price_per_mtok(pricing.get("completion") or pricing.get("output"))
+    if prompt_ppm is None:
+        try:
+            prompt_ppm = float(meta["prompt_price_per_m"]) if meta.get("prompt_price_per_m") is not None else None
+        except (TypeError, ValueError, KeyError):
+            prompt_ppm = None
+    if completion_ppm is None:
+        try:
+            completion_ppm = (
+                float(meta["completion_price_per_m"]) if meta.get("completion_price_per_m") is not None else None
+            )
+        except (TypeError, ValueError, KeyError):
+            completion_ppm = None
+    ctx = live_row.get("context_length") or live_row.get("context_window") or meta.get("context_length")
+    try:
+        ctx_i = int(ctx) if ctx is not None else None
+    except (TypeError, ValueError):
+        ctx_i = None
+    policy_fields = model_registry.catalog_policy_fields(mid)
     return {
         "id": mid,
-        "name": meta.get("name") or live_row.get("name") or mid.split("/")[-1],
+        "name": meta.get("name") or live_row.get("name") or live_row.get("display_name") or mid.split("/")[-1],
         "provider": meta.get("provider") or live_row.get("provider") or _provider_from_id(mid),
         "description": meta.get("description") or live_row.get("description") or "",
-        "context_length": live_row.get("context_length"),
+        "context_length": ctx_i,
         "prompt_price_per_m": prompt_ppm,
         "completion_price_per_m": completion_ppm,
-        "recommended": bool(meta.get("recommended")),
+        "recommended": bool(meta.get("recommended")) and bool(policy_fields["selectable"]),
         "intelligence": meta.get("intelligence") or _infer_intelligence(mid, prompt_ppm),
         "speed": meta.get("speed") or _infer_speed(mid, prompt_ppm),
+        # Sample turn estimate used by the picker UI (10k in + 2k out).
+        "est_cost_10k_2k": _est_turn_cost_usd(prompt_ppm, completion_ppm, 10_000, 2_000),
+        **policy_fields,
     }
+
+
+def _est_turn_cost_usd(
+    prompt_ppm: float | None,
+    completion_ppm: float | None,
+    prompt_tokens: int = 10_000,
+    completion_tokens: int = 2_000,
+) -> float | None:
+    if prompt_ppm is None and completion_ppm is None:
+        return None
+    pin = float(prompt_ppm or 0.0) * (prompt_tokens / 1_000_000)
+    pout = float(completion_ppm or 0.0) * (completion_tokens / 1_000_000)
+    return round(pin + pout, 6)
+
+
+def xai_api_key() -> str:
+    return (
+        os.getenv("XAI_API_KEY", "").strip()
+        or os.getenv("X_AI_API_KEY", "").strip()
+        or os.getenv("GROK_API_KEY", "").strip()
+    )
+
+
+def _normalize_xai_model(model: str) -> str:
+    return model_registry.normalize_xai_model_id(model)
+
+
+def is_xai_model(model: str | None) -> bool:
+    return model_registry.is_xai_model_id(model)
+
+
+def is_anthropic_model(model: str | None) -> bool:
+    return model_registry.is_anthropic_model_id(model)
+
+
+def resolve_chat_route(model: str | None) -> model_registry.ModelRoute:
+    """Resolve the exact selected model to a configured provider route."""
+    selected = str(model or DEFAULT_MODEL).strip() or DEFAULT_MODEL
+    return model_registry.resolve_model_route(
+        selected,
+        xai_configured=bool(xai_api_key()),
+        anthropic_configured=bool(anthropic_api_key()),
+        openrouter_configured=bool(_openrouter_api_key_optional()),
+    )
+
+
+def resolve_chat_model(model: str | None) -> tuple[str, str]:
+    """Return the provider model ID without substituting another model."""
+    route = resolve_chat_route(model)
+    route_note = ""
+    if route.provider_model_id != route.requested_model:
+        route_note = (
+            f"Routing {route.requested_model} as {route.provider_model_id} via "
+            f"{route.route_provider}; the selected model is unchanged."
+        )
+    return route.provider_model_id, route_note
+
+
+# Official Chat + Code API models (docs.x.ai) — always surface when key is set.
+# Live GET /models may also return legacy SKUs still enabled on the account.
+_XAI_CHAT_MODEL_IDS = (
+    "grok-4.5",
+    "grok-4.3",
+    "grok-4.20-0309-reasoning",
+    "grok-4.20-0309-non-reasoning",
+    "grok-4.20-multi-agent-0309",
+    "grok-build-0.1",
+    "grok-4",
+    "grok-3",
+    "grok-3-mini",
+    "grok-3-mini-fast",
+)
+
+_XAI_NON_CHAT_MARKERS = (
+    "imagine",
+    "image",
+    "video",
+    "tts",
+    "voice",
+    "speech",
+    "embedding",
+    "embed",
+    "realtime",
+)
+
+
+def _xai_is_chat_model_id(mid: str) -> bool:
+    low = str(mid or "").strip().lower()
+    if not low.startswith("grok-") and not low.startswith("x-ai/") and not low.startswith("xai/"):
+        return False
+    bare = _normalize_xai_model(low)
+    return not any(x in bare for x in _XAI_NON_CHAT_MARKERS)
+
+
+def _xai_model_sort_key(mid: str) -> tuple:
+    """Stable picker order: current official chat → code → legacy."""
+    order = {m: i for i, m in enumerate(_XAI_CHAT_MODEL_IDS)}
+    return (order.get(mid, 500), mid)
+
+
+async def list_xai_models() -> list[dict[str, Any]]:
+    """List xAI chat models for the runner picker (requires XAI_API_KEY).
+
+    Pricing: prefer live /models fields when present; otherwise official curated
+    tables from docs.x.ai (Chat + Code API).
+    """
+    key = xai_api_key()
+    if not key:
+        return []
+    headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+    live_by_id: dict[str, dict[str, Any]] = {}
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            r = await client.get(f"{XAI_BASE}/models", headers=headers)
+            if r.status_code < 400:
+                data = r.json()
+                items = data.get("data") if isinstance(data, dict) else data
+                for item in items or []:
+                    if not isinstance(item, dict):
+                        continue
+                    mid = _normalize_xai_model(str(item.get("id") or ""))
+                    if not mid or not _xai_is_chat_model_id(mid):
+                        continue
+                    live_by_id[mid] = item
+    except Exception:
+        pass
+
+    # Union of live account models + curated official chat/code SKUs.
+    ids = set(live_by_id.keys()) | set(_XAI_CHAT_MODEL_IDS)
+    ordered = sorted(ids, key=_xai_model_sort_key)
+
+    rows: list[dict[str, Any]] = []
+    for mid in ordered:
+        meta = CURATED_META.get(mid, {})
+        live = live_by_id.get(mid) or {}
+        # Live pricing (rare on xAI /models) — accept several shapes.
+        live_pricing = live.get("pricing") if isinstance(live.get("pricing"), dict) else {}
+        prompt_per_tok = live_pricing.get("prompt") or live_pricing.get("input")
+        completion_per_tok = live_pricing.get("completion") or live_pricing.get("output")
+        # Some payloads use $/M directly
+        if prompt_per_tok is None and live.get("input_price_per_million_tokens") is not None:
+            try:
+                prompt_per_tok = float(live["input_price_per_million_tokens"]) / 1_000_000
+            except (TypeError, ValueError):
+                prompt_per_tok = None
+        if completion_per_tok is None and live.get("output_price_per_million_tokens") is not None:
+            try:
+                completion_per_tok = float(live["output_price_per_million_tokens"]) / 1_000_000
+            except (TypeError, ValueError):
+                completion_per_tok = None
+        if prompt_per_tok is None and meta.get("prompt_price_per_m") is not None:
+            prompt_per_tok = float(meta["prompt_price_per_m"]) / 1_000_000
+        if completion_per_tok is None and meta.get("completion_price_per_m") is not None:
+            completion_per_tok = float(meta["completion_price_per_m"]) / 1_000_000
+        ctx = (
+            live.get("context_length")
+            or live.get("context_window")
+            or meta.get("context_length")
+        )
+        rows.append({
+            "id": mid,
+            "name": meta.get("name") or live.get("name") or live.get("display_name") or mid,
+            "description": meta.get("description") or live.get("description") or "",
+            "provider": "xAI",
+            "context_length": ctx,
+            "pricing": {
+                # OpenRouter-style per-token so _price_per_mtok / catalog works
+                "prompt": prompt_per_tok,
+                "completion": completion_per_tok,
+            },
+        })
+    return rows
 
 
 def build_model_catalog(live: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
     """Merge curated display metadata with the full live OpenRouter model list + pricing."""
     live_by_id: dict[str, dict[str, Any]] = {}
+    live_by_canonical: dict[str, dict[str, Any]] = {}
     for item in live or []:
         mid = str(item.get("id") or "")
         if mid and not _is_alias_or_redirect(mid, item):
             live_by_id[mid] = item
+            live_by_canonical.setdefault(model_registry.canonical_model_id(mid), item)
 
     catalog: list[dict[str, Any]] = []
     seen: set[str] = set()
+    seen_canonical: set[str] = set()
 
-    for mid in RECOMMENDED_MODELS:
+    curated_ids = list(dict.fromkeys([
+        *RECOMMENDED_MODELS,
+        *model_registry.ALWAYS_VISIBLE_MODEL_IDS,
+    ]))
+    for mid in curated_ids:
         if _is_alias_or_redirect(mid):
             continue
         seen.add(mid)
-        live_row = live_by_id.get(mid, {"id": mid})
+        canonical = model_registry.canonical_model_id(mid)
+        seen_canonical.add(canonical)
+        live_row = live_by_id.get(mid) or live_by_canonical.get(canonical) or {"id": mid}
         row = _catalog_row(mid, live_row)
         if not row.get("recommended"):
             row["recommended"] = mid in RECOMMENDED_MODELS[:6]
+        if not row.get("selectable", True):
+            row["recommended"] = False
         catalog.append(row)
 
     extras: list[dict[str, Any]] = []
     for mid, live_row in live_by_id.items():
-        if mid in seen:
+        if mid in seen or model_registry.canonical_model_id(mid) in seen_canonical:
             continue
         if _is_alias_or_redirect(mid, live_row):
             continue
@@ -350,13 +690,21 @@ def _openrouter_api_key_optional() -> str:
     )
 
 
+def any_llm_provider_configured() -> bool:
+    """True when OpenRouter and/or direct xAI/Anthropic keys are present."""
+    return bool(_openrouter_api_key_optional() or xai_api_key() or anthropic_api_key())
+
+
 def api_key() -> str:
     key = _openrouter_api_key_optional()
-    if not key:
-        raise RuntimeError(
-            "OPENROUTER_API_KEY is not set. Add it to .env (never commit the key)."
-        )
-    return key
+    if key:
+        return key
+    # Local / direct-provider mode: allow Studio Agent when only XAI or Anthropic is set.
+    if xai_api_key() or anthropic_api_key():
+        return ""
+    raise RuntimeError(
+        "No LLM API key set. Add OPENROUTER_API_KEY, XAI_API_KEY, or ANTHROPIC_API_KEY to .env."
+    )
 
 
 def anthropic_api_key() -> str:
@@ -376,8 +724,13 @@ def _use_anthropic_primary() -> bool:
 
 
 def _headers() -> dict[str, str]:
+    key = _openrouter_api_key_optional()
+    if not key:
+        raise RuntimeError(
+            "OPENROUTER_API_KEY is not set (required for OpenRouter-routed models)."
+        )
     h = {
-        "Authorization": f"Bearer {api_key()}",
+        "Authorization": f"Bearer {key}",
         "Content-Type": "application/json",
     }
     referer = os.getenv("OPENROUTER_HTTP_REFERER", "https://studio.nyptidindustries.com")
@@ -551,6 +904,22 @@ def _strip_anthropic_tools(payload: dict[str, Any]) -> None:
     payload.pop("tool_choice", None)
 
 
+def _anthropic_tools_by_name(tools: list[dict[str, Any]] | None) -> dict[str, dict[str, Any]]:
+    return {
+        str(row.get("name") or ""): row
+        for row in _anthropic_tools(tools)
+        if str(row.get("name") or "").strip()
+    }
+
+
+def _anthropic_preserve_tool_subset(
+    tools: list[dict[str, Any]] | None,
+    preserve_names: set[str] | frozenset[str],
+) -> list[dict[str, Any]]:
+    by_name = _anthropic_tools_by_name(tools)
+    return [by_name[name] for name in preserve_names if name in by_name]
+
+
 def _anthropic_tool_size(tools: list[dict[str, Any]] | None) -> int:
     if not tools:
         return 0
@@ -566,6 +935,7 @@ _ANTHROPIC_CORE_TOOL_PRIORITY = (
     "set_production_scenes_animate",
     "set_production_scene_duration",
     "animate_production_scenes",
+    "repair_production_scene_animation",
     "finalize_production",
     "ingest_product_reference",
     "start_shortform_generate",
@@ -575,6 +945,9 @@ _ANTHROPIC_CORE_TOOL_PRIORITY = (
     "recommend_video_topics",
     "search_youtube_public",
     "analyze_reference_video",
+    "retry_reference_analysis",
+    "estimate_shortform_render_cost",
+    "get_fal_pricing",
 )
 
 
@@ -586,7 +959,17 @@ def _select_anthropic_tools(
 ) -> list[dict[str, Any]]:
     """Keep relevant tools callable instead of dropping the complete tool set."""
     converted = _anthropic_tools(tools)
+    full_toolset = str(os.getenv("STUDIO_AGENT_FULL_TOOLSET", "1") or "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    # Full toolset is allowed only when it fits the caller's budget. When the
+    # payload is oversized (or a tight budget is passed), always trim by priority.
     if _anthropic_tool_size(converted) <= budget:
+        return converted
+    if full_toolset and budget >= max(ANTHROPIC_FALLBACK_TOOL_CHAR_BUDGET, 12_000):
         return converted
 
     recent_text = " ".join(
@@ -596,8 +979,16 @@ def _select_anthropic_tools(
     ).lower()
     priority = list(_ANTHROPIC_CORE_TOOL_PRIORITY)
     keyword_tools = {
+        "watch": ("analyze_reference_video", "poll_render_job"),
+        "upload": ("analyze_reference_video", "poll_render_job"),
+        "uploaded": ("analyze_reference_video", "poll_render_job"),
+        "video": ("analyze_reference_video", "poll_render_job"),
+        "analyze": ("analyze_reference_video", "poll_render_job"),
+        "try again": ("retry_reference_analysis", "analyze_reference_video", "poll_render_job"),
+        "retry": ("retry_reference_analysis", "analyze_reference_video", "poll_render_job"),
+        "transcript": ("retry_reference_analysis", "analyze_reference_video", "poll_render_job"),
         "poll": ("poll_render_job", "list_production_scenes"),
-        "continue": ("poll_render_job", "list_production_scenes"),
+        "continue": ("poll_render_job", "list_production_scenes", "analyze_reference_video"),
         "status": ("poll_render_job", "list_production_scenes"),
         "scene": ("list_production_scenes", "edit_production_scene_still", "set_production_scenes_animate"),
         "edit": ("edit_production_scene_still", "edit_production_scenes_still", "re_edit_production"),
@@ -605,10 +996,18 @@ def _select_anthropic_tools(
         "product": ("ingest_product_reference", "start_shortform_generate"),
         "advertisement": ("ingest_product_reference", "start_shortform_generate"),
         "website": ("ingest_product_reference", "start_shortform_generate"),
-        "animate": ("set_production_scenes_animate", "animate_production_scenes"),
+        "animate": ("set_production_scenes_animate", "animate_production_scenes", "repair_production_scene_animation"),
+        "animation": ("repair_production_scene_animation", "animate_production_scenes"),
+        "motion": ("repair_production_scene_animation", "animate_production_scenes"),
+        "static": ("repair_production_scene_animation",),
+        "reanimate": ("repair_production_scene_animation", "animate_production_scenes"),
         "final": ("finalize_production", "finalize_longform_render"),
         "channel": ("get_channel_analytics", "recommend_video_topics"),
         "youtube": ("search_youtube_public", "analyze_reference_video"),
+        "cost": ("estimate_shortform_render_cost", "get_studio_credits"),
+        "pricing": ("estimate_shortform_render_cost", "get_fal_pricing"),
+        "how much": ("estimate_shortform_render_cost",),
+        "per short": ("estimate_shortform_render_cost",),
     }
     for keyword, names in keyword_tools.items():
         if keyword in recent_text:
@@ -625,7 +1024,9 @@ def _select_anthropic_tools(
         if _anthropic_tool_size(candidate) > budget:
             continue
         selected.append(row)
-    return selected
+    if not selected:
+        selected = [by_name[name] for name in priority if name in by_name]
+    return selected or converted
 
 
 def _anthropic_payload_messages(messages: list[dict[str, Any]]) -> tuple[str | None, list[dict[str, Any]]]:
@@ -698,7 +1099,10 @@ async def _anthropic_chat_completion(
     provider_label: str = "anthropic_fallback",
     model_override: str | None = None,
     force_tool_call: bool = False,
+    preserve_tool_names: frozenset[str] | None = None,
 ) -> dict[str, Any]:
+    if model_override:
+        model_registry.assert_model_selectable(model_override)
     key = anthropic_api_key()
     if not key:
         raise RuntimeError("ANTHROPIC_API_KEY is not set.")
@@ -725,10 +1129,21 @@ async def _anthropic_chat_completion(
         else:
             payload_base.pop("system", None)
         if _anthropic_payload_size(system_text, anth_messages, payload_base.get("tools")) > ANTHROPIC_FALLBACK_HARD_PROMPT_CHAR_BUDGET:
-            _strip_anthropic_tools(payload_base)
-            anth_tools = []
+            preserved = _anthropic_preserve_tool_subset(tools, preserve_tool_names or frozenset())
+            if preserved:
+                payload_base["tools"] = preserved
+                payload_base["tool_choice"] = {"type": "any" if force_tool_call else "auto"}
+                anth_tools = preserved
+            else:
+                _strip_anthropic_tools(payload_base)
+                anth_tools = []
     if _anthropic_payload_size(payload_base.get("system"), payload_base["messages"], payload_base.get("tools")) > ANTHROPIC_FALLBACK_HARD_PROMPT_CHAR_BUDGET:
-        _strip_anthropic_tools(payload_base)
+        preserved = _anthropic_preserve_tool_subset(tools, preserve_tool_names or frozenset())
+        if preserved:
+            payload_base["tools"] = preserved
+            payload_base["tool_choice"] = {"type": "any" if force_tool_call else "auto"}
+        else:
+            _strip_anthropic_tools(payload_base)
     headers = {
         "x-api-key": key,
         "anthropic-version": os.getenv("ANTHROPIC_VERSION", "2023-06-01"),
@@ -738,7 +1153,10 @@ async def _anthropic_chat_completion(
     if model_override:
         override = _normalize_anthropic_model(model_override)
         if override and ("/" not in override or override.startswith("claude-")):
-            model_candidates = [override] + [m for m in model_candidates if m != override]
+            # An explicit creator selection is exact. A 404 must surface for
+            # that model instead of silently changing Opus/Sonnet/Fable to a
+            # cheaper fallback model.
+            model_candidates = [override]
     last_error = ""
     selected_model = model_candidates[0] if model_candidates else ANTHROPIC_FALLBACK_MODEL
     async with httpx.AsyncClient(timeout=timeout) as client:
@@ -758,7 +1176,12 @@ async def _anthropic_chat_completion(
                 else:
                     payload.pop("system", None)
                 if _anthropic_payload_size(payload.get("system"), hard_anth_messages, payload.get("tools")) > ANTHROPIC_FALLBACK_HARD_PROMPT_CHAR_BUDGET:
-                    _strip_anthropic_tools(payload)
+                    preserved = _anthropic_preserve_tool_subset(tools, preserve_tool_names or frozenset())
+                    if preserved:
+                        payload["tools"] = preserved
+                        payload["tool_choice"] = {"type": "any" if force_tool_call else "auto"}
+                    else:
+                        _strip_anthropic_tools(payload)
                 r = await client.post(f"{ANTHROPIC_BASE}/messages", headers=headers, json=payload)
             if r.status_code < 400:
                 data = r.json()
@@ -803,45 +1226,120 @@ async def _anthropic_chat_completion(
 
 
 async def list_models() -> list[dict[str, Any]]:
-    if _use_anthropic_primary():
-        headers = {
-            "x-api-key": anthropic_api_key(),
-            "anthropic-version": os.getenv("ANTHROPIC_VERSION", "2023-06-01"),
-        }
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            r = await client.get(f"{ANTHROPIC_BASE}/models", headers=headers)
-            r.raise_for_status()
-            data = r.json()
-        items = data.get("data") if isinstance(data, dict) else data
-        available = {
-            str(item.get("id") or ""): item
-            for item in (items or [])
-            if isinstance(item, dict) and item.get("id")
-        }
-        rows: list[dict[str, Any]] = []
-        for model_id in RECOMMENDED_MODELS:
-            item = available.get(model_id)
-            if not item:
-                continue
-            rows.append({
-                "id": model_id,
-                "name": CURATED_META.get(model_id, {}).get("name") or item.get("display_name") or model_id,
-                "description": CURATED_META.get(model_id, {}).get("description") or "",
-                "provider": "Anthropic",
-                "context_length": item.get("context_window"),
-            })
-        return rows or [
-            {"id": model_id, "name": CURATED_META[model_id]["name"], "provider": "Anthropic"}
-            for model_id in RECOMMENDED_MODELS[:3]
-        ]
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        r = await client.get(f"{OPENROUTER_BASE}/models", headers=_headers())
-        r.raise_for_status()
-        data = r.json()
-    items = data.get("data") if isinstance(data, dict) else data
-    if not isinstance(items, list):
-        return [{"id": m, "name": m} for m in RECOMMENDED_MODELS]
-    return items
+    """Return runner models for the Studio picker (Anthropic + xAI Grok + optional OpenRouter)."""
+    rows: list[dict[str, Any]] = []
+    if _use_anthropic_primary() or anthropic_api_key():
+        try:
+            headers = {
+                "x-api-key": anthropic_api_key(),
+                "anthropic-version": os.getenv("ANTHROPIC_VERSION", "2023-06-01"),
+            }
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                r = await client.get(f"{ANTHROPIC_BASE}/models", headers=headers)
+                r.raise_for_status()
+                data = r.json()
+            items = data.get("data") if isinstance(data, dict) else data
+            available = {
+                str(item.get("id") or ""): item
+                for item in (items or [])
+                if isinstance(item, dict) and item.get("id")
+            }
+            for model_id in RECOMMENDED_MODELS:
+                if is_xai_model(model_id):
+                    continue
+                item = available.get(model_id)
+                if not item and model_id not in CURATED_META:
+                    continue
+                meta = CURATED_META.get(model_id, {})
+                rows.append({
+                    "id": model_id,
+                    "name": meta.get("name") or (item or {}).get("display_name") or model_id,
+                    "description": meta.get("description") or "",
+                    "provider": "Anthropic",
+                    "context_length": (item or {}).get("context_window") or meta.get("context_length"),
+                    "pricing": {
+                        "prompt": (float(meta["prompt_price_per_m"]) / 1_000_000)
+                        if meta.get("prompt_price_per_m") is not None
+                        else None,
+                        "completion": (float(meta["completion_price_per_m"]) / 1_000_000)
+                        if meta.get("completion_price_per_m") is not None
+                        else None,
+                    },
+                })
+            # Include every live Anthropic chat model, not only the hand-curated
+            # launch set. Newly released Claude/Fable/Sonnet/Opus variants then
+            # become selectable without a Studio code release.
+            seen_anthropic_ids = {str(row.get("id") or "") for row in rows}
+            for model_id, item in sorted(available.items()):
+                if model_id in seen_anthropic_ids:
+                    continue
+                rows.append({
+                    **item,
+                    "id": model_id,
+                    "name": item.get("display_name") or item.get("name") or model_id,
+                    "provider": "Anthropic",
+                    "context_length": item.get("context_window") or item.get("context_length"),
+                })
+            if not rows:
+                for model_id in ("claude-haiku-4-5-20251001", "claude-sonnet-4-6", "claude-opus-4-8"):
+                    meta = CURATED_META[model_id]
+                    rows.append({
+                        "id": model_id,
+                        "name": meta["name"],
+                        "provider": "Anthropic",
+                        "description": meta.get("description") or "",
+                        "context_length": meta.get("context_length"),
+                        "pricing": {
+                            "prompt": float(meta["prompt_price_per_m"]) / 1_000_000,
+                            "completion": float(meta["completion_price_per_m"]) / 1_000_000,
+                        },
+                    })
+        except Exception:
+            for model_id in ("claude-haiku-4-5-20251001", "claude-sonnet-4-6", "claude-opus-4-8"):
+                meta = CURATED_META[model_id]
+                rows.append({
+                    "id": model_id,
+                    "name": meta["name"],
+                    "provider": "Anthropic",
+                    "description": meta.get("description") or "",
+                    "context_length": meta.get("context_length"),
+                    "pricing": {
+                        "prompt": float(meta["prompt_price_per_m"]) / 1_000_000,
+                        "completion": float(meta["completion_price_per_m"]) / 1_000_000,
+                    },
+                })
+
+    # Always attach Grok chat models when XAI_API_KEY is configured (same key as dictation).
+    if xai_api_key():
+        try:
+            xai_rows = await list_xai_models()
+            seen = {str(r.get("id")) for r in rows}
+            for xr in xai_rows:
+                if str(xr.get("id")) not in seen:
+                    rows.append(xr)
+        except Exception:
+            pass
+
+    # OpenRouter is additive, not an either/or fallback. A creator with direct
+    # Anthropic or xAI credentials must still see every compatible marketplace
+    # model instead of having the catalog silently collapse to those providers.
+    # Provider-qualified IDs also preserve an explicit OpenRouter route for the
+    # exact selected model.
+    if _openrouter_api_key_optional():
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                r = await client.get(f"{OPENROUTER_BASE}/models", headers=_headers())
+                r.raise_for_status()
+                data = r.json()
+            items = data.get("data") if isinstance(data, dict) else data
+            if isinstance(items, list):
+                rows.extend(item for item in items if isinstance(item, dict) and item.get("id"))
+        except Exception:
+            if not rows:
+                raise
+    if rows:
+        return rows
+    return [{"id": m, "name": CURATED_META.get(m, {}).get("name") or m} for m in RECOMMENDED_MODELS[:6]]
 
 
 # In-memory model-pricing cache for per-turn credit metering (TTL seconds).
@@ -856,17 +1354,44 @@ async def model_pricing(model_id: str) -> tuple[float | None, float | None]:
     """
     import time as _t
 
+    mid = _normalize_xai_model(model_id) if is_xai_model(model_id) else str(model_id or "").strip()
     now = _t.time()
     if now - float(_MODELS_CACHE.get("at", 0) or 0) > _MODELS_TTL or not _MODELS_CACHE.get("by_id"):
         try:
             live = await list_models()
-            _MODELS_CACHE["by_id"] = {str(m.get("id")): m for m in live if m.get("id")}
+            catalog = build_model_catalog(live)
+            _MODELS_CACHE["by_id"] = {str(m.get("id")): m for m in catalog if m.get("id")}
             _MODELS_CACHE["at"] = now
         except Exception:
             pass
-    row = (_MODELS_CACHE.get("by_id") or {}).get(model_id) or {}
+    row = (_MODELS_CACHE.get("by_id") or {}).get(mid) or (_MODELS_CACHE.get("by_id") or {}).get(model_id) or {}
+    # Catalog rows already have $/M; raw live rows may have pricing.prompt per-token
+    if row.get("prompt_price_per_m") is not None or row.get("completion_price_per_m") is not None:
+        try:
+            pin = float(row["prompt_price_per_m"]) if row.get("prompt_price_per_m") is not None else None
+        except (TypeError, ValueError):
+            pin = None
+        try:
+            pout = float(row["completion_price_per_m"]) if row.get("completion_price_per_m") is not None else None
+        except (TypeError, ValueError):
+            pout = None
+        if pin is not None or pout is not None:
+            return pin, pout
     pricing = row.get("pricing") if isinstance(row.get("pricing"), dict) else {}
-    return _price_per_mtok(pricing.get("prompt")), _price_per_mtok(pricing.get("completion"))
+    pin = _price_per_mtok(pricing.get("prompt") or pricing.get("input"))
+    pout = _price_per_mtok(pricing.get("completion") or pricing.get("output"))
+    if pin is None and pout is None:
+        meta = CURATED_META.get(mid) or CURATED_META.get(str(model_id or ""))
+        if meta:
+            try:
+                pin = float(meta["prompt_price_per_m"]) if meta.get("prompt_price_per_m") is not None else None
+            except (TypeError, ValueError):
+                pin = None
+            try:
+                pout = float(meta["completion_price_per_m"]) if meta.get("completion_price_per_m") is not None else None
+            except (TypeError, ValueError):
+                pout = None
+    return pin, pout
 
 
 REASONING_DEPTHS = ("fast", "balanced", "deep")
@@ -934,6 +1459,49 @@ def reasoning_params(
     return 0.4, {"enabled": True, "effort": "low", "max_tokens": _reasoning_token_cap(key)}
 
 
+async def _xai_chat_completion(
+    *,
+    messages: list[dict[str, Any]],
+    tools: list[dict[str, Any]] | None = None,
+    temperature: float = 0.4,
+    timeout: float = 120.0,
+    model: str,
+    force_tool_call: bool = False,
+    max_tokens: int | None = None,
+) -> dict[str, Any]:
+    """OpenAI-compatible chat completions against api.x.ai (Grok)."""
+    model_registry.assert_model_selectable(model)
+    key = xai_api_key()
+    if not key:
+        raise RuntimeError("XAI_API_KEY is not set. Add it to use Grok runner models.")
+    mid = _normalize_xai_model(model)
+    payload: dict[str, Any] = {
+        "model": mid,
+        "messages": messages,
+        "temperature": float(temperature),
+    }
+    if max_tokens is not None:
+        payload["max_tokens"] = int(max_tokens)
+    if tools:
+        # xAI accepts OpenAI-style tools; tool_schemas() already emit that shape.
+        payload["tools"] = tools
+        payload["tool_choice"] = "required" if force_tool_call else "auto"
+    headers = {
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json",
+    }
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        r = await client.post(f"{XAI_BASE}/chat/completions", headers=headers, json=payload)
+        if r.status_code >= 400:
+            raise RuntimeError(f"xAI {r.status_code}: {r.text[:2000]}")
+        data = r.json()
+    # Normalize provider label for billing/telemetry
+    if isinstance(data, dict):
+        data.setdefault("provider", "xai_direct")
+        data["model"] = data.get("model") or mid
+    return data
+
+
 async def chat_completion(
     *,
     messages: list[dict[str, Any]],
@@ -943,17 +1511,53 @@ async def chat_completion(
     reasoning_depth: str = "balanced",
     web_search: bool = False,
     force_tool_call: bool = False,
+    preserve_tool_names: frozenset[str] | None = None,
 ) -> dict[str, Any]:
-    selected_model = model or DEFAULT_MODEL
-    temp, reasoning = reasoning_params(reasoning_depth, model=selected_model)
+    requested_model = str(model or DEFAULT_MODEL).strip() or DEFAULT_MODEL
+    # Final policy gate immediately before any provider request. The route may
+    # change providers for the same model, but never changes the selected model.
+    route = resolve_chat_route(requested_model)
+    selected_model = route.provider_model_id
+    temp, reasoning = reasoning_params(reasoning_depth, model=route.canonical_model)
     if temperature is not None:
         temp = float(temperature)
     timeout = 180.0 if reasoning_depth == "deep" else 120.0
-    if _use_anthropic_primary():
-        direct_messages = messages
+
+    route_messages = list(messages)
+
+    # Bare Grok IDs use xAI direct when configured. Provider-qualified x-ai/*
+    # IDs and OpenRouter-only Grok routes stay on OpenRouter.
+    if route.route_provider == "xai_direct":
+        xai_messages = list(route_messages)
+        if web_search:
+            xai_messages = [
+                *xai_messages,
+                {
+                    "role": "system",
+                    "content": (
+                        "Direct xAI mode does not provide OpenRouter web search. "
+                        "Use only Studio tool results already present in this turn. "
+                        "Do not claim live web or private analytics unless a tool result is present."
+                    ),
+                },
+            ]
+        return await _xai_chat_completion(
+            messages=xai_messages,
+            tools=tools,
+            temperature=temp,
+            timeout=timeout,
+            model=selected_model,
+            force_tool_call=force_tool_call,
+            max_tokens=_completion_token_cap(reasoning_depth, has_tools=bool(tools)),
+        )
+
+    # Bare Claude IDs use Anthropic direct. Provider-qualified anthropic/* IDs
+    # stay on OpenRouter when that exact route was selected.
+    if route.route_provider == "anthropic_direct":
+        direct_messages = list(route_messages)
         if web_search:
             direct_messages = [
-                *messages,
+                *direct_messages,
                 {
                     "role": "system",
                     "content": (
@@ -972,10 +1576,15 @@ async def chat_completion(
             provider_label="anthropic_direct",
             model_override=selected_model,
             force_tool_call=force_tool_call,
+            preserve_tool_names=preserve_tool_names,
         )
+
+    if route.route_provider != "openrouter":
+        raise RuntimeError(f"Unsupported Studio Agent model route: {route.route_provider}")
+
     payload: dict[str, Any] = {
         "model": selected_model,
-        "messages": messages,
+        "messages": route_messages,
         "temperature": temp,
         "max_tokens": _completion_token_cap(reasoning_depth, has_tools=bool(tools)),
     }
@@ -1005,34 +1614,10 @@ async def chat_completion(
             r = await client.post(f"{OPENROUTER_BASE}/chat/completions", headers=_headers(), json=retry_payload)
         if r.status_code >= 400:
             detail = r.text[:2000]
-            if anthropic_api_key() and _should_try_anthropic(r.status_code, detail):
-                fallback_messages = messages
-                if web_search:
-                    fallback_messages = [
-                        *messages,
-                        {
-                            "role": "system",
-                            "content": (
-                                "OpenRouter web search is unavailable because the primary provider hit "
-                                "credits or rate limits. Continue with available Studio tools only. "
-                                "Do not claim live web search or private analytics unless a tool result "
-                                "is present in this turn."
-                            ),
-                        },
-                    ]
-                return await _anthropic_chat_completion(
-                    messages=fallback_messages,
-                    tools=tools,
-                    temperature=temp,
-                    timeout=timeout,
-                    provider_label="anthropic_fallback",
-                    model_override=selected_model,
-                    force_tool_call=force_tool_call,
-                )
-            suffix = ""
-            if _should_try_anthropic(r.status_code, detail) and not anthropic_api_key():
-                suffix = " Anthropic fallback is not configured on this backend (ANTHROPIC_API_KEY missing)."
-            raise RuntimeError(f"OpenRouter {r.status_code}: {detail}{suffix}")
+            raise RuntimeError(
+                f"OpenRouter {r.status_code} for selected model "
+                f"{route.requested_model}: {detail}"
+            )
         return r.json()
 
 

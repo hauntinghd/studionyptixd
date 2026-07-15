@@ -1,6 +1,6 @@
 import { Clapperboard, Loader2 } from 'lucide-react';
 import type { AgentJobSnapshot, AgentJobTrack } from '../../lib/agentProduction';
-import { isTerminalJob } from '../../lib/agentProduction';
+import { isStaleDeadLongformPoll, isTerminalJob, isStaleIdleLongformFailure } from '../../lib/agentProduction';
 
 export default function AgentProductionRail({
     tracks,
@@ -11,7 +11,12 @@ export default function AgentProductionRail({
 }) {
     const active = tracks
         .map((t) => ({ track: t, snap: snapshots[t.job_id] }))
-        .filter(({ snap }) => snap && snap.running !== false && !isTerminalJob(snap));
+        .filter(({ snap }) => snap
+            && !snap.thumbnail_only
+            && snap.running !== false
+            && !isTerminalJob(snap)
+            && !isStaleDeadLongformPoll(snap)
+            && !isStaleIdleLongformFailure(snap));
 
     if (!active.length) return null;
 

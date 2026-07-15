@@ -89,16 +89,21 @@ _PLAN_SYSTEM_PROMPT = (
     "ivory-white anatomical bones and translucent glass body shell. The eyes already "
     "present in the reference remain unchanged. No skin, flesh, human limbs, or muscle tissue. "
     "Identity never changes. Scene-to-scene you may only "
-    "change OUTFIT (worn over the shell), BACKGROUND, PROPS, and POSE.\n\n"
-    "Given a full narration script and optional topic hint, list recurring "
-    "comparison subjects or roles and lock ONE outfit description per named "
-    "subject so every beat stays consistent. Be specific: colors, fabrics, "
-    "footwear, accessories, era-appropriate gear when the script is historical.\n\n"
+    "change OUTFIT (worn over the shell), BACKGROUND, optional set dressing, and POSE.\n\n"
+    "CRITICAL HOST RULES:\n"
+    "- There is exactly ONE on-camera host: the skeleton. Never invent a separate human cast.\n"
+    "- Do NOT plan multi-person characters (guy, woman, couple, ancestor as separate people).\n"
+    "- Hands stay EMPTY by default (presenter gestures). No basketball, sports balls, dumbbells, "
+    "gym gear, weapons, or random handheld props unless the TOPIC is explicitly about sports/fitness.\n"
+    "- Psychology / relationship / dark-psychology topics use a modern psychology-studio or cinematic "
+    "interior environment — never a gym, court, or sports arena unless the topic names that setting.\n\n"
+    "Given a full narration script and optional topic hint, lock ONE continuous skeleton_host "
+    "look so every beat stays consistent. Be specific about colors/fabrics only when wardrobe is needed.\n\n"
     "Output strict JSON:\n"
     "  {\n"
-    '    "characters": { "<subject or role>": "<outfit worn on the same skeleton, ~20-35 words>" },\n'
-    '    "topic_setting": "<one sentence: environment / location / lighting / era vibe>",\n'
-    '    "fallback_outfit": "<default outfit when no named subject, ~15 words>"\n'
+    '    "characters": { "skeleton_host": "<outfit OR no clothing note, ~15-30 words>" },\n'
+    '    "topic_setting": "<one sentence: environment / location / lighting — not a sports venue>",\n'
+    '    "fallback_outfit": "<default look, or no clothing>"\n'
     "  }\n"
     "No markdown fences, no commentary outside the JSON."
 )
@@ -243,7 +248,11 @@ def analyze_script(grok: GrokClient, script_text: str, *, category_label: str = 
         raw = raw[4:].strip()
     try:
         plan = json.loads(raw)
-    except json.JSONDecodeError:
+    except (TypeError, json.JSONDecodeError):
+        plan = {}
+    # The JSON literal `null` is valid but is not a scene plan.  Never let an
+    # upstream provider response turn into a `.get` crash in production.
+    if not isinstance(plan, dict):
         plan = {}
     if not isinstance(plan.get("characters"), dict):
         plan["characters"] = {}
@@ -257,9 +266,36 @@ def analyze_script(grok: GrokClient, script_text: str, *, category_label: str = 
     if not _visual_brief_requests_wardrobe(visual_brief):
         plan["fallback_outfit"] = (
             "no clothing; preserve the complete canonical transparent glass shell "
-            "and ivory bone anatomy from the master reference"
+            "and ivory bone anatomy from the master reference; empty hands, no props"
         )
-        plan["characters"]["skeleton_host"] = plan["fallback_outfit"]
+        # Drop multi-human cast sheets — only the skeleton host is on camera.
+        plan["characters"] = {"skeleton_host": plan["fallback_outfit"]}
+    else:
+        # Collapse invented multi-person cast into a single host look.
+        host = (
+            plan["characters"].get("skeleton_host")
+            or plan.get("fallback_outfit")
+            or "no clothing; empty hands"
+        )
+        plan["characters"] = {"skeleton_host": str(host)[:200]}
+    # Strip sports venues from topic_setting when topic is not sports.
+    from .canonical_edit import sanitize_skeleton_prop_language
+
+    plan["topic_setting"] = sanitize_skeleton_prop_language(
+        str(plan.get("topic_setting") or ""),
+        topic=str(topic or ""),
+        visual_brief=str(visual_brief or ""),
+    )
+    plan["fallback_outfit"] = sanitize_skeleton_outfit(
+        str(plan.get("fallback_outfit") or ""),
+        topic=str(topic or ""),
+        visual_brief=str(visual_brief or ""),
+    )
+    plan["characters"]["skeleton_host"] = sanitize_skeleton_outfit(
+        str(plan["characters"].get("skeleton_host") or plan["fallback_outfit"]),
+        topic=str(topic or ""),
+        visual_brief=str(visual_brief or ""),
+    )
     return plan
 
 
@@ -286,19 +322,37 @@ def derive_beat_visuals(
         "You compose ONE per-scene visual prompt for a NYPTID Skeleton AI short.\n\n"
         "THE HOST IS LOCKED — the same canonical ivory skeleton with glass shell and "
         "the unchanged eyes from the master reference. Do NOT describe a different character, "
-        "porcelain mannequin, or human actor. Only wardrobe, environment, props, and pose "
-        "may change. Every exposed body part must remain ivory bone inside clear glass. "
+        "porcelain mannequin, human actor, woman, man, couple, or second person. "
+        "Only wardrobe, environment, optional set dressing, and pose may change. "
+        "Every exposed body part must remain ivory bone inside clear glass. "
         "Never output skin, flesh, muscles, human hands, human feet, or the phrase 'bare feet'. "
         "The glass shell is body-shaped and hugs the skeleton silhouette like clear skin; "
         "never describe a bell jar, capsule, dome, specimen tube, cylinder, display case, "
-        "helmet bubble, glass container, circular base, labels, callouts, diagrams, or readable text.\n\n"
+        "helmet bubble, glass container, circular base, labels, callouts, diagrams, or readable text. "
+        "Never use split screen, diptych, side-by-side panels, before/after layouts, or comparison collages — "
+        "those duplicate the skeleton and create extra hands. Use one continuous full-frame scene only. "
+        "Exactly two hands total, no third hand, no floating limbs.\n\n"
+        "HANDS / PROPS (CRITICAL):\n"
+        "- Default: EMPTY hands in a clear presenter / talking-head gesture.\n"
+        "- FORBIDDEN unless the topic is sports/fitness: basketball, any sports ball, dumbbells, "
+        "barbells, gym racks, courts, jerseys, primitive tools, weapons, random handheld objects.\n"
+        "- Never invent sports gear.\n"
+        "- Psychology / relationship topics: choose a DISTINCT real cinematic location and composition driven by THIS narration beat "
+        "(apartment doorway, quiet cafe window, office corridor, library aisle, train platform, parking garage, or a specific studio setup). "
+        "Do not repeat a generic studio presenter shot for consecutive beats.\n"
+        "EYES (CRITICAL):\n"
+        "- Exactly two realistic eyes, ONLY inside the skull eye sockets.\n"
+        "- FORBIDDEN: eyeballs in the ribcage, sternum, chest cavity, abdomen, or as floating orbs.\n"
+        "- Soft amber light along the spine is light only — never literal eyes in the torso.\n\n"
         "Output strict JSON:\n"
-        "  outfit — clothing, armor, or visible muscle definition worn ON the same skeleton "
-        "(from character sheet when named). Example: 'lean athletic muscle overlay on glass shell' — "
-        "NOT a different body type.\n"
-        "  scene_action — photoreal 9:16 environment + props + pose around the skeleton "
-        "(gym, court, office, battlefield tableau, etc.). No text overlays.\n"
-        "  motion_prompt — one subtle 5-second i2v motion (breath, weight shift, prop move)\n"
+        "  outfit — clothing worn ON the same skeleton (from character sheet) OR 'no clothing'. "
+        "Never describe a second human's wardrobe as if they are in frame.\n"
+        "  scene_action — photoreal 9:16 environment + pose around the ONE skeleton host "
+        "(psychology studio, moody apartment, cinematic interior — NOT gym/court unless topic is sports). "
+        "Empty hands. No text overlays.\n"
+        "  motion_prompt — one SILENT 5-second i2v PERFORMANCE (pose change + gesture + camera/background "
+        "energy + glass-shell light motion). Not near-static. No talking, no jaw/mouth/lip-sync "
+        "(voiceover is added later). No prop moves, no text overlays.\n"
         "  bare_torso — always false\n"
         "No markdown."
     )
@@ -319,30 +373,94 @@ def derive_beat_visuals(
         raw = raw[4:].strip()
     try:
         data = json.loads(raw)
-    except json.JSONDecodeError:
+    except (TypeError, json.JSONDecodeError):
+        data = None
+    if not isinstance(data, dict):
         return (
-            fallback or "charcoal hoodie and dark joggers",
-            "Canonical skeleton host in a cinematic photoreal environment matching the narration, sharp commercial lighting, vertical 9:16",
+            fallback or "no clothing; empty hands, no props",
+            "Exactly one canonical skeleton host in a modern psychology-studio environment matching the narration, "
+            "empty hands in a presenter gesture, sharp commercial lighting, vertical 9:16, no sports props",
             "Subtle weight shift and ambient light flicker over five seconds",
         )
+    topic_hint = str((plan or {}).get("topic_setting") or category_label or "")
     outfit = sanitize_skeleton_outfit(
-        data.get("outfit", fallback) or fallback or "charcoal hoodie and dark joggers"
+        data.get("outfit", fallback) or fallback or "no clothing; empty hands, no props",
+        topic=topic_hint,
+        visual_brief=vbl,
     )
     if bool(data.get("bare_torso", False)):
         outfit = f"[BARE_TORSO] {outfit}"
     generated_action = data.get(
         "scene_action",
-        "Canonical skeleton in a photoreal environment matching the narration, premium 9:16 framing",
+        "Exactly one canonical skeleton host in a psychology-studio environment matching the narration, "
+        "empty hands, premium 9:16 framing, no sports props",
+    )
+    from .canonical_edit import sanitize_skeleton_scene_action
+
+    generated_action, _ = sanitize_skeleton_scene_action(
+        generated_action, topic=topic_hint, visual_brief=vbl, narration=narration
+    )
+    locked_scene, _ = sanitize_skeleton_scene_action(
+        locked_scene, topic=topic_hint, visual_brief=vbl, narration=narration
     )
     action = _merge_locked_scene_with_generated(locked_scene, generated_action)
+    action, _ = sanitize_skeleton_scene_action(
+        action, topic=topic_hint, visual_brief=vbl, narration=narration
+    )
+    # Providers often return "psychology studio, presenter pose" for every
+    # beat. Preserve an explicit user lock, but replace that lazy fallback
+    # with a distinct filmable location so a six-scene short is actually six
+    # directed scenes rather than six camera angles in the same room.
+    if not vbl and re.fullmatch(r"(?is).*\b(?:psychology|modern)\s+studio\b.*", action.strip()):
+        variations = (
+            "Quiet apartment doorway at blue hour, medium side profile; the host pauses before leaving, one hand resting on the doorframe",
+            "Rainy cafe window booth, close three-quarter portrait; the host studies a phone left face-down on the table",
+            "Long empty office corridor at night, medium-wide tracking composition; the host stops beneath practical ceiling lights",
+            "Library aisle with warm practical lamps, profile medium shot; the host reaches toward a book then pulls the hand back",
+            "Cinema lobby after closing, wide frame with reflected floor lights; the host stands alone facing the exit signs",
+            "Train platform at dawn, medium-wide shot; the host watches a departing train through glass without touching any prop",
+        )
+        action = variations[int(beat_index or 0) % len(variations)]
+        action, _ = sanitize_skeleton_scene_action(
+            action, topic=topic_hint, visual_brief=vbl, narration=narration
+        )
     return (
         outfit,
-        action,
+        f"PERFORMANCE: {_skeleton_performance_direction(narration, beat_index)}; {action}",
         apply_wardrobe_motion_lock(
-            data.get("motion_prompt", "Subtle idle motion, soft ambient movement"),
+            (
+                f"{_skeleton_performance_motion(narration, beat_index)}; "
+                f"{data.get('motion_prompt', 'subtle controlled movement')}"
+            ),
             outfit,
         ),
     )
+
+
+def _skeleton_performance_direction(narration: str, beat_index: int | None) -> str:
+    """Filmable emotion without changing the canonical skull, eyes, or anatomy."""
+    text = str(narration or "").lower()
+    if any(word in text for word in ("ghost", "pull away", "distance", "avoid", "wall", "withdraw", "silence")):
+        return "withdrawn body language, chin lowered, gaze averted, shoulders drawn in, one hand half-raised then held still"
+    if any(word in text for word in ("uncertain", "fear", "anxious", "doubt", "why", "confused", "risk")):
+        return "uneasy posture, head tilted, focused sideward gaze, weight shifted back, hands held close to the torso"
+    if any(word in text for word in ("truth", "real reason", "realize", "insight", "understand", "reveal")):
+        return "moment of realization, head raised, direct focused gaze, torso leaning forward, one open explanatory hand"
+    if any(word in text for word in ("care", "love", "connection", "warmth", "trust", "secure")):
+        return "guard softening, gentle head tilt, calm eye focus, relaxed shoulders, one open welcoming hand"
+    if any(word in text for word in ("chase", "hunt", "pressure", "mission", "compete", "win")):
+        return "alert purposeful stance, forward lean, intent eye focus, squared shoulders, restrained decisive gesture"
+    variants = (
+        "quietly reflective pose, chin lowered, eyes focused away from camera, hands loosely open",
+        "tense contained pose, head angled to one side, eyes fixed on a distant point, arms close to the body",
+        "engaged explanatory pose, direct eye focus, slight forward lean, one hand open in emphasis",
+    )
+    return variants[int(beat_index or 0) % len(variants)]
+
+
+def _skeleton_performance_motion(narration: str, beat_index: int | None) -> str:
+    direction = _skeleton_performance_direction(narration, beat_index)
+    return f"Slow natural performance: {direction}; subtle head turn and controlled hand movement; stable anatomy"
 
 
 def _write_progress(workspace: Path, *, stage: str, progress: int, detail: str = "") -> None:
@@ -386,10 +504,19 @@ def run(
     watermark_text: str = "Studio",
     captions_enabled: bool = True,
     caption_mode: str = "word",
+    master_reference_url: str = "",
 ) -> dict:
     """Run the full Skeleton AI pipeline. Returns a result dict."""
     workspace = Path(workspace)
     workspace.mkdir(parents=True, exist_ok=True)
+    master_ref = str(master_reference_url or "").strip()
+    if not master_ref:
+        try:
+            from skeleton_ai.styled_pipeline import _resolve_skeleton_master_reference
+
+            master_ref = _resolve_skeleton_master_reference(workspace, None)
+        except Exception:
+            master_ref = ""
     stills_dir = workspace / "stills"
     clips_dir = workspace / "clips"
     trimmed_dir = workspace / "trimmed"
@@ -496,7 +623,12 @@ def run(
                     visual_description="Plain neutral studio backdrop, full body front view.",
                     outfit=beat.outfit,
                 )
-                generate_still_edit(roster_prompt, roster_path, seed=420100 + beat.index)
+                generate_still_edit(
+                    roster_prompt,
+                    roster_path,
+                    master_url=master_ref,
+                    seed=420100 + beat.index,
+                )
                 amount, note, key = production_costs.price_fal_image(edit=True)
                 production_costs.record_event(
                     workspace,
@@ -520,6 +652,7 @@ def run(
         still_result = generate_still_edit(
             edit_prompt,
             stills_dir / f"{sid}.png",
+            master_url=master_ref,
             extra_refs=extra_refs,
             seed=420042 + beat.index,
         )

@@ -26,6 +26,11 @@ export default function AgentRenderDock({
     const complete = snapshot.status === 'complete';
     const running = !failed && !complete && snapshot.status !== 'awaiting_approval';
     const isAnalysis = track.kind === 'competitor' || snapshot.kind === 'competitor';
+    const isClipLab = track.kind === 'cliplab' || snapshot.kind === 'cliplab';
+    const cliplabJobType = String(snapshot.job_type || '').toLowerCase();
+    const isClipLabIngest = isClipLab && (cliplabJobType === 'cliplab_ingest' || track.job_id.startsWith('clipi_'));
+    const isClipLabAnalyze = isClipLab && (cliplabJobType === 'cliplab_analyze' || track.job_id.startsWith('clipa_'));
+    const isClipLabRender = isClipLab && (cliplabJobType === 'cliplab_render' || track.job_id.startsWith('clipr_'));
 
     if (!running && !failed && !complete) return null;
 
@@ -35,10 +40,15 @@ export default function AgentRenderDock({
     const dashOffset = circumference - (progress / 100) * circumference;
     const rawDl = snapshot.download_url || snapshot.mp4_url || '';
     const downloadUrl =
-        rawDl && accessToken ? mediaUrl(rawDl, accessToken) : rawDl;
+        rawDl.startsWith('http') ? rawDl : rawDl && accessToken ? mediaUrl(rawDl, accessToken) : rawDl;
     const actualCost = snapshot.cost?.actual_usd_decimal
         || (typeof snapshot.cost?.actual_usd === 'number' ? snapshot.cost.actual_usd.toFixed(6) : '');
     const costLabel = actualCost && Number(actualCost) > 0 ? `$${actualCost}` : '';
+    const spendLabel = snapshot.cost?.spend_label || 'Provider spend so far';
+    const providerBreakdown = (snapshot.cost?.provider_breakdown || [])
+        .filter((row) => Number(row.usd_decimal || row.usd || 0) > 0)
+        .map((row) => `${row.label || row.provider}: $${row.usd_decimal || Number(row.usd || 0).toFixed(6)}`)
+        .join(' | ');
 
     return (
         <div className="pointer-events-auto fixed bottom-5 right-5 z-[70] w-[min(100vw-2rem,340px)]">
@@ -96,20 +106,32 @@ export default function AgentRenderDock({
                                 failed ? 'text-red-300/90' : complete ? 'text-emerald-300/90' : 'text-cyan-300/90'
                             }`}
                         >
-                            {failed ? 'Failed' : complete ? 'Complete' : isAnalysis ? 'Analysis' : 'Production'}
+                            {failed ? 'Failed' : complete ? 'Complete' : isClipLab ? 'ClipLab' : isAnalysis ? 'Analysis' : 'Production'}
                         </p>
                         <p className="truncate text-sm font-semibold text-white">
                             {failed
                                 ? isAnalysis ? 'Reference analysis failed' : 'Production failed'
                                 : complete
-                                  ? track.title || (isAnalysis ? 'Analysis ready' : 'Video ready')
+                                  ? isClipLabIngest
+                                      ? 'Ingest ready'
+                                      : isClipLabAnalyze
+                                          ? 'Clip analysis ready'
+                                          : track.title || (isAnalysis ? 'Analysis ready' : isClipLabRender ? 'ClipLab clips ready' : 'Video ready')
                                   : snapshot.stage_label || track.title || 'Rendering'}
                         </p>
                         <p className="mt-0.5 line-clamp-2 text-[11px] text-gray-400">
                             {failed
                                 ? snapshot.error || (isAnalysis ? 'Ask Studio Agent to re-run the reference analysis.' : 'Tap Retry to run the same brief again.')
                                 : complete
-                                  ? isAnalysis ? 'The pacing and blueprint signals are ready in chat.' : 'Download your MP4 or keep chatting.'
+                                  ? isAnalysis
+                                      ? 'The pacing and blueprint signals are ready in chat.'
+                                      : isClipLabIngest
+                                          ? 'Source video is ingested. Send continue to analyze clips.'
+                                          : isClipLabAnalyze
+                                              ? 'Segments are selected. Approve/render them into 9:16 clips.'
+                                              : isClipLabRender
+                                                  ? 'Rendered clips and upload packages are ready.'
+                                                  : 'Download your MP4 or keep chatting.'
                                   : snapshot.stage_detail
                                     || (snapshot.total_scenes
                                         ? `Scene ${snapshot.current_scene || 0}/${snapshot.total_scenes}`
@@ -117,7 +139,10 @@ export default function AgentRenderDock({
                         </p>
                         {costLabel ? (
                             <p className="mt-1 text-[10px] font-medium text-cyan-200/80">
-                                FAL spent so far: <span className="tabular-nums">{costLabel}</span>
+                                {spendLabel}: <span className="tabular-nums">{costLabel}</span>
+                                {providerBreakdown ? (
+                                    <span className="block truncate text-cyan-100/60">{providerBreakdown}</span>
+                                ) : null}
                             </p>
                         ) : null}
                         <div className="mt-2 flex flex-wrap items-center gap-2">
@@ -133,7 +158,7 @@ export default function AgentRenderDock({
                                     disabled={cancelling}
                                     onClick={onCancel}
                                     className="inline-flex items-center gap-1 rounded-lg border border-red-500/30 bg-red-500/10 px-2 py-1 text-[11px] font-semibold text-red-100 hover:bg-red-500/20 disabled:opacity-50"
-                                    title="Stop this render at the next scene (no more fal spend)"
+                                    title="Stop this render at the next scene (no more provider spend)"
                                 >
                                     <Square className="h-3 w-3" />
                                     {cancelling ? 'Cancelling…' : 'Cancel'}
@@ -150,7 +175,7 @@ export default function AgentRenderDock({
                                     {retrying ? 'Retrying…' : 'Retry'}
                                 </button>
                             ) : null}
-                            {complete && downloadUrl ? (
+                            {complete && downloadUrl && (!isClipLab || isClipLabRender) ? (
                                 <a
                                     href={downloadUrl}
                                     download

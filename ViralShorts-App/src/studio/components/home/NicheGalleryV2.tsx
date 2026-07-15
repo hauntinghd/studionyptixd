@@ -68,7 +68,11 @@ export function StudioToolsRow({
     onTool: (action: string) => void;
     isAdmin?: boolean;
 }) {
-    const tools = STUDIO_TOOLS.filter((t) => t.action !== 'agent' || isAdmin);
+    const tools = STUDIO_TOOLS.filter((t) => {
+        if (t.action === 'agent') return isAdmin;
+        if (t.action === 'longform' || t.action === 'cliplab') return isAdmin;
+        return true;
+    });
     return (
         <section className="space-y-4">
             <div>

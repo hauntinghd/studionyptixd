@@ -24,6 +24,8 @@ Sourced from:
   D:/recaps/history_rewind/competitor_decode_2026-05-07.md (HR title-format winners)
 """
 from __future__ import annotations
+
+import re
 from typing import Any
 
 
@@ -340,21 +342,22 @@ CHANNELS: dict[str, dict[str, Any]] = {
     "history_rewind": {
         "key": "history_rewind",
         "label": "History Rewind",
-        "tagline": "Sleep history docs — Grok Imagine + ElevenLabs voice",
+        "tagline": "Sleep history docs — ERNIE stills + fal MiniMax voice",
         "icon": "🏛️",
         "format": "long_form",
         "channel_id": "UCHmwsIGud6CeZ3CIs5cuaUA",
         "default_minutes": 0,                         # 0 = script-driven length, not forced 9hr
         "fps": 30,
-        "image_model_default": "grok_imagine_quality",
+        "image_model_default": "ernie_image",
         "i2v_model_default": "ken_burns",              # zoom/pan stills, no real i2v
-        "voice_provider_default": "elevenlabs",
-        "voice_id_default": "Zu82ovvOlZd6iX0xbEzd",
+        "voice_provider_default": "fal_minimax",
+        "voice_id_default": "Wise_Woman",
+        "scenes_per_chapter": 12,                   # was 20 — 360-scene galleries burned xAI wallet
         # Real cost: fal MiniMax (~478k chars × $0.10/1k = $47.80)
         # + 540 ernie-image scenes × $0.03 = $16.20
         # + 18 chapter LLM passes ($9) + outline/ambient/thumbnails ($0.40)
         # ≈ $73 all-in. Old $35 estimate excluded fal MiniMax.
-        "cost_estimate_usd": 73.0,
+        "cost_estimate_usd": 12.21,
         "pipeline_kind": "sleep_doc",                 # routes to sleep-doc sub-pipeline
         "system_prompt": (
             "You write 9-hour sleep documentary scripts for the History "
@@ -399,20 +402,38 @@ CHANNELS: dict[str, dict[str, Any]] = {
             "Drift off to sleep with the full story — told slowly, "
             "from beginning to end."
         ),
-        # Thumbnail style decoded from ASMR Historian 9h winners + History at
-        # Night 900K-view covers + Joe's Sleepy History 1.3M monster:
-        # dark moody single-figure (robed/torch-lit), 3-word caps overlay,
-        # corner '9 HOURS' badge. NOT golden-hour establishing shots
-        # (Casey's old pattern, 0 winners).
+        # Spark / premium history-doc style: audible but low under narration.
+        "default_background_music": "auto",
+        "sound_design": (
+            "Subtle documentary underscore — soft orchestral bed, gentle piano "
+            "and low strings, slow evolving chords. Audible but never competing "
+            "with narration; Spark / long-form history documentary mix level."
+        ),
+        "ambient_bed_prompt": (
+            "Subtle premium documentary background music for a long-form "
+            "history video, in the style of Spark and high-retention history "
+            "channels. Soft orchestral underscore, gentle piano and low "
+            "strings, slow evolving harmonic pads, cinematic and calm, "
+            "instrumental only, no drums, no percussion hits, no vocals, "
+            "no lyrics, continuous unobtrusive bed for voiceover"
+        ),
+        # Casey explicitly rejected the competitor-decoded look (dark
+        # torch-lit figure, yellow caps, '9 HOURS' badge) — see July 2026
+        # thumbnail feedback. The channel's REAL covers are the authority:
+        # golden-hour painterly establishing scenes with a short serif-caps
+        # title. Primary path pulls the published covers as Seedream edit
+        # references; this prompt is only the fallback when the RSS/CDN
+        # fetch fails, so it must describe the same look.
         "thumbnail_style_prompt": (
-            "Cinematic 16:9 sleep-documentary thumbnail. ONE dominant "
-            "photoreal figure (robed historical figure or silhouetted "
-            "ruler) center-left, dark moody torch-lit composition, deep "
-            "shadows, occult or imperial symbol behind them. ASMR Historian "
-            "/ History at Night style. Bold yellow-white sans-serif 3-word "
-            "title caps overlay (e.g. 'KHMER EMPIRE' or 'ANGKOR SECRETS') "
-            "filling top third. Small bright '9 HOURS' badge top-right "
-            "corner. High contrast, no watermarks. Sleep-doc cover."
+            "Cinematic 16:9 sleep-history thumbnail in this channel's house "
+            "style: wide golden-hour painterly establishing scene of the "
+            "era's signature architecture or landscape (warm amber/orange "
+            "light, soft haze, no people close-up). Short elegant serif "
+            "title in white caps, 2-4 words max (e.g. 'THE MONGOL EMPIRE'), "
+            "centered top, optionally inside a thin white border frame. "
+            "NOTHING else on the image: no badges, no banner strips, no "
+            "duration text, no subtitle rows, no logos. High detail, calm "
+            "mood, no watermarks."
         ),
     },
 
@@ -560,8 +581,46 @@ def list_channels(format_filter: str | None = None) -> list[dict[str, Any]]:
     return out
 
 
+def _canon_channel_token(value: str) -> str:
+    """Lowercase, strip non-alphanumerics, collapse repeated letters.
+
+    Dictation stretches names ("Historyyy Rewinddd") and users drop
+    underscores ("historyrewind"); both must resolve to history_rewind.
+    Collapsing runs is safe because it is applied to both sides."""
+    token = re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
+    return re.sub(r"(.)\1+", r"\1", token)
+
+
+def resolve_channel_key(key: str) -> str:
+    """Best-effort map of a user/session-provided channel name to a registry key.
+
+    Returns "" when nothing matches; callers decide whether to raise."""
+    raw = str(key or "").strip()
+    if not raw:
+        return ""
+    if raw in CHANNELS:
+        return raw
+    wanted = _canon_channel_token(raw)
+    if not wanted:
+        return ""
+    for k, rec in CHANNELS.items():
+        candidates = {_canon_channel_token(k), _canon_channel_token(str(rec.get("label") or ""))}
+        candidates.discard("")
+        if wanted in candidates:
+            return k
+    # Containment fallback for partials like "history" or "empire magnates ch".
+    for k, rec in CHANNELS.items():
+        for cand in (_canon_channel_token(k), _canon_channel_token(str(rec.get("label") or ""))):
+            if cand and len(wanted) >= 5 and (wanted in cand or cand in wanted):
+                return k
+    return ""
+
+
 def get_channel(key: str) -> dict[str, Any]:
     if key not in CHANNELS:
+        resolved = resolve_channel_key(key)
+        if resolved:
+            return CHANNELS[resolved]
         raise ValueError(f"unknown channel {key!r}. valid: {sorted(CHANNELS.keys())}")
     return CHANNELS[key]
 

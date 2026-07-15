@@ -5,6 +5,7 @@ import ipaddress
 import json
 import mimetypes
 import os
+import re
 import socket
 import time
 import uuid
@@ -53,30 +54,66 @@ class _ProductHTMLParser(HTMLParser):
         super().__init__(convert_charrefs=True)
         self.title = ""
         self._in_title = False
+        self._heading_tag = ""
         self.meta: dict[str, str] = {}
         self.images: list[tuple[str, str]] = []
+        self.headings: list[str] = []
+        self.cta_candidates: list[str] = []
+        self.price_candidates: list[str] = []
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         data = {str(k).lower(): str(v or "") for k, v in attrs}
-        if tag.lower() == "title":
+        tag_l = tag.lower()
+        if tag_l == "title":
             self._in_title = True
-        elif tag.lower() == "meta":
+        elif tag_l == "meta":
             key = (data.get("property") or data.get("name") or "").lower()
             value = data.get("content") or ""
             if key and value:
                 self.meta[key] = value
-        elif tag.lower() == "img":
+        elif tag_l == "img":
             src = data.get("src") or data.get("data-src") or data.get("data-lazy-src") or ""
             if src:
                 self.images.append((src, (data.get("alt") or "")[:240]))
+        elif tag_l in {"h1", "h2", "h3"}:
+            self._heading_tag = tag_l
+        elif tag_l in {"a", "button"}:
+            label = (data.get("aria-label") or data.get("title") or "").strip()
+            if label:
+                self.cta_candidates.append(label[:120])
 
     def handle_endtag(self, tag: str) -> None:
         if tag.lower() == "title":
             self._in_title = False
+        if tag.lower() in {"h1", "h2", "h3"}:
+            self._heading_tag = ""
 
     def handle_data(self, data: str) -> None:
         if self._in_title:
             self.title += data
+            return
+        text = " ".join(str(data or "").split())
+        if not text:
+            return
+        if self._heading_tag in {"h1", "h2", "h3"}:
+            self.headings.append(text[:240])
+        if re.search(r"(?:\$|€|£)\s?\d", text) or re.search(r"\b\d+(?:\.\d{2})?\s?(?:usd|eur|gbp|/mo|/month)\b", text, re.I):
+            self.price_candidates.append(text[:120])
+
+
+def _extract_ad_signals(parser: _ProductHTMLParser) -> dict[str, Any]:
+    ctas: list[str] = []
+    for row in parser.cta_candidates + parser.headings:
+        low = row.lower()
+        if any(word in low for word in ("buy", "shop", "get", "start", "join", "sign", "trial", "access", "order", "subscribe")):
+            ctas.append(row)
+    benefits = [h for h in parser.headings if h not in ctas][:6]
+    return {
+        "headline": (parser.headings[0] if parser.headings else parser.title.strip())[:240],
+        "benefits": benefits,
+        "cta_candidates": list(dict.fromkeys(ctas))[:5],
+        "price_hints": list(dict.fromkeys(parser.price_candidates))[:4],
+    }
 
 
 def _image_candidates(base_url: str, parser: _ProductHTMLParser) -> list[dict[str, str]]:
@@ -170,6 +207,7 @@ def ingest(
                 raise ProductReferenceError("product page exceeds 2MB")
             parser = _ProductHTMLParser()
             parser.feed(response.text)
+            ad_signals = _extract_ad_signals(parser)
             page = {
                 "url": str(response.url),
                 "title": parser.title.strip()[:240],
@@ -179,6 +217,7 @@ def ingest(
                     or parser.meta.get("twitter:description")
                     or ""
                 )[:1000],
+                "ad_signals": ad_signals,
             }
             for candidate in _image_candidates(str(response.url), parser):
                 if len(images) >= 6:
@@ -192,6 +231,7 @@ def ingest(
         raise ProductReferenceError(
             "No usable product images were found. Attach product images or provide a page with public product imagery."
         )
+    ad_signals = page.get("ad_signals") if isinstance(page.get("ad_signals"), dict) else {}
     manifest = {
         "reference_id": reference_id,
         "session_id": session_id,
@@ -200,6 +240,13 @@ def ingest(
         "product_description": product_description.strip()[:2000] or page.get("description") or "",
         "website": page,
         "images": images,
+        "ad_brief": {
+            "headline": str(ad_signals.get("headline") or page.get("title") or product_name or "").strip()[:240],
+            "benefits": [str(x)[:180] for x in (ad_signals.get("benefits") or [])[:6]],
+            "cta_candidates": [str(x)[:120] for x in (ad_signals.get("cta_candidates") or [])[:5]],
+            "price_hints": [str(x)[:120] for x in (ad_signals.get("price_hints") or [])[:4]],
+            "conversion_goal": "purchase_or_signup",
+        },
         "created_at": time.time(),
     }
     manifest_path = target_dir / "manifest.json"

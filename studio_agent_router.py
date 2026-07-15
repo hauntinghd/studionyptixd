@@ -15,16 +15,19 @@ FastAPI router for NYPTID Studio Agent (OpenRouter + Rookcast skills).
   GET    /api/studio-agent/queue
   GET    /api/studio-agent/production-control
   POST   /api/studio-agent/dictation
+  POST   /api/studio-agent/sessions/{id}/attachments/video
 """
 from __future__ import annotations
 
 import asyncio
 import hmac
+import json
 import os
 import time
+from pathlib import Path
 from typing import Any, Callable, Literal
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, WebSocket
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
@@ -34,7 +37,7 @@ from studio_agent import jobs as agent_jobs
 from studio_agent.access import account_profile, can_use_studio_agent, is_owner
 from studio_agent.dictation import transcribe_audio_bytes
 
-from studio_agent import openrouter, skills
+from studio_agent import model_registry, openrouter, skills
 from studio_agent import memory, production_budget, runner, store, training_capture
 from studio_agent.queue import (
     StudioAgentQueueFullError,
@@ -42,6 +45,9 @@ from studio_agent.queue import (
     queue_snapshot,
     reset_queue_counters,
 )
+
+_MODELS_CACHE: dict[str, Any] = {"at": 0.0, "payload": None}
+_MODELS_CACHE_SEC = max(60, int(os.getenv("STUDIO_MODELS_CACHE_SEC", "900") or 900))
 
 
 def _user_id(user: dict) -> str:
@@ -62,13 +68,32 @@ def _membership_plan_for_user(user: dict) -> str:
         return ""
 
 
+def _direct_production_command_id(request: Request, *, runpod_enabled: bool) -> str:
+    """Return the caller's stable mutation id; never invent one for RunPod."""
+
+    if not runpod_enabled:
+        return ""
+    command_id = str(request.headers.get("x-idempotency-key") or "").strip()
+    if not command_id:
+        raise HTTPException(
+            400,
+            "X-Idempotency-Key is required for RunPod production mutations.",
+        )
+    if len(command_id) > 512:
+        raise HTTPException(400, "X-Idempotency-Key is too long.")
+    return command_id
+
+
 class CreateSessionRequest(BaseModel):
+    agent_mode: Literal["plan", "studio", "cliplab"] = "plan"
     model: str | None = None
     approval_mode: Literal["auto", "confirm"] = "confirm"
     content_format: Literal["short", "long", "both"] = "both"
     reasoning_depth: Literal["fast", "balanced", "deep"] = "balanced"
     render_style: str | None = "cinematic"
-    video_model: Literal["ltx_budget", "seedance", "pixverse", "kling_pro"] = "seedance"
+    image_model: str | None = None
+    image_model_id: str | None = None
+    video_model: str | None = None
     channel_id: str | None = ""
     registry_key: str | None = ""
     channel_title: str | None = ""
@@ -80,12 +105,15 @@ class CreateSessionRequest(BaseModel):
 
 
 class PatchSessionRequest(BaseModel):
+    agent_mode: Literal["plan", "studio", "cliplab"] | None = None
     model: str | None = None
     approval_mode: Literal["auto", "confirm"] | None = None
     content_format: Literal["short", "long", "both"] | None = None
     reasoning_depth: Literal["fast", "balanced", "deep"] | None = None
     render_style: str | None = None
-    video_model: Literal["ltx_budget", "seedance", "pixverse", "kling_pro"] | None = None
+    image_model: str | None = None
+    image_model_id: str | None = None
+    video_model: str | None = None
     channel_id: str | None = None
     registry_key: str | None = None
     channel_title: str | None = None
@@ -96,13 +124,23 @@ class PatchSessionRequest(BaseModel):
     product_website: str | None = None
 
 
+class ResetProductionRequest(BaseModel):
+    target_title: str = ""
+
+
 class ChatRequest(BaseModel):
+    request_id: str = Field(default="", max_length=128)
     message: str = Field(..., min_length=1, max_length=32000)
     reply_to: dict | None = None  # {job_id, kind, scene_index?} for re-editing a previous video/still in same chat
     attachments: list[dict] = Field(default_factory=list, max_length=4)
+    agent_mode: Literal["plan", "studio", "cliplab"] | None = "plan"
     channel_id: str | None = ""
     registry_key: str | None = ""
     channel_title: str | None = ""
+    render_style: str | None = None
+    image_model: str | None = None
+    image_model_id: str | None = None
+    video_model: str | None = None
     captions_enabled: bool | None = None
     caption_mode: Literal["word", "off"] | None = None
 
@@ -128,6 +166,10 @@ class RejectRequest(BaseModel):
 
 class SceneApprovalRequest(BaseModel):
     animate: bool = False
+
+
+class ScenePromptRequest(BaseModel):
+    prompt: str = Field(..., min_length=12, max_length=759)
 
 
 class SceneBulkApprovalRequest(BaseModel):
@@ -170,6 +212,14 @@ def _apply_chat_turn_options(session_id: str, session: dict[str, Any], body: Cha
         updates["caption_mode"] = body.caption_mode
         if body.caption_mode == "off":
             updates["captions_enabled"] = False
+    if body.render_style is not None and str(body.render_style or "").strip():
+        updates["render_style"] = str(body.render_style or "").strip()
+    if body.image_model_id is not None or body.image_model is not None:
+        updates["image_model"] = store.normalize_image_model(
+            body.image_model_id or body.image_model
+        )
+    if body.video_model is not None:
+        updates["video_model"] = store.normalize_video_model(body.video_model)
     if not updates:
         return session
     return store.update_session(session_id, **updates) or session
@@ -178,6 +228,7 @@ def _apply_chat_turn_options(session_id: str, session: dict[str, Any], body: Cha
 def build_studio_agent_router(
     *,
     require_auth: Callable,
+    get_current_user: Callable | None = None,
     is_admin_check: Callable[[dict], bool] | None = None,
     lane_access_check: Callable[[dict], bool] | None = None,
 ) -> APIRouter:
@@ -225,25 +276,40 @@ def build_studio_agent_router(
 
     @router.get("/models")
     async def list_models(user: dict = Depends(_agent_user)):
+        now = time.time()
+        cached = _MODELS_CACHE.get("payload")
+        if isinstance(cached, dict) and now - float(_MODELS_CACHE.get("at") or 0) < _MODELS_CACHE_SEC:
+            return cached
         try:
             live = await openrouter.list_models()
             catalog = openrouter.build_model_catalog(live)
-            ids = [m.get("id") for m in live if m.get("id")]
+            ids = [m.get("id") for m in catalog if m.get("id")]
             recommended = [m["id"] for m in catalog if m.get("recommended")]
             if not recommended:
                 recommended = [m for m in openrouter.RECOMMENDED_MODELS if m in ids] or openrouter.RECOMMENDED_MODELS
-            return {
+            providers = sorted({str(m.get("provider") or "") for m in catalog if m.get("provider")})
+            payload = {
                 "models": catalog,
                 "recommended": recommended,
                 "count": len(ids),
+                "providers": providers,
+                "xai_configured": bool(openrouter.xai_api_key()),
+                "anthropic_configured": bool(openrouter.anthropic_api_key()),
+                "cached": False,
             }
         except Exception as exc:
             catalog = openrouter.build_model_catalog(None)
-            return {
+            payload = {
                 "models": catalog,
                 "recommended": openrouter.RECOMMENDED_MODELS,
                 "error": str(exc),
+                "xai_configured": bool(getattr(openrouter, "xai_api_key", lambda: "")()),
+                "anthropic_configured": bool(openrouter.anthropic_api_key()),
+                "cached": False,
             }
+        _MODELS_CACHE["payload"] = payload
+        _MODELS_CACHE["at"] = now
+        return payload
 
     @router.get("/skills")
     async def list_skills(user: dict = Depends(_agent_user)):
@@ -253,6 +319,20 @@ def build_studio_agent_router(
     async def agent_queue_status(user: dict = Depends(_agent_user)):
         """Live OpenRouter/fal concurrency — for UI wait indicators."""
         return await queue_snapshot()
+
+    @router.get("/catalyst/status")
+    async def agent_catalyst_status(user: dict = Depends(_agent_user)):
+        """Always-on Catalyst runtime health (warm loop + tracked niches)."""
+        try:
+            from studio_agent import catalyst_runtime
+
+            return {
+                "ok": True,
+                "runtime": catalyst_runtime.catalyst_runtime_status(),
+                "account": _billing_profile(user),
+            }
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)[:200]}
 
     @router.get("/production-control")
     async def agent_production_control_status(user: dict = Depends(_agent_user)):
@@ -336,7 +416,12 @@ def build_studio_agent_router(
                 uid, snap, session_id=session_id or None
             )
         if session_id and snap.get("status") in ("complete", "failed"):
-            agent_jobs.prune_session_job(session_id, job_id, user_id=uid)
+            if not (
+                snap.get("kind") == "longform"
+                and snap.get("status") == "failed"
+                and not agent_jobs.longform_failed_is_terminal(job_id)
+            ):
+                agent_jobs.prune_session_job(session_id, job_id, user_id=uid)
         return snap
 
     @router.post("/jobs/{job_id}/cancel")
@@ -346,11 +431,42 @@ def build_studio_agent_router(
         session_id: str = Query(""),
         user: dict = Depends(_agent_user),
     ):
-        """Signal a running render to stop at its next checkpoint (no more fal spend)."""
+        """Cancel a locally owned render; RunPod-owned work fails closed."""
+        from studio_agent import runpod_bridge
         from studio_agent.tools import cancel_shortform_job
 
         if kind != "shortform":
             raise HTTPException(400, "cancel is currently supported for shortform renders only")
+        try:
+            runpod_receipt = runpod_bridge.get_dispatch_receipt_by_studio_job_id(job_id)
+        except Exception as exc:
+            raise HTTPException(
+                503,
+                {
+                    "code": "runpod_cancel_ownership_unknown",
+                    "message": (
+                        "Cancellation ownership could not be verified. No local cancellation was issued, "
+                        "and provider spend may continue."
+                    ),
+                    "job_id": job_id,
+                    "error": str(exc),
+                },
+            ) from exc
+        if runpod_receipt:
+            raise HTTPException(
+                409,
+                {
+                    "code": "runpod_remote_cancel_not_supported",
+                    "message": (
+                        "This production is owned by RunPod, but remote cancellation is not implemented. "
+                        "No local cancellation was issued, and provider spend may continue until the "
+                        "remote worker reaches a terminal state."
+                    ),
+                    "job_id": job_id,
+                    "runpod_job_id": str(runpod_receipt.get("runpod_job_id") or ""),
+                    "dispatch_id": str(runpod_receipt.get("dispatch_id") or ""),
+                },
+            )
         ok = cancel_shortform_job(job_id)
         if not ok:
             raise HTTPException(404, "job workspace not found (it may have already finished)")
@@ -407,32 +523,200 @@ def build_studio_agent_router(
         return FileResponse(
             path,
             media_type="image/png",
+            headers={"Cache-Control": "private, no-cache, must-revalidate"},
+        )
+
+    @router.get("/jobs/{job_id}/clip/{scene_idx}")
+    async def production_job_clip(
+        job_id: str,
+        scene_idx: int,
+        user: dict = Depends(_agent_user),
+    ):
+        _ = user
+        if scene_idx < 0 or scene_idx > 999:
+            raise HTTPException(400, "bad_scene_index")
+        path = agent_jobs.resolve_clip_path(job_id, scene_idx)
+        if not path:
+            raise HTTPException(404, "clip_not_found")
+        return FileResponse(
+            path,
+            media_type="video/mp4",
             headers={"Cache-Control": "private, max-age=600"},
         )
+
+    @router.get("/jobs/{job_id}/thumbnail/{thumbnail_idx}")
+    async def production_job_thumbnail(
+        job_id: str,
+        thumbnail_idx: int,
+        user: dict = Depends(_agent_user),
+    ):
+        """Serve a Plan-mode long-form thumbnail candidate inside Agent chat."""
+        _ = user
+        if thumbnail_idx < 1 or thumbnail_idx > 12:
+            raise HTTPException(400, "bad_thumbnail_index")
+        path = agent_jobs.resolve_longform_thumbnail_path(job_id, thumbnail_idx)
+        if not path:
+            raise HTTPException(404, "thumbnail_not_found")
+        return FileResponse(
+            path,
+            media_type="image/png",
+            headers={"Cache-Control": "private, no-cache, must-revalidate"},
+        )
+
+    @router.get("/catalyst/skeleton-health")
+    async def catalyst_skeleton_health(
+        channel_key: str = Query("mrskelewelly"),
+        user: dict = Depends(_agent_user),
+    ):
+        """Audit Catalyst self-learning + skeleton reference memory for Studio Agent."""
+        _ = user
+        from studio_agent.catalyst_health import ensure_catalyst_skeleton_learning_ready
+
+        return await run_in_threadpool(ensure_catalyst_skeleton_learning_ready, channel_key)
+
+    @router.post("/jobs/{job_id}/scene/{scene_idx}/regenerate")
+    async def production_job_scene_regenerate(
+        job_id: str,
+        scene_idx: int,
+        request: Request,
+        user: dict = Depends(_agent_user),
+    ):
+        """Catalyst-audited scene regenerate — preserves style, fixes artifacting."""
+        if scene_idx < 0 or scene_idx > 999:
+            raise HTTPException(400, "bad_scene_index")
+        try:
+            from long_form import pipeline as lf_pipeline
+            from studio_agent import tools as agent_tools
+
+            is_longform = bool(lf_pipeline.load_state(job_id))
+            runpod_enabled = agent_tools._runpod_production_enabled()
+            command_id = _direct_production_command_id(
+                request,
+                runpod_enabled=runpod_enabled,
+            )
+            if runpod_enabled:
+                tool_name = (
+                    "regenerate_longform_still"
+                    if is_longform
+                    else "regenerate_production_scene"
+                )
+                scene_key = "scene_idx" if is_longform else "scene_index"
+                tool_result = await run_in_threadpool(
+                    agent_tools.execute_tool_logged,
+                    tool_name,
+                    {
+                        "job_id": job_id,
+                        scene_key: scene_idx,
+                        "_runpod_command_id": command_id,
+                    },
+                    user_id=_user_id(user),
+                    content_format="long" if is_longform else "short",
+                )
+            elif is_longform:
+                tool_result = await run_in_threadpool(
+                    agent_tools.regenerate_longform_still,
+                    job_id,
+                    scene_idx,
+                )
+            else:
+                tool_result = await run_in_threadpool(
+                    agent_tools.regenerate_production_scene,
+                    job_id,
+                    scene_idx,
+                )
+
+            if is_longform:
+                snapshot = agent_jobs.get_job_snapshot(job_id, "longform")
+            else:
+                snapshot = agent_jobs.get_job_snapshot(job_id, "shortform")
+            parsed = json.loads(tool_result or "{}")
+        except Exception as exc:
+            raise HTTPException(400, f"scene_regenerate_failed: {exc}") from exc
+        return {
+            "ok": True,
+            "job_id": job_id,
+            "scene_index": scene_idx,
+            "tool_result": parsed,
+            "snapshot": snapshot,
+        }
+
+    @router.put("/jobs/{job_id}/scene/{scene_idx}/prompt")
+    async def production_job_scene_prompt(
+        job_id: str,
+        scene_idx: int,
+        body: ScenePromptRequest,
+        user: dict = Depends(_agent_user),
+    ):
+        """Persist the creator's exact provider prompt for the next regeneration."""
+        _ = user
+        if scene_idx < 0 or scene_idx > 999:
+            raise HTTPException(400, "bad_scene_index")
+        try:
+            from skeleton_ai.styled_pipeline import set_scene_prompt_override
+            from studio_agent.tools import _shortform_workspace
+
+            scene = await run_in_threadpool(
+                set_scene_prompt_override, _shortform_workspace(job_id), scene_idx, body.prompt,
+            )
+            snapshot = agent_jobs.get_job_snapshot(job_id, "shortform")
+        except Exception as exc:
+            raise HTTPException(400, f"scene_prompt_update_failed: {exc}") from exc
+        return {"ok": True, "job_id": job_id, "scene_index": scene_idx, "scene": scene, "snapshot": snapshot}
 
     @router.post("/jobs/{job_id}/scene/{scene_idx}/approval")
     async def production_job_scene_approval(
         job_id: str,
         scene_idx: int,
         body: SceneApprovalRequest,
+        request: Request,
         user: dict = Depends(_agent_user),
     ):
-        _ = user
+        import time as _time
+
         if scene_idx < 0 or scene_idx > 999:
             raise HTTPException(400, "bad_scene_index")
         try:
             from studio_agent import tools as agent_tools
 
+            runpod_enabled = agent_tools._runpod_production_enabled()
+            command_id = _direct_production_command_id(
+                request,
+                runpod_enabled=runpod_enabled and bool(body.animate),
+            )
             tool_result = await run_in_threadpool(
                 agent_tools.set_production_scenes_animate,
                 job_id,
                 bool(body.animate),
                 [scene_idx],
             )
+            spawn_parsed = None
+            if body.animate:
+                if runpod_enabled:
+                    raw_spawn = await run_in_threadpool(
+                        agent_tools.execute_tool_logged,
+                        "animate_production_scenes",
+                        {
+                            "job_id": job_id,
+                            "scene_indices": [scene_idx],
+                            "_runpod_command_id": command_id,
+                        },
+                        user_id=_user_id(user),
+                        content_format="short",
+                    )
+                else:
+                    raw_spawn = await run_in_threadpool(
+                        agent_tools.spawn_animate_production_scenes,
+                        job_id,
+                        [scene_idx],
+                    )
+                try:
+                    spawn_parsed = __import__("json").loads(raw_spawn or "{}")
+                except Exception:
+                    spawn_parsed = {"status": "running", "raw": raw_spawn}
             snapshot = agent_jobs.get_job_snapshot(job_id, "shortform")
         except Exception as exc:
             raise HTTPException(400, f"scene_approval_failed: {exc}") from exc
-        return {
+        payload: dict = {
             "ok": True,
             "job_id": job_id,
             "scene_index": scene_idx,
@@ -440,30 +724,71 @@ def build_studio_agent_router(
             "tool_result": tool_result,
             "snapshot": snapshot,
         }
+        if body.animate:
+            payload["spawn_result"] = spawn_parsed
+            payload["active_jobs"] = [{
+                "job_id": job_id,
+                "kind": "shortform",
+                "title": str(snapshot.get("title") or "Short-form animation"),
+                "started_at": _time.time(),
+            }]
+            payload["poll_url"] = f"/api/studio-agent/jobs/{job_id}?kind=shortform"
+        return payload
 
     @router.post("/jobs/{job_id}/scenes/approval")
     async def production_job_scenes_approval(
         job_id: str,
         body: SceneBulkApprovalRequest,
+        request: Request,
         user: dict = Depends(_agent_user),
     ):
-        _ = user
+        import time as _time
+
         indices = body.scene_indices
         if indices is not None and any(idx < 0 or idx > 999 for idx in indices):
             raise HTTPException(400, "bad_scene_index")
         try:
             from studio_agent import tools as agent_tools
 
+            runpod_enabled = agent_tools._runpod_production_enabled()
+            command_id = _direct_production_command_id(
+                request,
+                runpod_enabled=runpod_enabled and bool(body.animate),
+            )
             tool_result = await run_in_threadpool(
                 agent_tools.set_production_scenes_animate,
                 job_id,
                 bool(body.animate),
                 indices,
             )
+            spawn_parsed = None
+            if body.animate:
+                if runpod_enabled:
+                    raw_spawn = await run_in_threadpool(
+                        agent_tools.execute_tool_logged,
+                        "animate_production_scenes",
+                        {
+                            "job_id": job_id,
+                            "scene_indices": indices,
+                            "_runpod_command_id": command_id,
+                        },
+                        user_id=_user_id(user),
+                        content_format="short",
+                    )
+                else:
+                    raw_spawn = await run_in_threadpool(
+                        agent_tools.spawn_animate_production_scenes,
+                        job_id,
+                        indices,
+                    )
+                try:
+                    spawn_parsed = __import__("json").loads(raw_spawn or "{}")
+                except Exception:
+                    spawn_parsed = {"status": "running", "raw": raw_spawn}
             snapshot = agent_jobs.get_job_snapshot(job_id, "shortform")
         except Exception as exc:
             raise HTTPException(400, f"scene_bulk_approval_failed: {exc}") from exc
-        return {
+        payload: dict = {
             "ok": True,
             "job_id": job_id,
             "scene_indices": indices,
@@ -471,46 +796,149 @@ def build_studio_agent_router(
             "tool_result": tool_result,
             "snapshot": snapshot,
         }
+        if body.animate:
+            payload["spawn_result"] = spawn_parsed
+            payload["active_jobs"] = [{
+                "job_id": job_id,
+                "kind": "shortform",
+                "title": str(snapshot.get("title") or "Short-form animation"),
+                "started_at": _time.time(),
+            }]
+            payload["poll_url"] = f"/api/studio-agent/jobs/{job_id}?kind=shortform"
+        return payload
 
     @router.post("/jobs/{job_id}/animate")
     async def production_job_animate(
         job_id: str,
+        request: Request,
         user: dict = Depends(_agent_user),
     ):
         """Run i2v for short-form scenes that were explicitly approved for animation."""
-        _ = user
+        import time as _time
+
         try:
             from studio_agent import tools as agent_tools
 
-            tool_result = await run_in_threadpool(
-                agent_tools.animate_production_scenes,
-                job_id,
+            runpod_enabled = agent_tools._runpod_production_enabled()
+            command_id = _direct_production_command_id(
+                request,
+                runpod_enabled=runpod_enabled,
             )
+            if runpod_enabled:
+                raw = await run_in_threadpool(
+                    agent_tools.execute_tool_logged,
+                    "animate_production_scenes",
+                    {
+                        "job_id": job_id,
+                        "_runpod_command_id": command_id,
+                    },
+                    user_id=_user_id(user),
+                    content_format="short",
+                )
+            else:
+                raw = agent_tools.spawn_animate_production_scenes(job_id)
+            try:
+                parsed = __import__("json").loads(raw or "{}")
+            except Exception:
+                parsed = {"status": "running", "raw": raw}
             snapshot = agent_jobs.get_job_snapshot(job_id, "shortform")
         except Exception as exc:
             raise HTTPException(400, f"animation_failed: {exc}") from exc
         return {
             "ok": True,
             "job_id": job_id,
-            "tool_result": tool_result,
+            "tool_result": parsed,
             "snapshot": snapshot,
+            "active_jobs": [{
+                "job_id": job_id,
+                "kind": "shortform",
+                "title": str(snapshot.get("title") or "Short-form animation"),
+                "started_at": _time.time(),
+            }],
+            "poll_url": f"/api/studio-agent/jobs/{job_id}?kind=shortform",
         }
+
+    @router.post("/jobs/{job_id}/expand-proof")
+    async def production_job_expand_proof(
+        job_id: str,
+        request: Request,
+        user: dict = Depends(_agent_user),
+    ):
+        """Expand an approved one-scene long-form visual proof into the full still gallery."""
+        try:
+            from long_form import pipeline as lf_pipeline
+            from studio_agent import tools as agent_tools
+
+            # Must run on the FastAPI event-loop thread — create_task fails inside run_in_threadpool.
+            runpod_enabled = agent_tools._runpod_production_enabled()
+            command_id = _direct_production_command_id(
+                request,
+                runpod_enabled=runpod_enabled,
+            )
+            tool_result = None
+            if runpod_enabled:
+                raw = await run_in_threadpool(
+                    agent_tools.execute_tool_logged,
+                    "expand_longform_visual_proof",
+                    {
+                        "job_id": job_id,
+                        "_runpod_command_id": command_id,
+                    },
+                    user_id=_user_id(user),
+                    content_format="long",
+                )
+                tool_result = json.loads(raw or "{}")
+            else:
+                lf_pipeline.expand_visual_proof(job_id)
+            snapshot = agent_jobs.get_job_snapshot(job_id, "longform")
+        except Exception as exc:
+            raise HTTPException(400, str(exc)) from exc
+        payload = {"ok": True, "job_id": job_id, "snapshot": snapshot}
+        if tool_result is not None:
+            payload["tool_result"] = tool_result
+        return payload
 
     @router.post("/jobs/{job_id}/finalize")
     async def production_job_finalize(
         job_id: str,
+        request: Request,
         kind: str = Query("longform"),
+        captions_enabled: bool | None = Query(None),
+        caption_mode: Literal["word", "off"] | None = Query(None),
         user: dict = Depends(_agent_user),
     ):
         """Agent subscribers can finalize approved productions after the relevant review gate."""
         import time as _time
 
         normalized_kind = str(kind or "longform").strip().lower()
+        from studio_agent import tools as agent_tools
+
+        runpod_enabled = agent_tools._runpod_production_enabled()
+        command_id = _direct_production_command_id(
+            request,
+            runpod_enabled=runpod_enabled,
+        )
         if normalized_kind == "shortform":
             try:
-                from studio_agent import tools as agent_tools
-
-                raw = await run_in_threadpool(agent_tools.finalize_production, job_id)
+                if runpod_enabled:
+                    raw = await run_in_threadpool(
+                        agent_tools.execute_tool_logged,
+                        "finalize_production",
+                        {
+                            "job_id": job_id,
+                            "captions_enabled": captions_enabled,
+                            "caption_mode": caption_mode,
+                            "_runpod_command_id": command_id,
+                        },
+                        user_id=_user_id(user),
+                        content_format="short",
+                    )
+                else:
+                    raw = agent_tools.spawn_finalize_production(
+                        job_id,
+                        captions_enabled=captions_enabled,
+                        caption_mode=caption_mode,
+                    )
                 try:
                     parsed = __import__("json").loads(raw or "{}")
                 except Exception:
@@ -528,7 +956,7 @@ def build_studio_agent_router(
                 "kind": "shortform",
                 "tool_result": parsed,
                 "snapshot": snapshot,
-                "active_jobs": [] if snapshot.get("status") == "complete" else [{
+                "active_jobs": [] if (not runpod_enabled and snapshot.get("status") == "complete") else [{
                     "job_id": job_id,
                     "kind": "shortform",
                     "title": str(snapshot.get("title") or "Short-form finalize"),
@@ -538,7 +966,27 @@ def build_studio_agent_router(
             }
 
         try:
-            out = agent_jobs.finalize_longform_job(job_id)
+            if runpod_enabled:
+                raw = await run_in_threadpool(
+                    agent_tools.execute_tool_logged,
+                    "finalize_longform_render",
+                    {
+                        "job_id": job_id,
+                        "_runpod_command_id": command_id,
+                    },
+                    user_id=_user_id(user),
+                    content_format="long",
+                )
+                parsed = json.loads(raw or "{}")
+                out = {
+                    "ok": True,
+                    "job_id": job_id,
+                    "kind": "longform",
+                    "tool_result": parsed,
+                    "snapshot": agent_jobs.get_job_snapshot(job_id, "longform"),
+                }
+            else:
+                out = agent_jobs.finalize_longform_job(job_id)
         except Exception as exc:
             raise HTTPException(400, f"finalize_failed: {exc}") from exc
         return {
@@ -557,10 +1005,10 @@ def build_studio_agent_router(
         user: dict = Depends(_agent_user),
         audio: UploadFile = File(...),
     ):
-        """Firefox-safe STT: browser records audio, server runs fal whisper."""
+        """Server STT for recorded mic audio (xAI primary, FAL fallback)."""
         raw = await audio.read()
         try:
-            text = await transcribe_audio_bytes(
+            text, provider = await transcribe_audio_bytes(
                 raw,
                 filename=str(audio.filename or "dictation.webm"),
                 content_type=str(audio.content_type or ""),
@@ -571,7 +1019,174 @@ def build_studio_agent_router(
             raise HTTPException(503, str(exc)) from exc
         except Exception as exc:
             raise HTTPException(502, f"Transcription failed: {exc}") from exc
-        return {"text": text, "chars": len(text)}
+        return {"text": text, "chars": len(text), "provider": provider}
+
+    @router.websocket("/dictation/stream")
+    async def dictation_live_stream(
+        websocket: WebSocket,
+        token: str = Query(""),
+        language: str = Query(""),
+    ):
+        """Authenticated proxy to xAI streaming STT for live voice planning.
+
+        Auth (same identity as HTTP agent routes):
+        1. Query ``token`` (legacy)
+        2. First client JSON frame ``{"type":"auth","token":"…"}`` (preferred — avoids
+           long JWTs in access logs / proxy URL limits)
+        3. ``Authorization: Bearer …`` header when the client can set it
+        """
+        await websocket.accept()
+
+        async def _resolve_user_from_token(raw: str) -> dict | None:
+            cleaned = str(raw or "").strip()
+            if not cleaned:
+                return None
+            if not get_current_user:
+                # Misconfigured mount — do not silently accept; surface clearly.
+                return None
+            # Strip accidental "Bearer " prefix from query/body.
+            if cleaned.lower().startswith("bearer "):
+                cleaned = cleaned[7:].strip()
+
+            try:
+                # Prefer dedicated resolver when auth helpers expose it.
+                resolve = getattr(get_current_user, "__resolve_token__", None)
+                if callable(resolve):
+                    resolved = await resolve(cleaned)
+                else:
+                    class _FakeCred:
+                        scheme = "Bearer"
+                        credentials = cleaned
+
+                    resolved = await get_current_user(_FakeCred())
+            except Exception:
+                return None
+            return resolved if isinstance(resolved, dict) else None
+
+        user: dict | None = None
+        # Header first (when present), then query token.
+        try:
+            auth_header = str(websocket.headers.get("authorization") or websocket.headers.get("Authorization") or "").strip()
+        except Exception:
+            auth_header = ""
+        if auth_header:
+            user = await _resolve_user_from_token(auth_header)
+        if not user and str(token or "").strip():
+            user = await _resolve_user_from_token(token)
+
+        # Preferred: short auth frame so JWT is not stuck in the URL forever.
+        if not user:
+            try:
+                first = await asyncio.wait_for(websocket.receive_json(), timeout=8.0)
+            except Exception:
+                first = None
+            if isinstance(first, dict) and str(first.get("type") or "").strip().lower() == "auth":
+                user = await _resolve_user_from_token(str(first.get("token") or first.get("access_token") or ""))
+            elif isinstance(first, dict) and str(first.get("token") or "").strip():
+                # Tolerate bare token frames from older clients.
+                user = await _resolve_user_from_token(str(first.get("token") or ""))
+
+        if not user:
+            await websocket.send_json({
+                "type": "error",
+                "code": "auth_required",
+                "message": "Sign in required. Refresh Studio, then try the mic again.",
+            })
+            await websocket.close(code=4401)
+            return
+        if not can_use_studio_agent(
+            user,
+            is_admin_check=is_admin_check,
+            lane_access_check=lane_access_check,
+        ):
+            await websocket.send_json({
+                "type": "error",
+                "code": "plan_required",
+                "message": (
+                    "Studio Agent requires an active Studio ($60/mo) or Studio Pro ($200/mo) plan. "
+                    "Owners have unlimited access."
+                ),
+            })
+            await websocket.close(code=4403)
+            return
+        from studio_agent.dictation_stream import proxy_dictation_stream
+
+        await proxy_dictation_stream(websocket, language=str(language or "").strip())
+
+    @router.post("/sessions/{session_id}/attachments/image")
+    async def upload_image_attachment(
+        session_id: str,
+        file: UploadFile = File(...),
+        user: dict = Depends(_agent_user),
+    ):
+        """Persist an uploaded skeleton/product reference image for shortform still locking."""
+        from studio_agent.attachments import save_image_attachment
+
+        uid = _user_id(user)
+        session = store.get_session(session_id, user_id=uid)
+        if not session:
+            raise HTTPException(404, "session not found")
+        if not file or not file.filename:
+            raise HTTPException(400, "No image file")
+        raw = await file.read()
+        if not raw or len(raw) < 1024:
+            raise HTTPException(400, "Image too small")
+        if len(raw) > 12 * 1024 * 1024:
+            raise HTTPException(400, "Image exceeds 12MB")
+        try:
+            saved = save_image_attachment(session_id, str(file.filename), raw)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        store.update_session(
+            session_id,
+            skeleton_reference_image=str(saved["path"]),
+            image_model=store.SKELETON_DEFAULT_IMAGE_MODEL,
+        )
+        return {
+            "ok": True,
+            "name": str(saved["name"]),
+            "mime_type": str(file.content_type or saved["mime_type"]),
+            "size": int(saved["size"]),
+            "path": str(saved["path"]),
+            "skeleton_reference_image": str(saved["path"]),
+        }
+
+    @router.post("/sessions/{session_id}/attachments/video")
+    async def upload_video_attachment(
+        session_id: str,
+        file: UploadFile = File(...),
+        user: dict = Depends(_agent_user),
+    ):
+        """Persist an uploaded Studio Agent reference video for analysis in this chat."""
+        from studio_agent.attachments import save_video_attachment
+
+        uid = _user_id(user)
+        session = store.get_session(session_id, user_id=uid)
+        if not session:
+            raise HTTPException(404, "session not found")
+        if not file or not file.filename:
+            raise HTTPException(400, "No video file")
+        raw = await file.read()
+        if not raw:
+            raise HTTPException(400, "Empty video file")
+        try:
+            saved = save_video_attachment(session_id, str(file.filename), raw)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        existing = [str(p) for p in list(session.get("latest_attachment_paths") or []) if p]
+        next_paths = [*existing, str(saved["path"])][-8:]
+        store.update_session(
+            session_id,
+            latest_attachment_paths=next_paths,
+            latest_attachment_at=time.time(),
+        )
+        return {
+            "ok": True,
+            "name": str(saved["name"]),
+            "mime_type": str(file.content_type or saved["mime_type"]),
+            "size": int(saved["size"]),
+            "path": str(saved["path"]),
+        }
 
     @router.get("/credits")
     async def credits(user: dict = Depends(_agent_user)):
@@ -604,18 +1219,26 @@ def build_studio_agent_router(
 
     @router.post("/sessions")
     async def create_session(body: CreateSessionRequest, user: dict = Depends(_agent_user)):
+        selected_model = body.model or openrouter.DEFAULT_MODEL
+        try:
+            model_registry.assert_model_selectable(selected_model)
+        except model_registry.ModelSelectionError as exc:
+            raise HTTPException(422, str(exc)) from exc
         try:
             openrouter.api_key()
         except RuntimeError as exc:
             raise HTTPException(503, str(exc)) from exc
+        image_model = str(body.image_model_id or body.image_model or "").strip()
         session = store.create_session(
             user_id=_user_id(user),
-            model=body.model or openrouter.DEFAULT_MODEL,
+            model=selected_model,
+            agent_mode=body.agent_mode,
             approval_mode=body.approval_mode,
             content_format=body.content_format,
             reasoning_depth=body.reasoning_depth,
             render_style=body.render_style or store.DEFAULT_RENDER_STYLE,
-            video_model=body.video_model,
+            image_model=store.normalize_image_model(image_model or store.DEFAULT_IMAGE_MODEL),
+            video_model=store.normalize_video_model(body.video_model or store.DEFAULT_VIDEO_MODEL),
             channel_id=body.channel_id or "",
             registry_key=body.registry_key or "",
             channel_title=body.channel_title or "",
@@ -669,6 +1292,15 @@ def build_studio_agent_router(
             "styles": list_render_styles(),
         }
 
+    @router.get("/continuous-evaluation")
+    async def continuous_evaluation_status(user: dict = Depends(_agent_user)):
+        """Owner release gate: verified evidence and promoted regressions only."""
+        if not is_owner(user, is_admin_check):
+            raise HTTPException(403, "owner access required")
+        from studio_agent.continuous_evaluation import evaluation_health
+
+        return evaluation_health()
+
     @router.get("/style-preview/{key}")
     async def style_preview(key: str):
         """Serve (generate on-demand if missing) a single cheap hero preview still for the visual style grid.
@@ -718,19 +1350,86 @@ def build_studio_agent_router(
             raise HTTPException(404, "session not found")
         return {"session": _public_session(session), "rolled_over_from": session_id}
 
+    @router.post("/sessions/{session_id}/fork")
+    async def fork_session_with_context(session_id: str, user: dict = Depends(_agent_user)):
+        """Fresh chat with channel settings + compacted prior context, without prior jobs."""
+        uid = _user_id(user)
+        session = store.fork_session_with_context(session_id, user_id=uid)
+        if not session:
+            raise HTTPException(404, "session not found")
+        return {"session": _public_session(session), "forked_from": session_id}
+
     @router.get("/sessions/{session_id}")
     async def get_session(
         session_id: str,
         sync_pending: bool = Query(True),
+        message_tail: int = Query(0, ge=0, le=500),
         user: dict = Depends(_agent_user),
     ):
-        session = store.get_session(session_id, user_id=_user_id(user))
+        uid = _user_id(user)
+        if sync_pending:
+            session = store.force_sync_session(session_id, user_id=uid)
+            session = session or store.get_session(session_id, user_id=uid, reconcile_jobs=False)
+        else:
+            session = store.get_session(session_id, user_id=uid, reconcile_jobs=False)
         if not session:
             raise HTTPException(404, "session not found")
-        if sync_pending:
-            store.sync_pending_from_messages(session_id)
-            session = store.get_session(session_id, user_id=_user_id(user)) or session
-        return {"session": _public_session(session)}
+        return {"session": _public_session(session, message_tail=message_tail)}
+
+    @router.post("/sessions/{session_id}/sync")
+    async def sync_session(
+        session_id: str,
+        message_tail: int = Query(0, ge=0, le=500),
+        user: dict = Depends(_agent_user),
+    ):
+        """UI 'Sync chat' — authoritative reload of transcript + pending + jobs.
+
+        Always prunes stale production Approves. Never rebuilds start_shortform
+        pending from old transcript tool rows.
+        """
+        uid = _user_id(user)
+        session = store.force_sync_session(session_id, user_id=uid)
+        if not session:
+            raise HTTPException(404, "session not found")
+        return {
+            "session": _public_session(session, message_tail=message_tail),
+            "synced": True,
+            "pending_count": len(session.get("pending_actions") or []),
+            "message_count": len(session.get("messages") or []),
+            "active_run_count": len(store.active_runs(session) or []),
+        }
+
+    @router.post("/sessions/{session_id}/reset-production")
+    async def reset_production_state(
+        session_id: str,
+        body: ResetProductionRequest | None = None,
+        message_tail: int = Query(0, ge=0, le=500),
+        user: dict = Depends(_agent_user),
+    ):
+        """Clear poisoned production state in-place — same chat, fresh production boundary."""
+        uid = _user_id(user)
+        session = store.get_session(session_id, user_id=uid, reconcile_jobs=False)
+        if not session:
+            raise HTTPException(404, "session not found")
+        target = str((body.target_title if body else "") or "").strip()
+        if not target:
+            target = store.resolve_current_production_target(
+                session,
+                list(session.get("messages") or []),
+            )
+        session = store.advance_production_cycle(
+            session,
+            target_title=target,
+            messages=list(session.get("messages") or []),
+            reason="user_reset",
+            persist=True,
+        )
+        session = store.force_sync_session(session_id, user_id=uid) or session
+        return {
+            "session": _public_session(session, message_tail=message_tail),
+            "production_state": store.get_production_state(session),
+            "reset": True,
+        }
 
     @router.patch("/sessions/{session_id}")
     async def patch_session(
@@ -743,7 +1442,16 @@ def build_studio_agent_router(
             raise HTTPException(404, "session not found")
         updates: dict[str, Any] = {}
         if body.model is not None:
+            try:
+                model_registry.assert_model_selectable(body.model)
+            except model_registry.ModelSelectionError as exc:
+                raise HTTPException(422, str(exc)) from exc
             updates["model"] = body.model
+        if body.agent_mode is not None:
+            updates["agent_mode"] = body.agent_mode
+            if body.agent_mode == "plan":
+                updates["pending_actions"] = []
+                updates["last_production"] = {}
         if body.approval_mode is not None:
             updates["approval_mode"] = body.approval_mode
         if body.content_format is not None:
@@ -752,8 +1460,12 @@ def build_studio_agent_router(
             updates["reasoning_depth"] = body.reasoning_depth
         if body.render_style is not None:
             updates["render_style"] = body.render_style
+        if body.image_model_id is not None or body.image_model is not None:
+            updates["image_model"] = store.normalize_image_model(
+                body.image_model_id or body.image_model
+            )
         if body.video_model is not None:
-            updates["video_model"] = body.video_model
+            updates["video_model"] = store.normalize_video_model(body.video_model)
         if body.channel_id is not None:
             updates["channel_id"] = body.channel_id.strip()
         if body.registry_key is not None:
@@ -798,6 +1510,7 @@ def build_studio_agent_router(
                 billing_profile=profile,
                 reply_to=getattr(body, 'reply_to', None),
                 attachments=body.attachments,
+                agent_mode=body.agent_mode,
             )
         except (StudioAgentQueueFullError, StudioAgentQueueTimeoutError) as exc:
             snap = await queue_snapshot()
@@ -814,7 +1527,8 @@ def build_studio_agent_router(
 
     @router.post("/sessions/{session_id}/chat/stream")
     async def chat_stream(session_id: str, body: ChatRequest, user: dict = Depends(_agent_user)):
-        session = store.get_session(session_id, user_id=_user_id(user))
+        # Skip heavy job reconcile before first SSE byte — proxies (Cloudflare) 524 if TTFB > ~100s.
+        session = store.get_session(session_id, user_id=_user_id(user), reconcile_jobs=False)
         if not session:
             raise HTTPException(404, "session not found")
         session = _apply_chat_turn_options(session_id, session, body)
@@ -824,16 +1538,72 @@ def build_studio_agent_router(
             openrouter.api_key()
         except RuntimeError as exc:
             raise HTTPException(503, str(exc)) from exc
-        run = store.create_run(session_id, user_text=body.message.strip())
-        store.append_run_event(
+        run = store.create_run(
             session_id,
-            run["run_id"],
-            "status",
-            {"event": "status", "message": "Run accepted.", "run_id": run["run_id"]},
+            user_text=body.message.strip(),
+            request_id=str(body.request_id or "").strip(),
         )
+        run_id = run["run_id"]
+        idempotent_replay = bool(run.get("idempotent_replay"))
+
+        def sse_frame(event: str, payload: dict[str, Any]) -> str:
+            return f"event: {event}\ndata: {json.dumps(payload, default=str)}\n\n"
 
         async def body_iter():
-            yield f"event: status\ndata: {{\"event\":\"status\",\"message\":\"Run accepted.\",\"run_id\":\"{run['run_id']}\"}}\n\n"
+            # Immediate SSE comment so load balancers see bytes before LLM/tool work begins.
+            yield ": connected\n\n"
+            if idempotent_replay:
+                current = store.get_run(session_id, run_id, user_id=_user_id(user)) or run
+                for saved in list(current.get("events") or []):
+                    event_name = str(saved.get("event") or "status")
+                    if event_name in {"done", "error", "interrupted"}:
+                        continue
+                    event_data = saved.get("data") if isinstance(saved.get("data"), dict) else {}
+                    replay_data = {
+                        **event_data,
+                        "event": event_name,
+                        "run_id": run_id,
+                        "idempotent_replay": True,
+                    }
+                    yield sse_frame(event_name, replay_data)
+
+                run_status = str(current.get("status") or "running")
+                if run_status == "complete":
+                    saved_result = current.get("result") if isinstance(current.get("result"), dict) else {}
+                    yield sse_frame("done", {
+                        **saved_result,
+                        "event": "done",
+                        "run_id": run_id,
+                        "idempotent_replay": True,
+                    })
+                    return
+                if run_status in store.ACTIVE_RUN_STATUSES:
+                    yield sse_frame("status", {
+                        "event": "status",
+                        "message": "This run is already in progress. Resume will attach to the saved run.",
+                        "run_id": run_id,
+                        "run_status": run_status,
+                        "idempotent_replay": True,
+                        "resume_required": True,
+                    })
+                    return
+                yield sse_frame("error", {
+                    "event": "error",
+                    "message": str(current.get("error") or "The saved run did not complete."),
+                    "run_id": run_id,
+                    "run_status": run_status,
+                    "idempotent_replay": True,
+                })
+                return
+
+            accepted = {"event": "status", "message": "Run accepted.", "run_id": run_id}
+            yield sse_frame("status", accepted)
+            store.append_run_event(
+                session_id,
+                run_id,
+                "status",
+                accepted,
+            )
             async for chunk in runner.stream_turn(
                 session,
                 body.message.strip(),
@@ -841,7 +1611,8 @@ def build_studio_agent_router(
                 billing_profile=profile,
                 reply_to=body.reply_to,
                 attachments=body.attachments,
-                run_id=run["run_id"],
+                agent_mode=body.agent_mode,
+                run_id=run_id,
             ):
                 yield chunk
 
@@ -903,7 +1674,15 @@ def build_studio_agent_router(
                 "propose start_shortform_generate again with the same topic.",
             ) from exc
         except Exception as exc:
-            raise HTTPException(500, str(exc)) from exc
+            import logging
+            import traceback
+
+            logging.getLogger("studio_agent").exception(
+                "approve failed session=%s action=%s", session_id, body.action_id
+            )
+            detail = str(exc) or exc.__class__.__name__
+            # Keep detail useful for UI without dumping full stacks to the client.
+            raise HTTPException(500, f"Approve failed: {detail}") from exc
 
     @router.post("/sessions/{session_id}/retry-production")
     async def retry_production(session_id: str, user: dict = Depends(_agent_user)):
@@ -939,7 +1718,14 @@ def build_studio_agent_router(
             "role": "user",
             "content": f"[Rejected {action.get('tool')}] {reason}",
         })
-        store.update_session(session_id, messages=messages)
+        clear_fields: dict[str, object] = {}
+        if str(action.get("tool") or "") in {"start_shortform_generate", "start_longform_render"}:
+            clear_fields["last_production"] = {}
+            clear_fields["active_jobs"] = [
+                j for j in (session.get("active_jobs") or [])
+                if str(j.get("kind") or "") not in {"shortform", "longform"}
+            ]
+        store.update_session(session_id, messages=messages, **clear_fields)
         training_capture.capture_event(
             _user_id(user),
             "production_feedback",
@@ -962,9 +1748,11 @@ def _session_summary(session: dict[str, Any]) -> dict[str, Any]:
         "session_id": session.get("session_id"),
         "title": store.derive_title(session),
         "model": session.get("model"),
+        "agent_mode": session.get("agent_mode") or "plan",
         "content_format": session.get("content_format"),
         "reasoning_depth": session.get("reasoning_depth") or "balanced",
         "render_style": session.get("render_style") or store.DEFAULT_RENDER_STYLE,
+        "image_model": store.normalize_image_model(session.get("image_model")),
         "video_model": store.normalize_video_model(session.get("video_model")),
         "channel_id": session.get("channel_id") or "",
         "registry_key": session.get("registry_key") or "",
@@ -979,15 +1767,37 @@ def _session_summary(session: dict[str, Any]) -> dict[str, Any]:
         "active_runs": store.active_runs(session),
         "created_at": session.get("created_at"),
         "updated_at": session.get("updated_at"),
+        "blocked_job_ids": list(session.get("blocked_job_ids") or []),
+        "production_state": store.get_production_state(session),
     }
 
 
-def _public_session(session: dict[str, Any]) -> dict[str, Any]:
-    return {
+def _public_session(session: dict[str, Any], *, message_tail: int = 0) -> dict[str, Any]:
+    pending_concept = session.get("pending_concept")
+    if not isinstance(pending_concept, dict):
+        pending_concept = None
+    thumbnail_review = session.get("thumbnail_review")
+    if not isinstance(thumbnail_review, dict):
+        thumbnail_review = None
+    messages = list(session.get("messages") or [])
+    total_messages = len(messages)
+    tail = max(0, int(message_tail or 0))
+    if tail > 0 and total_messages > tail:
+        messages = messages[-tail:]
+    payload = {
         **_session_summary(session),
         "approval_mode": session.get("approval_mode"),
         "pending_actions": session.get("pending_actions") or [],
+        "pending_concept": pending_concept,
+        "thumbnail_review": thumbnail_review,
         "active_jobs": session.get("active_jobs") or [],
         "active_runs": store.active_runs(session),
-        "messages": session.get("messages") or [],
+        "messages": messages,
+        "forked_from": session.get("forked_from") or "",
+        "context_ingested": bool(session.get("context_ingested")),
+        "skip_job_recovery": bool(session.get("skip_job_recovery")),
     }
+    if tail > 0 and total_messages > tail:
+        payload["message_count"] = total_messages
+        payload["messages_truncated"] = True
+    return payload

@@ -38,9 +38,28 @@ export default function AgentYouTubeConnect({
                 });
                 const data = (await res.json().catch(() => ({}))) as {
                     channels?: ChannelRow[];
-                    detail?: string;
+                    detail?: unknown;
                 };
-                if (!res.ok) throw new Error(String(data.detail || `HTTP ${res.status}`));
+                if (!res.ok) {
+                    const raw = data.detail;
+                    let detail = '';
+                    if (typeof raw === 'string') detail = raw;
+                    else if (Array.isArray(raw)) {
+                        detail = raw
+                            .map((item) => {
+                                if (typeof item === 'string') return item;
+                                if (item && typeof item === 'object' && 'msg' in item) {
+                                    return String((item as { msg?: string }).msg || '');
+                                }
+                                return '';
+                            })
+                            .filter(Boolean)
+                            .join('; ');
+                    } else if (raw && typeof raw === 'object') {
+                        detail = JSON.stringify(raw);
+                    }
+                    throw new Error(detail || `HTTP ${res.status}`);
+                }
                 const list = Array.isArray(data.channels) ? data.channels : [];
                 setChannels(list);
                 onChannelsLoadedRef.current?.(list);

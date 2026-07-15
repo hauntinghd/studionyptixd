@@ -1,18 +1,32 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useContext, useEffect, useState } from 'react';
 import { Bell } from 'lucide-react';
 import {
     listNotifications,
     markAllRead,
     markRead,
     subscribeNotifications,
+    syncReleaseNotifications,
     type StudioNotification,
 } from '../../lib/studioNotifications';
+import { AuthContext } from '../../shared';
 
 export default function NotificationBell() {
+    const { session } = useContext(AuthContext);
     const [open, setOpen] = useState(false);
     const [items, setItems] = useState<StudioNotification[]>(() => listNotifications());
 
     useEffect(() => subscribeNotifications(() => setItems(listNotifications())), []);
+
+    const pullReleaseNotes = useCallback((force = false) => {
+        void syncReleaseNotifications(session?.access_token, force).then(() => setItems(listNotifications()));
+    }, [session?.access_token]);
+
+    useEffect(() => {
+        pullReleaseNotes();
+        const onFocus = () => pullReleaseNotes();
+        window.addEventListener('focus', onFocus);
+        return () => window.removeEventListener('focus', onFocus);
+    }, [pullReleaseNotes]);
 
     const unread = items.filter((n) => !n.read).length;
 
@@ -21,7 +35,10 @@ export default function NotificationBell() {
             <button
                 type="button"
                 aria-label="Notifications"
-                onClick={() => setOpen((v) => !v)}
+                onClick={() => {
+                    if (!open) pullReleaseNotes(true);
+                    setOpen((v) => !v);
+                }}
                 className="relative flex h-9 w-9 items-center justify-center rounded-lg border border-white/[0.08] bg-white/[0.03] text-gray-300 transition hover:border-violet-500/30 hover:text-white"
             >
                 <Bell className="h-4 w-4" />

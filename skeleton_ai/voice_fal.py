@@ -23,6 +23,20 @@ TTS_ENDPOINT = "fal-ai/minimax/speech-02-hd"
 DEFAULT_VOICE = "English_Trustworthy_Man"
 
 
+def resolve_voice_id(*, skeleton: bool = False, explicit: str | None = None) -> str:
+    """Pick the fal MiniMax voice id for Studio narration."""
+    chosen = str(explicit or "").strip()
+    if chosen:
+        return chosen
+    if skeleton:
+        return (
+            str(os.getenv("SKELETON_FAL_VOICE_ID") or "").strip()
+            or str(os.getenv("FAL_TTS_VOICE_ID") or "").strip()
+            or DEFAULT_VOICE
+        )
+    return str(os.getenv("FAL_TTS_VOICE_ID") or "").strip() or DEFAULT_VOICE
+
+
 def _ensure_fal_key() -> str:
     key = (os.getenv("FAL_AI_KEY", "") or os.getenv("FAL_KEY", "")).strip()
     if not key:

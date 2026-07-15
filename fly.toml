@@ -19,6 +19,7 @@ kill_timeout = 120  # match render.yaml maxShutdownDelaySeconds
 
 [env]
   PORT = "10000"
+  WEB_CONCURRENCY = "4"
   FRONTEND_DIST_DIR = "/app/ViralShorts-App/dist"
   APP_DATA_DIR = "/var/data"
   STUDIO_AGENT_SESSIONS_DIR = "/var/data/studio_agent_sessions"
@@ -53,6 +54,10 @@ kill_timeout = 120  # match render.yaml maxShutdownDelaySeconds
   STUDIO_PRODUCTION_AUDIO_SLOTS = "8"
   STUDIO_PRODUCTION_COMPOSE_SLOTS = "4"
   STUDIO_PRODUCTION_SLOT_MAX_WAIT_SEC = "1800"
+  SHORTFORM_JOB_STALE_SEC = "3600"
+  STUDIO_FINALIZE_QA_REQUIRED = "false"
+  STUDIO_LONGFORM_MAX_SCENES = "144"
+  STUDIO_MODELS_CACHE_SEC = "900"
   JOB_QUEUE_WORKERS = "1"
   RUN_EMBEDDED_WORKER = "true"
   SITE_URL = "https://studio.nyptidindustries.com"
@@ -75,6 +80,27 @@ kill_timeout = 120  # match render.yaml maxShutdownDelaySeconds
   # the "what works" corpus. Quota-safe (budget-capped per tick, ~4 ticks/day).
   CATALYST_BACKFILL_AUTO_ENABLED = "true"
   CATALYST_BACKFILL_AUTO_INTERVAL_SEC = "21600"
+  # Studio Agent Catalyst runtime: warm public niche cache + refresh stale OAuth channels.
+  # 600s = 10 minutes continuous niche warm + channel sync (quota-safe with prefer_recent).
+  STUDIO_CATALYST_AUTO_ENABLED = "true"
+  STUDIO_CATALYST_TICK_INTERVAL_SEC = "600"
+  STUDIO_CATALYST_NICHE_WARM_MAX = "6"
+  STUDIO_CATALYST_CHANNEL_SYNC_MAX = "8"
+  # Reference video analysis: Anthropic Haiku vision/story, xAI STT, FAL whisper fallback.
+  STUDIO_REFERENCE_VISION_PROVIDER_ORDER = "anthropic,fal,openrouter"
+  STUDIO_REFERENCE_ANALYSIS_PROVIDER_ORDER = "anthropic,fal,openrouter"
+  STUDIO_REFERENCE_STT_PROVIDER_ORDER = "xai,fal"
+  STUDIO_REFERENCE_VISION_MODEL = "claude-haiku-4-5-20251001"
+  STUDIO_REFERENCE_ANALYSIS_MODEL = "claude-haiku-4-5-20251001"
+  STUDIO_AGENT_VISION_MODEL_FAL = "anthropic/claude-haiku-4.5"
+  STUDIO_AGENT_ANALYSIS_MODEL_FAL = "anthropic/claude-haiku-4.5"
+  STUDIO_SHORTS_ONLY = "false"
+  # RunPod is intentionally inactive until the endpoint is funded and its
+  # strict worker image passes a live canary. Fly continues using the existing
+  # provider-backed production path while these gates are off.
+  STUDIO_RUNPOD_PRODUCTION_ENABLED = "false"
+  STUDIO_RUNPOD_LONGFORM_ENABLED = "false"
+  RUNPOD_DISPATCH_MAX_QUEUE_DEPTH = "1"
 
 [[mounts]]
   source = "studio_data"
