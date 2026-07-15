@@ -91,6 +91,7 @@ from audio import (
     _voice_provider_snapshot,
 )
 from auth import FALLBACK_SUPABASE_ANON_KEY, FALLBACK_SUPABASE_URL, build_auth_helpers
+from alt_history_private_router import build_alt_history_private_router
 from routes import (
     build_assets_router,
     build_billing_router,
@@ -104,9 +105,13 @@ from routes import (
 )
 from backend_youtube_catalyst_routes import build_youtube_catalyst_app_router
 from cliplab_router import build_cliplab_router
+from long_form_router import build_long_form_router
+from history_rewind_private_router import build_history_rewind_private_router
+from skeleton_ai_router import build_skeleton_ai_router
 from studio_agent_router import build_studio_agent_router
 from studio_analytics_router import build_studio_analytics_router
 from studio_hub_router import build_studio_hub_router
+from zerotier_private_router import build_zerotier_private_router
 from backend_settings import (
     XAI_API_KEY,
     ELEVENLABS_API_KEY,
@@ -18714,6 +18719,63 @@ mount_router(
         public_config_payload=_public_config_payload,
         landing_notifications_payload=_landing_notifications_payload,
     )
+)
+
+
+async def _skeleton_reserve_credit(user: dict, *, ac_cost: int):
+    """Adapt Skeleton AI's AC reservation to the unified Studio wallet."""
+    user_plan, _plan_limits = _resolve_user_plan_for_limits(user)
+    is_admin = _is_admin_user(user)
+    return await _reserve_generation_credit(
+        user,
+        user_plan,
+        _billing_active_for_user(user),
+        is_admin=is_admin,
+        usage_kind="animated",
+        credits_needed=ac_cost,
+    )
+
+
+mount_router(
+    app,
+    build_skeleton_ai_router(
+        require_auth=require_auth,
+        reserve_credit=_skeleton_reserve_credit,
+        refund_credit=_refund_generation_credit,
+    ),
+)
+
+mount_router(
+    app,
+    build_long_form_router(
+        require_auth=require_auth,
+        catalyst_hub_snapshot_for_user=_catalyst_hub_snapshot_for_user,
+        is_admin_check=_is_admin_user,
+    ),
+)
+
+mount_router(
+    app,
+    build_zerotier_private_router(
+        require_auth=require_auth,
+        is_admin_user=_is_admin_user,
+    ),
+)
+
+mount_router(
+    app,
+    build_alt_history_private_router(
+        require_auth=require_auth,
+        is_admin_user=_is_admin_user,
+    ),
+)
+
+mount_router(
+    app,
+    build_history_rewind_private_router(
+        require_auth=require_auth,
+        is_admin_user=_is_admin_user,
+    ),
 )
 
 mount_router(
