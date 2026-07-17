@@ -1,6 +1,6 @@
 import { useContext, useMemo, useRef, useState, useEffect } from 'react';
 import { ChevronDown, LogOut, MessageSquarePlus, Settings, User } from 'lucide-react';
-import { AuthContext, Logo, STUDIO_SITE_URL } from '../../shared';
+import { AuthContext, Logo } from '../../shared';
 import type { PageNav } from '../NavBar';
 import CreditFuelBar from './CreditFuelBar';
 import NotificationBell from './NotificationBell';
@@ -39,10 +39,10 @@ export default function StudioTopBar({ onNavigate }: { onNavigate: PageNav }) {
     const goBilling = () => onNavigate('billing');
 
     return (
-        <header className="sticky top-0 z-30 flex h-14 items-center justify-between gap-3 border-b border-white/[0.06] bg-[#09090b]/95 px-4 backdrop-blur-md sm:px-6">
-            <a href={`${STUDIO_SITE_URL}?page=dashboard&tab=agent`} className="flex items-center gap-2 shrink-0">
+        <header className="sticky top-0 z-30 flex h-14 items-center justify-between gap-2 border-b border-white/[0.06] bg-[#09090b]/95 px-2 backdrop-blur-md sm:gap-3 sm:px-6">
+            <button type="button" onClick={() => onNavigate('dashboard')} className="flex shrink-0 items-center gap-2">
                 <Logo size={28} />
-            </a>
+            </button>
 
             <div className="flex flex-1 items-center justify-end gap-2 sm:gap-3">
                 <a

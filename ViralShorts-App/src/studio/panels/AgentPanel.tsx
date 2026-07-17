@@ -1579,6 +1579,16 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
     const [history, setHistory] = useState<SessionSummary[]>([]);
     const [historyQuery, setHistoryQuery] = useState('');
     const [historyOpen, setHistoryOpen] = useState(true);
+
+    useEffect(() => {
+        const narrowWindow = window.matchMedia('(max-width: 767px)');
+        const collapseForNarrowWindow = () => {
+            if (narrowWindow.matches) setHistoryOpen(false);
+        };
+        collapseForNarrowWindow();
+        narrowWindow.addEventListener('change', collapseForNarrowWindow);
+        return () => narrowWindow.removeEventListener('change', collapseForNarrowWindow);
+    }, []);
     const [productWebsite, setProductWebsite] = useState('');
     const [contentFormat, setContentFormat] = useState<ContentFormat>('short');
     const [reasoningDepth, setReasoningDepth] = useState<ReasoningDepth>('balanced');
@@ -4650,10 +4660,20 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                 </div>
             )}
 
-            <div className="flex min-h-0 flex-1 overflow-hidden bg-black">
+            <div className="relative flex min-h-0 flex-1 overflow-hidden bg-black">
+                {historyOpen && (
+                    <button
+                        type="button"
+                        aria-label="Close chat history"
+                        className="absolute inset-0 z-30 bg-black/60 sm:hidden"
+                        onClick={() => setHistoryOpen(false)}
+                    />
+                )}
                 <aside
-                    className={`flex shrink-0 flex-col border-r border-white/[0.07] bg-[#050505] transition-all duration-200 ${
-                        historyOpen ? 'w-[244px]' : 'w-[56px]'
+                    className={`shrink-0 flex-col border-r border-white/[0.07] bg-[#050505] transition-all duration-200 ${
+                        historyOpen
+                            ? 'absolute inset-y-0 left-0 z-40 flex w-[min(244px,calc(100vw-3rem))] sm:relative sm:z-auto sm:w-[244px]'
+                            : 'hidden sm:flex sm:w-[56px]'
                     }`}
                 >
                     <div className={`border-b border-white/[0.06] p-2.5 ${historyOpen ? 'block' : 'hidden'}`}>

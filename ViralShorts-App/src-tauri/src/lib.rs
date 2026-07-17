@@ -62,6 +62,37 @@ fn focus_main_window<R: Runtime>(app: &tauri::AppHandle<R>) {
     }
 }
 
+#[cfg(windows)]
+fn apply_studio_windows_frame(window: &tauri::WebviewWindow) {
+    use std::{ffi::c_void, mem::size_of};
+    use windows::Win32::Graphics::Dwm::{
+        DwmSetWindowAttribute, DWMWA_BORDER_COLOR, DWMWA_CAPTION_COLOR, DWMWA_TEXT_COLOR,
+    };
+
+    let Ok(hwnd) = window.hwnd() else {
+        return;
+    };
+    let black: u32 = 0x000000;
+    let white: u32 = 0x00ff_ffff;
+    let apply = |attribute, color: &u32| unsafe {
+        DwmSetWindowAttribute(
+            hwnd,
+            attribute,
+            color as *const u32 as *const c_void,
+            size_of::<u32>() as u32,
+        )
+    };
+    if let Err(error) = apply(DWMWA_BORDER_COLOR, &black) {
+        log::warn!("could not set Studio window border color: {error}");
+    }
+    if let Err(error) = apply(DWMWA_CAPTION_COLOR, &black) {
+        log::warn!("could not set Studio window caption color: {error}");
+    }
+    if let Err(error) = apply(DWMWA_TEXT_COLOR, &white) {
+        log::warn!("could not set Studio window title color: {error}");
+    }
+}
+
 fn trusted_navigation<R: Runtime>() -> TauriPlugin<R> {
     tauri::plugin::Builder::new("trusted-navigation")
         .on_navigation(|_webview, url| {
@@ -105,6 +136,11 @@ pub fn run() {
         .plugin(tauri_plugin_deep_link::init())
         .plugin(trusted_navigation())
         .setup(|app| {
+            #[cfg(windows)]
+            if let Some(window) = app.get_webview_window("main") {
+                apply_studio_windows_frame(&window);
+            }
+
             // Bundled installers register this statically. Runtime registration
             // also makes the portable Windows executable return OAuth callbacks
             // to whichever copy the beta tester actually launched.

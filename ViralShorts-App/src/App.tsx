@@ -1,4 +1,4 @@
-import { useCallback, useContext, useEffect, useState } from 'react';
+import { useCallback, useContext, useEffect, useRef, useState } from 'react';
 import AccountPage from './studio/pages/AccountPage';
 import AuthPage from './studio/pages/AuthPage';
 import BillingPage from './studio/pages/BillingPage';
@@ -10,7 +10,7 @@ import SubscriptionPage from './studio/pages/SubscriptionPage';
 import TermsPage from './studio/pages/TermsPage';
 import WaitlistPage from './studio/pages/WaitlistPage';
 import WaitlistConfirmationPage from './studio/pages/WaitlistConfirmationPage';
-import { AuthContext, AuthProvider, isBillingHost } from './studio/shared';
+import { AuthContext, AuthProvider, isBillingHost, isTauriDesktopApp } from './studio/shared';
 import { trackStudioPageView } from './studio/lib/googleAds';
 
 type StudioPage = 'landing' | 'dashboard' | 'auth' | 'account' | 'settings' | 'billing' | 'subscription' | 'privacy' | 'terms' | 'waitlist' | 'waitlist_confirmation';
@@ -30,8 +30,18 @@ const hasPendingAuthRedirectArtifacts = (): boolean => {
 };
 
 function AppShell() {
-    const { session, loading, role, backendOffline, maintenanceBannerEnabled, maintenanceBannerMessage } = useContext(AuthContext);
+    const {
+        session,
+        loading,
+        role,
+        backendOffline,
+        maintenanceBannerEnabled,
+        maintenanceBannerMessage,
+        signInWithGoogle,
+        supabase,
+    } = useContext(AuthContext);
     const [desktopAuthError, setDesktopAuthError] = useState('');
+    const desktopStartupAuthStartedRef = useRef(false);
     const billingHost = isBillingHost;
     const thumblabHost = typeof window !== 'undefined' && window.location.hostname.toLowerCase() === 'thumblab.nyptidindustries.com';
     const resolvePageFromLocation = useCallback((): StudioPage | null => {
@@ -57,6 +67,10 @@ function AppShell() {
         return billingHost ? 'billing' : null;
     }, [billingHost]);
     const [page, setPage] = useState<StudioPage>(() => {
+        // The desktop application is the product workspace, not the marketing
+        // website. It boots into auth and moves straight to Studio after the
+        // persisted or browser-returned session is available.
+        if (isTauriDesktopApp) return 'auth';
         try {
             const locationPage = resolvePageFromLocation();
             if (locationPage) return locationPage;
@@ -135,7 +149,23 @@ function AppShell() {
     }, []);
 
     useEffect(() => {
+        if (!isTauriDesktopApp || loading || session) return;
+        if (page !== 'auth') setPage('auth');
+        if (!supabase || desktopStartupAuthStartedRef.current) return;
+
+        desktopStartupAuthStartedRef.current = true;
+        void signInWithGoogle().then((error) => {
+            if (!error) return;
+            window.dispatchEvent(new CustomEvent('nyptid:desktop-auth-error', { detail: error }));
+        });
+    }, [loading, page, session, signInWithGoogle, supabase]);
+
+    useEffect(() => {
         if (loading) return;
+        if (isTauriDesktopApp && !session) {
+            if (page !== 'auth') setPage('auth');
+            return;
+        }
         // Legal pages are always reachable — both when signed in (no forced-dashboard redirect)
         // and when signed out (no forced-auth redirect). Google's OAuth verification flow
         // needs these URLs to load for any visitor, logged in or not.
@@ -177,7 +207,7 @@ function AppShell() {
     }, [session, loading, page, role, backendOffline, billingHost]);
 
     return (
-        <div className="min-h-screen bg-[#09090b] text-gray-100 font-sans selection:bg-violet-500/30">
+        <div className="min-h-[100dvh] overflow-x-hidden bg-[#09090b] text-gray-100 font-sans selection:bg-violet-500/30">
             {maintenanceBannerEnabled && (
                 <div className="sticky top-0 z-50 border-b border-amber-300/20 bg-amber-500/10 px-4 py-2 text-center text-xs sm:text-sm text-amber-100 backdrop-blur">
                     {maintenanceBannerMessage || 'Studio is under high load. Queue times may be longer than usual while we scale capacity.'}

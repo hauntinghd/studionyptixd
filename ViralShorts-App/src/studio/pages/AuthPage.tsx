@@ -1,7 +1,7 @@
 import { useContext, useEffect, useState } from 'react';
 import { Lock, Mail } from 'lucide-react';
 import NavBar, { type PageNav } from '../components/NavBar';
-import { AuthContext, Logo } from '../shared';
+import { AuthContext, isTauriDesktopApp, Logo } from '../shared';
 
 export default function AuthPage({ onNavigate }: { onNavigate: PageNav }) {
     const { signIn, signInWithGoogle, signUp, session, loading, supabase } = useContext(AuthContext);
@@ -65,14 +65,16 @@ export default function AuthPage({ onNavigate }: { onNavigate: PageNav }) {
 
     return (
         <>
-            <NavBar onNavigate={onNavigate} />
-            <div className="pt-32 max-w-md mx-auto px-6">
+            {!isTauriDesktopApp && <NavBar onNavigate={onNavigate} />}
+            <div className={`max-w-md mx-auto px-6 ${isTauriDesktopApp ? 'pt-16 sm:pt-24' : 'pt-32'}`}>
                 <div className="text-center mb-8">
                     <Logo size={48} />
                     <h1 className="text-3xl font-bold mt-4">{mode === 'signin' ? 'Welcome Back' : 'Create Account'}</h1>
                     <p className="text-gray-500 text-sm mt-2">
                         {mode === 'signin'
-                            ? 'Email + password login is fully supported. Google stays optional when its OAuth path is healthy.'
+                            ? (isTauriDesktopApp
+                                ? 'Finish Google sign-in in your browser. Studio will securely return you to this app automatically.'
+                                : 'Email + password login is fully supported. Google stays optional when its OAuth path is healthy.')
                             : (
                                 <>
                                     Create an email account below, then verify it to unlock Studio even if Google sign-in is down.

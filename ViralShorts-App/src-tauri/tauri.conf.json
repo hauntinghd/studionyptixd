@@ -15,10 +15,11 @@
         "title": "NYPTID Studio",
         "width": 1440,
         "height": 900,
-        "minWidth": 1024,
-        "minHeight": 700,
+        "minWidth": 420,
+        "minHeight": 560,
         "center": true,
-        "backgroundColor": "#09090b",
+        "backgroundColor": "#000000",
+        "theme": "Dark",
         "resizable": true,
         "fullscreen": false
       }

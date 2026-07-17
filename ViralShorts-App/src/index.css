@@ -4,6 +4,14 @@
 
 @layer base {
     body {
-        @apply bg-gray-950 text-gray-100 antialiased selection:bg-indigo-500/30;
+        @apply m-0 min-w-0 overflow-x-hidden bg-black text-gray-100 antialiased selection:bg-indigo-500/30;
+    }
+
+    html,
+    body,
+    #root {
+        width: 100%;
+        min-height: 100%;
+        background: #000;
     }
 }

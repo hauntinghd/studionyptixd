@@ -15,7 +15,7 @@ type CreditState = {
 
 /** Matches Discord / notification pills in StudioTopBar — no wrapper box. */
 const topBarPill =
-    'inline-flex items-center gap-2 rounded-lg border border-white/[0.08] px-3 py-1.5 text-xs font-medium text-gray-300 transition hover:border-indigo-500/30 hover:text-white';
+    'items-center gap-1.5 rounded-lg border border-white/[0.08] px-2 py-1.5 text-xs font-medium text-gray-300 transition hover:border-indigo-500/30 hover:text-white sm:gap-2 sm:px-3';
 
 export default function CreditFuelBar({
     totalAc,
@@ -81,13 +81,13 @@ export default function CreditFuelBar({
 
     return (
         <>
-            <span className={topBarPill} title={unlimited ? 'Owner — unmetered' : 'Studio credits'}>
+            <span className={`inline-flex ${topBarPill}`} title={unlimited ? 'Owner — unmetered' : 'Studio credits'}>
                 <Sparkles className="h-3.5 w-3.5 shrink-0 text-cyan-300" />
                 <span className="hidden uppercase tracking-[0.14em] text-gray-500 sm:inline">Credits</span>
                 <span className="text-sm font-bold tabular-nums text-white">{display}</span>
             </span>
             {onTopUp && !unlimited && (
-                <button type="button" onClick={onTopUp} className={topBarPill}>
+                <button type="button" onClick={onTopUp} className={`hidden sm:inline-flex ${topBarPill}`}>
                     Top up
                 </button>
             )}

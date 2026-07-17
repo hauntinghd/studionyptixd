@@ -18,7 +18,7 @@ export default function StudioShell({
     flush?: boolean;
 }) {
     return (
-        <div className="flex min-h-screen flex-col bg-[#09090b] text-gray-100">
+        <div className="flex h-[100dvh] min-h-0 flex-col overflow-hidden bg-[#09090b] text-gray-100">
             <StudioTopBar onNavigate={onNavigate} />
             <div className="flex min-h-0 flex-1 overflow-hidden">
                 {sidebar}
