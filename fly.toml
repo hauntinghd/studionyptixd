@@ -67,7 +67,9 @@ kill_timeout = 120  # match render.yaml maxShutdownDelaySeconds
   SITE_URL = "https://studio.nyptidindustries.com"
   PAYPAL_ENV = "live"
   IMAGE_PROVIDER_ORDER = "fal"
-  XAI_IMAGE_FALLBACK_ENABLED = "true"
+  # xAI credits are not an implicit safety net. Users can still select an xAI
+  # model explicitly, but FAL production must never spill into xAI on failure.
+  XAI_IMAGE_FALLBACK_ENABLED = "false"
   HIDREAM_ENABLED = "false"
   HIDREAM_EDIT_ENABLED = "false"
   SKELETON_REQUIRE_WAN22 = "false"
