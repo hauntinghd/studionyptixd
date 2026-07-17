@@ -1,7 +1,9 @@
 param(
     [switch]$SkipTests,
     [switch]$DeployWorker,
-    [switch]$DeployVercel
+    [switch]$DeployVercel,
+    [string]$VercelProject = "studio-frontend-asd",
+    [string]$VercelScope = "nyptids-projects"
 )
 
 # Build and deploy one immutable Studio candidate. A dirty worktree is refused
@@ -128,9 +130,14 @@ if ($DeployVercel) {
     $vercel = Find-CommandPath "vercel.cmd"
     if (-not $vercel) { $vercel = Find-CommandPath "vercel" }
     if (-not $vercel) { throw "vercel is required when -DeployVercel is selected" }
-    Push-Location (Join-Path $Root "ViralShorts-App")
+    # The Vercel project itself declares ViralShorts-App as its root. Link and
+    # deploy from the repository root so that project setting remains valid;
+    # .vercelignore limits the upload to the actual web application.
+    Push-Location $Root
     try {
-        & $vercel --prod --yes --build-env "VITE_STUDIO_BUILD_ID=$buildId"
+        & $vercel link --yes --scope $VercelScope --project $VercelProject
+        Assert-NativeSuccess "Vercel project link"
+        & $vercel --prod --yes --scope $VercelScope --build-env "VITE_STUDIO_BUILD_ID=$buildId"
         Assert-NativeSuccess "Vercel deploy"
     } finally {
         Pop-Location

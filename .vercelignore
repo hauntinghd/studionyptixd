@@ -1,12 +1,12 @@
-**
+# The Vercel project root is this repository, but only the web application is
+# needed for its configured ViralShorts-App root directory.
+*
 !ViralShorts-App
 !ViralShorts-App/**
+
+# Local dependencies, build output, Vercel metadata, and the native Tauri shell
+# are never inputs to the hosted Vite build.
 ViralShorts-App/node_modules
-ViralShorts-App/node_modules/**
 ViralShorts-App/dist
-ViralShorts-App/dist/**
 ViralShorts-App/.vercel
-ViralShorts-App/.vercel/**
-ViralShorts-App/ViralShorts-App
-ViralShorts-App/ViralShorts-App/**
-ViralShorts-App/tsconfig.tsbuildinfo
+ViralShorts-App/src-tauri
