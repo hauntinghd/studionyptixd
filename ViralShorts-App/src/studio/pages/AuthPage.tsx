@@ -17,6 +17,17 @@ export default function AuthPage({ onNavigate }: { onNavigate: PageNav }) {
         if (session) onNavigate('dashboard');
     }, [onNavigate, session]);
 
+    useEffect(() => {
+        const handleDesktopAuthError = (event: Event) => {
+            const message = String((event as CustomEvent<string>).detail || '').trim();
+            setGoogleLoading(false);
+            setInfo('');
+            setError(message || 'Google sign-in could not return to Studio.');
+        };
+        window.addEventListener('nyptid:desktop-auth-error', handleDesktopAuthError);
+        return () => window.removeEventListener('nyptid:desktop-auth-error', handleDesktopAuthError);
+    }, []);
+
     if (session) return null;
     const authBooting = !supabase;
     const authSettling = loading && Boolean(supabase);

@@ -5,6 +5,14 @@ import { UNIFIED_PLANS, type UnifiedPlanId } from '../lib/studioProduct';
 import { type PageNav } from '../components/NavBar';
 import { AuthContext, BILLING_SITE_URL, STUDIO_SITE_URL, isBillingHost, resolveStudioBackendUrl } from '../shared';
 import { trackMembershipPurchaseCompleted, trackOnce } from '../lib/googleAds';
+import {
+    BILLING_CHECKOUT_STARTED_EVENT,
+    BILLING_CHECKOUT_STATE_EVENT,
+    beginBillingCheckout,
+    clearPendingBillingCheckout,
+    readPendingBillingCheckout,
+    type BillingCheckoutSyncStatus,
+} from '../lib/billingCheckoutSync';
 
 export default function SubscriptionPage({ onNavigate }: { onNavigate: PageNav }) {
     const {
@@ -32,6 +40,15 @@ export default function SubscriptionPage({ onNavigate }: { onNavigate: PageNav }
     const [actionError, setActionError] = useState('');
     const [loadingPlanId, setLoadingPlanId] = useState('');
     const [unifiedBalance, setUnifiedBalance] = useState<number | null>(null);
+    const [stripeCheckoutSync, setStripeCheckoutSync] = useState<{
+        status: BillingCheckoutSyncStatus | 'idle';
+        startedAt: number;
+    }>(() => {
+        const pending = readPendingBillingCheckout();
+        if (pending?.kind === 'subscription') return { status: 'pending', startedAt: pending.startedAt };
+        if (!paypalProvider && subscriptionResult === 'success') return { status: 'pending', startedAt: 0 };
+        return { status: 'idle', startedAt: 0 };
+    });
     const normalizedMembershipSource = String(membershipSource || nextRenewalSource || '').trim().toLowerCase();
     const usesStripeMembership = billingActive && normalizedMembershipSource === 'stripe';
     const usesManualPayPalMembership = billingActive && normalizedMembershipSource === 'paypal_manual';
@@ -79,14 +96,45 @@ export default function SubscriptionPage({ onNavigate }: { onNavigate: PageNav }
     }, [session]);
 
     useEffect(() => {
-        if (subscriptionResult !== 'success') return;
+        const handleStarted = (event: Event) => {
+            const pending = (event as CustomEvent).detail;
+            if (pending?.kind !== 'subscription') return;
+            setStripeCheckoutSync({ status: 'pending', startedAt: Number(pending.startedAt || 0) });
+        };
+        const handleState = (event: Event) => {
+            const detail = (event as CustomEvent).detail;
+            if (detail?.pending?.kind !== 'subscription') return;
+            setStripeCheckoutSync({
+                status: detail.status || 'pending',
+                startedAt: Number(detail.pending.startedAt || 0),
+            });
+        };
+        window.addEventListener(BILLING_CHECKOUT_STARTED_EVENT, handleStarted);
+        window.addEventListener(BILLING_CHECKOUT_STATE_EVENT, handleState);
+        return () => {
+            window.removeEventListener(BILLING_CHECKOUT_STARTED_EVENT, handleStarted);
+            window.removeEventListener(BILLING_CHECKOUT_STATE_EVENT, handleState);
+        };
+    }, []);
+
+    useEffect(() => {
+        if (stripeCheckoutSync.status !== 'confirmed') return;
+        const url = new URL(window.location.href);
+        url.searchParams.delete('subscription');
+        if (url.searchParams.get('provider') === 'stripe') url.searchParams.delete('provider');
+        window.history.replaceState(window.history.state, '', `${url.pathname}${url.search}${url.hash}`);
+    }, [stripeCheckoutSync.status]);
+
+    useEffect(() => {
+        const confirmed = (paypalProvider && paypalVerifyState === 'verified')
+            || stripeCheckoutSync.status === 'confirmed';
+        if (!confirmed) return;
         const planId = requestedPlanId || normalizedCurrentPlan || 'studio_pro_1k';
         const match = UNIFIED_PLANS.find((p) => p.id === planId);
-        const search = typeof window === 'undefined' ? '' : window.location.search;
-        trackOnce(`subscription_membership_success:${search}`, () => {
+        trackOnce(`subscription_membership_confirmed:${stripeCheckoutSync.startedAt || paypalOrderId}:${planId}`, () => {
             trackMembershipPurchaseCompleted(planId, match?.priceUsd || 0);
         });
-    }, [normalizedCurrentPlan, requestedPlanId, subscriptionResult]);
+    }, [normalizedCurrentPlan, paypalOrderId, paypalProvider, paypalVerifyState, requestedPlanId, stripeCheckoutSync]);
 
     useEffect(() => {
         if (!paypalProvider || !paypalOrderId || subscriptionResult !== 'success') return;
@@ -142,6 +190,12 @@ export default function SubscriptionPage({ onNavigate }: { onNavigate: PageNav }
             setActionError('');
             setLoadingPlanId(planId);
             try {
+                const startPlanCheckout = async () => {
+                    beginBillingCheckout({ kind: 'subscription', expectedPlanId: planId });
+                    const err = await checkout(planId);
+                    if (err) clearPendingBillingCheckout(readPendingBillingCheckout());
+                    return err;
+                };
                 if (billingActive && usesStripeMembership) {
                     const err = await manageBilling();
                     if (err) setActionError(err);
@@ -149,12 +203,12 @@ export default function SubscriptionPage({ onNavigate }: { onNavigate: PageNav }
                 }
                 if (billingActive && normalizedCurrentPlan === planId) {
                     if (usesManualPayPalMembership) {
-                        const err = await checkout(planId);
+                        const err = await startPlanCheckout();
                         if (err) setActionError(err);
                         return;
                     }
                 }
-                const err = await checkout(planId);
+                const err = await startPlanCheckout();
                 if (err) setActionError(err);
             } finally {
                 setLoadingPlanId('');
@@ -165,9 +219,19 @@ export default function SubscriptionPage({ onNavigate }: { onNavigate: PageNav }
 
     const banners = (
         <>
-            {subscriptionResult === 'success' && (!paypalProvider || paypalVerifyState === 'verified') && (
+            {(stripeCheckoutSync.status === 'confirmed' || (paypalProvider && paypalVerifyState === 'verified')) && (
                 <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-100">
                     Your plan is active. Monthly credits have been added to your wallet.
+                </div>
+            )}
+            {stripeCheckoutSync.status === 'pending' && !paypalProvider && (
+                <div className="rounded-xl border border-sky-500/20 bg-sky-500/10 px-4 py-3 text-sm text-sky-100">
+                    Checkout returned. Waiting for Studio to confirm the payment and refresh your account...
+                </div>
+            )}
+            {stripeCheckoutSync.status === 'timed_out' && !paypalProvider && (
+                <div className="rounded-xl border border-amber-500/20 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">
+                    Payment is not confirmed in Studio yet. No credits or plan access are being claimed; refocus or reopen the app to check again.
                 </div>
             )}
             {paypalProvider && paypalVerifyState === 'verifying' && (

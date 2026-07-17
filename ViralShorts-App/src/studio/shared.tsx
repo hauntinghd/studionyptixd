@@ -2,10 +2,21 @@ import { useState, useEffect, createContext, useCallback, useRef } from 'react';
 import { createClient, Session, SupabaseClient } from '@supabase/supabase-js';
 import { UNIFIED_TOPUP_PACKS } from './lib/studioProduct';
 import { trackAuthCompletion } from './lib/googleAds';
+import {
+    BILLING_CHECKOUT_STARTED_EVENT,
+    BILLING_VIEWER_REFRESH_EVENT,
+    checkoutIsConfirmed,
+    clearPendingBillingCheckout,
+    emitBillingCheckoutState,
+    readPendingBillingCheckout,
+    type BillingCheckoutSnapshot,
+} from './lib/billingCheckoutSync';
 
 const viteEnv = ((import.meta as any).env || {}) as Record<string, string>;
 const hostLower = window.location.hostname.toLowerCase();
 export const isLocalDevHost = hostLower === "localhost" || hostLower === "127.0.0.1";
+export const isTauriDesktopApp = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+export const STUDIO_DESKTOP_AUTH_CALLBACK_URL = "nyptid-studio://auth/callback";
 const billingHostAliases = new Set([
     "billing.nyptidindustries.com",
     "billing.niptidindustries.com",
@@ -13,7 +24,12 @@ const billingHostAliases = new Set([
     "invoicer.niptidindustries.com",
 ]);
 export const isBillingHost = billingHostAliases.has(hostLower) || hostLower.startsWith("billing.") || hostLower.startsWith("invoicer.");
-export const STUDIO_SITE_URL = "https://studio.nyptidindustries.com";
+const CONTROLLED_BETA_SITE_URL = "https://studio-frontend-asd.vercel.app";
+export const STUDIO_SITE_URL = (
+    isTauriDesktopApp || hostLower === "studio-frontend-asd.vercel.app"
+        ? CONTROLLED_BETA_SITE_URL
+        : "https://studio.nyptidindustries.com"
+);
 export const BILLING_SITE_URL = STUDIO_SITE_URL;
 export const INVOICER_API_BASE_URL = "https://invoicer.nyptidindustries.com";
 // Keep beta traffic on the verified Fly control plane. The api-studio hostname
@@ -270,6 +286,60 @@ export const Logo = ({ size = 24 }: { size?: number }) => (
 const FALLBACK_SUPABASE_URL = viteEnv.VITE_SUPABASE_URL || "https://qdwzilgqvpegekxrrnnn.supabase.co";
 const FALLBACK_SUPABASE_ANON_KEY = viteEnv.VITE_SUPABASE_ANON_KEY || "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFkd3ppbGdxdnBlZ2VreHJybm5uIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjYwMjQ3NzYsImV4cCI6MjA4MTYwMDc3Nn0.89jrswXUwk1Th_e2y7QEq_vLf3M2XhQJjIfByWOD7EE";
 
+const trustedSupabaseAuthOrigins = new Set<string>();
+
+const rememberSupabaseAuthOrigin = (rawUrl: string): void => {
+    try {
+        const parsed = new URL(String(rawUrl || '').trim());
+        if (parsed.protocol === 'https:') trustedSupabaseAuthOrigins.add(parsed.origin);
+    } catch {
+        // Invalid backend auth configuration is rejected when OAuth starts.
+    }
+};
+
+rememberSupabaseAuthOrigin(FALLBACK_SUPABASE_URL);
+
+const createStudioSupabaseClient = (url: string, anonKey: string): SupabaseClient => {
+    rememberSupabaseAuthOrigin(url);
+    return createClient(url, anonKey, isTauriDesktopApp ? {
+        auth: {
+            flowType: 'pkce',
+            detectSessionInUrl: false,
+            persistSession: true,
+            autoRefreshToken: true,
+        },
+    } : undefined);
+};
+
+const isTrustedSupabaseOAuthUrl = (rawUrl: string): boolean => {
+    try {
+        const parsed = new URL(String(rawUrl || '').trim());
+        return (
+            parsed.protocol === 'https:'
+            && trustedSupabaseAuthOrigins.has(parsed.origin)
+            && parsed.pathname === '/auth/v1/authorize'
+        );
+    } catch {
+        return false;
+    }
+};
+
+export const isTrustedDesktopAuthCallbackUrl = (rawUrl: string): boolean => {
+    try {
+        const parsed = new URL(String(rawUrl || '').trim());
+        return (
+            parsed.protocol === 'nyptid-studio:'
+            && parsed.hostname === 'auth'
+            && parsed.pathname === '/callback'
+            && !parsed.username
+            && !parsed.password
+            && !parsed.port
+        );
+    } catch {
+        return false;
+    }
+};
+
 export const WAITLIST_TABLE = "waiting_list";
 export const WAITLIST_FALLBACK_TABLE = "app_settings";
 export const WAITLIST_FALLBACK_KEY_PREFIX = "studio_waitlist_reservation:";
@@ -478,15 +548,18 @@ const sameAuthSession = (prev: Session | null, next: Session | null): boolean =>
     );
 };
 
-const recoverSupabaseSessionFromUrl = async (sb: SupabaseClient): Promise<Session | null> => {
-    if (typeof window === 'undefined') return null;
-    const url = new URL(window.location.href);
+const recoverSupabaseSessionFromRedirectUrl = async (
+    sb: SupabaseClient,
+    rawUrl: string,
+    clearBrowserArtifacts: boolean,
+): Promise<Session | null> => {
+    const url = new URL(rawUrl);
     const query = url.searchParams;
     const hash = new URLSearchParams(String(url.hash || '').replace(/^#/, ''));
     const authError =
         decodeAuthParam(String(hash.get('error_description') || query.get('error_description') || hash.get('error') || query.get('error') || ''));
     if (authError) {
-        clearSupabaseAuthRedirectArtifacts();
+        if (clearBrowserArtifacts) clearSupabaseAuthRedirectArtifacts();
         throw new Error(authError);
     }
 
@@ -497,7 +570,7 @@ const recoverSupabaseSessionFromUrl = async (sb: SupabaseClient): Promise<Sessio
             SUPABASE_SESSION_TIMEOUT_MS,
             'Supabase code exchange'
         );
-        clearSupabaseAuthRedirectArtifacts();
+        if (clearBrowserArtifacts) clearSupabaseAuthRedirectArtifacts();
         const error = (result as any)?.error;
         if (error) throw error;
         return ((result as any)?.data?.session || null) as Session | null;
@@ -511,13 +584,18 @@ const recoverSupabaseSessionFromUrl = async (sb: SupabaseClient): Promise<Sessio
             SUPABASE_SESSION_TIMEOUT_MS,
             'Supabase session recovery'
         );
-        clearSupabaseAuthRedirectArtifacts();
+        if (clearBrowserArtifacts) clearSupabaseAuthRedirectArtifacts();
         if (result.error) throw result.error;
         return (result.data.session || null) as Session | null;
     }
 
-    if (accessToken || refreshToken) clearSupabaseAuthRedirectArtifacts();
+    if (clearBrowserArtifacts && (accessToken || refreshToken)) clearSupabaseAuthRedirectArtifacts();
     return null;
+};
+
+const recoverSupabaseSessionFromUrl = async (sb: SupabaseClient): Promise<Session | null> => {
+    if (typeof window === 'undefined') return null;
+    return recoverSupabaseSessionFromRedirectUrl(sb, window.location.href, true);
 };
 
 export const readWaitlistFallbackRows = async (supabase: SupabaseClient): Promise<WaitingListEntry[]> => {
@@ -722,7 +800,7 @@ export interface AuthContextType {
     signInWithGoogle: () => Promise<string | null>;
     signUp: (email: string, password: string) => Promise<string | null>;
     signOut: () => Promise<void>;
-    checkout: (plan: string, options?: { trial?: boolean }) => Promise<string | null>;
+    checkout: (plan: string) => Promise<string | null>;
     checkoutTopup: (priceId: string, preferredMethod?: 'card' | 'paypal') => Promise<string | null>;
     checkoutDemo: () => Promise<void>;
     manageBilling: () => Promise<string | null>;
@@ -798,6 +876,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const supabaseRef = useRef<SupabaseClient | null>(null);
     const authSubscriptionRef = useRef<{ unsubscribe: () => void } | null>(null);
     const ensureSupabasePromiseRef = useRef<Promise<SupabaseClient | null> | null>(null);
+    const desktopAuthCallbacksSeenRef = useRef<Set<string>>(new Set());
     const ownerLaneAccess: LaneAccessMap = {
         create: true,
         thumbnails: true,
@@ -869,7 +948,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
                 const fallbackUrl = String(FALLBACK_SUPABASE_URL || '').trim();
                 const fallbackKey = String(FALLBACK_SUPABASE_ANON_KEY || '').trim();
                 if (!fallbackUrl || !fallbackKey) return null;
-                const sb = createClient(fallbackUrl, fallbackKey);
+                const sb = createStudioSupabaseClient(fallbackUrl, fallbackKey);
                 await attachSupabaseClient(sb);
                 return sb;
             } catch {
@@ -880,6 +959,80 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         })();
         return await ensureSupabasePromiseRef.current;
     }, [attachSupabaseClient]);
+
+    useEffect(() => {
+        if (!isTauriDesktopApp) return;
+
+        let cancelled = false;
+        let unlisten: (() => void) | null = null;
+
+        const handleDesktopAuthUrls = async (urls: string[]) => {
+            for (const rawUrl of urls) {
+                const callbackUrl = String(rawUrl || '').trim();
+                if (!callbackUrl || !isTrustedDesktopAuthCallbackUrl(callbackUrl)) continue;
+                if (desktopAuthCallbacksSeenRef.current.has(callbackUrl)) continue;
+                desktopAuthCallbacksSeenRef.current.add(callbackUrl);
+
+                try {
+                    const parsed = new URL(callbackUrl);
+                    const hasCode = Boolean(String(parsed.searchParams.get('code') || '').trim());
+                    const hasError = Boolean(
+                        String(parsed.searchParams.get('error') || parsed.searchParams.get('error_description') || '').trim()
+                    );
+                    if (!hasCode && !hasError) {
+                        throw new Error('Desktop sign-in callback did not contain a PKCE authorization result.');
+                    }
+                    if (parsed.hash && /(^|[&#])(access_token|refresh_token)=/i.test(parsed.hash)) {
+                        throw new Error('Studio rejected an unsafe token-bearing desktop callback.');
+                    }
+
+                    const sb = supabaseRef.current || await ensureSupabaseClient();
+                    if (!sb) throw new Error('Studio authentication is not available.');
+                    const recovered = await recoverSupabaseSessionFromRedirectUrl(sb, callbackUrl, false);
+                    if (!recovered) throw new Error('Google sign-in returned without a usable Studio session.');
+                    if (cancelled) return;
+
+                    if (!pendingAuthIntentRef.current) pendingAuthIntentRef.current = 'google';
+                    setSession((prev) => (sameAuthSession(prev, recovered) ? prev : recovered));
+                    window.dispatchEvent(new CustomEvent('nyptid:desktop-auth-complete'));
+                } catch (error) {
+                    if (cancelled) return;
+                    pendingAuthIntentRef.current = '';
+                    const message = error instanceof Error ? error.message : 'Google sign-in could not return to Studio.';
+                    console.error('Desktop Google auth callback failed', error);
+                    window.dispatchEvent(new CustomEvent('nyptid:desktop-auth-error', { detail: message }));
+                }
+            }
+        };
+
+        void (async () => {
+            try {
+                const { getCurrent, onOpenUrl } = await import('@tauri-apps/plugin-deep-link');
+                unlisten = await onOpenUrl((urls) => {
+                    void handleDesktopAuthUrls(urls);
+                });
+                if (cancelled) {
+                    unlisten();
+                    unlisten = null;
+                    return;
+                }
+                const startupUrls = await getCurrent();
+                if (startupUrls?.length) await handleDesktopAuthUrls(startupUrls);
+            } catch (error) {
+                if (!cancelled) console.error('Desktop auth callback listener could not start', error);
+            }
+        })();
+
+        return () => {
+            cancelled = true;
+            try {
+                unlisten?.();
+            } catch {
+                // Ignore plugin listener cleanup failures during app shutdown.
+            }
+        };
+    }, [ensureSupabaseClient]);
+
     const refreshViewerState = useCallback(async () => {
         if (!session) {
             setPlan('none');
@@ -1037,7 +1190,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
                     }
                 }
                 if (cfg.supabase_url && cfg.supabase_anon_key) {
-                    const sb = createClient(cfg.supabase_url, cfg.supabase_anon_key);
+                    const sb = createStudioSupabaseClient(cfg.supabase_url, cfg.supabase_anon_key);
                     await attachSupabaseClient(sb);
                     sbCreated = true;
                 }
@@ -1048,7 +1201,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             // Fallback: if backend was offline or didn't provide supabase creds, use hardcoded fallback
             if (!cancelled && !sbCreated) {
                 try {
-                    const sb = createClient(FALLBACK_SUPABASE_URL, FALLBACK_SUPABASE_ANON_KEY);
+                    const sb = createStudioSupabaseClient(FALLBACK_SUPABASE_URL, FALLBACK_SUPABASE_ANON_KEY);
                     await attachSupabaseClient(sb);
                     if (!cancelled) {
                         if (!configLoaded) setBackendOffline(true);
@@ -1167,10 +1320,104 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             }
         };
         window.addEventListener('focus', handleFocusRefresh);
+        window.addEventListener(BILLING_VIEWER_REFRESH_EVENT, handleFocusRefresh);
         document.addEventListener('visibilitychange', handleVisibilityRefresh);
         return () => {
             window.removeEventListener('focus', handleFocusRefresh);
+            window.removeEventListener(BILLING_VIEWER_REFRESH_EVENT, handleFocusRefresh);
             document.removeEventListener('visibilitychange', handleVisibilityRefresh);
+        };
+    }, [session?.access_token, refreshViewerState]);
+
+    useEffect(() => {
+        const accessToken = session?.access_token;
+        if (!accessToken) return;
+        let cancelled = false;
+        let running = false;
+        let timer: number | null = null;
+        let attempt = 0;
+        const retryDelays = [500, 1000, 1500, 2500, 4000, 6500, 10000, 15000];
+
+        const schedule = (run: () => void) => {
+            if (cancelled) return;
+            const delay = retryDelays[Math.min(attempt, retryDelays.length - 1)];
+            attempt += 1;
+            timer = window.setTimeout(run, delay);
+        };
+
+        const reconcile = async () => {
+            if (cancelled || running) return;
+            const pending = readPendingBillingCheckout();
+            if (!pending) return;
+            running = true;
+            try {
+                const [creditResult, viewerResult] = await Promise.allSettled([
+                    fetch(resolveStudioBackendUrl('/api/studio-agent/credits'), {
+                        headers: { Authorization: `Bearer ${accessToken}` },
+                        cache: 'no-store',
+                    }),
+                    fetch(resolveStudioBackendUrl('/api/me'), {
+                        headers: { Authorization: `Bearer ${accessToken}` },
+                        cache: 'no-store',
+                    }),
+                ]);
+                const creditResponse = creditResult.status === 'fulfilled' ? creditResult.value : null;
+                const viewerResponse = viewerResult.status === 'fulfilled' ? viewerResult.value : null;
+                const creditData = creditResponse?.ok ? await creditResponse.json() as Record<string, any> : null;
+                const viewerData = viewerResponse?.ok ? await viewerResponse.json() as Record<string, any> : null;
+                const snapshot: BillingCheckoutSnapshot = {
+                    viewerVerified: Boolean(viewerResponse?.ok && viewerData),
+                    billingActive: Boolean(viewerData?.membership_active ?? viewerData?.billing_active),
+                    membershipPlanId: String(viewerData?.membership_plan_id || viewerData?.plan || ''),
+                    balance: Number(creditData?.balance),
+                    recent: Array.isArray(creditData?.recent) ? creditData.recent : [],
+                };
+
+                if (checkoutIsConfirmed(pending, snapshot)) {
+                    clearPendingBillingCheckout(pending);
+                    await refreshViewerState();
+                    emitBillingCheckoutState('confirmed', pending, snapshot);
+                    return;
+                }
+                if (Date.now() - pending.startedAt >= 2 * 60 * 1000) {
+                    emitBillingCheckoutState('timed_out', pending, snapshot);
+                    return;
+                }
+                emitBillingCheckoutState('pending', pending, snapshot);
+                schedule(() => void reconcile());
+            } catch (error) {
+                emitBillingCheckoutState(
+                    'pending',
+                    pending,
+                    undefined,
+                    error instanceof Error ? error.message : 'Account refresh failed',
+                );
+                schedule(() => void reconcile());
+            } finally {
+                running = false;
+            }
+        };
+
+        const restart = () => {
+            attempt = 0;
+            if (timer !== null) window.clearTimeout(timer);
+            timer = null;
+            void reconcile();
+        };
+        const onVisible = () => {
+            if (document.visibilityState === 'visible') restart();
+        };
+
+        window.addEventListener(BILLING_CHECKOUT_STARTED_EVENT, restart);
+        window.addEventListener('focus', restart);
+        document.addEventListener('visibilitychange', onVisible);
+        if (readPendingBillingCheckout()) restart();
+        return () => {
+            cancelled = true;
+            if (timer !== null) window.clearTimeout(timer);
+            window.removeEventListener(BILLING_CHECKOUT_STARTED_EVENT, restart);
+            window.removeEventListener('focus', restart);
+            document.removeEventListener('visibilitychange', onVisible);
         };
     }, [session?.access_token, refreshViewerState]);
 
@@ -1187,16 +1434,31 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         const sb = supabase || await ensureSupabaseClient();
         if (!sb) return "Auth is still connecting. Try again in a second.";
         pendingAuthIntentRef.current = 'google';
-        const redirectTo = isLocalDevHost
+        desktopAuthCallbacksSeenRef.current.clear();
+        const redirectTo = isTauriDesktopApp
+            ? STUDIO_DESKTOP_AUTH_CALLBACK_URL
+            : isLocalDevHost
             ? `${window.location.origin}?page=dashboard&tab=agent`
             : `${STUDIO_SITE_URL}?page=dashboard&tab=agent`;
-        const { error } = await sb.auth.signInWithOAuth({
+        const { data, error } = await sb.auth.signInWithOAuth({
             provider: 'google',
             options: {
                 redirectTo,
+                skipBrowserRedirect: isTauriDesktopApp,
             },
         });
         if (error) pendingAuthIntentRef.current = '';
+        if (!error && isTauriDesktopApp) {
+            const authUrl = String(data?.url || '').trim();
+            if (!authUrl || !isTrustedSupabaseOAuthUrl(authUrl)) {
+                pendingAuthIntentRef.current = '';
+                return 'Studio blocked an invalid Google authorization URL.';
+            }
+            // Tauri's Rust navigation guard validates the same Supabase origin,
+            // opens it in the system browser, and keeps the WebView on Studio.
+            window.location.assign(authUrl);
+            return null;
+        }
         if (!error) return null;
         const message = String(error.message || '').trim();
         if (message.toLowerCase().includes('provider is not enabled')) {
@@ -1258,7 +1520,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         pendingAuthIntentRef.current = '';
     }, [session]);
 
-    const checkout = useCallback(async (planName: string, options?: { trial?: boolean }): Promise<string | null> => {
+    const checkout = useCallback(async (planName: string): Promise<string | null> => {
         if (!session) return "Missing membership checkout details";
         const normalizedPlanName = String(planName || '').trim().toLowerCase();
         const isMembershipCheckout = normalizedPlanName === 'membership';
@@ -1285,9 +1547,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
                     "Content-Type": "application/json",
                     Authorization: `Bearer ${session.access_token}`,
                 },
-                body: JSON.stringify(
-                    { product: 'membership', plan: targetPlanId, trial: Boolean(options?.trial) }
-                ),
+                body: JSON.stringify({ product: 'membership', plan: targetPlanId }),
             });
             const { data } = await readJsonResponse<any>(res);
             const payload = data || {};

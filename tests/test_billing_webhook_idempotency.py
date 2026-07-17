@@ -674,6 +674,7 @@ def test_stripe_retry_after_partial_effect_does_not_double_grant(
             "object": {
                 "id": "cs-retry",
                 "mode": "payment",
+                "payment_status": "paid",
                 "client_reference_id": "user-a",
                 "customer_email": "creator@example.com",
                 "metadata": {
@@ -710,3 +711,123 @@ def test_stripe_retry_after_partial_effect_does_not_double_grant(
     assert billing._topup_wallets["user-a"]["animated_topup_credits"] == 25
     assert unified_credits.get_state("user-a")["topup_balance"] == 25
     assert add_calls == 2
+
+
+def test_stripe_topup_waits_for_async_payment_and_grants_session_once(
+    isolated_billing_state: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = {
+        "id": "cs-delayed-topup",
+        "mode": "payment",
+        "payment_status": "unpaid",
+        "client_reference_id": "user-a",
+        "customer_email": "creator@example.com",
+        "metadata": {
+            "user_id": "user-a",
+            "topup_credits": "40",
+            "topup_pack": "delayed",
+            "topup_price_id": "legacy-delayed",
+        },
+    }
+    current_event = {
+        "value": {
+            "id": "evt-delayed-completed",
+            "type": "checkout.session.completed",
+            "data": {"object": session},
+        }
+    }
+    monkeypatch.setattr(backend, "STRIPE_WEBHOOK_SECRET", "test-secret")
+    monkeypatch.setattr(
+        backend.stripe_lib.Webhook,
+        "construct_event",
+        lambda *_args: current_event["value"],
+    )
+    request = DummyRequest({}, stripe=True)
+
+    completed = asyncio.run(backend._stripe_webhook(request))
+    assert completed["outcome"]["action"] == "topup_payment_pending"
+    assert billing._topup_wallets.get("user-a") is None
+    assert unified_credits.get_state("user-a")["topup_balance"] == 0
+
+    paid_session = {**session, "payment_status": "paid"}
+    current_event["value"] = {
+        "id": "evt-delayed-succeeded",
+        "type": "checkout.session.async_payment_succeeded",
+        "data": {"object": paid_session},
+    }
+    succeeded = asyncio.run(backend._stripe_webhook(request))
+    assert succeeded["outcome"]["action"] == "checkout.session.async_payment_succeeded"
+    assert billing._topup_wallets["user-a"]["animated_topup_credits"] == 40
+    assert unified_credits.get_state("user-a")["topup_balance"] == 40
+
+    # A second delivered success event for the same Checkout Session must use
+    # the existing session-scoped idempotency keys instead of granting twice.
+    current_event["value"] = {
+        "id": "evt-delayed-succeeded-redelivered",
+        "type": "checkout.session.async_payment_succeeded",
+        "data": {"object": paid_session},
+    }
+    assert asyncio.run(backend._stripe_webhook(request))["status"] == "ok"
+    assert billing._topup_wallets["user-a"]["animated_topup_credits"] == 40
+    assert unified_credits.get_state("user-a")["topup_balance"] == 40
+
+
+def test_stripe_webhook_normalizes_stripe_object_event(
+    isolated_billing_state: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    event = {
+        "id": "evt-stripe-object",
+        "type": "checkout.session.completed",
+        "data": {
+            "object": {
+                "id": "cs-stripe-object",
+                "mode": "payment",
+                "payment_status": "paid",
+                "client_reference_id": "user-a",
+                "metadata": {
+                    "user_id": "user-a",
+                    "topup_credits": "15",
+                    "topup_pack": "object-pack",
+                    "topup_price_id": "legacy-object-pack",
+                },
+            }
+        },
+    }
+
+    class StripeObjectLike:
+        def to_dict(self) -> dict:
+            return event
+
+    monkeypatch.setattr(backend, "STRIPE_WEBHOOK_SECRET", "test-secret")
+    monkeypatch.setattr(
+        backend.stripe_lib.Webhook,
+        "construct_event",
+        lambda *_args: StripeObjectLike(),
+    )
+
+    result = asyncio.run(backend._stripe_webhook(DummyRequest({}, stripe=True)))
+    assert result["status"] == "ok"
+    assert billing._topup_wallets["user-a"]["animated_topup_credits"] == 15
+    assert unified_credits.get_state("user-a")["topup_balance"] == 15
+
+
+def test_stripe_webhook_rejects_non_dict_normalized_event(
+    isolated_billing_state: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class MalformedStripeObject:
+        def to_dict(self) -> list[dict]:
+            return []
+
+    monkeypatch.setattr(backend, "STRIPE_WEBHOOK_SECRET", "test-secret")
+    monkeypatch.setattr(
+        backend.stripe_lib.Webhook,
+        "construct_event",
+        lambda *_args: MalformedStripeObject(),
+    )
+
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(backend._stripe_webhook(DummyRequest({}, stripe=True)))
+    assert error.value.status_code == 400

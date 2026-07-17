@@ -19,6 +19,18 @@ _ANNOUNCED_PATH = _DATA_DIR / "studio_release_announced.json"
 # Bump id when shipping; startup announces any id not yet in announced store.
 CATALOG: list[dict[str, Any]] = [
     {
+        "id": "release-2026-07-17-desktop-auth-payment-settlement",
+        "kind": "success",
+        "title": "Desktop sign-in return + verified payment settlement",
+        "body": (
+            "Studio Desktop now returns Google sign-in through a PKCE-protected app link instead of leaving the "
+            "session in a separate browser. Paid subscriptions and credit top-ups are confirmed against the "
+            "authenticated account before the app reports success, and Stripe webhook processing now normalizes "
+            "verified events and credits each paid checkout exactly once."
+        ),
+        "version": "2026.07.17",
+    },
+    {
         "id": "release-2026-07-17-video-beta-tauri",
         "kind": "success",
         "title": "Paid long-form, verified captions, desktop shell",

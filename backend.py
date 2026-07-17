@@ -21419,7 +21419,11 @@ async def _join_waitlist(req: WaitlistJoinRequest, request: Request = None):
 
 async def _stripe_apply_webhook_event_unordered(event: dict) -> dict:
     """Apply one verified Stripe event; effect failures must propagate."""
-    if event.get("type") == "checkout.session.completed":
+    event_type = str(event.get("type", "") or "")
+    if event_type in {
+        "checkout.session.completed",
+        "checkout.session.async_payment_succeeded",
+    }:
         session_data = event["data"]["object"]
         metadata = session_data.get("metadata", {}) or {}
         mode = str(session_data.get("mode", "") or "")
@@ -21477,6 +21481,15 @@ async def _stripe_apply_webhook_event_unordered(event: dict) -> dict:
                     log.info(f"Stripe webhook: confirmed waitlist reservation {customer_email} -> {plan}")
                 return {"status": "ok"}
             topup_credits = int(str(metadata.get("topup_credits", "0") or "0"))
+            payment_status = str(session_data.get("payment_status", "") or "").strip().lower()
+            if topup_credits > 0 and payment_status != "paid":
+                log.info(
+                    "Stripe webhook: deferred top-up credit grant for session %s "
+                    "because payment_status=%s",
+                    str(session_data.get("id", "") or ""),
+                    payment_status or "missing",
+                )
+                return {"status": "ok", "action": "topup_payment_pending"}
             if user_id and topup_credits > 0:
                 is_unified_pack = str(metadata.get("topup_price_id", "") or "").startswith("uc_")
                 if not is_unified_pack:
@@ -21665,10 +21678,26 @@ async def _stripe_webhook(request: Request):
         log.error("Stripe webhook rejected: signing secret is not configured")
         raise HTTPException(503, "Webhook signing is not configured on the server")
     try:
-        event = stripe_lib.Webhook.construct_event(payload, sig_header, STRIPE_WEBHOOK_SECRET)
+        verified_event = stripe_lib.Webhook.construct_event(payload, sig_header, STRIPE_WEBHOOK_SECRET)
     except Exception:
         log.error("Stripe webhook signature verification failed")
         raise HTTPException(400, "Invalid signature")
+
+    if isinstance(verified_event, dict):
+        event = verified_event
+    else:
+        to_dict = getattr(verified_event, "to_dict", None)
+        if not callable(to_dict):
+            log.error("Stripe webhook rejected: verified event is not dictionary-compatible")
+            raise HTTPException(400, "Invalid Stripe event")
+        try:
+            event = to_dict()
+        except Exception:
+            log.error("Stripe webhook rejected: verified event normalization failed")
+            raise HTTPException(400, "Invalid Stripe event")
+    if not isinstance(event, dict):
+        log.error("Stripe webhook rejected: normalized event is not a dictionary")
+        raise HTTPException(400, "Invalid Stripe event")
 
     event_id = str(event.get("id", "") or "").strip()
     event_type = str(event.get("type", "") or "").strip()

@@ -6,6 +6,15 @@ import { UNIFIED_PLANS, UNIFIED_TOPUP_PACKS, type UnifiedPlanId } from '../lib/s
 import { type PageNav } from '../components/NavBar';
 import { AuthContext, GENERATION_API, STUDIO_SITE_URL, isBillingHost, resolveStudioBackendUrl } from '../shared';
 import { trackMembershipPurchaseCompleted, trackOnce, trackTopupPurchaseCompleted } from '../lib/googleAds';
+import {
+    BILLING_CHECKOUT_STARTED_EVENT,
+    BILLING_CHECKOUT_STATE_EVENT,
+    beginBillingCheckout,
+    clearPendingBillingCheckout,
+    readPendingBillingCheckout,
+    type BillingCheckoutKind,
+    type BillingCheckoutSyncStatus,
+} from '../lib/billingCheckoutSync';
 
 export default function BillingPage({ onNavigate }: { onNavigate: PageNav }) {
     const {
@@ -44,6 +53,17 @@ export default function BillingPage({ onNavigate }: { onNavigate: PageNav }) {
     const [packCheckoutLoadingId, setPackCheckoutLoadingId] = useState('');
     const [planLoadingId, setPlanLoadingId] = useState('');
     const topupSectionRef = useRef<HTMLElement | null>(null);
+    const [stripeCheckoutSync, setStripeCheckoutSync] = useState<{
+        kind: BillingCheckoutKind | '';
+        status: BillingCheckoutSyncStatus | 'idle';
+        startedAt: number;
+    }>(() => {
+        const pending = readPendingBillingCheckout();
+        if (pending) return { kind: pending.kind, status: 'pending', startedAt: pending.startedAt };
+        if (stripeProvider && topupResult === 'success') return { kind: 'topup', status: 'pending', startedAt: 0 };
+        if (stripeProvider && subscriptionResult === 'success') return { kind: 'subscription', status: 'pending', startedAt: 0 };
+        return { kind: '', status: 'idle', startedAt: 0 };
+    });
 
     const normalizedMembershipSource = String(membershipSource || nextRenewalSource || '').trim().toLowerCase();
     const usesStripeMembership = billingActive && normalizedMembershipSource === 'stripe';
@@ -120,6 +140,39 @@ export default function BillingPage({ onNavigate }: { onNavigate: PageNav }) {
     }, []);
 
     useEffect(() => {
+        const handleStarted = (event: Event) => {
+            const pending = (event as CustomEvent).detail;
+            if (!pending || !['subscription', 'topup'].includes(pending.kind)) return;
+            setStripeCheckoutSync({ kind: pending.kind, status: 'pending', startedAt: Number(pending.startedAt || 0) });
+        };
+        const handleState = (event: Event) => {
+            const detail = (event as CustomEvent).detail;
+            const pending = detail?.pending;
+            if (!pending || !['subscription', 'topup'].includes(pending.kind)) return;
+            setStripeCheckoutSync({
+                kind: pending.kind,
+                status: detail.status || 'pending',
+                startedAt: Number(pending.startedAt || 0),
+            });
+        };
+        window.addEventListener(BILLING_CHECKOUT_STARTED_EVENT, handleStarted);
+        window.addEventListener(BILLING_CHECKOUT_STATE_EVENT, handleState);
+        return () => {
+            window.removeEventListener(BILLING_CHECKOUT_STARTED_EVENT, handleStarted);
+            window.removeEventListener(BILLING_CHECKOUT_STATE_EVENT, handleState);
+        };
+    }, []);
+
+    useEffect(() => {
+        if (stripeCheckoutSync.status !== 'confirmed') return;
+        const url = new URL(window.location.href);
+        url.searchParams.delete(stripeCheckoutSync.kind === 'topup' ? 'topup' : 'subscription');
+        if (url.searchParams.get('provider') === 'stripe') url.searchParams.delete('provider');
+        window.history.replaceState(window.history.state, '', `${url.pathname}${url.search}${url.hash}`);
+        setLocationState({ search: url.search, hash: url.hash });
+    }, [stripeCheckoutSync.kind, stripeCheckoutSync.status]);
+
+    useEffect(() => {
         if (!sortedPacks.length) return;
         const requestedExists = requestedPackId && sortedPacks.some((pack) => pack.price_id === requestedPackId);
         if (requestedExists) {
@@ -140,11 +193,13 @@ export default function BillingPage({ onNavigate }: { onNavigate: PageNav }) {
     }, [requestedHash, requestedPackId, requestedSection, sortedPacks.length]);
 
     useEffect(() => {
-        if (topupResult !== 'success') return;
-        trackOnce(`billing_topup_success:${locationState.search}`, () => {
+        const confirmed = (paypalProvider && paypalVerifyState === 'verified')
+            || (stripeCheckoutSync.kind === 'topup' && stripeCheckoutSync.status === 'confirmed');
+        if (!confirmed) return;
+        trackOnce(`billing_topup_confirmed:${stripeCheckoutSync.startedAt || paypalOrderId}`, () => {
             trackTopupPurchaseCompleted(Number(selectedPack?.price_usd || 0));
         });
-    }, [locationState.search, selectedPack?.price_usd, topupResult]);
+    }, [paypalOrderId, paypalProvider, paypalVerifyState, selectedPack?.price_usd, stripeCheckoutSync]);
 
     useEffect(() => {
         if (!paypalProvider || !paypalOrderId) return;
@@ -173,13 +228,15 @@ export default function BillingPage({ onNavigate }: { onNavigate: PageNav }) {
     }, [paypalProvider, paypalOrderId, topupResult, subscriptionResult, verifyPayPalOrder]);
 
     useEffect(() => {
-        if (subscriptionResult !== 'success') return;
+        const confirmed = (paypalProvider && paypalVerifyState === 'verified')
+            || (stripeCheckoutSync.kind === 'subscription' && stripeCheckoutSync.status === 'confirmed');
+        if (!confirmed) return;
         const planId = requestedPlanId || normalizedCurrentPlan || 'studio_pro_1k';
         const match = UNIFIED_PLANS.find((p) => p.id === planId);
-        trackOnce(`billing_membership_success:${locationState.search}`, () => {
+        trackOnce(`billing_membership_confirmed:${stripeCheckoutSync.startedAt || paypalOrderId}:${planId}`, () => {
             trackMembershipPurchaseCompleted(planId, match?.priceUsd || 0);
         });
-    }, [locationState.search, normalizedCurrentPlan, requestedPlanId, subscriptionResult]);
+    }, [normalizedCurrentPlan, paypalOrderId, paypalProvider, paypalVerifyState, requestedPlanId, stripeCheckoutSync]);
 
     const handleBack = () => {
         if (isBillingHost) {
@@ -198,6 +255,12 @@ export default function BillingPage({ onNavigate }: { onNavigate: PageNav }) {
             setCheckoutError('');
             setPlanLoadingId(planId);
             try {
+                const startPlanCheckout = async () => {
+                    beginBillingCheckout({ kind: 'subscription', expectedPlanId: planId });
+                    const err = await checkout(planId);
+                    if (err) clearPendingBillingCheckout(readPendingBillingCheckout());
+                    return err;
+                };
                 if (billingActive && usesStripeMembership) {
                     const err = await manageBilling();
                     if (err) setCheckoutError(err);
@@ -205,12 +268,12 @@ export default function BillingPage({ onNavigate }: { onNavigate: PageNav }) {
                 }
                 if (billingActive && normalizedCurrentPlan === planId) {
                     if (usesManualPayPalMembership) {
-                        const err = await checkout(planId);
+                        const err = await startPlanCheckout();
                         if (err) setCheckoutError(err);
                         return;
                     }
                 }
-                const err = await checkout(planId);
+                const err = await startPlanCheckout();
                 if (err) setCheckoutError(err);
             } finally {
                 setPlanLoadingId('');
@@ -231,25 +294,51 @@ export default function BillingPage({ onNavigate }: { onNavigate: PageNav }) {
         setCheckoutError('');
         setPackCheckoutLoadingId(method);
         try {
+            if (method === 'stripe') {
+                beginBillingCheckout({
+                    kind: 'topup',
+                    expectedCredits: Number(selectedPack.credits || 0),
+                    baselineBalance: unifiedBalance == null ? undefined : Number(unifiedBalance),
+                });
+            }
             const err = await checkoutTopup(selectedPack.price_id, method === 'paypal' ? 'paypal' : 'card');
-            if (err) setCheckoutError(err);
+            if (err) {
+                if (method === 'stripe') clearPendingBillingCheckout(readPendingBillingCheckout());
+                setCheckoutError(err);
+            }
         } finally {
             setPackCheckoutLoadingId('');
         }
-    }, [checkoutTopup, onNavigate, selectedPack, session]);
+    }, [checkoutTopup, onNavigate, selectedPack, session, unifiedBalance]);
 
     const creditBalance = unifiedBalance ?? Number(creditsTotalRemaining || 0);
+    const stripeTopupConfirmed = stripeCheckoutSync.kind === 'topup' && stripeCheckoutSync.status === 'confirmed';
+    const stripeMembershipConfirmed = stripeCheckoutSync.kind === 'subscription' && stripeCheckoutSync.status === 'confirmed';
+    const stripeTopupPending = (stripeCheckoutSync.kind === 'topup' && stripeCheckoutSync.status === 'pending')
+        || (stripeProvider && topupResult === 'success' && !stripeTopupConfirmed);
+    const stripeMembershipPending = (stripeCheckoutSync.kind === 'subscription' && stripeCheckoutSync.status === 'pending')
+        || (stripeProvider && subscriptionResult === 'success' && !stripeMembershipConfirmed);
 
     const paypalBanner = (
         <>
-            {topupResult === 'success' && (stripeProvider || (!paypalProvider || paypalVerifyState === 'verified')) && (
+            {(stripeTopupConfirmed || (paypalProvider && paypalVerifyState === 'verified')) && (
                 <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-100">
-                    Credit top-up received. Your balance is refreshing now.
+                    Credit top-up confirmed. Your refreshed balance is shown below.
                 </div>
             )}
-            {subscriptionResult === 'success' && (stripeProvider || (!paypalProvider || paypalVerifyState === 'verified')) && (
+            {(stripeMembershipConfirmed || (paypalProvider && paypalVerifyState === 'verified')) && (
                 <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-100">
                     Your plan is active. Monthly credits have been added to your wallet.
+                </div>
+            )}
+            {(stripeTopupPending || stripeMembershipPending) && (
+                <div className="rounded-xl border border-sky-500/20 bg-sky-500/10 px-4 py-3 text-sm text-sky-100">
+                    Checkout returned. Waiting for Studio to confirm the payment and refresh your account...
+                </div>
+            )}
+            {stripeCheckoutSync.status === 'timed_out' && (
+                <div className="rounded-xl border border-amber-500/20 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">
+                    Payment is not confirmed in Studio yet. No credits or plan access are being claimed; refocus or reopen the app to check again.
                 </div>
             )}
             {paypalProvider && paypalVerifyState === 'verifying' && (

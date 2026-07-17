@@ -189,7 +189,7 @@ export default function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
                             </button>
                         </div>
                         <p className="mt-3 text-xs leading-5 text-gray-500">
-                            Free trial includes 1,000 credits, enough for one 2-minute short-form test run or equivalent shorter tests. Stripe requires a card to prevent trial abuse, and billing starts only after the trial ends unless you cancel.
+                            Choose a paid plan to start creating. Stripe securely collects payment details during checkout.
                         </p>
                         <div className="mt-8 grid gap-3 sm:grid-cols-3">
                             <StatCard label="Verified channel views" value="823K+" />
@@ -393,7 +393,7 @@ export default function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
                         <p className="text-sm font-semibold uppercase tracking-[0.18em] text-cyan-300">Pricing</p>
                         <h2 className="mt-3 text-3xl font-bold text-white sm:text-4xl">Pricing is public. Purchasing requires an account and card.</h2>
                         <p className="mx-auto mt-3 max-w-3xl text-gray-400">
-                            Visitors can see the credit ladder before signing in. When they start a trial or subscribe, Stripe collects payment details first so credits cannot be abused.
+                            Visitors can see the credit ladder before signing in. Sign in and choose a paid plan to continue to Stripe checkout.
                         </p>
                     </div>
                     <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">

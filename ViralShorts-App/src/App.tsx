@@ -31,6 +31,7 @@ const hasPendingAuthRedirectArtifacts = (): boolean => {
 
 function AppShell() {
     const { session, loading, role, backendOffline, maintenanceBannerEnabled, maintenanceBannerMessage } = useContext(AuthContext);
+    const [desktopAuthError, setDesktopAuthError] = useState('');
     const billingHost = isBillingHost;
     const thumblabHost = typeof window !== 'undefined' && window.location.hostname.toLowerCase() === 'thumblab.nyptidindustries.com';
     const resolvePageFromLocation = useCallback((): StudioPage | null => {
@@ -120,6 +121,20 @@ function AppShell() {
     }, [page]);
 
     useEffect(() => {
+        const handleDesktopAuthError = (event: Event) => {
+            const message = String((event as CustomEvent<string>).detail || '').trim();
+            setDesktopAuthError(message || 'Google sign-in could not return to Studio.');
+        };
+        const clearDesktopAuthError = () => setDesktopAuthError('');
+        window.addEventListener('nyptid:desktop-auth-error', handleDesktopAuthError);
+        window.addEventListener('nyptid:desktop-auth-complete', clearDesktopAuthError);
+        return () => {
+            window.removeEventListener('nyptid:desktop-auth-error', handleDesktopAuthError);
+            window.removeEventListener('nyptid:desktop-auth-complete', clearDesktopAuthError);
+        };
+    }, []);
+
+    useEffect(() => {
         if (loading) return;
         // Legal pages are always reachable — both when signed in (no forced-dashboard redirect)
         // and when signed out (no forced-auth redirect). Google's OAuth verification flow
@@ -166,6 +181,14 @@ function AppShell() {
             {maintenanceBannerEnabled && (
                 <div className="sticky top-0 z-50 border-b border-amber-300/20 bg-amber-500/10 px-4 py-2 text-center text-xs sm:text-sm text-amber-100 backdrop-blur">
                     {maintenanceBannerMessage || 'Studio is under high load. Queue times may be longer than usual while we scale capacity.'}
+                </div>
+            )}
+            {desktopAuthError && (
+                <div role="alert" className="sticky top-0 z-50 flex items-center justify-center gap-3 border-b border-red-300/20 bg-red-500/10 px-4 py-2 text-center text-xs sm:text-sm text-red-100 backdrop-blur">
+                    <span>{desktopAuthError}</span>
+                    <button type="button" className="text-red-200 underline underline-offset-2" onClick={() => setDesktopAuthError('')}>
+                        Dismiss
+                    </button>
                 </div>
             )}
             {page === 'landing' && <LandingPage onNavigate={setPage} />}

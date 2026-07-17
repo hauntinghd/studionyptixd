@@ -1,6 +1,7 @@
-import { useContext, useEffect, useState } from 'react';
+import { useCallback, useContext, useEffect, useState } from 'react';
 import { Sparkles } from 'lucide-react';
 import { AuthContext, isOwnerEmail, resolveStudioBackendUrl } from '../../shared';
+import { BILLING_CHECKOUT_STATE_EVENT } from '../../lib/billingCheckoutSync';
 
 type CreditState = {
     balance: number;
@@ -30,26 +31,43 @@ export default function CreditFuelBar({
         || role === 'admin'
         || isOwnerEmail(session?.user?.email);
 
-    useEffect(() => {
+    const refreshCredits = useCallback(async (): Promise<CreditState | null> => {
         const tok = session?.access_token;
-        if (!tok || ownerAccount) return;
+        if (!tok || ownerAccount) return null;
+        try {
+            const res = await fetch(resolveStudioBackendUrl('/api/studio-agent/credits'), {
+                headers: { Authorization: `Bearer ${tok}` },
+                cache: 'no-store',
+            });
+            if (!res.ok) return null;
+            const data = (await res.json()) as CreditState;
+            setState(data);
+            return data;
+        } catch {
+            return null;
+        }
+    }, [ownerAccount, session?.access_token]);
+
+    useEffect(() => {
+        if (!session?.access_token || ownerAccount) return;
         let cancelled = false;
-        (async () => {
-            try {
-                const res = await fetch(resolveStudioBackendUrl('/api/studio-agent/credits'), {
-                    headers: { Authorization: `Bearer ${tok}` },
-                });
-                if (!res.ok) return;
-                const data = (await res.json()) as CreditState;
-                if (!cancelled) setState(data);
-            } catch {
-                /* keep fallback */
-            }
-        })();
+        void refreshCredits().then((data) => {
+            if (cancelled || !data) return;
+            setState(data);
+        });
         return () => {
             cancelled = true;
         };
-    }, [session?.access_token, ownerAccount]);
+    }, [session?.access_token, ownerAccount, refreshCredits]);
+
+    useEffect(() => {
+        if (!session?.access_token || ownerAccount) return;
+        const refresh = () => void refreshCredits();
+        window.addEventListener(BILLING_CHECKOUT_STATE_EVENT, refresh);
+        return () => {
+            window.removeEventListener(BILLING_CHECKOUT_STATE_EVENT, refresh);
+        };
+    }, [ownerAccount, refreshCredits, session?.access_token]);
 
     const unlimited = ownerAccount
         || Boolean(state?.unlimited)
