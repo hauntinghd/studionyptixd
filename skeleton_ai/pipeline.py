@@ -28,6 +28,7 @@ from typing import Any
 
 from studio_agent import production_costs
 
+from . import captions as cap
 from .scripting_grok import GrokClient, build_script_prompt
 from .canonical_edit import build_scene_edit_prompt, generate_still_edit, sanitize_skeleton_outfit
 from .i2v_engine import (
@@ -36,7 +37,7 @@ from .i2v_engine import (
     resolve_video_model_chain,
 )
 from .voice_fal import FalVoiceClient
-from .compose import probe_duration, trim_with_captions, concat_demuxer, mux_narration
+from .compose import decode_audio_clock, probe_duration, trim_with_captions, concat_demuxer, mux_narration
 from .prompts.category_registry import get_category
 
 CANCEL_FLAG = "CANCELLED"
@@ -692,11 +693,35 @@ def run(
         unit="1k_chars",
         metadata={"pricing_note": note, "chars": len(script_text)},
     )
-    narration_duration = probe_duration(narration_audio)
+    narration_clock = decode_audio_clock(narration_audio, work_dir / "narration_clock.wav")
+    narration_duration = probe_duration(narration_clock)
+    normalized_caption_mode = (
+        "word"
+        if str(caption_mode or "").strip().lower() in {"word", "single_word", "one_word"}
+        else "phrase"
+    )
+    global_word_phrases: list[cap.CaptionPhrase] = []
+    if captions_enabled and normalized_caption_mode == "word":
+        from studio_agent.caption_alignment import align_audio_words
+
+        verified_words = align_audio_words(
+            narration_clock,
+            cache_path=work_dir / "caption_alignment.json",
+        )
+        global_word_phrases, timing_source = cap.build_timed_captions(
+            script_text,
+            narration_duration,
+            caption_mode="word",
+            verified_word_timings=verified_words,
+        )
+        if timing_source != "verified_word":
+            raise RuntimeError("word caption alignment lost verified timing provenance")
     _retime_beats_to_narration(beats, narration_duration)
 
     # 4. Render stills + clips per beat (canonical master edit — identity locked).
     trimmed_paths: list[Path] = []
+    caption_scenes: list[dict[str, Any]] = []
+    caption_offset = 0.0
     roster_cache: dict[str, Path] = {}
     total_beats = max(len(beats), 1)
     for beat in beats:
@@ -811,22 +836,85 @@ def run(
             scene_index=beat.index,
             metadata={"pricing_note": note, "video_model": clip_meta.get("video_model") or video_model},
         )
+        render_scene_captions = captions_enabled and normalized_caption_mode != "word"
         trimmed = trim_with_captions(
             clip_path,
             trimmed_dir / f"{sid}.mp4",
             duration_sec=beat.duration_sec,
             narration_text=beat.narration,
             watermark_text=watermark_text,
-            caption_mode=caption_mode,
-            captions_enabled=captions_enabled,
+            caption_mode="phrase",
+            captions_enabled=render_scene_captions,
             force=True,
         )
         trimmed_paths.append(trimmed)
+        manifest_path = trimmed.with_suffix(trimmed.suffix + ".captions.json")
+        try:
+            scene_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except Exception:
+            if render_scene_captions:
+                raise RuntimeError(f"caption manifest missing for beat {beat.index + 1}")
+            scene_manifest = {"timing_source": "disabled", "cues": []}
+        scene_cues = [
+            {
+                "text": str(cue.get("text") or ""),
+                "start": round(caption_offset + float(cue.get("start") or 0.0), 4),
+                "end": round(caption_offset + float(cue.get("end") or 0.0), 4),
+                "scene_index": beat.index,
+            }
+            for cue in list(scene_manifest.get("cues") or [])
+            if isinstance(cue, dict)
+        ]
+        caption_scenes.append({
+            "scene_index": beat.index,
+            "offset_sec": round(caption_offset, 4),
+            "duration_sec": round(float(beat.duration_sec), 4),
+            "timing_source": str(scene_manifest.get("timing_source") or "disabled"),
+            "cues": scene_cues,
+        })
+        caption_offset += float(beat.duration_sec)
 
     _write_progress(workspace, stage="compose", progress=94, detail="Muxing final MP4")
     # 6. Concat + mux.
     silent = concat_demuxer(trimmed_paths, workspace / "silent.mp4", work_dir)
-    final = mux_narration(silent, narration_audio, workspace / "skeleton_short.mp4")
+    final = mux_narration(
+        silent,
+        narration_clock,
+        workspace / "skeleton_short.mp4",
+        caption_phrases=global_word_phrases,
+    )
+    timing_source = (
+        "verified_word"
+        if captions_enabled and normalized_caption_mode == "word"
+        else "script_weighted_estimate"
+        if captions_enabled
+        else "disabled"
+    )
+    if captions_enabled and normalized_caption_mode == "word":
+        final_caption_cues = [
+            {
+                "text": phrase.text,
+                "start": round(phrase.start_sec, 4),
+                "end": round(phrase.start_sec + phrase.duration_sec, 4),
+            }
+            for phrase in global_word_phrases
+        ]
+        final_caption_scenes: list[dict[str, Any]] = []
+    else:
+        final_caption_cues = [cue for scene in caption_scenes for cue in list(scene.get("cues") or [])]
+        final_caption_scenes = caption_scenes
+    (workspace / "captions.json").write_text(
+        json.dumps({
+            "version": 2,
+            "enabled": bool(captions_enabled),
+            "mode": normalized_caption_mode if captions_enabled else "off",
+            "timing_source": timing_source,
+            "duration_sec": round(narration_duration, 4),
+            "cues": final_caption_cues,
+            "scenes": final_caption_scenes,
+        }, indent=2),
+        encoding="utf-8",
+    )
 
     # 7. Cost / AC tracking.
     _, resolved_vm = resolve_video_model_chain(video_model=video_model, tier=tier)
@@ -835,6 +923,10 @@ def run(
         "video_path": str(final),
         "script_path": str(workspace / "script.txt"),
         "narration_path": str(narration_audio),
+        "final_audio_path": str(narration_clock),
+        "captions_enabled": bool(captions_enabled),
+        "caption_mode": normalized_caption_mode if captions_enabled else "off",
+        "caption_timing_source": timing_source,
         "beats": [asdict(b) for b in beats],
         "tier": tier,
         "video_model": resolved_vm,

@@ -12,9 +12,17 @@ Reuses skeleton_ai.scripting_grok.GrokClient.
 """
 from __future__ import annotations
 import json
-from typing import Any
+from typing import Any, Protocol
 
-from skeleton_ai.scripting_grok import GrokClient
+
+class CompletionClient(Protocol):
+    def complete(
+        self,
+        system: str,
+        user: str,
+        max_tokens: int = 1500,
+        temperature: float = 0.8,
+    ) -> str: ...
 
 
 def _strip_json_fences(s: str) -> str:
@@ -25,7 +33,7 @@ def _strip_json_fences(s: str) -> str:
 
 
 def generate_outline(
-    grok: GrokClient,
+    grok: CompletionClient,
     channel_system_prompt: str,
     *,
     topic: str,
@@ -115,7 +123,7 @@ def generate_outline(
 
 
 def expand_chapter(
-    grok: GrokClient,
+    grok: CompletionClient,
     channel_system_prompt: str,
     *,
     outline_title: str,

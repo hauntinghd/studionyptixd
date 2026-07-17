@@ -12,7 +12,7 @@ Routes:
   GET  /api/long-form/channels                       channel registry list
   GET  /api/long-form/channel/{key}                  single channel canonical
   POST /api/long-form/catalyst-insights              {channel_key} → shaped Catalyst data
-  POST /api/long-form/outline                        Grok outline pass (chapter list)
+  POST /api/long-form/outline                        Selected-model outline pass (chapter list)
   POST /api/long-form/outline/expand-chapter         Lazy per-chapter beat expansion
 
   POST /api/long-form/render-start                   Kick a background render → job_id
@@ -58,7 +58,7 @@ from long_form.catalyst_bridge import (
     fetch_channel_snapshot,
 )
 
-from skeleton_ai.scripting_grok import GrokClient, GrokAuthError
+from long_form.text_client import StudioTextClient
 
 from long_form import pipeline as lf_pipeline
 
@@ -119,12 +119,14 @@ class OutlineRequest(BaseModel):
     topic: str
     target_minutes: int | None = None       # default = channel's preferred length
     use_catalyst_context: bool = True
+    model: str | None = None
 
 
 class ExpandChapterRequest(BaseModel):
     channel_key: str
     outline_title: str
     chapter: dict
+    model: str | None = None
 
 
 class RenderRequest(BaseModel):
@@ -132,6 +134,7 @@ class RenderRequest(BaseModel):
     outline: dict
     image_model: str | None = None
     voice_id: str | None = None
+    model: str | None = None
 
 
 def build_long_form_router(
@@ -141,10 +144,9 @@ def build_long_form_router(
     is_admin_check: Callable[[dict], bool] | None = None,
 ) -> APIRouter:
     """
-    All long-form endpoints are ADMIN-ONLY (Casey 2026-05-05). Public users
-    only see /api/skeleton-ai/* via the Create tab. Long-form burns Grok
-    tokens + fal money on episode-scale renders, so we gate at the API
-    level rather than relying on frontend sidebar hiding alone.
+    Long-form endpoints require an authenticated, active Studio plan (or an
+    owner/admin account). Production spend remains credit-reserved separately;
+    the frontend visibility check is never the security boundary.
     """
     router = APIRouter(prefix="/api/long-form", tags=["long-form"])
     auth_dep = Depends(require_auth) if require_auth else Depends(lambda: {"user_id": "anon"})
@@ -183,6 +185,7 @@ def build_long_form_router(
         raise HTTPException(404, "job_not_found")
 
     def _gate_admin(user: dict) -> None:
+        """Legacy name; allows owners or active Studio subscribers."""
         if not is_admin_check:
             return  # No admin checker passed (test mode) — open.
         try:
@@ -190,15 +193,27 @@ def build_long_form_router(
                 return
         except Exception:
             pass
-        raise HTTPException(403, "long-form is admin-only")
+        uid = _user_id(user)
+        if not uid:
+            raise HTTPException(401, "authentication_required")
+        from studio_agent.access import STUDIO_AGENT_PLANS, unified_plan
+
+        if unified_plan(uid) in STUDIO_AGENT_PLANS:
+            return
+        raise HTTPException(403, "active_studio_plan_required")
 
     @router.get("/channels")
     async def list_channels_route(user: dict = auth_dep, format: str | None = None):
         _gate_admin(user)
-        # format=long_form filters to the 6 generative channels;
-        # format=shorts filters to ZeroTier / CrypticScience / Lexi Manhwa;
-        # omit to get all 9.
-        return {"channels": list_channels(format_filter=format)}
+        rows = list_channels(format_filter=format or "long_form")
+        available: list[dict[str, Any]] = []
+        for row in rows:
+            try:
+                lf_pipeline.validate_channel_pipeline(row)
+            except lf_pipeline.LFRenderError:
+                continue
+            available.append(row)
+        return {"channels": available}
 
     @router.get("/fal-pricing")
     async def fal_pricing_route(
@@ -331,8 +346,8 @@ def build_long_form_router(
             raise HTTPException(404, str(e))
 
         try:
-            grok = GrokClient()
-        except GrokAuthError as e:
+            grok = StudioTextClient(model=getattr(body, "model", None))
+        except RuntimeError as e:
             raise HTTPException(503, f"config: {e}")
 
         # Pull Catalyst context from the OAuth connection store (best effort).
@@ -376,6 +391,8 @@ def build_long_form_router(
             catalyst_context=combined_context,
             title_template_block=title_template_block,
         )
+        if isinstance(outline, dict):
+            outline["chat_model"] = grok.model
 
         # Always append the channel's description_tail to outline.description
         # so the YouTube upload metadata carries the proven CTR signal
@@ -415,8 +432,8 @@ def build_long_form_router(
         except ValueError as e:
             raise HTTPException(404, str(e))
         try:
-            grok = GrokClient()
-        except GrokAuthError as e:
+            grok = StudioTextClient(model=body.model)
+        except RuntimeError as e:
             raise HTTPException(503, f"config: {e}")
         beats = expand_chapter(
             grok,
@@ -471,6 +488,8 @@ def build_long_form_router(
         _gate_admin(user)
         outline = dict(body.outline or {})
         outline["user_id"] = _user_id(user)
+        if body.model:
+            outline["chat_model"] = str(body.model).strip()
         from studio_agent.direct_production import (
             execute_logged_production,
             require_longform_runpod_if_global_enabled,
@@ -510,6 +529,10 @@ def build_long_form_router(
             channel = dict(get_channel(body.channel_key))
         except ValueError as e:
             raise HTTPException(404, str(e))
+        try:
+            lf_pipeline.validate_channel_pipeline(channel)
+        except lf_pipeline.LFRenderError as e:
+            raise HTTPException(400, f"render_start_failed: {e}")
         if not isinstance(body.outline, dict) or not (outline.get("chapters") or []):
             raise HTTPException(400, "outline must include a non-empty chapters list")
         picked_image = str(body.image_model or outline.get("image_model_id") or "").strip()
@@ -542,6 +565,12 @@ def build_long_form_router(
         # when the user clicks Resume).
         out: list[dict] = []
         for st in rows:
+            job_id = str(st.get("job_id") or "").strip()
+            if not _is_admin(user):
+                try:
+                    _require_owned_longform_job(job_id, user)
+                except HTTPException:
+                    continue
             outline = st.get("outline") or {}
             mp4_rel = st.get("mp4_path") or ""
             mp4_present = bool(mp4_rel)
@@ -573,6 +602,7 @@ def build_long_form_router(
     async def job_state_route(job_id: str, user: dict = auth_dep):
         _gate_admin(user)
         _validate_job_id(job_id)
+        _require_owned_longform_job(job_id, user)
         st = lf_pipeline.load_state(job_id)
         if not st:
             runpod_snapshot = _runpod_snapshot(job_id)
@@ -624,6 +654,7 @@ def build_long_form_router(
     async def job_status_route(job_id: str, user: dict = auth_dep):
         _gate_admin(user)
         _validate_job_id(job_id)
+        _require_owned_longform_job(job_id, user)
         runpod_snapshot = _runpod_snapshot(job_id)
         if runpod_snapshot is not None:
             return _legacy_status_from_snapshot(job_id, runpod_snapshot)
@@ -660,6 +691,7 @@ def build_long_form_router(
     async def job_mp4_route(job_id: str, user: dict = auth_dep):
         _gate_admin(user)
         _validate_job_id(job_id)
+        _require_owned_longform_job(job_id, user)
         path = lf_pipeline.job_mp4_path(job_id)
         if not path or not path.exists():
             raise HTTPException(404, "mp4_not_ready")
@@ -674,6 +706,7 @@ def build_long_form_router(
     async def job_thumbnail_route(job_id: str, idx: int, user: dict = auth_dep):
         _gate_admin(user)
         _validate_job_id(job_id)
+        _require_owned_longform_job(job_id, user)
         if idx < 1 or idx > 12:
             raise HTTPException(400, "bad_index")
         path = lf_pipeline.job_thumbnail_path(job_id, idx)
@@ -689,6 +722,7 @@ def build_long_form_router(
     async def job_still_route(job_id: str, scene_idx: int, user: dict = auth_dep):
         _gate_admin(user)
         _validate_job_id(job_id)
+        _require_owned_longform_job(job_id, user)
         if scene_idx < 0 or scene_idx > 9999:
             raise HTTPException(400, "bad_scene_index")
         path = lf_pipeline.job_still_path(job_id, scene_idx)
@@ -846,6 +880,7 @@ def build_long_form_router(
         the still file mtime so regenerated stills surface immediately."""
         _gate_admin(user)
         _validate_job_id(job_id)
+        _require_owned_longform_job(job_id, user)
         state = lf_pipeline.load_state(job_id)
         if not state:
             raise HTTPException(404, "no such job")

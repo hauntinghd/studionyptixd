@@ -499,16 +499,22 @@ def _longform_status(job_id: str) -> dict[str, Any]:
     )
     if proof_only:
         snap["visual_proof_only"] = True
-    scenes_gen = int(st.get("scenes_generated") or live.get("scene_total") or 0)
+    manifest = lf_pipeline.longform_scene_manifest(job_id)
+    actual_scene_indices = list(manifest.get("actual_indices") or [])
+    scenes_gen = max(
+        int(st.get("scenes_generated") or live.get("scene_total") or 0),
+        int(manifest.get("actual_count") or 0),
+    )
     disk_stills = _longform_still_count(job_id) if phase in {"scenes", "awaiting_approval", "done"} else 0
     if phase == "awaiting_approval" and scenes_gen > 0:
-        snap["can_finalize"] = not proof_only
+        snap["can_finalize"] = bool(manifest.get("ready_to_finalize"))
         snap["still_count"] = scenes_gen
         snap["still_preview_urls"] = [
             f"/api/studio-agent/jobs/{job_id}/still/{i}"
-            for i in range(min(scenes_gen, 12))
+            for i in actual_scene_indices
         ]
-        snap["total_scenes"] = scenes_gen
+        snap["total_scenes"] = int(manifest.get("expected_count") or scenes_gen)
+        snap["missing_scene_indices"] = list(manifest.get("missing_indices") or [])
         _attach_production_control(
             snap,
             "start_longform_render",
@@ -543,7 +549,7 @@ def _longform_status(job_id: str) -> dict[str, Any]:
             snap["total_scenes"] = scene_total or scene_done
             snap["still_preview_urls"] = [
                 f"/api/studio-agent/jobs/{job_id}/still/{i}"
-                for i in range(min(scene_done, 12))
+                for i in actual_scene_indices
             ]
             snap["stage_detail"] = str(
                 live.get("detail")

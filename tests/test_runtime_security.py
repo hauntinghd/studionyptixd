@@ -112,6 +112,28 @@ def test_runtime_security_headers_trusted_hosts_and_cors() -> None:
     assert preflight.headers["access-control-allow-origin"] == "https://studio.nyptidindustries.com"
     assert "x-idempotency-key" in preflight.headers["access-control-allow-headers"].lower()
 
+    tauri_preflight = client.options(
+        "/ping",
+        headers={
+            "Host": "nyptid-studio.fly.dev",
+            "Origin": "http://tauri.localhost",
+            "Access-Control-Request-Method": "GET",
+            "Access-Control-Request-Headers": "authorization",
+        },
+    )
+    assert tauri_preflight.status_code == 200
+    assert tauri_preflight.headers["access-control-allow-origin"] == "http://tauri.localhost"
+
+    rejected = client.options(
+        "/ping",
+        headers={
+            "Host": "nyptid-studio.fly.dev",
+            "Origin": "https://tauri.localhost.attacker.invalid",
+            "Access-Control-Request-Method": "GET",
+        },
+    )
+    assert rejected.status_code == 400
+
 
 def test_backend_registers_cors_once_and_public_health_omits_provider_url() -> None:
     import backend

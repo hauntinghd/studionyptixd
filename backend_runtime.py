@@ -50,6 +50,10 @@ _CORS_ORIGINS = (
     "http://127.0.0.1:5173",
     "http://localhost:8080",
     "http://127.0.0.1:8080",
+    # Tauri v2 serves bundled assets from these fixed application origins.
+    # Keep the allowlist exact; bearer-authenticated APIs must never use '*'.
+    "http://tauri.localhost",
+    "tauri://localhost",
 )
 _CONTENT_SECURITY_POLICY = "; ".join(
     (

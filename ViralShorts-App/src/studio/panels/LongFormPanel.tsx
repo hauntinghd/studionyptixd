@@ -376,7 +376,7 @@ export default function LongFormPanel() {
                 );
             } else if (chRes.status === 403) {
                 setChannelLoadError(
-                    'Long-Form is admin-only. The signed-in account is not an admin.'
+                    'An active Studio plan is required for Long-Form production.'
                 );
             } else {
                 setChannelLoadError(

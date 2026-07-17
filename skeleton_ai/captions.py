@@ -14,12 +14,41 @@ Plus "Cryptic Science" watermark in retro stencil at bottom-center.
 Output: drawtext filter strings ready to splice into ffmpeg compose.
 """
 from __future__ import annotations
+import math
+import os
 import re
 from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Iterable
 
-# Default font on Windows; deployment image will need to ship this font.
-DEFAULT_FONT = "C\\:/Windows/Fonts/arialbd.ttf"
 WATERMARK_TEXT = "ZeroTier"  # Updated for ZeroTier channel (was Cryptic Science in tests)
+
+
+class CaptionTimingError(RuntimeError):
+    """Raised when Studio cannot prove the requested caption timeline."""
+
+
+def resolve_caption_font() -> str:
+    """Return an ffmpeg-safe bold font path on Windows, Linux, or macOS."""
+    configured = str(os.getenv("STUDIO_CAPTION_FONT") or "").strip()
+    candidates = [
+        configured,
+        "C:/Windows/Fonts/arialbd.ttf",
+        "C:/Windows/Fonts/Arial.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
+        "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+    ]
+    selected = next((value for value in candidates if value and Path(value).is_file()), "")
+    if not selected:
+        # Fontconfig-backed ffmpeg builds can resolve this family even when the
+        # distribution stores the font file outside our known paths.
+        return "Noto Sans"
+    return Path(selected).as_posix().replace(":", "\\:").replace("'", "\\'")
+
+
+DEFAULT_FONT = resolve_caption_font()
 
 # Patterns that mark a word as Tier-1 KEY DATA (orange).
 KEY_PATTERNS = [
@@ -105,7 +134,8 @@ def time_phrases(phrases: list[str], total_duration: float) -> list[CaptionPhras
     naturally lingers on longer words, hyphenated numbers, and sentence-final
     punctuation, so weight those beats instead of using a flat interval.
     """
-    if not phrases:
+    total_duration = max(0.0, float(total_duration or 0.0))
+    if not phrases or total_duration <= 0.0:
         return []
     weights: list[float] = []
     for phrase in phrases:
@@ -115,16 +145,95 @@ def time_phrases(phrases: list[str], total_duration: float) -> list[CaptionPhras
         numeric_weight = 0.45 if any(ch.isdigit() for ch in phrase) else 0.0
         weights.append(max(1.0, len(words) * 0.55 + char_weight + punct_pause + numeric_weight))
     total_weight = max(1, sum(weights))
-    min_phrase = 0.16 if len(phrases) >= 12 else 0.36
-    variable_total = max(float(total_duration) - (min_phrase * len(phrases)), 0.0)
+    requested_floor = 0.16 if len(phrases) >= 12 else 0.36
+    # The old fixed floor could make a dense three-second caption track run
+    # almost a full second past the final audio clock.  Scale the floor to the
+    # available clock instead and assign the final cue from the exact remainder.
+    min_phrase = min(requested_floor, total_duration / len(phrases))
+    variable_total = max(total_duration - (min_phrase * len(phrases)), 0.0)
     out: list[CaptionPhrase] = []
     t = 0.0
-    for p, weight in zip(phrases, weights):
+    for index, (p, weight) in enumerate(zip(phrases, weights)):
         is_key = any(is_key_word(w) for w in p.split())
-        dur = min_phrase + variable_total * (weight / total_weight)
+        if index == len(phrases) - 1:
+            dur = max(0.0, total_duration - t)
+        else:
+            dur = min_phrase + variable_total * (weight / total_weight)
+            dur = min(dur, max(0.0, total_duration - t))
         out.append(CaptionPhrase(text=p, start_sec=t, duration_sec=dur, is_key=is_key))
         t += dur
     return out
+
+
+def _seconds(value: Any) -> float:
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return result if math.isfinite(result) else 0.0
+
+
+def _verified_cues(
+    rows: Iterable[dict[str, Any]],
+    *,
+    total_duration: float,
+) -> list[CaptionPhrase]:
+    cues: list[CaptionPhrase] = []
+    prior_end = 0.0
+    for row in rows:
+        text = str(row.get("text") or row.get("word") or "").strip()
+        start = _seconds(row.get("start"))
+        end = _seconds(row.get("end"))
+        if not text or start < 0.0 or end <= start or start + 0.08 < prior_end:
+            raise CaptionTimingError("verified word alignment contains an invalid or non-monotonic cue")
+        if start >= total_duration or end > total_duration + 0.08:
+            raise CaptionTimingError("verified word alignment extends past the final audio clock")
+        end = min(end, total_duration)
+        if end <= start:
+            raise CaptionTimingError("verified word alignment collapses at the final audio clock")
+        cues.append(
+            CaptionPhrase(
+                text=text.upper(),
+                start_sec=start,
+                duration_sec=end - start,
+                is_key=is_key_word(text),
+            )
+        )
+        prior_end = max(prior_end, end)
+    if not cues:
+        raise CaptionTimingError("verified word alignment returned no timed words")
+    return cues
+
+
+def build_timed_captions(
+    text: str,
+    total_duration: float,
+    *,
+    caption_mode: str = "phrase",
+    verified_word_timings: Iterable[dict[str, Any]] | None = None,
+) -> tuple[list[CaptionPhrase], str]:
+    """Compile captions and return ``(cues, timing_source)``.
+
+    Word mode deliberately has no heuristic fallback.  Calling a weighted text
+    estimate "word synced" was the source of delayed captions in exported
+    shorts, so Studio now fails closed unless timestamps came from audio.
+    """
+    duration = max(0.0, float(total_duration or 0.0))
+    if duration <= 0.0:
+        raise CaptionTimingError("caption duration must be greater than zero")
+    normalized_mode = (
+        "word"
+        if str(caption_mode or "").strip().lower() in {"word", "single_word", "one_word"}
+        else "phrase"
+    )
+    verified = list(verified_word_timings or [])
+    if normalized_mode == "word":
+        if not verified:
+            raise CaptionTimingError("word captions require verified timestamps from the narration audio")
+        return _verified_cues(verified, total_duration=duration), "verified_word"
+
+    phrases = split_into_phrases(text, max_words=3)
+    return time_phrases(phrases, duration), "script_weighted_estimate"
 
 
 def _esc(text: str) -> str:
@@ -173,8 +282,9 @@ def caption_drawtext(
         f"between(t\\,{phrase.start_sec:.3f}\\,"
         f"{phrase.start_sec + phrase.duration_sec:.3f})"
     )
+    font_option = f"fontfile='{font}'" if "/" in font or "\\" in font else f"font='{font}'"
     return (
-        f"drawtext=fontfile='{font}':text='{_esc(phrase.text)}':"
+        f"drawtext={font_option}:text='{_esc(phrase.text)}':"
         f"fontsize={size}:fontcolor={fontcolor}:"
         f"bordercolor=black:borderw=6:"
         f"x=(w-text_w)/2:y=h*0.78:enable='{enable}'"
@@ -183,8 +293,9 @@ def caption_drawtext(
 
 def watermark_drawtext(font: str = DEFAULT_FONT, watermark_text: str = WATERMARK_TEXT) -> str:
     """Persistent channel watermark at bottom-center (ZeroTier for this channel)."""
+    font_option = f"fontfile='{font}'" if "/" in font or "\\" in font else f"font='{font}'"
     return (
-        f"drawtext=fontfile='{font}':text='{_esc(watermark_text)}':"
+        f"drawtext={font_option}:text='{_esc(watermark_text)}':"
         f"fontsize=36:fontcolor=white@0.85:"
         f"bordercolor=black@0.7:borderw=3:"
         f"x=(w-text_w)/2:y=h*0.93"

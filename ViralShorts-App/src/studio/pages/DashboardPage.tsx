@@ -93,7 +93,7 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
     const isTabUnlocked = useCallback(
         (nextTab: DashboardTab) => {
             if (nextTab === 'home' || nextTab === 'create') return true;
-            if (nextTab === 'longform') return isAdmin;
+            if (nextTab === 'longform') return isAdmin || Boolean((laneAccess as Record<string, boolean>).longform);
             if (nextTab === 'campus' || nextTab === 'network' || nextTab === 'wins' || nextTab === 'leaderboard') return canUseAgent;
             if (nextTab === 'agent') return canUseAgent;
             if (nextTab === 'thumbnails') return isAdmin || Boolean((laneAccess as Record<string, boolean>).thumbnails);
@@ -145,7 +145,7 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
             setSelectedNiche(null);
             return;
         }
-        if (urlTab === 'longform' && isAdmin) {
+        if (urlTab === 'longform' && (isAdmin || laneAccess.longform)) {
             setTab('longform');
             setCreateOpen(false);
             setSelectedNiche(null);
@@ -170,7 +170,7 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
             setCreateOpen(true);
             setTab('create');
         }
-    }, [loading, isAdmin, canUseAgent, selectedNiche]);
+    }, [loading, isAdmin, canUseAgent, selectedNiche, laneAccess.longform, laneAccess.thumbnails]);
 
     if (!session) {
         if (loading) {
@@ -222,7 +222,7 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
             if (canUseAgent) openAgent();
             return;
         }
-        if (action === 'longform' && isAdmin) {
+        if (action === 'longform' && (isAdmin || laneAccess.longform)) {
             selectTab('longform');
             return;
         }
@@ -244,7 +244,7 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
     );
 
     const panel = (() => {
-        if (tab === 'longform' && isAdmin) return lazyPanel(<LongFormPanel />);
+        if (tab === 'longform' && (isAdmin || laneAccess.longform)) return lazyPanel(<LongFormPanel />);
         if (tab === 'thumbnails' && (isAdmin || laneAccess.thumbnails)) return lazyPanel(<ThumbnailPanel />);
         if (tab === 'cliplab' && (isAdmin || (laneAccess as Record<string, boolean>).cliplab)) {
             return lazyPanel(<ClipLabPanel />);

@@ -171,6 +171,32 @@ export const CREATE_WORKFLOW_PERSISTENCE_ENABLED = true;
 export const startYouTubeBrowserConnect = (accessToken: string, nextUrl?: string): void => {
     const token = String(accessToken || "").trim();
     if (!token || typeof document === "undefined") return;
+    // A desktop WebView cannot safely hand an authenticated POST body to the
+    // system browser. Start OAuth through the authenticated JSON route, then
+    // let Tauri's strict navigation guard open only the returned Google URL in
+    // the system browser. The bearer token is sent only to Studio's API.
+    if (typeof window !== "undefined" && "__TAURI_INTERNALS__" in window) {
+        const browserReturn = `${STUDIO_SITE_URL}?page=dashboard&tab=agent`;
+        void fetch(`${DIRECT_API || API}/api/oauth/google/youtube/start`, {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                Authorization: `Bearer ${token}`,
+            },
+            body: JSON.stringify({ next_url: browserReturn }),
+        }).then(async (response) => {
+            const payload = await response.json().catch(() => ({}));
+            const authUrl = String(payload?.auth_url || "").trim();
+            if (!response.ok || !authUrl) {
+                throw new Error(String(payload?.detail || "Google authorization URL missing"));
+            }
+            const externalAuthUrl = new URL(authUrl, `${DIRECT_API || API}/`).toString();
+            window.location.assign(externalAuthUrl);
+        }).catch((error) => {
+            console.error("Could not start desktop YouTube OAuth", error);
+        });
+        return;
+    }
     const form = document.createElement("form");
     form.method = "POST";
     form.action = `${DIRECT_API || API}/api/oauth/google/youtube/browser-start`;

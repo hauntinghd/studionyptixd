@@ -19,6 +19,18 @@ _ANNOUNCED_PATH = _DATA_DIR / "studio_release_announced.json"
 # Bump id when shipping; startup announces any id not yet in announced store.
 CATALOG: list[dict[str, Any]] = [
     {
+        "id": "release-2026-07-17-video-beta-tauri",
+        "kind": "success",
+        "title": "Paid long-form, verified captions, desktop shell",
+        "body": (
+            "Active Studio plans can now create long-form videos, with the selected text, image, and video models "
+            "routed exactly through their configured providers. Proof and incomplete-scene gates prevent premature "
+            "finalization, short- and long-form captions use synchronized audio timelines with stored provenance, "
+            "and the new Tauri desktop shell keeps Studio's production workflow in a secured native window."
+        ),
+        "version": "2026.07.17",
+    },
+    {
         "id": "release-2026-07-13-owner-credits-longform-compose",
         "kind": "success",
         "title": "Owner credits, long-form status, HR compose fix",

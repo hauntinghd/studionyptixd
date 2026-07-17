@@ -1552,6 +1552,7 @@ def _gen_scenes_batch(
         )
         return committed
 
+    failures: dict[int, str] = {}
     with ThreadPoolExecutor(max_workers=concurrency) as ex:
         future_to_task = {
             ex.submit(_generate_one, gi, prompt, out): (gi, out)
@@ -1563,6 +1564,7 @@ def _gen_scenes_batch(
                 fut.result()
                 out_paths.append(out)
             except Exception as e:
+                failures[gi] = str(e)[:240]
                 # Keep going — single scene failure shouldn't kill 540-scene render.
                 # We log it on state.json so the operator can re-run after.
                 print(f"[scenes] scene {gi} failed: {e}")
@@ -1570,6 +1572,16 @@ def _gen_scenes_batch(
             if on_progress and (done % 5 == 0 or done == total):
                 on_progress(done, total)
     out_paths.sort(key=lambda p: int(re.search(r"scene_(\d+)", p.name).group(1)))
+    expected_indices = {gi for gi, _prompt, _out in tasks}
+    rendered_indices = {
+        int(match.group(1))
+        for p in out_paths
+        if (match := re.search(r"scene_(\d+)", p.name))
+    }
+    missing = sorted(expected_indices - rendered_indices)
+    if missing:
+        detail = "; ".join(f"{idx}: {failures.get(idx, 'missing output')}" for idx in missing[:12])
+        raise LFRenderError(f"scene generation incomplete; missing {missing}. {detail}")
     return out_paths
 
 
@@ -2058,6 +2070,51 @@ def _list_scenes_sorted(stills_dir: Path) -> list[Path]:
     return [p for _, p in matches]
 
 
+def longform_scene_manifest(job_id: str) -> dict[str, Any]:
+    """Return the exact expected/actual gallery and whether finalize is safe."""
+    state = load_state(job_id) or {}
+    expected = [int(v) for v in (state.get("expected_scene_indices") or [])]
+    if not expected:
+        records = state.get("scene_briefs") or []
+        expected = sorted({
+            int(row.get("global_idx"))
+            for row in records
+            if isinstance(row, dict) and row.get("global_idx") is not None
+        })
+    if not expected:
+        chapters_path = _chapters_path(job_id)
+        try:
+            chapters = list((json.loads(chapters_path.read_text(encoding="utf-8")) or {}).get("chapters") or [])
+        except Exception:
+            chapters = []
+        scenes_per_chapter = len(chapters[0].get("scene_prompts") or []) if chapters else 0
+        max_scenes = max(1, int(os.environ.get("STUDIO_LONGFORM_MAX_SCENES", "144") or 144))
+        expected = sorted({
+            int(ch.get("chapter_index", 0)) * scenes_per_chapter + local_idx
+            for ch in chapters
+            for local_idx, _prompt in enumerate(ch.get("scene_prompts") or [])
+            if int(ch.get("chapter_index", 0)) * scenes_per_chapter + local_idx < max_scenes
+        })
+    stills_dir = _job_dir(job_id) / "stills"
+    actual: list[int] = []
+    if stills_dir.is_dir():
+        for path in _list_scenes_sorted(stills_dir):
+            match = re.search(r"scene_(\d+)", path.name)
+            if match and path.stat().st_size > 4096:
+                actual.append(int(match.group(1)))
+    missing = sorted(set(expected) - set(actual))
+    proof_pending = bool(state.get("visual_proof_only")) and not bool(state.get("proof_scene_approved"))
+    return {
+        "expected_indices": expected,
+        "actual_indices": sorted(set(actual)),
+        "missing_indices": missing,
+        "expected_count": len(expected),
+        "actual_count": len(set(actual)),
+        "proof_pending": proof_pending,
+        "ready_to_finalize": bool(expected) and not missing and not proof_pending,
+    }
+
+
 def _sum_chapter_audio_durations(audio_dir: Path) -> float:
     total = 0.0
     for part in sorted(audio_dir.glob("chapter_*.mp3")):
@@ -2097,6 +2154,8 @@ def _compose_slideshow(
     ken_burns_enabled: bool = True,
     light_shake_enabled: bool = False,
     job_id: str | None = None,
+    captions_enabled: bool = False,
+    caption_mode: str = "word",
 ) -> Path:
     """Full slideshow compose: scenes held for narration_total/scene_count
     seconds each, ambient mixed under narration at -16dB."""
@@ -2133,6 +2192,35 @@ def _compose_slideshow(
     # 2-pass loudnorm on the mix.
     final_audio = mix_path.with_name(mix_path.stem + "_lk.mp3")
     _two_pass_loudnorm(mix_path, final_audio)
+    caption_filter = ""
+    if captions_enabled:
+        from studio_agent.caption_alignment import (
+            align_audio_words,
+            group_word_cues,
+            write_ass,
+            write_caption_manifest,
+        )
+
+        caption_root = _ensure_job_dir(job_id) if job_id else out_path.parent
+        words = align_audio_words(
+            final_audio,
+            cache_path=caption_root / "caption_alignment.json",
+        )
+        cues = group_word_cues(words, mode=caption_mode)
+        ass_path = write_ass(
+            cues,
+            caption_root / "captions.ass",
+            width=1920,
+            height=1080,
+        )
+        write_caption_manifest(
+            caption_root / "captions.json",
+            words=words,
+            cues=cues,
+            mode=caption_mode,
+        )
+        escaped_ass = str(ass_path.resolve()).replace("\\", "/").replace(":", "\\:").replace("'", "\\'")
+        caption_filter = f"subtitles='{escaped_ass}',"
 
     # Build concat-demuxer list.
     concat_file = out_path.with_suffix(".concat.txt")
@@ -2167,7 +2255,7 @@ def _compose_slideshow(
         "-f", "concat", "-safe", "0", "-i", str(concat_file),
         "-i", str(final_audio),
         "-vf",
-        base_filter + motion_filter + "format=yuv420p,fps=" + str(fps),
+        base_filter + motion_filter + caption_filter + "format=yuv420p,fps=" + str(fps),
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "26", "-g", "300",
         "-c:a", "aac", "-b:a", "192k",
         "-movflags", "+faststart",
@@ -2228,8 +2316,8 @@ async def run_sleep_doc_pipeline(
     save_state(job_id, state)
 
     # Lazy import — keeps pipeline.py importable on machines without GrokClient.
-    from skeleton_ai.scripting_grok import GrokClient
-    grok = GrokClient()
+    from long_form.text_client import StudioTextClient
+    grok = StudioTextClient(model=str(outline.get("chat_model") or "").strip() or None)
 
     chapters_path = _chapters_path(job_id)
     if chapters_path.exists():
@@ -2299,6 +2387,16 @@ async def run_sleep_doc_pipeline(
     # complete chapter plan on disk so approval can expand from the exact same
     # scene-zero reference rather than starting a second, drifting job.
     proof_only = bool(outline.get("visual_proof_only"))
+    scenes_per_chapter_actual = len(chapters[0].get("scene_prompts") or []) if chapters else 0
+    max_scenes = max(1, int(os.environ.get("STUDIO_LONGFORM_MAX_SCENES", "144") or 144))
+    state["expected_scene_indices"] = sorted({
+        int(ch.get("chapter_index", 0)) * scenes_per_chapter_actual + local_idx
+        for ch in chapters
+        for local_idx, _prompt in enumerate(ch.get("scene_prompts") or [])
+        if int(ch.get("chapter_index", 0)) * scenes_per_chapter_actual + local_idx < max_scenes
+    })
+    state["expected_scene_count"] = len(state["expected_scene_indices"])
+    save_state(job_id, state)
     scene_chapters = chapters
     if proof_only:
         first = dict(chapters[0])
@@ -2357,6 +2455,13 @@ async def finalize_sleep_doc_pipeline(job_id: str) -> None:
             f"job {job_id} is in phase {state.get('phase')!r}; "
             "finalize requires awaiting_approval (or resume from a stalled "
             "finalize / failure)"
+        )
+
+    manifest = longform_scene_manifest(job_id)
+    if not manifest["ready_to_finalize"]:
+        raise LFRenderError(
+            "cannot finalize an incomplete long-form gallery; missing "
+            + ", ".join(str(i) for i in manifest["missing_indices"][:24])
         )
 
     # Re-hydrate channel from registry by key.
@@ -2483,12 +2588,17 @@ async def finalize_sleep_doc_pipeline(job_id: str) -> None:
             ken_burns_enabled=ken_burns,
             light_shake_enabled=light_shake,
             job_id=job_id,
+            captions_enabled=bool(outline.get("captions_enabled", True)),
+            caption_mode=str(outline.get("caption_mode") or "word"),
         ),
     )
 
     state["mp4_path"] = str(out_mp4.relative_to(LF_OUTPUT_ROOT))
     state["mp4_duration_sec"] = _ffprobe_dur(out_mp4)
     state["mp4_size_bytes"] = out_mp4.stat().st_size
+    state["captions_enabled"] = bool(outline.get("captions_enabled", True))
+    state["caption_mode"] = str(outline.get("caption_mode") or "word") if state["captions_enabled"] else "off"
+    state["caption_timing_source"] = "fal_whisper_word" if state["captions_enabled"] else "off"
     state["phase"] = "done"
     state["percent"] = 100
     state["finished_at"] = time.time()
@@ -2626,6 +2736,19 @@ def _register_v5_episode() -> None:
 _register_v5_episode()
 
 
+def validate_channel_pipeline(channel: dict) -> str:
+    """Fail before any workspace, reservation, or provider call is created."""
+    if str(channel.get("format") or "long_form").strip().lower() != "long_form":
+        raise LFRenderError("selected channel is not a long-form production channel")
+    _register_v5_episode()
+    pipeline_kind = str(channel.get("pipeline_kind") or "sleep_doc").strip()
+    if not callable(SUB_PIPELINES.get(pipeline_kind)):
+        raise LFRenderError(f"long-form pipeline {pipeline_kind!r} is not registered")
+    if not callable(FINALIZE_PIPELINES.get(pipeline_kind)):
+        raise LFRenderError(f"long-form finalizer {pipeline_kind!r} is not registered")
+    return pipeline_kind
+
+
 async def _run_render(job_id: str, channel: dict, outline: dict) -> None:
     """Outer wrapper that catches errors + marks the job failed on disk +
     in memory. Sub-pipelines never raise to here in normal flow — they
@@ -2673,6 +2796,7 @@ def start_render(
     reviews + regenerates as needed, then POST /finalize resumes the rest.
 
     Caller polls /jobs/{id}/status — phase=='awaiting_approval' is the gate."""
+    pipeline_kind = validate_channel_pipeline(channel)
     if not isinstance(outline, dict) or not outline.get("chapters"):
         raise LFRenderError("outline must include a non-empty 'chapters' list")
     requested = str(requested_job_id or "").strip()
@@ -2686,7 +2810,7 @@ def start_render(
         "user_id": str(outline.get("user_id") or "").strip(),
         "channel_key": channel.get("key"),
         "channel_label": channel.get("label"),
-        "pipeline_kind": channel.get("pipeline_kind") or "sleep_doc",
+        "pipeline_kind": pipeline_kind,
         "outline": outline,
         "phase": "queued",
         "percent": 0,
@@ -2702,6 +2826,11 @@ def start_render(
 async def _expand_visual_proof(job_id: str) -> None:
     """Render the remaining gallery only after the user accepts scene zero."""
     state = load_state(job_id) or {}
+    if str(state.get("pipeline_kind") or "sleep_doc") == "v5_episode":
+        from long_form.v5_pipeline import expand_v5_visual_proof_pipeline
+
+        await expand_v5_visual_proof_pipeline(job_id)
+        return
     outline = state.get("outline") if isinstance(state.get("outline"), dict) else {}
     if not outline:
         raise LFRenderError(f"no outline for job {job_id}")
@@ -2833,6 +2962,14 @@ def start_finalize(job_id: str) -> None:
         raise LFRenderError(
             f"job {job_id} is in phase {state.get('phase')!r}; "
             f"finalize requires one of {sorted(allowed)}"
+        )
+    manifest = longform_scene_manifest(job_id)
+    if not manifest["ready_to_finalize"]:
+        if manifest["proof_pending"]:
+            raise LFRenderError("approve and expand the one-scene proof before finalizing")
+        raise LFRenderError(
+            "long-form gallery is incomplete; missing scene indices "
+            + ", ".join(str(i) for i in manifest["missing_indices"][:24])
         )
     update_status(job_id, phase="finalizing", percent=int(state.get("percent") or 73))
     _spawn_lf_background_coro(_run_finalize(job_id), job_id)

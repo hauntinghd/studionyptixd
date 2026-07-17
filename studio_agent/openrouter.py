@@ -1100,6 +1100,7 @@ async def _anthropic_chat_completion(
     model_override: str | None = None,
     force_tool_call: bool = False,
     preserve_tool_names: frozenset[str] | None = None,
+    max_tokens: int | None = None,
 ) -> dict[str, Any]:
     if model_override:
         model_registry.assert_model_selectable(model_override)
@@ -1110,7 +1111,7 @@ async def _anthropic_chat_completion(
     system_text, anth_messages = _anthropic_payload_messages(compacted_messages)
     payload_base: dict[str, Any] = {
         "messages": anth_messages,
-        "max_tokens": int(os.getenv("ANTHROPIC_FALLBACK_MAX_TOKENS", "2048")),
+        "max_tokens": int(max_tokens or os.getenv("ANTHROPIC_FALLBACK_MAX_TOKENS", "2048")),
         "temperature": temperature,
     }
     if system_text:
@@ -1512,6 +1513,7 @@ async def chat_completion(
     web_search: bool = False,
     force_tool_call: bool = False,
     preserve_tool_names: frozenset[str] | None = None,
+    max_tokens: int | None = None,
 ) -> dict[str, Any]:
     requested_model = str(model or DEFAULT_MODEL).strip() or DEFAULT_MODEL
     # Final policy gate immediately before any provider request. The route may
@@ -1522,6 +1524,11 @@ async def chat_completion(
     if temperature is not None:
         temp = float(temperature)
     timeout = 180.0 if reasoning_depth == "deep" else 120.0
+    output_cap = (
+        max(512, min(int(max_tokens), 32768))
+        if max_tokens is not None
+        else _completion_token_cap(reasoning_depth, has_tools=bool(tools))
+    )
 
     route_messages = list(messages)
 
@@ -1548,7 +1555,7 @@ async def chat_completion(
             timeout=timeout,
             model=selected_model,
             force_tool_call=force_tool_call,
-            max_tokens=_completion_token_cap(reasoning_depth, has_tools=bool(tools)),
+            max_tokens=output_cap,
         )
 
     # Bare Claude IDs use Anthropic direct. Provider-qualified anthropic/* IDs
@@ -1577,6 +1584,7 @@ async def chat_completion(
             model_override=selected_model,
             force_tool_call=force_tool_call,
             preserve_tool_names=preserve_tool_names,
+            max_tokens=output_cap,
         )
 
     if route.route_provider != "openrouter":
@@ -1586,7 +1594,7 @@ async def chat_completion(
         "model": selected_model,
         "messages": route_messages,
         "temperature": temp,
-        "max_tokens": _completion_token_cap(reasoning_depth, has_tools=bool(tools)),
+        "max_tokens": output_cap,
     }
     if reasoning:
         payload["reasoning"] = reasoning

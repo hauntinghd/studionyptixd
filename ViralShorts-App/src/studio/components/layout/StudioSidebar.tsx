@@ -107,7 +107,7 @@ export function buildSidebarItems(
         { id: 'agent', label: 'Studio Agent', icon: Wand2, hidden: !canAgent, badge: 'Beta' },
         { id: 'thumbnails', label: 'ThumbLab', icon: ImageIcon, hidden: !isAdmin, badge: 'Beta' },
         { id: 'cliplab', label: 'ClipLab', icon: Clapperboard, hidden: false, comingSoon: !isAdmin && !laneAccess.cliplab, badge: isAdmin || laneAccess.cliplab ? 'Beta' : 'Soon' },
-        { id: 'longform', label: 'Documentary', icon: Film, hidden: !isAdmin, badge: 'Beta' },
+        { id: 'longform', label: 'Documentary', icon: Film, hidden: !isAdmin && !laneAccess.longform, badge: 'Beta' },
         { id: 'automate', label: 'Automate', icon: CalendarClock, comingSoon: true, badge: 'Soon' },
         { id: 'analytics', label: 'Analytics', icon: BrainCircuit, hidden: !isAdmin },
         { id: 'catalyst', label: 'Catalyst', icon: BrainCircuit, hidden: !isAdmin },

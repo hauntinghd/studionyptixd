@@ -6,6 +6,7 @@ not repeatedly invoke ffprobe.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -14,7 +15,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-QA_VERSION = 1
+QA_VERSION = 2
 
 
 def analyze_render(
@@ -27,8 +28,10 @@ def analyze_render(
     """Return a cached pass/warn/fail QA report for a finished render."""
     video_path = Path(video_path)
     package_path = Path(package_path) if package_path else None
+    caption_path = video_path.parent / "captions.json"
     cache_path = video_path.parent / "render_qa.json"
-    cached = _read_cache(cache_path, video_path, package_path)
+    input_fingerprint = _qa_inputs_fingerprint(video_path, package_path, caption_path)
+    cached = _read_cache(cache_path, video_path, package_path, caption_path, input_fingerprint)
     if cached:
         return cached
 
@@ -59,6 +62,10 @@ def analyze_render(
             "pass" if has_audio else "fail",
             "Audio track detected" if has_audio else "No audio stream detected",
         )
+        if has_audio:
+            _av_sync_check(checks, probe)
+        if caption_path.is_file():
+            _caption_timeline_check(checks, caption_path, duration, float(probe.get("fps") or 30.0))
     else:
         _add_check(
             checks,
@@ -81,13 +88,20 @@ def analyze_render(
         "score": score,
         "summary": _summary(status, score),
         "checks": checks,
+        "input_fingerprint": input_fingerprint,
         "created_at": time.time(),
     }
     _write_cache(cache_path, report)
     return report
 
 
-def _read_cache(cache_path: Path, video_path: Path, package_path: Path | None) -> dict[str, Any] | None:
+def _read_cache(
+    cache_path: Path,
+    video_path: Path,
+    package_path: Path | None,
+    caption_path: Path | None = None,
+    input_fingerprint: str = "",
+) -> dict[str, Any] | None:
     try:
         if not cache_path.is_file():
             return None
@@ -96,12 +110,43 @@ def _read_cache(cache_path: Path, video_path: Path, package_path: Path | None) -
             return None
         if package_path and package_path.is_file() and cache_mtime < package_path.stat().st_mtime:
             return None
+        if caption_path and caption_path.is_file() and cache_mtime < caption_path.stat().st_mtime:
+            return None
         data = json.loads(cache_path.read_text(encoding="utf-8"))
-        if isinstance(data, dict) and data.get("version") == QA_VERSION:
+        if (
+            isinstance(data, dict)
+            and data.get("version") == QA_VERSION
+            and (not input_fingerprint or data.get("input_fingerprint") == input_fingerprint)
+        ):
             return data
     except Exception:
         return None
     return None
+
+
+def _qa_inputs_fingerprint(
+    video_path: Path,
+    package_path: Path | None,
+    caption_path: Path | None,
+) -> str:
+    digest = hashlib.sha256()
+    digest.update(str(QA_VERSION).encode("ascii"))
+    for path, hash_content in (
+        (video_path, False),
+        (package_path, True),
+        (caption_path, True),
+    ):
+        if not path or not Path(path).is_file():
+            digest.update(b"missing\0")
+            continue
+        resolved = Path(path)
+        stat = resolved.stat()
+        digest.update(f"{resolved.name}:{stat.st_size}:{stat.st_mtime_ns}".encode("utf-8"))
+        if hash_content:
+            with resolved.open("rb") as handle:
+                for block in iter(lambda: handle.read(1024 * 1024), b""):
+                    digest.update(block)
+    return digest.hexdigest()
 
 
 def _write_cache(cache_path: Path, report: dict[str, Any]) -> None:
@@ -146,15 +191,128 @@ def _probe_video(video_path: Path) -> dict[str, Any]:
     video = next((s for s in dict_streams if s.get("codec_type") == "video"), None)
     if not isinstance(video, dict):
         return {"ok": False, "error": "No video stream found"}
-    audio = any(s.get("codec_type") == "audio" for s in dict_streams)
+    audio_stream = next((s for s in dict_streams if s.get("codec_type") == "audio"), None)
     fmt = data.get("format") if isinstance(data.get("format"), dict) else {}
+    format_duration = _float(fmt.get("duration"))
+    format_start = _float(fmt.get("start_time"))
+    video_duration = _float(video.get("duration")) or format_duration
+    video_start = _float(video.get("start_time")) if video.get("start_time") is not None else format_start
+    if isinstance(audio_stream, dict):
+        audio_duration = _float(audio_stream.get("duration")) or format_duration
+        audio_start = (
+            _float(audio_stream.get("start_time"))
+            if audio_stream.get("start_time") is not None
+            else format_start
+        )
+    else:
+        audio_duration = 0.0
+        audio_start = 0.0
     return {
         "ok": True,
-        "duration": _float(fmt.get("duration") or video.get("duration")),
+        "duration": format_duration or video_duration,
         "width": int(video.get("width") or 0),
         "height": int(video.get("height") or 0),
-        "has_audio": audio,
+        "has_audio": isinstance(audio_stream, dict),
+        "fps": _parse_rate(video.get("avg_frame_rate") or video.get("r_frame_rate")) or 30.0,
+        "video_start": video_start,
+        "video_duration": video_duration,
+        "audio_start": audio_start,
+        "audio_duration": audio_duration,
     }
+
+
+def _parse_rate(value: Any) -> float:
+    text = str(value or "").strip()
+    if not text:
+        return 0.0
+    if "/" in text:
+        numerator, denominator = text.split("/", 1)
+        den = _float(denominator)
+        return _float(numerator) / den if den else 0.0
+    return _float(text)
+
+
+def _av_sync_check(checks: list[dict[str, Any]], probe: dict[str, Any]) -> None:
+    fps = max(1.0, float(probe.get("fps") or 30.0))
+    tolerance = 1.0 / fps
+    duration = float(probe.get("duration") or 0.0)
+    video_start = float(probe.get("video_start") or 0.0)
+    audio_start = float(probe.get("audio_start") or 0.0)
+    video_duration = float(probe.get("video_duration") or duration)
+    audio_duration = float(probe.get("audio_duration") or duration)
+    start_delta = abs(video_start - audio_start)
+    end_delta = abs((video_start + video_duration) - (audio_start + audio_duration))
+    status = "pass" if start_delta <= tolerance + 1e-6 and end_delta <= tolerance + 1e-6 else "fail"
+    _add_check(
+        checks,
+        "av_sync",
+        "Audio/video clocks aligned",
+        status,
+        (
+            f"start delta {start_delta:.4f}s, end delta {end_delta:.4f}s; "
+            f"maximum one-frame tolerance {tolerance:.4f}s at {fps:.3f}fps"
+        ),
+    )
+
+
+def _caption_timeline_check(
+    checks: list[dict[str, Any]],
+    caption_path: Path,
+    video_duration: float,
+    fps: float,
+) -> None:
+    try:
+        manifest = json.loads(caption_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        _add_check(checks, "captions", "Caption timeline valid", "fail", f"Invalid captions.json: {exc}")
+        return
+    if not isinstance(manifest, dict):
+        _add_check(checks, "captions", "Caption timeline valid", "fail", "captions.json is not an object")
+        return
+    if not bool(manifest.get("enabled")):
+        _add_check(checks, "captions", "Caption timeline valid", "pass", "Captions intentionally disabled")
+        return
+
+    mode = str(manifest.get("mode") or "").strip().lower()
+    timing_source = str(manifest.get("timing_source") or "").strip().lower()
+    if mode == "word" and timing_source not in {"verified_word", "fal_whisper_word"}:
+        _add_check(
+            checks,
+            "captions",
+            "Caption timeline valid",
+            "fail",
+            "Word captions are missing verified audio-timing provenance",
+        )
+        return
+    cues = manifest.get("cues") if isinstance(manifest.get("cues"), list) else []
+    tolerance = 1.0 / max(1.0, float(fps or 30.0))
+    prior_end = 0.0
+    problems: list[str] = []
+    for index, cue in enumerate(cues):
+        if not isinstance(cue, dict):
+            problems.append(f"cue {index + 1} is not an object")
+            continue
+        start = _float(cue.get("start"))
+        end = _float(cue.get("end"))
+        if start < 0.0 or end <= start:
+            problems.append(f"cue {index + 1} has an invalid interval")
+        if start + tolerance < prior_end:
+            problems.append(f"cue {index + 1} is non-monotonic")
+        if end > video_duration + tolerance:
+            problems.append(f"cue {index + 1} exceeds the final video clock")
+        prior_end = max(prior_end, end)
+    if not cues:
+        problems.append("caption timeline contains no cues")
+    manifest_duration = _float(manifest.get("duration_sec"))
+    if manifest_duration and abs(manifest_duration - video_duration) > tolerance:
+        problems.append("caption and video durations differ by more than one frame")
+    _add_check(
+        checks,
+        "captions",
+        "Caption timeline valid",
+        "fail" if problems else "pass",
+        "; ".join(problems[:4]) if problems else f"{len(cues)} cues, source={timing_source}",
+    )
 
 
 def _duration_check(checks: list[dict[str, Any]], kind: str, duration: float) -> None:

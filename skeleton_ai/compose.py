@@ -12,8 +12,11 @@ Stages:
 Output: 720x1280 / 30fps / H.264 + AAC mono.
 """
 from __future__ import annotations
+import hashlib
+import json
 import subprocess
 from pathlib import Path
+from typing import Any, Iterable
 from . import captions as cap
 
 
@@ -42,6 +45,54 @@ def has_audio(path: Path) -> bool:
         text=True,
     )
     return "audio" in (r.stdout or "").lower()
+
+
+def decode_audio_clock(src_path: Path, out_path: Path) -> Path:
+    """Decode narration to Studio's stable 48 kHz mono alignment clock."""
+    src_path = Path(src_path)
+    out_path = Path(out_path)
+    if not src_path.is_file() or src_path.stat().st_size <= 0:
+        raise RuntimeError(f"narration audio is missing: {src_path}")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        [
+            "ffmpeg", "-y", "-loglevel", "error",
+            "-i", str(src_path),
+            "-map", "0:a:0",
+            "-af", "asetpts=PTS-STARTPTS",
+            "-ar", "48000",
+            "-ac", "1",
+            "-c:a", "pcm_s16le",
+            str(out_path),
+        ],
+        check=True,
+    )
+    return out_path
+
+
+def _file_sha256(path: Path | None) -> str:
+    if path is None or not Path(path).is_file():
+        return ""
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _render_fingerprint(payload: dict[str, Any]) -> str:
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _cached_render_matches(out_path: Path, cache_path: Path, fingerprint: str) -> bool:
+    if not out_path.is_file() or out_path.stat().st_size <= 1024 or not cache_path.is_file():
+        return False
+    try:
+        cached = json.loads(cache_path.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    return bool(isinstance(cached, dict) and cached.get("fingerprint") == fingerprint)
 
 
 def strip_clip_audio(path: Path) -> Path:
@@ -81,9 +132,12 @@ def trim_with_captions(
     height: int = 1280,
     fps: int = 30,
     watermark_text: str = "Studio",
-    caption_mode: str = "word",
+    caption_mode: str = "phrase",
     captions_enabled: bool = True,
     preserve_source_audio: bool = False,
+    audio_path: Path | None = None,
+    verified_word_timings: Iterable[dict[str, Any]] | None = None,
+    alignment_cache_path: Path | None = None,
     force: bool = False,
 ) -> Path:
     """Trim a scene clip to exact duration and burn captions + watermark.
@@ -92,21 +146,71 @@ def trim_with_captions(
     the catastrophic shell-escaping problem with drawtext filters when the
     text contains apostrophes, em-dashes, etc.
     """
+    src_clip = Path(src_clip)
     out_path = Path(out_path)
-    if not force and out_path.exists() and out_path.stat().st_size > 1024:
-        return out_path
-
+    audio_path = Path(audio_path) if audio_path else None
     caption_mode = "word" if str(caption_mode or "").lower() in {"word", "single_word", "one_word"} else "phrase"
+    duration_sec = max(0.0, float(duration_sec or 0.0))
+    if duration_sec <= 0.0:
+        raise RuntimeError("scene duration must be greater than zero")
+    if audio_path:
+        audio_duration = probe_duration(audio_path)
+        if audio_duration > 0.0:
+            # Narration is the canonical edit clock.  Picture is padded/trimmed
+            # to this value rather than shortening speech to provider video.
+            duration_sec = audio_duration
+
+    verified = [dict(row) for row in list(verified_word_timings or []) if isinstance(row, dict)]
+    if captions_enabled and caption_mode == "word" and not verified:
+        if not audio_path:
+            raise cap.CaptionTimingError("word captions require the scene narration audio")
+        from studio_agent.caption_alignment import align_audio_words
+
+        verified = align_audio_words(
+            audio_path,
+            cache_path=Path(alignment_cache_path) if alignment_cache_path else out_path.with_suffix(".alignment.json"),
+        )
+
     drawtexts = []
+    timed: list[cap.CaptionPhrase] = []
+    timing_source = "disabled"
     if captions_enabled:
-        phrases = cap.split_into_phrases(narration_text, max_words=1 if caption_mode == "word" else 3)
-        timed = cap.time_phrases(phrases, duration_sec)
+        timed, timing_source = cap.build_timed_captions(
+            narration_text,
+            duration_sec,
+            caption_mode=caption_mode,
+            verified_word_timings=verified,
+        )
         drawtexts = [cap.caption_drawtext(p, width=width, caption_mode=caption_mode) for p in timed]
     drawtexts.append(cap.watermark_drawtext(watermark_text=watermark_text))
 
+    render_payload = {
+        "version": 2,
+        "source_sha256": _file_sha256(src_clip),
+        "audio_sha256": _file_sha256(audio_path),
+        "duration_sec": round(duration_sec, 6),
+        "narration_text": narration_text,
+        "width": int(width),
+        "height": int(height),
+        "fps": int(fps),
+        "watermark_text": watermark_text,
+        "caption_mode": caption_mode,
+        "captions_enabled": bool(captions_enabled),
+        "preserve_source_audio": bool(preserve_source_audio),
+        "timing_source": timing_source,
+        "verified_word_timings": verified,
+    }
+    fingerprint = _render_fingerprint(render_payload)
+    render_cache = out_path.with_suffix(out_path.suffix + ".render.json")
+    if not force and _cached_render_matches(out_path, render_cache, fingerprint):
+        return out_path
+
     vf = (
+        "setpts=PTS-STARTPTS,"
         f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
         f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black,fps={fps},"
+        f"tpad=stop_mode=clone:stop_duration={duration_sec:.6f},"
+        f"trim=duration={duration_sec:.6f},setpts=PTS-STARTPTS,"
         f"{','.join(drawtexts)}"
     )
 
@@ -130,14 +234,47 @@ def trim_with_captions(
     ])
     if preserve_source_audio and source_has_audio:
         cmd.extend(["-map", "0:v:0", "-map", "0:a:0"])
-        cmd.extend(["-c:a", "aac", "-b:a", "128k"])
+        cmd.extend([
+            "-af", f"asetpts=PTS-STARTPTS,apad,atrim=duration={duration_sec:.6f}",
+            "-c:a", "aac", "-b:a", "128k",
+        ])
     elif preserve_source_audio:
         cmd.extend(["-map", "0:v:0", "-map", "1:a:0"])
-        cmd.extend(["-c:a", "aac", "-b:a", "128k"])
+        cmd.extend([
+            "-af", f"asetpts=PTS-STARTPTS,apad,atrim=duration={duration_sec:.6f}",
+            "-c:a", "aac", "-b:a", "128k",
+        ])
     else:
         cmd.append("-an")
+    cmd.extend(["-movflags", "+faststart"])
     cmd.append(str(out_path))
     subprocess.run(cmd, check=True)
+    cues = [
+        {
+            "text": item.text,
+            "start": round(item.start_sec, 4),
+            "end": round(min(duration_sec, item.start_sec + item.duration_sec), 4),
+        }
+        for item in timed
+    ]
+    out_path.with_suffix(out_path.suffix + ".captions.json").write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "enabled": bool(captions_enabled),
+                "mode": caption_mode if captions_enabled else "off",
+                "timing_source": timing_source,
+                "duration_sec": duration_sec,
+                "cues": cues,
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    render_cache.write_text(
+        json.dumps({"version": 2, "fingerprint": fingerprint, "inputs": render_payload}, indent=2),
+        encoding="utf-8",
+    )
     return out_path
 
 
@@ -159,19 +296,44 @@ def concat_demuxer(trimmed_clips: list[Path], out_silent: Path, work_dir: Path) 
     return out_silent
 
 
-def mux_narration(silent_video: Path, narration_audio: Path, out_path: Path) -> Path:
-    """Mux FAL voiceover onto silent picture. Never keep provider i2v audio."""
+def mux_narration(
+    silent_video: Path,
+    narration_audio: Path,
+    out_path: Path,
+    *,
+    fps: int = 30,
+    caption_phrases: Iterable[cap.CaptionPhrase] | None = None,
+) -> Path:
+    """Mux narration without ever shortening it to the provider video clock."""
     out_path = Path(out_path)
+    duration_sec = probe_duration(narration_audio)
+    if duration_sec <= 0.0:
+        raise RuntimeError("cannot mux narration with an unreadable audio clock")
     # Belt-and-suspenders: strip any leftover Grok/provider talk track first.
     strip_clip_audio(silent_video)
+    video_filters = [
+        "setpts=PTS-STARTPTS",
+        f"fps={int(fps)}",
+        f"tpad=stop_mode=clone:stop_duration={duration_sec:.6f}",
+        f"trim=duration={duration_sec:.6f}",
+        "setpts=PTS-STARTPTS",
+    ]
+    for phrase in list(caption_phrases or []):
+        video_filters.append(cap.caption_drawtext(phrase, caption_mode="word"))
+    filter_script = out_path.with_suffix(out_path.suffix + ".mux-filter.txt")
+    filter_script.parent.mkdir(parents=True, exist_ok=True)
+    filter_script.write_text(",".join(video_filters), encoding="utf-8")
     cmd = [
         "ffmpeg", "-y", "-loglevel", "error",
         "-i", str(silent_video),
         "-i", str(narration_audio),
         "-map", "0:v:0", "-map", "1:a:0",
-        "-c:v", "copy",
+        "-filter_script:v", str(filter_script),
+        "-af", "asetpts=PTS-STARTPTS",
+        "-c:v", "libx264", "-preset", "medium", "-crf", "20", "-pix_fmt", "yuv420p",
         "-c:a", "aac", "-b:a", "192k",
-        "-shortest",
+        "-t", f"{duration_sec:.6f}",
+        "-movflags", "+faststart",
         str(out_path),
     ]
     subprocess.run(cmd, check=True)

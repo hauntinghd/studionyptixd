@@ -62,6 +62,7 @@ from long_form.pipeline import (
     _ffprobe_dur,
     _final_mp4_path,
     _gen_chapter,
+    _gen_scene_image,
     _gen_thumbnails,
     _job_dir,
     _slugify,
@@ -93,7 +94,13 @@ def _em_cast_ref_paths() -> list[Path]:
 # Phase 2 — scenes (seedream v4.5 stills, EM uses seedream not ernie)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _gen_em_still(prompt: str, visual_style: str, out_path: Path) -> Path:
+def _gen_em_still(
+    prompt: str,
+    visual_style: str,
+    out_path: Path,
+    *,
+    image_model: str = "",
+) -> Path:
     """Generate a still via Seedream v4.5 edit (approved cast refs) or t2i fallback."""
     if out_path.exists() and out_path.stat().st_size > 1024:
         return out_path
@@ -106,6 +113,11 @@ def _gen_em_still(prompt: str, visual_style: str, out_path: Path) -> Path:
         "render them AS this yellow-porcelain mannequin."
     )
     full_prompt = f"{cast_rule}\n\n{prompt}\n\nStyle: {visual_style}".strip()
+    selected_model = str(image_model or "").strip().lower()
+    if selected_model and selected_model not in {
+        "seedream_edit", "seedream_v45_edit", "seedream_4_5_edit", "seedream-4.5-edit"
+    }:
+        return _gen_scene_image(full_prompt, out_path, image_model=selected_model)
 
     refs = _em_cast_ref_paths()
     if refs:
@@ -736,8 +748,16 @@ def _process_scene(
     return scene_mp4
 
 
-def _final_concat_v5(scene_mp4s: list[Path], out_path: Path,
-                     *, fade_out_sec: float = 3.0, fps: int = 24) -> Path:
+def _final_concat_v5(
+    scene_mp4s: list[Path],
+    out_path: Path,
+    *,
+    fade_out_sec: float = 3.0,
+    fps: int = 24,
+    captions_enabled: bool = False,
+    caption_mode: str = "word",
+    caption_root: Path | None = None,
+) -> Path:
     """Concat all scene MP4s + add final fade-to-black.
 
     NOTE: Using simple concat-demuxer here (no inter-scene crossfades).
@@ -774,11 +794,46 @@ def _final_concat_v5(scene_mp4s: list[Path], out_path: Path,
     if total <= 0:
         raise LFRenderError("v5 concat produced zero-duration file")
     fade_start = max(0.0, total - fade_out_sec)
+    caption_filter = ""
+    if captions_enabled:
+        from studio_agent.caption_alignment import (
+            align_audio_words,
+            group_word_cues,
+            write_ass,
+            write_caption_manifest,
+        )
+
+        root = Path(caption_root) if caption_root else out_path.parent
+        words = align_audio_words(
+            tmp,
+            cache_path=root / "caption_alignment.json",
+        )
+        cues = group_word_cues(words, mode=caption_mode)
+        ass_path = write_ass(
+            cues,
+            root / "captions.ass",
+            width=1920,
+            height=1080,
+        )
+        write_caption_manifest(
+            root / "captions.json",
+            words=words,
+            cues=cues,
+            mode=caption_mode,
+        )
+        escaped_ass = (
+            str(ass_path.resolve())
+            .replace("\\\\", "/")
+            .replace(":", "\\\\:")
+            .replace("'", "\\\\'")
+        )
+        caption_filter = f"subtitles='{escaped_ass}',"
     vfilter = (
         "scale=1920:1080:flags=lanczos:force_original_aspect_ratio=decrease,"
-        "pad=1920:1080:(ow-iw)/2:(oh-ih)/2:black,"
-        f"fps={fps},"
-        f"fade=t=out:st={fade_start:.3f}:d={fade_out_sec:.3f}"
+        + "pad=1920:1080:(ow-iw)/2:(oh-ih)/2:black,"
+        + caption_filter
+        + f"fps={fps},"
+        + f"fade=t=out:st={fade_start:.3f}:d={fade_out_sec:.3f}"
     )
     cmd2 = [
         "ffmpeg", "-hide_banner", "-loglevel", "warning", "-y",
@@ -846,8 +901,8 @@ async def run_v5_episode_pipeline(
     state["phase"] = "chapters"
     save_state(job_id, state)
 
-    from skeleton_ai.scripting_grok import GrokClient
-    grok = GrokClient()
+    from long_form.text_client import StudioTextClient
+    grok = StudioTextClient(model=str(outline.get("chat_model") or "").strip() or None)
 
     chapters_path = _chapters_path(job_id)
     if chapters_path.exists():
@@ -918,11 +973,20 @@ async def run_v5_episode_pipeline(
         {"chapter_index": ci, "local_idx": li, "global_idx": gi, "brief": sb}
         for ci, li, gi, sb in scene_briefs
     ]
+    state["expected_scene_indices"] = [gi for _ci, _li, gi, _sb in scene_briefs]
+    state["expected_scene_count"] = len(scene_briefs)
+    proof_only = bool(outline.get("visual_proof_only"))
+    state["visual_proof_only"] = proof_only
+    state["proof_scene_approved"] = False
     save_state(job_id, state)
 
-    total = len(scene_briefs)
+    render_scene_briefs = scene_briefs[:1] if proof_only else scene_briefs
+    total = len(render_scene_briefs)
     stills_dir = job_dir / "stills"
     stills_dir.mkdir(parents=True, exist_ok=True)
+    selected_image_model = str(
+        outline.get("image_model_id") or channel.get("image_model_default") or "seedream_edit"
+    ).strip()
 
     def _gen_one_still(triple):
         ci, li, gi, sb = triple
@@ -939,7 +1003,22 @@ async def run_v5_episode_pipeline(
             if result.returncode != 0:
                 raise LFRenderError(f"motion-graphic preview extraction failed: {result.stderr[-300:]}")
         else:
-            _gen_em_still(sb["scene_prompt"], visual_style, out)
+            def _dispatch(model: str, candidate: Path, _route_guard: Callable[[], bool]) -> Path:
+                return _gen_em_still(
+                    sb["scene_prompt"],
+                    visual_style,
+                    candidate,
+                    image_model=model,
+                )
+
+            _dispatch_longform_media_revision_aware(
+                job_id,
+                stage="image",
+                scene_index=gi,
+                destination=out,
+                dispatch=_dispatch,
+                fallback_model=selected_image_model,
+            )
         return gi
 
     # Stills-only concurrency = 6 (each is one seedream call ~5-10s; lower
@@ -949,7 +1028,7 @@ async def run_v5_episode_pipeline(
     def _run_stills_pool() -> int:
         done_n = 0
         with ThreadPoolExecutor(max_workers=STILLS_CONCURRENCY) as ex:
-            futs = {ex.submit(_gen_one_still, t): t for t in scene_briefs}
+            futs = {ex.submit(_gen_one_still, t): t for t in render_scene_briefs}
             for fut in as_completed(futs):
                 t = futs[fut]
                 gi = t[2]
@@ -962,6 +1041,8 @@ async def run_v5_episode_pipeline(
                                       scene_done=done_n, scene_total=total)
                 except Exception as e:
                     print(f"[v5 stills] scene {gi} failed: {e}")
+        if done_n != total:
+            raise LFRenderError(f"v5 still gallery incomplete: rendered {done_n}/{total}")
         return done_n
 
     done_n = await loop.run_in_executor(None, _run_stills_pool)
@@ -979,6 +1060,126 @@ async def run_v5_episode_pipeline(
     save_state(job_id, state)
     update_status(job_id, phase="awaiting_approval", percent=72)
     return
+
+
+async def expand_v5_visual_proof_pipeline(job_id: str) -> None:
+    """Generate every remaining v5 still after the creator approves scene 0."""
+    state = load_state(job_id) or {}
+    records = list(state.get("scene_briefs") or [])
+    if not records:
+        raise LFRenderError("scene_briefs missing; cannot expand v5 proof")
+    if not bool(state.get("visual_proof_only")):
+        raise LFRenderError("v5 job is not awaiting one-scene proof expansion")
+    from long_form.prompts.channels import get_channel
+
+    channel = dict(get_channel(str(state.get("channel_key") or "")))
+    outline = state.get("outline") if isinstance(state.get("outline"), dict) else {}
+    visual_style = str(channel.get("visual_style") or "")
+    fps = int(channel.get("fps") or 24)
+    selected_image_model = str(
+        outline.get("image_model_id") or channel.get("image_model_default") or "seedream_edit"
+    ).strip()
+    job_dir = _ensure_job_dir(job_id)
+    stills_dir = job_dir / "stills"
+    stills_dir.mkdir(parents=True, exist_ok=True)
+
+    state.update({
+        "phase": "scenes",
+        "proof_scene_approved": True,
+        "visual_proof_only": False,
+        "percent": 15,
+    })
+    outline["visual_proof_only"] = False
+    state["outline"] = outline
+    save_state(job_id, state)
+
+    pending = [
+        row for row in records
+        if not (stills_dir / f"scene_{int(row.get('global_idx') or 0):04d}.png").is_file()
+    ]
+
+    def _generate(row: dict) -> int:
+        gi = int(row.get("global_idx") or 0)
+        brief = dict(row.get("brief") or {})
+        out = stills_dir / f"scene_{gi:04d}.png"
+        treatment = dict(brief.get("visual_treatment") or {})
+        if str(treatment.get("kind") or "") == "motion_graphic":
+            from studio_agent.visual_treatment import render_motion_graphic_clip
+            preview = job_dir / "motion_graphics" / f"preview_{gi:04d}.mp4"
+            render_motion_graphic_clip(treatment, preview, duration_sec=4.0, fps=fps)
+            result = subprocess.run(
+                ["ffmpeg", "-hide_banner", "-loglevel", "warning", "-y", "-ss", "2.0", "-i", str(preview), "-frames:v", "1", str(out)],
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode != 0:
+                raise LFRenderError(f"motion-graphic preview extraction failed: {result.stderr[-300:]}")
+        else:
+            def _dispatch(model: str, candidate: Path, _route_guard: Callable[[], bool]) -> Path:
+                return _gen_em_still(
+                    str(brief.get("scene_prompt") or ""),
+                    visual_style,
+                    candidate,
+                    image_model=model,
+                )
+
+            _dispatch_longform_media_revision_aware(
+                job_id,
+                stage="image",
+                scene_index=gi,
+                destination=out,
+                dispatch=_dispatch,
+                fallback_model=selected_image_model,
+            )
+        if not out.is_file() or out.stat().st_size <= 4096:
+            raise LFRenderError(f"v5 still {gi} produced no usable output")
+        return gi
+
+    failures: dict[int, str] = {}
+    completed = len(records) - len(pending)
+
+    def _run_pool() -> None:
+        nonlocal completed
+        with ThreadPoolExecutor(max_workers=6) as executor:
+            futures = {executor.submit(_generate, row): row for row in pending}
+            for future in as_completed(futures):
+                row = futures[future]
+                gi = int(row.get("global_idx") or 0)
+                try:
+                    future.result()
+                    completed += 1
+                    update_status(
+                        job_id,
+                        phase="scenes",
+                        percent=15 + int(57 * completed / max(1, len(records))),
+                        scene_done=completed,
+                        scene_total=len(records),
+                    )
+                except Exception as exc:
+                    failures[gi] = str(exc)[:240]
+
+    await asyncio.get_running_loop().run_in_executor(None, _run_pool)
+    missing = [
+        int(row.get("global_idx") or 0)
+        for row in records
+        if not (
+            (stills_dir / f"scene_{int(row.get('global_idx') or 0):04d}.png").is_file()
+            and (stills_dir / f"scene_{int(row.get('global_idx') or 0):04d}.png").stat().st_size > 4096
+        )
+    ]
+    if missing:
+        detail = "; ".join(f"{idx}: {failures.get(idx, 'missing output')}" for idx in missing[:12])
+        raise LFRenderError(f"v5 proof expansion incomplete; missing {missing}. {detail}")
+    state = load_state(job_id) or state
+    state.update({
+        "phase": "awaiting_approval",
+        "percent": 72,
+        "scenes_generated": len(records),
+        "visual_proof_only": False,
+        "proof_scene_approved": True,
+    })
+    save_state(job_id, state)
+    update_status(job_id, phase="awaiting_approval", percent=72, scene_done=len(records), scene_total=len(records))
 
 
 async def finalize_v5_episode_pipeline(job_id: str) -> None:
@@ -1001,6 +1202,14 @@ async def finalize_v5_episode_pipeline(job_id: str) -> None:
             f"job {job_id} is in phase {state.get('phase')!r}; "
             "v5 finalize requires awaiting_approval (or resume from a "
             "stalled finalize / failure)"
+        )
+
+    from long_form.pipeline import longform_scene_manifest
+    manifest = longform_scene_manifest(job_id)
+    if not manifest["ready_to_finalize"]:
+        raise LFRenderError(
+            "cannot finalize an incomplete v5 gallery; missing "
+            + ", ".join(str(i) for i in manifest["missing_indices"][:24])
         )
 
     from long_form.prompts.channels import get_channel
@@ -1109,6 +1318,12 @@ async def finalize_v5_episode_pipeline(job_id: str) -> None:
         return out
 
     scene_mp4s_indexed = await loop.run_in_executor(None, _run_pool)
+    missing_scene_mp4s = sorted({gi for _, _, gi, _ in scene_briefs} - set(scene_mp4s_indexed))
+    if missing_scene_mp4s:
+        raise LFRenderError(
+            "v5 scene assembly incomplete; refusing partial publish. Missing scene indices: "
+            + ", ".join(str(i) for i in missing_scene_mp4s)
+        )
     scene_mp4s = [scene_mp4s_indexed[gi] for _, _, gi, _ in scene_briefs if gi in scene_mp4s_indexed]
     state["scene_mp4s_assembled"] = len(scene_mp4s)
     state["percent"] = 88
@@ -1134,12 +1349,23 @@ async def finalize_v5_episode_pipeline(job_id: str) -> None:
     out_mp4 = _final_mp4_path(job_id, title_slug)
     await loop.run_in_executor(
         None,
-        lambda: _final_concat_v5(scene_mp4s, out_mp4, fade_out_sec=3.0, fps=fps),
+        lambda: _final_concat_v5(
+            scene_mp4s,
+            out_mp4,
+            fade_out_sec=3.0,
+            fps=fps,
+            captions_enabled=bool(outline.get("captions_enabled", True)),
+            caption_mode=str(outline.get("caption_mode") or "word"),
+            caption_root=job_dir,
+        ),
     )
 
     state["mp4_path"] = str(out_mp4.relative_to(LF_OUTPUT_ROOT))
     state["mp4_duration_sec"] = _ffprobe_dur(out_mp4)
     state["mp4_size_bytes"] = out_mp4.stat().st_size
+    state["captions_enabled"] = bool(outline.get("captions_enabled", True))
+    state["caption_mode"] = str(outline.get("caption_mode") or "word") if state["captions_enabled"] else "off"
+    state["caption_timing_source"] = "fal_whisper_word" if state["captions_enabled"] else "off"
     state["phase"] = "done"
     state["percent"] = 100
     state["finished_at"] = time.time()
@@ -1173,4 +1399,28 @@ def regenerate_v5_still(job_id: str, scene_idx: int,
     out = _job_dir(job_id) / "stills" / f"scene_{scene_idx:04d}.png"
     if out.exists():
         out.unlink()
-    return _gen_em_still(prompt, visual_style, out)
+    job_dir = _job_dir(job_id)
+    for folder in (job_dir / "clips", job_dir / "scenes"):
+        if folder.is_dir():
+            for stale in folder.glob(f"*_{scene_idx:04d}*"):
+                if stale.is_file():
+                    stale.unlink(missing_ok=True)
+    outline = state.get("outline") if isinstance(state.get("outline"), dict) else {}
+    selected_image_model = str(
+        outline.get("image_model_id") or channel.get("image_model_default") or "seedream_edit"
+    ).strip()
+
+    committed, _receipt = _dispatch_longform_media_revision_aware(
+        job_id,
+        stage="image",
+        scene_index=scene_idx,
+        destination=out,
+        dispatch=lambda model, candidate, _guard: _gen_em_still(
+            prompt,
+            visual_style,
+            candidate,
+            image_model=model,
+        ),
+        fallback_model=selected_image_model,
+    )
+    return committed

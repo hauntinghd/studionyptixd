@@ -67,10 +67,6 @@ CLIPLAB_AGENT_ADMIN_USER_IDS = {
 }
 
 OWNER_ONLY_AGENT_TOOLS = frozenset({
-    "start_longform_render",
-    "expand_longform_visual_proof",
-    "generate_longform_thumbnails",
-    "finalize_longform_render",
     "ingest_cliplab_attachment",
     "analyze_cliplab_video",
     "render_cliplab_segments",
@@ -917,6 +913,8 @@ def tool_schemas() -> list[dict[str, Any]]:
                         "ken_burns_enabled": {"type": "boolean", "description": "Apply local cinematic zoom/pan to still-only scenes at compose time."},
                         "light_shake_enabled": {"type": "boolean", "description": "Add rare, subtle local camera emphasis without paid image-to-video."},
                         "image_model_id": {"type": "string", "description": "Session image model used for proof and scene stills."},
+                        "captions_enabled": {"type": "boolean", "default": True, "description": "Burn synchronized captions into the final long-form video."},
+                        "caption_mode": {"type": "string", "enum": ["word", "phrase", "off"], "default": "word"},
                     },
                     "required": ["channel_key", "title", "topic"],
                 },
@@ -928,6 +926,34 @@ def tool_schemas() -> list[dict[str, Any]]:
                 "name": "expand_longform_visual_proof",
                 "description": "After the user approves the one-scene long-form proof, generate the remaining still gallery from that approved foundation. Requires approval because it spends image credits.",
                 "parameters": {"type": "object", "properties": {"job_id": {"type": "string"}}, "required": ["job_id"]},
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "list_longform_scenes",
+                "description": "List every planned long-form scene, prompt, narration, still URL, and completeness status before editing or finalizing.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"job_id": {"type": "string"}},
+                    "required": ["job_id"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "regenerate_longform_still",
+                "description": "Regenerate one selected long-form still with the current session image route and invalidate dependent animation/composition output.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "job_id": {"type": "string"},
+                        "scene_idx": {"type": "integer", "minimum": 0},
+                        "reason": {"type": "string"},
+                    },
+                    "required": ["job_id", "scene_idx"],
+                },
             },
         },
         {
@@ -2529,9 +2555,21 @@ def _require_cliplab_admin(user_id: str) -> None:
         raise PermissionError("ClipLab Agent tools are internal/admin-only right now.")
 
 
-def _require_longform_admin(user_id: str) -> None:
-    if not _is_studio_admin_user(user_id):
-        raise PermissionError("Long-form is owner/admin-only while we finish the pipeline.")
+def _require_longform_entitlement(user_id: str) -> None:
+    """Allow owners and active Studio subscribers into the long-form lane.
+
+    Long-form is still credit-gated by the normal production reservation path;
+    this check only replaces the obsolete owner-only beta switch.
+    """
+    uid = str(user_id or "").strip()
+    if _is_studio_admin_user(uid):
+        return
+    if not uid:
+        raise PermissionError("Sign in to use long-form production.")
+    from studio_agent.access import STUDIO_AGENT_PLANS, unified_plan
+
+    if unified_plan(uid) not in STUDIO_AGENT_PLANS:
+        raise PermissionError("An active Studio plan is required for long-form production.")
 
 
 def tools_for_user(user_id: str | None) -> list[dict[str, Any]]:
@@ -5903,20 +5941,55 @@ def re_edit_production(job_id: str, instruction: str, kind: str = "shortform") -
 def list_longform_scenes(job_id: str) -> str:
     from long_form import pipeline as lf
     st = lf.load_state(job_id) or {}
-    chapters = st.get("chapters") or []
-    scenes_out = []
-    for ch_idx, ch in enumerate(chapters):
-        prompts = ch.get("scene_prompts") or []
-        for local, p in enumerate(prompts):
-            g = ch_idx * (len(prompts) or 1) + local
+    scenes_out: list[dict[str, Any]] = []
+    records = list(st.get("scene_briefs") or [])
+    if records:
+        for row in records:
+            if not isinstance(row, dict):
+                continue
+            brief = row.get("brief") if isinstance(row.get("brief"), dict) else {}
+            g = int(row.get("global_idx") or 0)
+            still = lf.job_still_path(job_id, g)
             scenes_out.append({
-                "chapter": ch_idx,
-                "local": local,
+                "chapter": int(row.get("chapter_index") or 0),
+                "local": int(row.get("local_idx") or 0),
                 "global": g,
-                "narration_preview": str(ch.get("narration") or "")[:180],
-                "prompt": p,
+                "narration": str(brief.get("narration") or ""),
+                "prompt": str(brief.get("scene_prompt") or ""),
+                "duration_sec": float(brief.get("duration_target_sec") or 0.0),
+                "still_exists": bool(still and still.is_file()),
+                "still_url": f"/api/studio-agent/jobs/{job_id}/still/{g}?kind=longform",
             })
-    return json.dumps({"job_id": job_id, "phase": st.get("phase"), "scenes": scenes_out}, indent=2)
+    else:
+        chapters_path = lf._chapters_path(job_id)
+        try:
+            chapters = list((json.loads(chapters_path.read_text(encoding="utf-8")) or {}).get("chapters") or [])
+        except Exception:
+            chapters = []
+        scenes_per_chapter = len(chapters[0].get("scene_prompts") or []) if chapters else 0
+        for ch in chapters:
+            ch_idx = int(ch.get("chapter_index") or 0)
+            prompts = list(ch.get("scene_prompts") or [])
+            narration = str(ch.get("narration") or "")
+            for local, prompt in enumerate(prompts):
+                g = ch_idx * scenes_per_chapter + local
+                still = lf.job_still_path(job_id, g)
+                scenes_out.append({
+                    "chapter": ch_idx,
+                    "local": local,
+                    "global": g,
+                    "narration": narration,
+                    "prompt": str(prompt),
+                    "still_exists": bool(still and still.is_file()),
+                    "still_url": f"/api/studio-agent/jobs/{job_id}/still/{g}?kind=longform",
+                })
+    manifest = lf.longform_scene_manifest(job_id)
+    return json.dumps({
+        "job_id": job_id,
+        "phase": st.get("phase"),
+        "manifest": manifest,
+        "scenes": sorted(scenes_out, key=lambda row: int(row.get("global") or 0)),
+    }, indent=2)
 
 
 def regenerate_longform_still(job_id: str, scene_idx: int, reason: str = "") -> str:
@@ -6095,6 +6168,7 @@ _SHORTFORM_EXISTING_JOB_TOOLS = frozenset({
 })
 _LONGFORM_EXISTING_JOB_TOOLS = frozenset({
     "expand_longform_visual_proof",
+    "regenerate_longform_still",
     "list_longform_scenes",
     "regenerate_longform_still",
     "finalize_longform_render",
@@ -6153,10 +6227,16 @@ def execute_tool(
 ) -> str:
     args = arguments or {}
     if name in OWNER_ONLY_AGENT_TOOLS:
-        if name in {"start_longform_render", "expand_longform_visual_proof", "generate_longform_thumbnails", "finalize_longform_render"}:
-            _require_longform_admin(user_id)
-        else:
-            _require_cliplab_admin(user_id)
+        _require_cliplab_admin(user_id)
+    if name in {
+        "start_longform_render",
+        "expand_longform_visual_proof",
+        "list_longform_scenes",
+        "regenerate_longform_still",
+        "generate_longform_thumbnails",
+        "finalize_longform_render",
+    }:
+        _require_longform_entitlement(user_id)
     if name in ("analyze_reference_video", "analyze_competitor_video"):
         name = "analyze_reference_video"
     _enforce_tool_job_ownership(name, args, user_id)
@@ -6204,8 +6284,18 @@ def execute_tool(
         path.write_text(str(args.get("content") or ""), encoding="utf-8")
         return json.dumps({"written": str(path.relative_to(ROOT)), "bytes": path.stat().st_size})
 
+    if name == "list_longform_scenes":
+        return list_longform_scenes(str(args.get("job_id") or "").strip())
+
+    if name == "regenerate_longform_still":
+        return regenerate_longform_still(
+            str(args.get("job_id") or "").strip(),
+            int(args.get("scene_idx") or 0),
+            str(args.get("reason") or ""),
+        )
+
     if name == "start_longform_render":
-        _require_longform_admin(user_id)
+        _require_longform_entitlement(user_id)
         from long_form.prompts.channels import get_channel
         from long_form import pipeline as lf_pipeline
         from studio_agent.render_styles import resolve_render_style
@@ -6214,9 +6304,11 @@ def execute_tool(
         # get_channel fuzzy-resolves mangled keys (dictation stretch like
         # "historyyyrewinddd"); keep the canonical key for state + response.
         channel = dict(get_channel(channel_key))
+        lf_pipeline.validate_channel_pipeline(channel)
         channel_key = str(channel.get("key") or channel_key)
         render_args = dict(args or {})
         models = _session_production_models(session_id)
+        bound_session = store.get_session(session_id, reconcile_jobs=False) or {} if session_id else {}
         picked_image = str(
             render_args.get("image_model_id")
             or render_args.get("image_model")
@@ -6248,6 +6340,15 @@ def execute_tool(
             initial_route.get("video_model") or models.get("video_model") or ""
         )
         outline["media_route_revision"] = int(initial_route.get("revision") or 1)
+        outline["chat_model"] = str(bound_session.get("model") or "").strip()
+        outline["captions_enabled"] = bool(
+            render_args.get("captions_enabled", bound_session.get("captions_enabled", True))
+        )
+        outline["caption_mode"] = str(
+            render_args.get("caption_mode") or bound_session.get("caption_mode") or "word"
+        ).strip().lower()
+        if outline["caption_mode"] == "off":
+            outline["captions_enabled"] = False
         selected_image_model = str(args.get("image_model_id") or "").strip()
         if selected_image_model:
             channel["image_model_default"] = selected_image_model
@@ -8384,6 +8485,23 @@ def execute_tool_logged(
     session_id: str | None = None,
 ) -> str:
     """Run a tool with telemetry, budget enforcement, and atomic credit hold."""
+    if name in {
+        "start_longform_render",
+        "expand_longform_visual_proof",
+        "list_longform_scenes",
+        "regenerate_longform_still",
+        "generate_longform_thumbnails",
+        "finalize_longform_render",
+    }:
+        # Authorization and static pipeline validation must happen before an
+        # idempotency claim, RunPod workspace stage, or credit reservation.
+        _require_longform_entitlement(user_id)
+        if name == "start_longform_render":
+            from long_form.prompts.channels import get_channel
+            from long_form import pipeline as lf_pipeline
+
+            channel = dict(get_channel(str((arguments or {}).get("channel_key") or "").strip()))
+            lf_pipeline.validate_channel_pipeline(channel)
     if session_id and name in {
         "expand_visual_proof_shortform",
         "regenerate_production_scene_still",
