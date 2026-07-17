@@ -29,6 +29,9 @@ Sniper-App/
 ViralShorts-App/node_modules/
 ViralShorts-App/dist/
 ViralShorts-App/.vercel/
+# The native desktop shell is built locally/released separately. None of its
+# Rust target artifacts or platform icons belong in the Fly web/API image.
+ViralShorts-App/src-tauri/
 test*.py
 setup_supabase.py
 train_thumbnail_lora.py
