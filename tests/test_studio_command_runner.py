@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import json
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 
-from studio_agent import command_execution, command_postconditions, model_registry, runner
+from studio_agent import command_execution, command_postconditions, model_registry, runner, tools
 from studio_agent.command_execution import InMemoryExecutionLedger
 from studio_agent.command_validation import SceneAssetFingerprint
 
@@ -39,6 +39,67 @@ def _snapshot():
     }
 
 
+def test_partial_scene_repair_message_reports_only_verified_successes():
+    message = runner._scene_repair_failure_message(
+        [2, 3, 4, 5, 6],
+        {
+            "ok": False,
+            "repaired_stills": [5],
+            "repaired_animations": [1, 2, 3, 4],
+            "failed": [3, 4, 5],
+        },
+        "tool failed",
+    )
+
+    assert "re-animated Scene(s) 2, 3" in message
+    assert "Scene(s) 4, 5, 6 still failed" in message
+    assert "not claiming those scenes are fixed" in message
+    assert "rebuilt stills" not in message
+
+
+def test_failed_owned_short_remains_repairable_from_durable_command(tmp_path, monkeypatch):
+    workspace = tmp_path / JOB_ID
+    workspace.mkdir()
+    (workspace / "job_spec.json").write_text(
+        json.dumps({"user_id": "user_test", "topic": "Ghosted"}),
+        encoding="utf-8",
+    )
+    (workspace / "scenes.json").write_text(
+        json.dumps([{"index": index} for index in range(6)]),
+        encoding="utf-8",
+    )
+    snapshot = {"status": "failed", "stage": "failed", "total_scenes": 6}
+    monkeypatch.setattr(tools, "_shortform_workspace", lambda _job_id: workspace)
+    monkeypatch.setattr(runner, "get_job_snapshot", lambda *_args, **_kwargs: dict(snapshot))
+
+    session = {
+        "user_id": "user_test",
+        "active_jobs": [],
+        "blocked_job_ids": [JOB_ID],
+        "messages": [],
+        "last_studio_command": {
+            "receipt": {
+                "status": "failed",
+                "target_job_id": JOB_ID,
+                "result": {"job_id": JOB_ID},
+            }
+        },
+    }
+
+    assert runner._verified_scene_repair_command_target(session, JOB_ID) is True
+    assert runner._find_repairable_shortform_job(session) == JOB_ID
+
+    snapshot.update({"status": "cancelled", "stage": "cancelled"})
+    assert runner._verified_scene_repair_command_target(session, JOB_ID) is False
+    assert runner._find_repairable_shortform_job(session) is None
+
+    snapshot.update({"status": "failed", "stage": "failed"})
+    assert runner._verified_scene_repair_command_target(
+        {**session, "user_id": "different_user"},
+        JOB_ID,
+    ) is False
+
+
 def test_runner_routes_direct_defect_through_typed_repair_and_clears_pending(monkeypatch):
     text = "Scenes 2 through 6 do not perfectly adhere to the prompt and script of the short."
     stored = {
@@ -47,9 +108,13 @@ def test_runner_routes_direct_defect_through_typed_repair_and_clears_pending(mon
         "agent_mode": "studio",
         "approval_mode": "confirm",
         "content_format": "short",
+        "image_model": "seedream_edit",
+        "video_model": "seedance",
+        "media_route_revision": 4,
         "updated_at": 123.0,
         "messages": [{"role": "user", "content": text}],
         "active_jobs": [{"job_id": JOB_ID, "kind": "shortform", "title": "Ghosted"}],
+        "blocked_job_ids": [JOB_ID],
         "pending_actions": [],
     }
 
@@ -106,6 +171,14 @@ def test_runner_routes_direct_defect_through_typed_repair_and_clears_pending(mon
         return real_execute(validation, ledger=ledger, **kwargs)
 
     monkeypatch.setattr(command_execution, "execute_validated_command", execute_with_test_ledger)
+    real_to_thread = asyncio.to_thread
+    threaded_calls = []
+
+    async def tracked_to_thread(function, /, *args, **kwargs):
+        threaded_calls.append(function)
+        return await real_to_thread(function, *args, **kwargs)
+
+    monkeypatch.setattr(runner.asyncio, "to_thread", tracked_to_thread)
     calls = []
 
     def fake_tool(name, arguments, **kwargs):
@@ -123,13 +196,41 @@ def test_runner_routes_direct_defect_through_typed_repair_and_clears_pending(mon
         )
 
     monkeypatch.setattr(runner, "execute_tool_logged", fake_tool)
-    monkeypatch.setattr(runner.store, "get_session", lambda _sid: stored)
+    monkeypatch.setattr(runner.store, "get_session", lambda _sid, **_kwargs: stored)
 
     def update_session(_sid, **updates):
         stored.update(updates)
         return stored
 
     monkeypatch.setattr(runner.store, "update_session", update_session)
+
+    def claim_gate(_sid, *, command_id, job_id):
+        stored.update({
+            "agent_mode": "studio",
+            "interaction_state": "production",
+            "production_gate_open": True,
+            "active_command_id": command_id,
+            "active_command_job_id": job_id,
+        })
+        return stored
+
+    def close_gate(_sid, *, command_id, interaction_state="verification"):
+        if stored.get("active_command_id") == command_id:
+            stored.update({
+                "interaction_state": interaction_state,
+                "production_gate_open": False,
+                "active_command_id": "",
+                "active_command_job_id": "",
+            })
+        return stored
+
+    @contextmanager
+    def job_lock(_job_id):
+        yield
+
+    monkeypatch.setattr(runner.store, "claim_production_gate", claim_gate)
+    monkeypatch.setattr(runner.store, "close_production_gate", close_gate)
+    monkeypatch.setattr(runner.store, "production_job_mutation_lock", job_lock)
 
     result = asyncio.run(
         runner._apply_model_agnostic_studio_command(
@@ -152,10 +253,28 @@ def test_runner_routes_direct_defect_through_typed_repair_and_clears_pending(mon
     assert calls[0][1]["job_id"] == JOB_ID
     assert calls[0][1]["scene_indices"] == [1, 2, 3, 4, 5]
     assert calls[0][1]["reason"] == text
+    assert calls[0][1]["image_model_id"] == "seedream_edit"
+    assert calls[0][1]["video_model"] == "seedance"
+    assert calls[0][1]["media_route_revision"] == 4
     assert result["postcondition_verdict"]["status"] == "passed"
     assert result["postcondition_verdict"]["safe_claim"] == "completed"
     assert stored["pending_scene_repair"] == {}
+    assert stored["agent_mode"] == "studio"
+    assert stored["interaction_state"] == "verification"
+    assert stored["production_gate_open"] is False
+    assert stored["active_command_id"] == ""
+    assert len(threaded_calls) == 1
+    assert threaded_calls[0].__name__ == "_execute_with_job_lock"
     assert "Every unselected scene was verified unchanged" in result["assistant_message"]
+    persisted_reply = stored["messages"][-1]
+    assert persisted_reply["role"] == "assistant"
+    assert persisted_reply["jobDeliverable"]["job_id"] == JOB_ID
+    assert len(persisted_reply["jobDeliverable"]["scenes"]) == 6
+    assert stored["blocked_job_ids"] == []
+    repaired_track = next(job for job in stored["active_jobs"] if job["job_id"] == JOB_ID)
+    assert repaired_track["title"] == "The Night Ghosted Her and Here's What Actually Happened"
+    assert repaired_track["status"] == "awaiting_approval"
+    assert repaired_track["stage"] == "awaiting_animation_review"
 
 
 def test_pending_repair_cancellation_clears_state_without_model_or_tool(monkeypatch):

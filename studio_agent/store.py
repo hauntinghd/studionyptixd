@@ -11,6 +11,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Literal
 
+from .image_model_catalog import MODAL_SEEDREAM_MODEL_ID
+
 ApprovalMode = Literal["auto", "confirm"]
 ContentFormat = Literal["short", "long", "both"]
 ReasoningDepth = Literal["fast", "balanced", "deep"]
@@ -37,6 +39,9 @@ IMAGE_MODELS = {
     "flux_lora_skeleton",
     "seedream_edit",
     "seedream_v45_edit",
+    "seedream_v4",
+    "seedream_v5_lite",
+    MODAL_SEEDREAM_MODEL_ID,
 }
 
 
@@ -44,6 +49,11 @@ _IMAGE_MODEL_ALIASES = {
     "grok_imagine_quality": "grok_imagine",
     "grok-imagine-image": "grok_imagine_standard",
     "seedream_v45_edit": "seedream_edit",
+    "seedream4": "seedream_v4",
+    "seedream_v4_edit": "seedream_v4",
+    "seedream5_lite": "seedream_v5_lite",
+    "seedream_v5_lite_edit": "seedream_v5_lite",
+    "seedream5_lite_modal": MODAL_SEEDREAM_MODEL_ID,
 }
 VIDEO_MODELS = {
     "ltx_budget",
@@ -72,6 +82,31 @@ def normalize_video_model(value: Any) -> str:
     model = str(value or "").strip().lower().replace(" ", "_").replace("-", "_")
     return model if model in VIDEO_MODELS else DEFAULT_VIDEO_MODEL
 
+
+def media_route_snapshot(session: dict[str, Any] | None) -> dict[str, Any]:
+    """Return the current immutable media-routing token for one dispatch.
+
+    Long-running production tools re-read this snapshot before every provider
+    call.  A picker change increments ``revision`` so an older provider result
+    can be rejected before it replaces an approved asset.
+    """
+
+    row = session if isinstance(session, dict) else {}
+    try:
+        revision = max(1, int(row.get("media_route_revision") or 1))
+    except (TypeError, ValueError):
+        revision = 1
+    try:
+        route_updated_at = float(row.get("media_route_updated_at") or row.get("updated_at") or 0.0)
+    except (TypeError, ValueError):
+        route_updated_at = 0.0
+    return {
+        "revision": revision,
+        "image_model_id": normalize_image_model(row.get("image_model")),
+        "video_model": normalize_video_model(row.get("video_model")),
+        "updated_at": route_updated_at,
+    }
+
 # Cap context sent to OpenRouter (full transcript still stored on disk).
 MAX_MESSAGES_FOR_MODEL = 80
 COMPACT_AT_MESSAGES = int(MAX_MESSAGES_FOR_MODEL * 0.8)
@@ -83,10 +118,34 @@ STALE_RUN_AFTER_SEC = int(__import__("os").environ.get("STUDIO_AGENT_STALE_RUN_S
 # create-or-return critical section so concurrent HTTP retries with the same
 # request ID cannot both observe absence and create separate runs.
 _RUN_CREATE_LOCK = threading.Lock()
+_SESSION_LOCKS_GUARD = threading.Lock()
+_SESSION_LOCKS: dict[str, threading.RLock] = {}
+_JOB_MUTATION_LOCKS_GUARD = threading.Lock()
+_JOB_MUTATION_LOCKS: dict[str, threading.RLock] = {}
 SINGLETON_PRODUCTION_APPROVAL_TOOLS = {
     "start_shortform_generate",
     "start_longform_render",
 }
+
+
+def _session_write_lock(session_id: str) -> threading.RLock:
+    key = str(session_id or "").strip() or "__unknown__"
+    with _SESSION_LOCKS_GUARD:
+        lock = _SESSION_LOCKS.get(key)
+        if lock is None:
+            lock = threading.RLock()
+            _SESSION_LOCKS[key] = lock
+        return lock
+
+
+def _job_mutation_thread_lock(job_id: str) -> threading.RLock:
+    key = str(job_id or "").strip() or "__unknown__"
+    with _JOB_MUTATION_LOCKS_GUARD:
+        lock = _JOB_MUTATION_LOCKS.get(key)
+        if lock is None:
+            lock = threading.RLock()
+            _JOB_MUTATION_LOCKS[key] = lock
+        return lock
 _TITLE_STOPWORDS = {
     "the", "and", "for", "with", "that", "this", "when", "they", "them", "you", "your",
     "into", "from", "short", "video", "scene", "test", "make", "making", "going", "title",
@@ -141,6 +200,20 @@ def _requested_title_from_user_text(text: str) -> str:
     ]
     if quoted:
         return quoted[-1]
+
+    # Existing-scene repair instructions often contain phrases such as
+    # "repair for scenes two through six". The broad legacy ``for ...``
+    # extractor below used that scene selector as a brand-new video title,
+    # which detached and hid the repaired job during Sync. Scene mutations are
+    # continuations unless the creator explicitly supplies a quoted/title form.
+    if re.search(
+        r"\b(?:audit|fix|repair|correct|redo|regenerate|rerender|re-render|"
+        r"reanimate|re-animate|edit|revise|restage|re-stage)\b.{0,180}"
+        r"\b(?:scenes?|stills?|clips?|animations?|shots?)\b",
+        value,
+        flags=re.IGNORECASE | re.DOTALL,
+    ):
+        return ""
 
     loose_patterns = [
         r"(?:one\s+still\s+for|still\s+for|short\s+for|video\s+for|make(?:\s+exactly)?\s+one\s+still\s+for)\s+(.{8,140}?)(?:\s+using|\s+with|\.|$)",
@@ -256,6 +329,81 @@ def _run_create_file_lock(session_id: str):
     lock_dir.mkdir(parents=True, exist_ok=True)
     lock_path = lock_dir / f"{digest}.lock"
     with lock_path.open("a+b") as handle:
+        handle.seek(0, 2)
+        if handle.tell() == 0:
+            handle.write(b"\0")
+            handle.flush()
+        handle.seek(0)
+        if __import__("os").name == "nt":
+            import msvcrt
+
+            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            handle.seek(0)
+            if __import__("os").name == "nt":
+                import msvcrt
+
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+@contextmanager
+def _session_write_file_lock(session_id: str):
+    """Serialize whole-session replacements across API worker processes."""
+
+    digest = hashlib.sha256(str(session_id or "").encode("utf-8")).hexdigest()
+    lock_dir = SESSIONS_DIR / ".session_write_locks"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = lock_dir / f"{digest}.lock"
+    with lock_path.open("a+b") as handle:
+        handle.seek(0, 2)
+        if handle.tell() == 0:
+            handle.write(b"\0")
+            handle.flush()
+        handle.seek(0)
+        if __import__("os").name == "nt":
+            import msvcrt
+
+            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            handle.seek(0)
+            if __import__("os").name == "nt":
+                import msvcrt
+
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+@contextmanager
+def production_job_mutation_lock(job_id: str):
+    """Serialize validated mutations of one production job across workers."""
+
+    normalized = str(job_id or "").strip()
+    if not normalized:
+        raise ValueError("job_id is required for a production mutation lock")
+    digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+    lock_dir = SESSIONS_DIR / ".job_mutation_locks"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = lock_dir / f"{digest}.lock"
+    with _job_mutation_thread_lock(normalized), lock_path.open("a+b") as handle:
         handle.seek(0, 2)
         if handle.tell() == 0:
             handle.write(b"\0")
@@ -3099,6 +3247,11 @@ def create_session(
         "skip_job_recovery": False,
         "blocked_job_ids": [],
         "production_state": {"epoch": 1, "target_title": "", "advanced_at": 0.0, "reason": "create"},
+        "media_route_revision": 1,
+        "media_route_updated_at": _now(),
+        "interaction_state": "plan",
+        "production_gate_open": False,
+        "active_command_id": "",
     }
     _save(session)
     return session
@@ -3170,8 +3323,13 @@ def create_run(
     request_id: str = "",
 ) -> dict[str, Any]:
     normalized_request_id = str(request_id or "").strip()[:128]
-    with _RUN_CREATE_LOCK, _run_create_file_lock(session_id):
-        session = get_session(session_id)
+    with (
+        _RUN_CREATE_LOCK,
+        _run_create_file_lock(session_id),
+        _session_write_lock(session_id),
+        _session_write_file_lock(session_id),
+    ):
+        session = _read_session_file(_session_path(session_id))
         if not session:
             raise KeyError(session_id)
         runs = _normalize_runs(session)
@@ -3193,7 +3351,7 @@ def create_run(
         }
         runs.append(run)
         session["runs"] = runs[-80:]
-        _save(session)
+        _write_session_unlocked(session)
         return {**run, "idempotent_replay": False}
 
 
@@ -3227,28 +3385,29 @@ def active_runs(session: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def append_run_event(session_id: str, run_id: str, event: str, data: dict[str, Any] | None = None) -> dict[str, Any] | None:
-    session = get_session(session_id)
-    if not session:
-        return None
-    now = _now()
-    for run in _normalize_runs(session):
-        if run.get("run_id") != run_id:
-            continue
-        payload = {
-            "event_id": f"evt_{uuid.uuid4().hex[:12]}",
-            "event": str(event or "status"),
-            "created_at": now,
-            "data": data or {},
-        }
-        run.setdefault("events", []).append(payload)
-        run["events"] = list(run.get("events") or [])[-MAX_RUN_EVENTS:]
-        run["updated_at"] = now
-        if event == "stream_disconnected":
-            run["status"] = "stream_disconnected"
-        elif run.get("status") in {"queued", "running", "stream_disconnected"}:
-            run["status"] = "running"
-        _save(session)
-        return _public_run(run)
+    with _session_write_lock(session_id), _session_write_file_lock(session_id):
+        session = _read_session_file(_session_path(session_id))
+        if not session:
+            return None
+        now = _now()
+        for run in _normalize_runs(session):
+            if run.get("run_id") != run_id:
+                continue
+            payload = {
+                "event_id": f"evt_{uuid.uuid4().hex[:12]}",
+                "event": str(event or "status"),
+                "created_at": now,
+                "data": data or {},
+            }
+            run.setdefault("events", []).append(payload)
+            run["events"] = list(run.get("events") or [])[-MAX_RUN_EVENTS:]
+            run["updated_at"] = now
+            if event == "stream_disconnected":
+                run["status"] = "stream_disconnected"
+            elif run.get("status") in {"queued", "running", "stream_disconnected"}:
+                run["status"] = "running"
+            _write_session_unlocked(session)
+            return _public_run(run)
     return None
 
 
@@ -3260,22 +3419,23 @@ def finish_run(
     error: str = "",
     result: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
-    session = get_session(session_id)
-    if not session:
-        return None
-    now = _now()
-    for run in _normalize_runs(session):
-        if run.get("run_id") != run_id:
-            continue
-        run["status"] = status
-        run["updated_at"] = now
-        run["completed_at"] = now
-        if error:
-            run["error"] = error
-        if result is not None:
-            run["result"] = dict(result)
-        _save(session)
-        return _public_run(run)
+    with _session_write_lock(session_id), _session_write_file_lock(session_id):
+        session = _read_session_file(_session_path(session_id))
+        if not session:
+            return None
+        now = _now()
+        for run in _normalize_runs(session):
+            if run.get("run_id") != run_id:
+                continue
+            run["status"] = status
+            run["updated_at"] = now
+            run["completed_at"] = now
+            if error:
+                run["error"] = error
+            if result is not None:
+                run["result"] = dict(result)
+            _write_session_unlocked(session)
+            return _public_run(run)
     return None
 
 
@@ -3284,6 +3444,7 @@ def get_session(
     *,
     user_id: str | None = None,
     reconcile_jobs: bool = True,
+    _prune_active_jobs: bool = True,
 ) -> dict[str, Any] | None:
     path = _session_path(session_id)
     if not path.exists():
@@ -3294,7 +3455,8 @@ def get_session(
     if user_id and session.get("user_id") != user_id:
         return None
     session = _reconcile_session_concept(_sanitize_session_pending(session))
-    session = prune_stale_active_jobs(session, persist=True)
+    if _prune_active_jobs:
+        session = prune_stale_active_jobs(session, persist=True)
     if not reconcile_jobs:
         return session
     try:
@@ -3487,22 +3649,138 @@ def _sanitize_session_pending(session: dict[str, Any]) -> dict[str, Any]:
     return session
 
 
-def _save(session: dict[str, Any]) -> None:
+def _write_session_unlocked(session: dict[str, Any]) -> None:
+    """Atomically replace one session while its process and file locks are held."""
+
+    destination = _session_path(str(session["session_id"]))
+    destination.parent.mkdir(parents=True, exist_ok=True)
     session["updated_at"] = _now()
-    _session_path(session["session_id"]).write_text(
+    temporary = destination.parent / f".{destination.name}.{uuid.uuid4().hex}.tmp"
+    temporary.write_text(
         json.dumps(session, indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
+    temporary.replace(destination)
+
+
+def _save(session: dict[str, Any]) -> None:
+    session_id = str(session["session_id"])
+    destination = _session_path(session_id)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with _session_write_lock(session_id), _session_write_file_lock(session_id):
+        # A heartbeat or stale runner snapshot must never roll a live picker
+        # switch backward. Preserve the newest monotonic media route even when
+        # another writer began from an older copy of the session.
+        existing = _read_session_file(destination) if destination.is_file() else None
+        if isinstance(existing, dict):
+            existing_route = media_route_snapshot(existing)
+            incoming_route = media_route_snapshot(session)
+            existing_is_newer = (
+                int(existing_route["revision"]) > int(incoming_route["revision"])
+                or (
+                    int(existing_route["revision"]) == int(incoming_route["revision"])
+                    and float(existing_route["updated_at"]) > float(incoming_route["updated_at"])
+                )
+            )
+            if existing_is_newer:
+                for key in (
+                    "image_model",
+                    "video_model",
+                    "media_route_revision",
+                    "media_route_updated_at",
+                ):
+                    if key in existing:
+                        session[key] = existing[key]
+        _write_session_unlocked(session)
 
 
 def update_session(session_id: str, **fields: Any) -> dict[str, Any]:
-    session = get_session(session_id)
-    if not session:
-        raise KeyError(session_id)
+    with _session_write_lock(session_id), _session_write_file_lock(session_id):
+        session = _read_session_file(_session_path(session_id))
+        if not session:
+            raise KeyError(session_id)
+        return _update_session_locked(session, **fields)
+
+
+def claim_production_gate(
+    session_id: str,
+    *,
+    command_id: str,
+    job_id: str,
+) -> dict[str, Any] | None:
+    """Atomically claim a session's spend-capable gate for one command."""
+
+    normalized_command = str(command_id or "").strip()
+    normalized_job = str(job_id or "").strip()
+    if not normalized_command or not normalized_job:
+        return None
+    with _session_write_lock(session_id), _session_write_file_lock(session_id):
+        session = _read_session_file(_session_path(session_id))
+        if not session:
+            raise KeyError(session_id)
+        current_command = str(session.get("active_command_id") or "").strip()
+        if session.get("production_gate_open") and current_command not in {"", normalized_command}:
+            return None
+        session.update({
+            "agent_mode": "studio",
+            "interaction_state": "production",
+            "production_gate_open": True,
+            "active_command_id": normalized_command,
+            "active_command_job_id": normalized_job,
+        })
+        _write_session_unlocked(session)
+        return session
+
+
+def close_production_gate(
+    session_id: str,
+    *,
+    command_id: str,
+    interaction_state: str = "verification",
+) -> dict[str, Any] | None:
+    """Close only the gate owned by ``command_id``; never clear a newer claim."""
+
+    normalized_command = str(command_id or "").strip()
+    with _session_write_lock(session_id), _session_write_file_lock(session_id):
+        session = _read_session_file(_session_path(session_id))
+        if not session:
+            return None
+        current_command = str(session.get("active_command_id") or "").strip()
+        if current_command and current_command != normalized_command:
+            return session
+        session.update({
+            "interaction_state": str(interaction_state or "verification"),
+            "production_gate_open": False,
+            "active_command_id": "",
+            "active_command_job_id": "",
+        })
+        _write_session_unlocked(session)
+        return session
+
+
+def _update_session_locked(session: dict[str, Any], **fields: Any) -> dict[str, Any]:
+    """Apply fields to the latest on-disk value under the session file lock."""
+
+    previous_route = media_route_snapshot(session)
     if "video_model" in fields:
         fields["video_model"] = normalize_video_model(fields.get("video_model"))
     if "image_model" in fields:
         fields["image_model"] = normalize_image_model(fields.get("image_model"))
+    route_requested = "image_model" in fields or "video_model" in fields
+    next_image_model = str(fields.get("image_model") or previous_route["image_model_id"])
+    next_video_model = str(fields.get("video_model") or previous_route["video_model"])
+    if route_requested and (
+        next_image_model != previous_route["image_model_id"]
+        or next_video_model != previous_route["video_model"]
+    ):
+        fields["media_route_revision"] = int(previous_route["revision"]) + 1
+        fields["media_route_updated_at"] = _now()
+    elif "media_route_revision" not in session:
+        fields.setdefault("media_route_revision", int(previous_route["revision"]))
+        fields.setdefault(
+            "media_route_updated_at",
+            float(previous_route["updated_at"] or _now()),
+        )
     if "pending_actions" in fields:
         session_messages = list(fields.get("messages") or session.get("messages") or [])
         fields["pending_actions"] = normalize_pending_actions(
@@ -3513,51 +3791,54 @@ def update_session(session_id: str, **fields: Any) -> dict[str, Any]:
     if any(k in fields for k in ("render_style", "image_model", "image_model_id", "video_model")):
         if _align_pending_picker_state(session):
             pass  # pending_actions / last_production / pending_concept updated in-place
-    _save(session)
+    _write_session_unlocked(session)
     return session
 
 
 def append_messages(session_id: str, new_messages: list[dict[str, Any]]) -> dict[str, Any]:
-    session = get_session(session_id)
-    if not session:
-        raise KeyError(session_id)
-    session.setdefault("messages", []).extend(new_messages)
-    _save(session)
+    with _session_write_lock(session_id), _session_write_file_lock(session_id):
+        session = _read_session_file(_session_path(session_id))
+        if not session:
+            raise KeyError(session_id)
+        session.setdefault("messages", []).extend(new_messages)
+        _write_session_unlocked(session)
     compact_session_if_needed(session_id)
     session = get_session(session_id) or session
     return session
 
 
 def set_pending_actions(session_id: str, actions: list[dict[str, Any]]) -> dict[str, Any]:
-    session = get_session(session_id)
-    if not session:
-        raise KeyError(session_id)
-    session_messages = list(session.get("messages") or [])
-    session["pending_actions"] = normalize_pending_actions(actions, session_messages)
-    _save(session)
-    return session
+    with _session_write_lock(session_id), _session_write_file_lock(session_id):
+        session = _read_session_file(_session_path(session_id))
+        if not session:
+            raise KeyError(session_id)
+        session_messages = list(session.get("messages") or [])
+        session["pending_actions"] = normalize_pending_actions(actions, session_messages)
+        _write_session_unlocked(session)
+        return session
 
 
 def pop_pending_action(session_id: str, action_id: str) -> dict[str, Any] | None:
-    session = get_session(session_id)
-    if not session:
-        return None
-    pending = session.get("pending_actions") or []
-    hit = None
-    rest = []
-    for a in pending:
-        if not isinstance(a, dict):
-            continue
-        if hit is None and a.get("id") == action_id:
-            hit = a
-        else:
-            rest.append(a)
-    if hit is None:
-        return None
-    session_messages = list(session.get("messages") or [])
-    session["pending_actions"] = normalize_pending_actions(rest, session_messages)
-    _save(session)
-    return hit
+    with _session_write_lock(session_id), _session_write_file_lock(session_id):
+        session = _read_session_file(_session_path(session_id))
+        if not session:
+            return None
+        pending = session.get("pending_actions") or []
+        hit = None
+        rest = []
+        for a in pending:
+            if not isinstance(a, dict):
+                continue
+            if hit is None and a.get("id") == action_id:
+                hit = a
+            else:
+                rest.append(a)
+        if hit is None:
+            return None
+        session_messages = list(session.get("messages") or [])
+        session["pending_actions"] = normalize_pending_actions(rest, session_messages)
+        _write_session_unlocked(session)
+        return hit
 
 
 def coerce_tool_arguments(raw: Any) -> dict[str, Any]:
@@ -3841,7 +4122,12 @@ def prune_stale_active_jobs(
     if not changed:
         return session
     if persist and sid:
-        return update_session(sid, active_jobs=kept) or {**session, "active_jobs": kept}
+        blocked_job_ids = list(session.get("blocked_job_ids") or [])
+        return update_session(
+            sid,
+            active_jobs=kept,
+            blocked_job_ids=blocked_job_ids,
+        ) or {**session, "active_jobs": kept, "blocked_job_ids": blocked_job_ids}
     return {**session, "active_jobs": kept}
 
 

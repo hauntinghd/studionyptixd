@@ -12,15 +12,26 @@ import secrets
 import subprocess
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from studio_agent import production_costs
+from studio_agent.image_model_catalog import (
+    MODAL_SEEDREAM_MODEL_ID,
+    is_seedream_model,
+    normalize_seedream_model_id,
+    seedream_provider,
+)
 from studio_agent.production_slots import production_slot
 from studio_agent.render_styles import RenderStyle, get_render_style
 
 from . import render_simulation
 from .compose import concat_demuxer, mux_narration, probe_duration, trim_with_captions
-from .i2v_engine import ac_cost_for_video_model, generate as gen_clip, resolve_video_model_chain
+from .i2v_engine import (
+    I2VRouteChanged,
+    ac_cost_for_video_model,
+    generate as gen_clip,
+    resolve_video_model_chain,
+)
 from .pipeline import Beat, _write_progress, apply_wardrobe_motion_lock, check_cancelled, split_script_into_beats
 from .prompts.category_registry import get_category
 from .scripting_grok import GrokClient, build_script_prompt
@@ -52,7 +63,14 @@ def _local_topic_label(topic: str | None, category_label: str = "") -> str:
     return text.strip(" .") or "the topic"
 
 
-_FAL_SKELETON_IMAGE_MODELS = frozenset({"seedream45", "seedream_edit", "flux_lora_skeleton"})
+_FAL_SKELETON_IMAGE_MODELS = frozenset({
+    "seedream45",
+    "seedream_edit",
+    "seedream_v4",
+    "seedream_v5_lite",
+    MODAL_SEEDREAM_MODEL_ID,
+    "flux_lora_skeleton",
+})
 
 
 def _read_job_spec(workspace: Path) -> dict[str, Any]:
@@ -179,7 +197,82 @@ def _persist_skeleton_reference(workspace: Path, reference_image: str) -> str:
 
 
 def _skeleton_prefers_xai(image_model_id: str) -> bool:
-    return str(image_model_id or "grok_imagine").strip().lower() not in _FAL_SKELETON_IMAGE_MODELS
+    model = str(image_model_id or "grok_imagine").strip().lower()
+    return not (is_seedream_model(model) or model == "flux_lora_skeleton")
+
+
+def _is_xai_availability_or_credit_error(exc: Exception) -> bool:
+    """Allow paid-lane failover without hiding invalid credentials or bad prompts."""
+
+    text = str(exc or "").strip().lower()
+    provider = str(getattr(exc, "provider", "") or "").strip().lower()
+    if provider != "xai" and not any(token in text for token in ("xai", "grok-imagine", "grok imagine")):
+        return False
+    credit_signal = any(
+        phrase in text
+        for phrase in (
+            "used all available credits",
+            "reached its monthly spending limit",
+            "monthly spending limit",
+            "credit balance",
+            "insufficient credits",
+            "insufficient balance",
+            "billing limit",
+            "spending limit",
+        )
+    )
+    availability_signal = any(
+        phrase in text
+        for phrase in (
+            " 429",
+            " 500",
+            " 502",
+            " 503",
+            " 504",
+            "temporarily unavailable",
+            "service unavailable",
+            "provider unavailable",
+            "upstream timeout",
+            "timed out",
+            "connection reset",
+        )
+    )
+    return bool(
+        (credit_signal and any(token in text for token in ("403", "permission-denied", "credit", "billing", "spending")))
+        or availability_signal
+    )
+
+
+def _fal_image_fallback_model(value: str | None) -> str:
+    """Return a concrete funded image lane; xAI aliases can never recurse."""
+
+    model = normalize_seedream_model_id(str(value or "").strip().lower())
+    return model if model and is_seedream_model(model) else "seedream_edit"
+
+
+class MediaRouteChangedError(RuntimeError):
+    """The creator changed the selected media route before fallback dispatch."""
+
+
+def _require_current_image_fallback_route(
+    fallback_guard: Callable[[], bool] | None,
+) -> None:
+    """Fail closed immediately before a secondary image-provider request."""
+
+    if fallback_guard is None:
+        return
+    try:
+        route_is_current = fallback_guard()
+    except MediaRouteChangedError:
+        raise
+    except Exception as exc:
+        raise MediaRouteChangedError(
+            "Could not verify the current media route before image fallback"
+        ) from exc
+    if route_is_current is not True:
+        raise MediaRouteChangedError(
+            "Media route changed before image fallback dispatch"
+        )
 
 
 def _skeleton_video_model(sc: dict[str, Any] | None, workspace: Path) -> str:
@@ -206,6 +299,8 @@ def _generate_skeleton_still_from_master(
 
     guarded_prompt = _xai_skeleton_artifact_guard(prompt)
     model = str(image_model_id or "seedream_edit").strip().lower()
+    if is_seedream_model(model):
+        model = normalize_seedream_model_id(model)
     resolved_master = str(master_url or "").strip()
     if not resolved_master:
         local_master = resolve_master_reference_local()
@@ -239,9 +334,10 @@ def _generate_skeleton_still_from_master(
         master_url=resolved_master,
         seed=int(seed if seed is not None else 420042),
         cast_count=int(cast_count or 1),
+        image_model_id=model,
     )
-    amount, note, key = production_costs.price_fal_image(edit=True)
-    return guarded_prompt, amount, note, key, "fal"
+    amount, note, key = production_costs.price_fal_image(edit=True, model_id=model)
+    return guarded_prompt, amount, note, key, seedream_provider(model) or "fal"
 
 
 def _audit_skeleton_still_for_generation(
@@ -286,9 +382,16 @@ def _generate_skeleton_still_edit(
         if result.get("cost_usd") is not None:
             amount = production_costs._usd(result.get("cost_usd"))
         return amount, note, key, "xai"
-    amount, note, key = production_costs.price_fal_image(edit=True)
-    generate_still_edit(prompt, out_path, master_url=str(reference_path))
-    return amount, note, key, "fal"
+    if is_seedream_model(model):
+        model = normalize_seedream_model_id(model)
+    amount, note, key = production_costs.price_fal_image(edit=True, model_id=model)
+    generate_still_edit(
+        prompt,
+        out_path,
+        master_url=str(reference_path),
+        image_model_id=model,
+    )
+    return amount, note, key, seedream_provider(model) or "fal"
 
 
 def _local_script_fallback(topic: str | None, category_label: str = "") -> str:
@@ -953,6 +1056,7 @@ def plan_scenes(
                     plan=plan,
                     visual_brief=visual_brief,
                     beat_index=i,
+                    cast_count=hosts,
                 )
                 action, risky_visual = sanitize_skeleton_scene_action(
                     str(action or ""),
@@ -1094,7 +1198,11 @@ def plan_scenes(
                 on_wait=_slot_wait_progress(workspace, "stills_queue", f"Scene {i + 1} still"),
             ):
                 if is_skeleton:
-                    provider_name = "fal" if selected_image_model in _FAL_SKELETON_IMAGE_MODELS else "xai"
+                    provider_name = (
+                        seedream_provider(selected_image_model) or "fal"
+                        if not _skeleton_prefers_xai(selected_image_model)
+                        else "xai"
+                    )
                     try:
                         prompt, amount, note, key, provider_name = _generate_skeleton_still_from_master(
                             prompt,
@@ -1151,13 +1259,19 @@ def plan_scenes(
                             negative_prompt=style.negative_prompt,
                             seed=420042 + i,
                         )
-                        amount, note, key = production_costs.price_fal_image(edit=True)
+                        amount, note, key = production_costs.price_fal_image(
+                            edit=True,
+                            model_id=selected_image_model,
+                        )
                     else:
                         if selected_image_model in {"grok_imagine", "grok_imagine_standard"}:
                             provider_name = "xai"
                             amount, note, key = production_costs.price_xai_image(selected_image_model)
                         else:
-                            amount, note, key = production_costs.price_fal_image(edit=False)
+                            amount, note, key = production_costs.price_fal_image(
+                                edit=False,
+                                model_id=selected_image_model,
+                            )
                         try:
                             still_result = generate_still_t2i(
                                 prompt,
@@ -1221,8 +1335,8 @@ def plan_scenes(
                 cast_count=hosts,
             ) or {"status": "fail", "pass": False, "issues": ["qa_unavailable"], "summary": "Still QA returned no report"}
             if still_qa.get("status") != "pass" and "qa_unavailable" not in list(still_qa.get("issues") or []):
-                # One bounded recovery: quarantine the rejected frame, then use
-                # the canonical Seedream edit path regardless of the first model.
+                # One bounded recovery: quarantine the rejected frame, then retry
+                # through the creator-selected identity-preserving model.
                 rejected_dir = workspace / "rejected_stills"
                 rejected_dir.mkdir(parents=True, exist_ok=True)
                 rejected = rejected_dir / f"{sid}_attempt1.png"
@@ -1232,7 +1346,7 @@ def plan_scenes(
                     _generate_skeleton_still_from_master(
                         prompt,
                         still_target,
-                        image_model_id="seedream_edit",
+                        image_model_id=selected_image_model or "seedream_edit",
                         seed=720042 + i,
                         master_url=skeleton_master_ref,
                         cast_count=hosts,
@@ -1456,8 +1570,18 @@ def _rebuild_skeleton_scene_prompt(workspace: Path, sc: dict[str, Any]) -> str:
     )
 
 
-def regenerate_scene(workspace: Path, index: int, *, seed: int | None = None) -> dict[str, Any]:
-    """Re-render one scene's still from a rebuilt prop-safe prompt with a fresh seed."""
+def regenerate_scene(
+    workspace: Path,
+    index: int,
+    *,
+    seed: int | None = None,
+    image_model_id: str | None = None,
+    fallback_image_model_id: str | None = None,
+    candidate_path: Path | None = None,
+    defer_commit: bool = False,
+    fallback_guard: Callable[[], bool] | None = None,
+) -> dict[str, Any]:
+    """Re-render one scene into an isolated candidate before replacing its still."""
     workspace = Path(workspace)
     stills_dir, _c, _t, _w = _setup_dirs(workspace)
     scenes = load_scenes(workspace)
@@ -1470,8 +1594,25 @@ def regenerate_scene(workspace: Path, index: int, *, seed: int | None = None) ->
     # like Studio ignored the user's request.
     fresh_seed = int(seed) if seed is not None else secrets.randbelow(2_000_000_000 - 1) + 1
     still_target = stills_dir / f"{sc['sid']}.png"
-    still_target.unlink(missing_ok=True)
-    image_model_id = _skeleton_image_model(sc, workspace) if style.pipeline == "skeleton_host" else str(sc.get("image_model_id") or "").strip().lower()
+    output_target = Path(candidate_path) if candidate_path is not None else (
+        stills_dir / f".{sc['sid']}.{secrets.token_hex(8)}.candidate.png"
+    )
+    if output_target.resolve() == still_target.resolve():
+        raise ValueError("regeneration candidate must not be the canonical still")
+    output_target.parent.mkdir(parents=True, exist_ok=True)
+    output_target.unlink(missing_ok=True)
+    image_model_id = str(
+        image_model_id
+        or (
+            _skeleton_image_model(sc, workspace)
+            if style.pipeline == "skeleton_host"
+            else sc.get("image_model_id")
+        )
+        or "seedream_edit"
+    ).strip().lower()
+    provider_name = ""
+    fallback_from = ""
+    fallback_reason = ""
     if style.pipeline == "skeleton_host":
         # Always rebuild — old scenes.json prompts still describe basketball/gym/glow-eye props.
         rebuilt = str(sc.get("prompt") or "").strip() if sc.get("prompt_user_override") else _rebuild_skeleton_scene_prompt(workspace, sc)
@@ -1479,16 +1620,35 @@ def regenerate_scene(workspace: Path, index: int, *, seed: int | None = None) ->
         master_ref = _resolve_skeleton_master_reference(workspace, None)
         # Prefer Seedream edit from clean empty-hands master for identity lock.
         # Grok T2I/edit free-form invents glowing eyes, circuits, and multi-cast costumes.
-        render_model = "seedream_edit"
+        render_model = image_model_id or "seedream_edit"
         hosts = int(sc.get("cast_count") or _read_job_spec(workspace).get("cast_count") or 1)
-        guarded_prompt, amount, note, key, provider_name = _generate_skeleton_still_from_master(
-            rebuilt,
-            still_target,
-            image_model_id=render_model,
-            seed=fresh_seed,
-            master_url=master_ref,
-            cast_count=hosts,
-        )
+        try:
+            guarded_prompt, amount, note, key, provider_name = _generate_skeleton_still_from_master(
+                rebuilt,
+                output_target,
+                image_model_id=render_model,
+                seed=fresh_seed,
+                master_url=master_ref,
+                cast_count=hosts,
+            )
+        except StyledStillError as exc:
+            if not _is_xai_availability_or_credit_error(exc):
+                output_target.unlink(missing_ok=True)
+                raise
+            fallback_from = render_model
+            fallback_reason = str(exc)[:300]
+            render_model = _fal_image_fallback_model(fallback_image_model_id)
+            output_target.unlink(missing_ok=True)
+            _require_current_image_fallback_route(fallback_guard)
+            guarded_prompt, amount, note, key, provider_name = _generate_skeleton_still_from_master(
+                rebuilt,
+                output_target,
+                image_model_id=render_model,
+                seed=fresh_seed,
+                master_url=master_ref,
+                cast_count=hosts,
+            )
+        image_model_id = render_model
         sc["prompt"] = guarded_prompt
         sc["image_model_id"] = render_model
         provider, amount, note = _metered_provider_values(provider_name, amount, note)
@@ -1501,7 +1661,12 @@ def regenerate_scene(workspace: Path, index: int, *, seed: int | None = None) ->
             quantity=1,
             unit="image",
             scene_index=index,
-            metadata={"pricing_note": note, "regenerate": True, "prompt_rebuilt": True},
+            metadata={
+                "pricing_note": note,
+                "regenerate": True,
+                "prompt_rebuilt": True,
+                "fallback_from": fallback_from or None,
+            },
         )
     elif image_model_id in {"grok_imagine", "grok_imagine_standard"}:
         amount, note, key = production_costs.price_xai_image(image_model_id, edit=False)
@@ -1509,7 +1674,7 @@ def regenerate_scene(workspace: Path, index: int, *, seed: int | None = None) ->
             guarded_prompt = sc["prompt"]
             result = generate_still_t2i(
                 guarded_prompt,
-                still_target,
+                output_target,
                 negative_prompt=style.negative_prompt,
                 seed=fresh_seed,
                 image_model_id=image_model_id,
@@ -1532,8 +1697,29 @@ def regenerate_scene(workspace: Path, index: int, *, seed: int | None = None) ->
                     scene_index=index,
                     metadata={"pricing_note": failed_note, "failed": True},
                 )
-            raise
-        provider, amount, note = _metered_provider_values("xai", amount, note)
+            if not _is_xai_availability_or_credit_error(exc):
+                output_target.unlink(missing_ok=True)
+                raise
+            fallback_from = image_model_id
+            fallback_reason = str(exc)[:300]
+            image_model_id = _fal_image_fallback_model(fallback_image_model_id)
+            output_target.unlink(missing_ok=True)
+            _require_current_image_fallback_route(fallback_guard)
+            generate_still_t2i(
+                sc["prompt"],
+                output_target,
+                negative_prompt=style.negative_prompt,
+                seed=fresh_seed,
+                image_model_id=image_model_id,
+            )
+            amount, note, key = production_costs.price_fal_image(
+                edit=False,
+                model_id=image_model_id,
+            )
+            provider_name = seedream_provider(image_model_id) or "fal"
+        else:
+            provider_name = "xai"
+        provider, amount, note = _metered_provider_values(provider_name, amount, note)
         production_costs.record_event(
             workspace,
             stage="regenerate",
@@ -1543,15 +1729,24 @@ def regenerate_scene(workspace: Path, index: int, *, seed: int | None = None) ->
             quantity=1,
             unit="image",
             scene_index=index,
-            metadata={"pricing_note": note},
+            metadata={"pricing_note": note, "fallback_from": fallback_from or None},
         )
     else:
+        image_model_id = _fal_image_fallback_model(image_model_id)
         generate_still_t2i(
-            sc["prompt"], still_target, negative_prompt=style.negative_prompt,
+            sc["prompt"], output_target, negative_prompt=style.negative_prompt,
             seed=fresh_seed,
+            image_model_id=image_model_id,
         )
-        amount, note, key = production_costs.price_fal_image(edit=False)
-        provider, amount, note = _metered_provider_values("fal", amount, note)
+        amount, note, key = production_costs.price_fal_image(
+            edit=False,
+            model_id=image_model_id,
+        )
+        provider, amount, note = _metered_provider_values(
+            seedream_provider(image_model_id) or "fal",
+            amount,
+            note,
+        )
         production_costs.record_event(
             workspace,
             stage="regenerate",
@@ -1563,6 +1758,26 @@ def regenerate_scene(workspace: Path, index: int, *, seed: int | None = None) ->
             scene_index=index,
             metadata={"pricing_note": note},
         )
+        provider_name = seedream_provider(image_model_id) or "fal"
+    if not output_target.is_file() or output_target.stat().st_size <= 0:
+        output_target.unlink(missing_ok=True)
+        raise StyledStillError("image provider returned no usable regeneration candidate")
+    result = {
+        "index": index,
+        "still_rel": sc["still_rel"],
+        "status": "candidate_ready" if defer_commit else "still_ready",
+        "seed": fresh_seed,
+        "candidate_path": str(output_target),
+        "image_model_id": image_model_id,
+        "image_provider": provider_name,
+        "fallback_from": fallback_from or None,
+        "fallback_reason": fallback_reason or None,
+    }
+    if defer_commit:
+        return result
+    # Atomic replacement: the canonical asset is untouched until the provider
+    # has produced a complete local candidate.
+    output_target.replace(still_target)
     # New still invalidates any existing animation for this scene.
     (workspace / "clips" / f"{sc['sid']}.mp4").unlink(missing_ok=True)
     sc["clip_rel"] = None
@@ -1570,8 +1785,10 @@ def regenerate_scene(workspace: Path, index: int, *, seed: int | None = None) ->
     sc["approved_for_video"] = False
     sc["approved_for_animation"] = False
     sc["regenerate_seed"] = fresh_seed
+    sc["image_model_id"] = image_model_id
     save_scenes(workspace, scenes)
-    return {"index": index, "still_rel": sc["still_rel"], "status": "still_ready", "seed": fresh_seed}
+    result["candidate_path"] = None
+    return result
 
 
 def set_scene_prompt_override(workspace: Path, index: int, prompt: str) -> dict[str, Any]:
@@ -1603,6 +1820,11 @@ def regenerate_scene_with_catalyst(
     *,
     audit: dict[str, Any] | None = None,
     seed: int | None = None,
+    image_model_id: str | None = None,
+    fallback_image_model_id: str | None = None,
+    candidate_path: Path | None = None,
+    defer_commit: bool = False,
+    fallback_guard: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
     """Catalyst-guided regenerate: audit artifacts, preserve style, fix limbs/layout."""
     workspace = Path(workspace)
@@ -1679,15 +1901,33 @@ def regenerate_scene_with_catalyst(
         fix_instruction = ""
 
     if method == "edit" and still_path.is_file() and fix_instruction:
-        result = edit_scene(workspace, index, fix_instruction, scope="character")
+        result = edit_scene(
+            workspace,
+            index,
+            fix_instruction,
+            scope="character",
+            image_model_id=image_model_id,
+            fallback_image_model_id=fallback_image_model_id,
+            candidate_path=candidate_path,
+            defer_commit=defer_commit,
+            fallback_guard=fallback_guard,
+        )
         if isinstance(result, dict):
             result["catalyst_audit"] = audit
             result["regenerate_method"] = "catalyst_style_preserving_edit"
         return result
 
     # Layout artifacts (diptych/split) cannot be fixed by editing the broken still.
-    still_path.unlink(missing_ok=True)
-    result = regenerate_scene(workspace, index, seed=seed)
+    result = regenerate_scene(
+        workspace,
+        index,
+        seed=seed,
+        image_model_id=image_model_id,
+        fallback_image_model_id=fallback_image_model_id,
+        candidate_path=candidate_path,
+        defer_commit=defer_commit,
+        fallback_guard=fallback_guard,
+    )
     if isinstance(result, dict):
         result["catalyst_audit"] = audit
         result["regenerate_method"] = "catalyst_master_regenerate"
@@ -2150,7 +2390,18 @@ def _scoped_edit_prompt(scene_prompt: str, instruction: str, scope: str) -> tupl
     return prompt, normalized
 
 
-def edit_scene(workspace: Path, index: int, instruction: str, scope: str = "full") -> dict[str, Any]:
+def edit_scene(
+    workspace: Path,
+    index: int,
+    instruction: str,
+    scope: str = "full",
+    *,
+    image_model_id: str | None = None,
+    fallback_image_model_id: str | None = None,
+    candidate_path: Path | None = None,
+    defer_commit: bool = False,
+    fallback_guard: Callable[[], bool] | None = None,
+) -> dict[str, Any]:
     """Natural-language edit of one scene's still via Seedream v4.5 edit.
 
     Uploads the current still as the reference image and applies the user's
@@ -2204,10 +2455,23 @@ def edit_scene(workspace: Path, index: int, instruction: str, scope: str = "full
         edit_instruction,
         scope,
     )
-    out_tmp = stills_dir / f"{sc['sid']}_edit.png"
+    out_tmp = Path(candidate_path) if candidate_path is not None else stills_dir / f"{sc['sid']}_edit.png"
+    if out_tmp.resolve() == still_target.resolve():
+        raise ValueError("edit candidate must not be the canonical still")
+    out_tmp.parent.mkdir(parents=True, exist_ok=True)
     out_tmp.unlink(missing_ok=True)
     style = _style_for(workspace)
-    image_model_id = _skeleton_image_model(sc, workspace) if style.pipeline == "skeleton_host" else str(sc.get("image_model_id") or "").strip().lower()
+    image_model_id = str(
+        image_model_id
+        or (
+            _skeleton_image_model(sc, workspace)
+            if style.pipeline == "skeleton_host"
+            else sc.get("image_model_id")
+        )
+        or "seedream_edit"
+    ).strip().lower()
+    fallback_from = ""
+    fallback_reason = ""
     if style.pipeline == "skeleton_host" and image_model_id in {"grok_imagine", "grok_imagine_standard"}:
         xai_edit_prompt = (
             _xai_skeleton_artifact_guard(edit_prompt)
@@ -2236,7 +2500,20 @@ def edit_scene(workspace: Path, index: int, instruction: str, scope: str = "full
                     scene_index=index,
                     metadata={"pricing_note": failed_note, "failed": True, "edit_scope": normalized_scope},
                 )
-            raise
+            if not _is_xai_availability_or_credit_error(exc):
+                out_tmp.unlink(missing_ok=True)
+                raise
+            fallback_from = image_model_id
+            fallback_reason = str(exc)[:300]
+            image_model_id = _fal_image_fallback_model(fallback_image_model_id)
+            out_tmp.unlink(missing_ok=True)
+            _require_current_image_fallback_route(fallback_guard)
+            amount, note, key, provider_name = _generate_skeleton_still_edit(
+                edit_prompt,
+                out_tmp,
+                reference_path=still_target,
+                image_model_id=image_model_id,
+            )
         provider, amount, note = _metered_provider_values(provider_name, amount, note)
         production_costs.record_event(
             workspace,
@@ -2247,7 +2524,11 @@ def edit_scene(workspace: Path, index: int, instruction: str, scope: str = "full
             quantity=1,
             unit="image",
             scene_index=index,
-            metadata={"pricing_note": note, "edit_scope": normalized_scope},
+            metadata={
+                "pricing_note": note,
+                "edit_scope": normalized_scope,
+                "fallback_from": fallback_from or None,
+            },
         )
         sc["image_model_id"] = image_model_id or "seedream_edit"
     elif style.pipeline == "skeleton_host":
@@ -2258,9 +2539,17 @@ def edit_scene(workspace: Path, index: int, instruction: str, scope: str = "full
             edit_prompt,
             out_tmp,
             master_url=master_ref or str(still_target),
+            image_model_id=image_model_id or "seedream_edit",
         )
-        amount, note, key = production_costs.price_fal_image(edit=True)
-        provider, amount, note = _metered_provider_values("fal", amount, note)
+        amount, note, key = production_costs.price_fal_image(
+            edit=True,
+            model_id=image_model_id or "seedream_edit",
+        )
+        provider, amount, note = _metered_provider_values(
+            seedream_provider(image_model_id or "seedream_edit") or "fal",
+            amount,
+            note,
+        )
         production_costs.record_event(
             workspace,
             stage="edit",
@@ -2286,9 +2575,17 @@ def edit_scene(workspace: Path, index: int, instruction: str, scope: str = "full
             edit_prompt,
             out_tmp,
             master_url=current_url,
+            image_model_id=image_model_id or "seedream_edit",
         )
-        amount, note, key = production_costs.price_fal_image(edit=True)
-        provider, amount, note = _metered_provider_values("fal", amount, note)
+        amount, note, key = production_costs.price_fal_image(
+            edit=True,
+            model_id=image_model_id or "seedream_edit",
+        )
+        provider, amount, note = _metered_provider_values(
+            seedream_provider(image_model_id or "seedream_edit") or "fal",
+            amount,
+            note,
+        )
         production_costs.record_event(
             workspace,
             stage="edit",
@@ -2300,9 +2597,24 @@ def edit_scene(workspace: Path, index: int, instruction: str, scope: str = "full
             scene_index=index,
             metadata={"pricing_note": note, "edit_scope": normalized_scope},
         )
-    # Promote the edit to the canonical still; drop stale animation.
-    still_target.unlink(missing_ok=True)
-    out_tmp.rename(still_target)
+    if not out_tmp.is_file() or out_tmp.stat().st_size <= 0:
+        out_tmp.unlink(missing_ok=True)
+        raise StyledStillError("image provider returned no usable edit candidate")
+    result = {
+        "index": index,
+        "still_rel": sc["still_rel"],
+        "status": "candidate_ready" if defer_commit else "still_ready",
+        "last_edit_scope": normalized_scope,
+        "candidate_path": str(out_tmp),
+        "image_model_id": image_model_id,
+        "image_provider": seedream_provider(image_model_id) or ("xai" if image_model_id.startswith("grok") else "fal"),
+        "fallback_from": fallback_from or None,
+        "fallback_reason": fallback_reason or None,
+    }
+    if defer_commit:
+        return result
+    # Promote atomically only after a complete candidate exists.
+    out_tmp.replace(still_target)
     (workspace / "clips" / f"{sc['sid']}.mp4").unlink(missing_ok=True)
     sc["clip_rel"] = None
     sc["status"] = "still_ready"
@@ -2311,12 +2623,8 @@ def edit_scene(workspace: Path, index: int, instruction: str, scope: str = "full
     sc["last_edit"] = instruction.strip()[:300]
     sc["last_edit_scope"] = normalized_scope
     save_scenes(workspace, scenes)
-    return {
-        "index": index,
-        "still_rel": sc["still_rel"],
-        "status": "still_ready",
-        "last_edit_scope": normalized_scope,
-    }
+    result["candidate_path"] = None
+    return result
 
 
 def set_scene_settings(
@@ -2433,8 +2741,54 @@ def _identity_safe_motion_fallback(
     )
 
 
+def _clip_replacement_artifacts(clip: Path) -> tuple[Path, ...]:
+    return (
+        clip,
+        clip.with_suffix(clip.suffix + ".fal.json"),
+        clip.with_suffix(clip.suffix + ".visualqa.json"),
+    )
+
+
+def _stage_clip_replacement(clip: Path) -> list[tuple[Path, Path]]:
+    """Move an existing playable clip aside until its replacement succeeds."""
+
+    token = secrets.token_hex(8)
+    staged: list[tuple[Path, Path]] = []
+    try:
+        for original in _clip_replacement_artifacts(clip):
+            if not original.is_file():
+                continue
+            backup = original.with_name(f".{original.name}.{token}.replace")
+            backup.unlink(missing_ok=True)
+            original.replace(backup)
+            staged.append((original, backup))
+    except Exception:
+        for original, backup in reversed(staged):
+            if backup.exists():
+                backup.replace(original)
+        raise
+    return staged
+
+
+def _restore_clip_replacement(clip: Path, staged: list[tuple[Path, Path]]) -> None:
+    for artifact in _clip_replacement_artifacts(clip):
+        artifact.unlink(missing_ok=True)
+    for original, backup in staged:
+        if backup.exists():
+            backup.replace(original)
+
+
+def _commit_clip_replacement(staged: list[tuple[Path, Path]]) -> None:
+    for _original, backup in staged:
+        backup.unlink(missing_ok=True)
+
+
 def animate_scenes_stage(
-    workspace: Path, *, indices: list[int] | None = None, tier: str = "standard",
+    workspace: Path,
+    *,
+    indices: list[int] | None = None,
+    tier: str = "standard",
+    route_resolver: Callable[[], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Animate the selected scenes (or all with animate=True) via i2v."""
     workspace = Path(workspace)
@@ -2466,6 +2820,8 @@ def animate_scenes_stage(
     animated: list[int] = []
     failed: list[int] = []
     fallback_scenes: list[int] = []
+    route_switches: list[dict[str, Any]] = []
+    final_route: dict[str, Any] = {}
     for n, sc in enumerate(targets):
         check_cancelled(workspace)
         _write_progress(workspace, stage="animate", progress=10 + int(n / total * 80),
@@ -2473,8 +2829,11 @@ def animate_scenes_stage(
         sc["animate"] = True
         still = workspace / sc["still_rel"]
         clip = clips_dir / f"{sc['sid']}.mp4"
-        clip.unlink(missing_ok=True)  # re-animate fresh
+        previous_clip_rel = sc.get("clip_rel")
+        previous_status = str(sc.get("status") or "")
+        staged_clip: list[tuple[Path, Path]] = []
         try:
+            staged_clip = _stage_clip_replacement(clip)
             motion_prompt = sc.get("motion_prompt") or sc["narration"]
             skeleton_scene_text = " ".join(
                 str(sc.get(key) or "") for key in ("render_style", "outfit", "prompt", "scene_action")
@@ -2517,6 +2876,11 @@ def animate_scenes_stage(
                 if is_skeleton
                 else str(sc.get("video_model") or "")
             )
+            if route_resolver is not None:
+                resolved_route = dict(route_resolver() or {})
+                if str(resolved_route.get("video_model") or "").strip():
+                    video_model = str(resolved_route["video_model"]).strip()
+                final_route = resolved_route
             sc["video_model"] = video_model or sc.get("video_model")
             lane = "i2v_premium" if "kling" in str(video_model).lower() or "premium" in str(video_model).lower() else "i2v"
             duration = float(sc.get("duration_sec") or 5.0)
@@ -2534,33 +2898,116 @@ def animate_scenes_stage(
                 sc["status"] = "clip_ready"
                 sc["i2v_qa"] = {"status": "pass", "pass": True, "kind": "deterministic_motion_graphic"}
                 animated.append(int(sc["index"]))
+                _commit_clip_replacement(staged_clip)
                 save_scenes(workspace, scenes)
                 continue
             max_attempts = max(1, min(2, int(os.getenv("STUDIO_I2V_QA_MAX_ATTEMPTS", "2") or "2")))
             rejected_reports: list[dict[str, Any]] = []
             semantic_passed = False
             current_motion = str(motion_prompt or "")
-            for attempt in range(1, max_attempts + 1):
+            qa_attempt = 0
+            final_route_restarts = 0
+            while qa_attempt < max_attempts:
+                attempt = qa_attempt + 1
                 clip.unlink(missing_ok=True)
                 clip.with_suffix(clip.suffix + ".fal.json").unlink(missing_ok=True)
                 clip.with_suffix(clip.suffix + ".visualqa.json").unlink(missing_ok=True)
-                with production_slot(
-                    lane,
-                    on_wait=_slot_wait_progress(
-                        workspace,
-                        "animation_queue",
-                        f"Scene {int(sc['index']) + 1} animation attempt {attempt}",
-                    ),
-                ):
-                    gen_clip(
-                        still,
-                        current_motion,
-                        clip,
-                        tier=tier,
-                        video_model=sc.get("video_model"),
-                        duration_sec=int(duration),
+                route_restart = 0
+                while True:
+                    dispatch_route = dict(route_resolver() or {}) if route_resolver is not None else {}
+                    dispatch_model = str(dispatch_route.get("video_model") or sc.get("video_model") or "").strip()
+                    if dispatch_model:
+                        sc["video_model"] = dispatch_model
+                    lane = (
+                        "i2v_premium"
+                        if "kling" in dispatch_model.lower() or "premium" in dispatch_model.lower()
+                        else "i2v"
                     )
-                clip_meta = _load_clip_meta(clip)
+                    dispatch_token = (
+                        int(dispatch_route.get("revision") or 1),
+                        str(dispatch_route.get("video_model") or ""),
+                    )
+
+                    def _fallback_route_is_current() -> bool:
+                        if route_resolver is None:
+                            return True
+                        current_route = dict(route_resolver() or {})
+                        current_token = (
+                            int(current_route.get("revision") or 1),
+                            str(current_route.get("video_model") or ""),
+                        )
+                        return dispatch_token == current_token
+
+                    try:
+                        with production_slot(
+                            lane,
+                            on_wait=_slot_wait_progress(
+                                workspace,
+                                "animation_queue",
+                                f"Scene {int(sc['index']) + 1} animation attempt {attempt}",
+                            ),
+                        ):
+                            gen_clip(
+                                still,
+                                current_motion,
+                                clip,
+                                tier=tier,
+                                video_model=sc.get("video_model"),
+                                duration_sec=int(duration),
+                                fallback_guard=(
+                                    _fallback_route_is_current
+                                    if route_resolver is not None
+                                    else None
+                                ),
+                            )
+                    except I2VRouteChanged:
+                        after_provider = dict(route_resolver() or {}) if route_resolver is not None else dispatch_route
+                        for artifact in _clip_replacement_artifacts(clip):
+                            artifact.unlink(missing_ok=True)
+                        route_switches.append({
+                            "scene_index": int(sc["index"]),
+                            "stage": "video_fallback",
+                            "from": dispatch_route,
+                            "to": after_provider,
+                            "quarantined": "",
+                        })
+                        final_route = after_provider
+                        route_restart += 1
+                        if route_restart >= 4:
+                            raise RuntimeError(
+                                "Media route changed repeatedly before video fallback dispatch"
+                            )
+                        continue
+                    clip_meta = _load_clip_meta(clip)
+                    after_provider = dict(route_resolver() or {}) if route_resolver is not None else dispatch_route
+                    after_token = (
+                        int(after_provider.get("revision") or 1),
+                        str(after_provider.get("video_model") or ""),
+                    )
+                    if route_resolver is None or dispatch_token == after_token:
+                        final_route = after_provider or dispatch_route
+                        if after_provider:
+                            sc["media_route_revision"] = int(after_provider.get("revision") or 1)
+                        break
+                    _record_animation_attempt_cost(
+                        workspace, sc, clip_meta, attempt=attempt, rejected=True,
+                    )
+                    stale_path = _quarantine_i2v_attempt(
+                        workspace,
+                        clip,
+                        sid=str(sc["sid"]),
+                        attempt=attempt * 100 + route_restart + 1,
+                    )
+                    route_switches.append({
+                        "scene_index": int(sc["index"]),
+                        "stage": "video",
+                        "from": dispatch_route,
+                        "to": after_provider,
+                        "quarantined": stale_path,
+                    })
+                    route_restart += 1
+                    if route_restart >= 4:
+                        raise RuntimeError("Media route changed repeatedly before a safe animation commit")
                 try:
                     if is_skeleton:
                         from studio_agent.visual_qa import audit_skeleton_clip
@@ -2587,6 +3034,41 @@ def animate_scenes_stage(
                 _record_animation_attempt_cost(
                     workspace, sc, clip_meta, attempt=attempt, rejected=not semantic_passed
                 )
+                before_clip_commit = (
+                    dict(route_resolver() or {})
+                    if route_resolver is not None
+                    else dispatch_route
+                )
+                dispatch_token = (
+                    int(dispatch_route.get("revision") or 1),
+                    str(dispatch_route.get("video_model") or ""),
+                )
+                commit_token = (
+                    int(before_clip_commit.get("revision") or 1),
+                    str(before_clip_commit.get("video_model") or ""),
+                )
+                if route_resolver is not None and dispatch_token != commit_token:
+                    stale_path = _quarantine_i2v_attempt(
+                        workspace,
+                        clip,
+                        sid=str(sc["sid"]),
+                        attempt=attempt * 100 + 50 + final_route_restarts,
+                    )
+                    route_switches.append({
+                        "scene_index": int(sc["index"]),
+                        "stage": "video_commit",
+                        "from": dispatch_route,
+                        "to": before_clip_commit,
+                        "quarantined": stale_path,
+                    })
+                    final_route = before_clip_commit
+                    final_route_restarts += 1
+                    if final_route_restarts >= 4:
+                        raise RuntimeError("Media route changed repeatedly before a safe animation commit")
+                    # Route churn does not consume a semantic-QA attempt. Retry
+                    # immediately with the creator's newest video picker.
+                    continue
+                qa_attempt += 1
                 sc["i2v_qa"] = semantic
                 if semantic_passed:
                     break
@@ -2639,10 +3121,50 @@ def animate_scenes_stage(
             sc["clip_rel"] = f"clips/{sc['sid']}.mp4"
             sc["status"] = "clip_ready"
             sc.pop("error", None)
+            sc.pop("last_repair_error", None)
+            if route_resolver is not None:
+                commit_route = dict(route_resolver() or {})
+                final_token = (
+                    int(final_route.get("revision") or 1),
+                    str(final_route.get("video_model") or ""),
+                )
+                commit_token = (
+                    int(commit_route.get("revision") or 1),
+                    str(commit_route.get("video_model") or ""),
+                )
+                if final_token != commit_token:
+                    stale_path = _quarantine_i2v_attempt(
+                        workspace,
+                        clip,
+                        sid=str(sc["sid"]),
+                        attempt=999,
+                    )
+                    route_switches.append({
+                        "scene_index": int(sc["index"]),
+                        "stage": "video_final_commit",
+                        "from": final_route,
+                        "to": commit_route,
+                        "quarantined": stale_path,
+                    })
+                    raise RuntimeError("Media route changed at animation commit; stale clip quarantined")
             animated.append(int(sc["index"]))
+            _commit_clip_replacement(staged_clip)
         except Exception as exc:  # noqa: BLE001 — surface per-scene, keep others
-            sc["status"] = "error"
-            sc["error"] = str(exc)[:300]
+            repair_error = str(exc)[:300]
+            had_previous_clip = any(original == clip for original, _backup in staged_clip)
+            _restore_clip_replacement(clip, staged_clip)
+            if had_previous_clip and clip.is_file():
+                sc["clip_rel"] = previous_clip_rel or f"clips/{sc['sid']}.mp4"
+                sc["status"] = (
+                    previous_status
+                    if previous_status not in {"", "error", "failed"}
+                    else "clip_ready"
+                )
+                sc["last_repair_error"] = repair_error
+                sc.pop("error", None)
+            else:
+                sc["status"] = "error"
+                sc["error"] = repair_error
             failed.append(int(sc["index"]))
         save_scenes(workspace, scenes)
     save_scenes(workspace, scenes)
@@ -2658,6 +3180,8 @@ def animate_scenes_stage(
             "animated": animated,
             "failed": failed,
             "identity_safe_fallbacks": fallback_scenes,
+            "route": final_route,
+            "route_switches": route_switches,
         }
     _write_progress(workspace, stage="awaiting_scene_review", progress=80, detail="Review animation")
     return {
@@ -2665,6 +3189,8 @@ def animate_scenes_stage(
         "animated": animated,
         "failed": [],
         "identity_safe_fallbacks": fallback_scenes,
+        "route": final_route,
+        "route_switches": route_switches,
     }
 
 

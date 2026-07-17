@@ -273,8 +273,12 @@ def extract_scene_numbers_request(
         if allow_bare
         else r"(?:scenes?|shots?|clips?|those|these)\s+"
     )
+    # Accept ordinary lists with or without an Oxford comma.  The old pattern
+    # stopped before ``and 6`` in ``2, 3, 4, 5, and 6`` because it consumed the
+    # comma as the separator and then expected a digit immediately.
+    list_separator = r"(?:,\s*(?:and\s+)?|&\s*|and\s+)"
     for match in re.finditer(
-        rf"\b{list_prefix}((?:\d{{1,3}}\s*(?:,|&|and)\s*)+\d{{1,3}})\b",
+        rf"\b{list_prefix}((?:\d{{1,3}}\s*{list_separator})+\d{{1,3}})\b",
         low,
     ):
         selected.update(

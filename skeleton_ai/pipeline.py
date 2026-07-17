@@ -307,6 +307,7 @@ def derive_beat_visuals(
     plan: dict | None = None,
     visual_brief: str | None = None,
     beat_index: int | None = None,
+    cast_count: Any = None,
 ) -> tuple[str, str, str]:
     """Per-beat visuals for canonical skeleton Seedream edit (background/outfit/props only)."""
     plan = plan or {"characters": {}, "fallback_outfit": "charcoal hoodie and dark joggers"}
@@ -314,15 +315,43 @@ def derive_beat_visuals(
     setting = plan.get("topic_setting", "")
     fallback = plan.get("fallback_outfit", "")
     vbl = (visual_brief or plan.get("visual_brief_lock") or "").strip()
+    from .prompt_compose import dual_host_staging_brief, resolve_cast_count
+
+    hosts = resolve_cast_count(
+        job_cast=plan.get("cast_count"),
+        scene_cast=cast_count,
+        topic=str(setting or category_label or ""),
+        visual_brief=vbl,
+        narration=narration,
+    )
+    host_identity = (
+        "exactly TWO identical canonical ivory skeleton hosts, each with its own thin glass shell"
+        if hosts >= 2
+        else "exactly ONE canonical ivory skeleton host with its thin glass shell"
+    )
+    extra_subject_rule = (
+        "Do NOT describe humans, a third person, or a third skeleton. "
+        if hosts >= 2
+        else "Do NOT describe a couple, second person, or second skeleton. "
+    )
+    hand_rule = (
+        "Exactly four hands total, two correctly attached to each host; no extra or floating limbs."
+        if hosts >= 2
+        else "Exactly two hands total, no third hand, no floating limbs."
+    )
+    eye_rule = (
+        "Exactly four realistic eyes total, two inside each skull's eye sockets."
+        if hosts >= 2
+        else "Exactly two realistic eyes, ONLY inside the skull eye sockets."
+    )
     locked_scene = _expand_locked_scene_direction(
         _visual_brief_beat_direction(vbl, beat_index)
     )
 
     sys = (
         "You compose ONE per-scene visual prompt for a NYPTID Skeleton AI short.\n\n"
-        "THE HOST IS LOCKED — the same canonical ivory skeleton with glass shell and "
-        "the unchanged eyes from the master reference. Do NOT describe a different character, "
-        "porcelain mannequin, human actor, woman, man, couple, or second person. "
+        f"THE CAST IS LOCKED — use {host_identity}, with the unchanged eyes from the master reference. "
+        f"{extra_subject_rule}Do NOT describe a different character, porcelain mannequin, or human actor. "
         "Only wardrobe, environment, optional set dressing, and pose may change. "
         "Every exposed body part must remain ivory bone inside clear glass. "
         "Never output skin, flesh, muscles, human hands, human feet, or the phrase 'bare feet'. "
@@ -331,7 +360,7 @@ def derive_beat_visuals(
         "helmet bubble, glass container, circular base, labels, callouts, diagrams, or readable text. "
         "Never use split screen, diptych, side-by-side panels, before/after layouts, or comparison collages — "
         "those duplicate the skeleton and create extra hands. Use one continuous full-frame scene only. "
-        "Exactly two hands total, no third hand, no floating limbs.\n\n"
+        f"{hand_rule}\n\n"
         "HANDS / PROPS (CRITICAL):\n"
         "- Default: EMPTY hands in a clear presenter / talking-head gesture.\n"
         "- FORBIDDEN unless the topic is sports/fitness: basketball, any sports ball, dumbbells, "
@@ -341,13 +370,13 @@ def derive_beat_visuals(
         "(apartment doorway, quiet cafe window, office corridor, library aisle, train platform, parking garage, or a specific studio setup). "
         "Do not repeat a generic studio presenter shot for consecutive beats.\n"
         "EYES (CRITICAL):\n"
-        "- Exactly two realistic eyes, ONLY inside the skull eye sockets.\n"
+        f"- {eye_rule}\n"
         "- FORBIDDEN: eyeballs in the ribcage, sternum, chest cavity, abdomen, or as floating orbs.\n"
         "- Soft amber light along the spine is light only — never literal eyes in the torso.\n\n"
         "Output strict JSON:\n"
-        "  outfit — clothing worn ON the same skeleton (from character sheet) OR 'no clothing'. "
-        "Never describe a second human's wardrobe as if they are in frame.\n"
-        "  scene_action — photoreal 9:16 environment + pose around the ONE skeleton host "
+        "  outfit — the shared clothing lock worn ON each canonical skeleton OR 'no clothing'. "
+        "Never describe human wardrobe as a separate person.\n"
+        f"  scene_action — photoreal 9:16 environment + pose for {host_identity} "
         "(psychology studio, moody apartment, cinematic interior — NOT gym/court unless topic is sports). "
         "Empty hands. No text overlays.\n"
         "  motion_prompt — one SILENT 5-second i2v PERFORMANCE (pose change + gesture + camera/background "
@@ -376,11 +405,22 @@ def derive_beat_visuals(
     except (TypeError, json.JSONDecodeError):
         data = None
     if not isinstance(data, dict):
+        fallback_action = (
+            "Two identical canonical skeleton hosts in a modern relationship-psychology interior; "
+            f"{dual_host_staging_brief()}; sharp commercial lighting, vertical 9:16, no sports props"
+            if hosts >= 2
+            else "Exactly one canonical skeleton host in a modern psychology-studio environment matching the narration, "
+            "empty hands in a presenter gesture, sharp commercial lighting, vertical 9:16, no sports props"
+        )
+        fallback_motion = (
+            "Left host opens both hands while the right host draws half-step back; slow push-in"
+            if hosts >= 2
+            else "Subtle weight shift and ambient light flicker over five seconds"
+        )
         return (
             fallback or "no clothing; empty hands, no props",
-            "Exactly one canonical skeleton host in a modern psychology-studio environment matching the narration, "
-            "empty hands in a presenter gesture, sharp commercial lighting, vertical 9:16, no sports props",
-            "Subtle weight shift and ambient light flicker over five seconds",
+            fallback_action,
+            fallback_motion,
         )
     topic_hint = str((plan or {}).get("topic_setting") or category_label or "")
     outfit = sanitize_skeleton_outfit(
@@ -392,48 +432,86 @@ def derive_beat_visuals(
         outfit = f"[BARE_TORSO] {outfit}"
     generated_action = data.get(
         "scene_action",
-        "Exactly one canonical skeleton host in a psychology-studio environment matching the narration, "
-        "empty hands, premium 9:16 framing, no sports props",
+        (
+            "Two identical canonical skeleton hosts in a relationship-psychology interior; "
+            f"{dual_host_staging_brief()}; premium 9:16 framing, no sports props"
+            if hosts >= 2
+            else "Exactly one canonical skeleton host in a psychology-studio environment matching the narration, "
+            "empty hands, premium 9:16 framing, no sports props"
+        ),
     )
     from .canonical_edit import sanitize_skeleton_scene_action
 
     generated_action, _ = sanitize_skeleton_scene_action(
-        generated_action, topic=topic_hint, visual_brief=vbl, narration=narration
+        generated_action,
+        topic=topic_hint,
+        visual_brief=vbl,
+        narration=narration,
+        cast_count=hosts,
     )
     locked_scene, _ = sanitize_skeleton_scene_action(
-        locked_scene, topic=topic_hint, visual_brief=vbl, narration=narration
+        locked_scene,
+        topic=topic_hint,
+        visual_brief=vbl,
+        narration=narration,
+        cast_count=hosts,
     )
     action = _merge_locked_scene_with_generated(locked_scene, generated_action)
     action, _ = sanitize_skeleton_scene_action(
-        action, topic=topic_hint, visual_brief=vbl, narration=narration
+        action,
+        topic=topic_hint,
+        visual_brief=vbl,
+        narration=narration,
+        cast_count=hosts,
     )
     # Providers often return "psychology studio, presenter pose" for every
     # beat. Preserve an explicit user lock, but replace that lazy fallback
     # with a distinct filmable location so a six-scene short is actually six
     # directed scenes rather than six camera angles in the same room.
     if not vbl and re.fullmatch(r"(?is).*\b(?:psychology|modern)\s+studio\b.*", action.strip()):
-        variations = (
-            "Quiet apartment doorway at blue hour, medium side profile; the host pauses before leaving, one hand resting on the doorframe",
-            "Rainy cafe window booth, close three-quarter portrait; the host studies a phone left face-down on the table",
-            "Long empty office corridor at night, medium-wide tracking composition; the host stops beneath practical ceiling lights",
-            "Library aisle with warm practical lamps, profile medium shot; the host reaches toward a book then pulls the hand back",
-            "Cinema lobby after closing, wide frame with reflected floor lights; the host stands alone facing the exit signs",
-            "Train platform at dawn, medium-wide shot; the host watches a departing train through glass without touching any prop",
-        )
+        if hosts >= 2:
+            variations = tuple(
+                f"{location}; {dual_host_staging_brief()}"
+                for location in (
+                    "Quiet apartment doorway at blue hour, medium-wide frame",
+                    "Rainy cafe window booth, medium-wide three-quarter frame",
+                    "Long empty office corridor at night, medium-wide tracking composition",
+                    "Library aisle with warm practical lamps, medium-wide frame",
+                    "Cinema lobby after closing, wide frame with reflected floor lights",
+                    "Train platform at dawn, medium-wide frame",
+                )
+            )
+        else:
+            variations = (
+                "Quiet apartment doorway at blue hour, medium side profile; the host pauses before leaving, one hand resting on the doorframe",
+                "Rainy cafe window booth, close three-quarter portrait; the host studies a phone left face-down on the table",
+                "Long empty office corridor at night, medium-wide tracking composition; the host stops beneath practical ceiling lights",
+                "Library aisle with warm practical lamps, profile medium shot; the host reaches toward a book then pulls the hand back",
+                "Cinema lobby after closing, wide frame with reflected floor lights; the host stands alone facing the exit signs",
+                "Train platform at dawn, medium-wide shot; the host watches a departing train through glass without touching any prop",
+            )
         action = variations[int(beat_index or 0) % len(variations)]
         action, _ = sanitize_skeleton_scene_action(
-            action, topic=topic_hint, visual_brief=vbl, narration=narration
+            action,
+            topic=topic_hint,
+            visual_brief=vbl,
+            narration=narration,
+            cast_count=hosts,
         )
+    from .prompt_compose import compose_skeleton_motion_prompt
+
+    motion = compose_skeleton_motion_prompt(
+        motion=(
+            f"{_skeleton_performance_motion(narration, beat_index)}; "
+            f"{data.get('motion_prompt', 'subtle controlled movement')}"
+        ),
+        locked_outfit=outfit,
+        cast_count=hosts,
+    )
     return (
         outfit,
         f"PERFORMANCE: {_skeleton_performance_direction(narration, beat_index)}; {action}",
-        apply_wardrobe_motion_lock(
-            (
-                f"{_skeleton_performance_motion(narration, beat_index)}; "
-                f"{data.get('motion_prompt', 'subtle controlled movement')}"
-            ),
-            outfit,
-        ),
+        apply_wardrobe_motion_lock(motion, outfit),
     )
 
 
@@ -505,6 +583,8 @@ def run(
     captions_enabled: bool = True,
     caption_mode: str = "word",
     master_reference_url: str = "",
+    image_model_id: str = "seedream_edit",
+    cast_count: Any = None,
 ) -> dict:
     """Run the full Skeleton AI pipeline. Returns a result dict."""
     workspace = Path(workspace)
@@ -559,6 +639,22 @@ def run(
         raise RuntimeError("Grok returned empty script")
 
     # 4. For each beat, derive outfit/action/motion using the locked plan.
+    requested_cast = cast_count
+    if requested_cast is None:
+        try:
+            job_spec = json.loads((workspace / "job_spec.json").read_text(encoding="utf-8"))
+            if isinstance(job_spec, dict):
+                requested_cast = job_spec.get("cast_count")
+        except Exception:
+            requested_cast = None
+    from .prompt_compose import resolve_cast_count
+
+    production_cast = resolve_cast_count(
+        job_cast=requested_cast,
+        topic=str(topic or cat["label"] or ""),
+        visual_brief=str(visual_brief or ""),
+        narration=script_text,
+    )
     beats: list[Beat] = []
     for i, narration in enumerate(sentences):
         outfit, action, motion = derive_beat_visuals(
@@ -568,6 +664,7 @@ def run(
             plan=plan,
             visual_brief=visual_brief,
             beat_index=i,
+            cast_count=production_cast,
         )
         beats.append(Beat(
             index=i,
@@ -622,14 +719,20 @@ def run(
                     topic=topic or cat["label"],
                     visual_description="Plain neutral studio backdrop, full body front view.",
                     outfit=beat.outfit,
+                    cast_count=production_cast,
                 )
                 generate_still_edit(
                     roster_prompt,
                     roster_path,
                     master_url=master_ref,
                     seed=420100 + beat.index,
+                    cast_count=production_cast,
+                    image_model_id=image_model_id or "seedream_edit",
                 )
-                amount, note, key = production_costs.price_fal_image(edit=True)
+                amount, note, key = production_costs.price_fal_image(
+                    edit=True,
+                    model_id=image_model_id or "seedream_edit",
+                )
                 production_costs.record_event(
                     workspace,
                     stage="stills",
@@ -648,6 +751,7 @@ def run(
             topic=topic or cat["label"],
             visual_description=beat.scene_action,
             outfit=beat.outfit,
+            cast_count=production_cast,
         )
         still_result = generate_still_edit(
             edit_prompt,
@@ -655,13 +759,18 @@ def run(
             master_url=master_ref,
             extra_refs=extra_refs,
             seed=420042 + beat.index,
+            cast_count=production_cast,
+            image_model_id=image_model_id or "seedream_edit",
         )
         still_path = Path(
             still_result["local_path"]
             if isinstance(still_result, dict)
             else still_result
         )
-        amount, note, key = production_costs.price_fal_image(edit=True)
+        amount, note, key = production_costs.price_fal_image(
+            edit=True,
+            model_id=image_model_id or "seedream_edit",
+        )
         production_costs.record_event(
             workspace,
             stage="stills",
@@ -730,6 +839,7 @@ def run(
         "tier": tier,
         "video_model": resolved_vm,
         "stills_model": "seedream_v45_edit_canonical",
+        "cast_count": production_cast,
         "ac_charged": ac_cost,
         "category": category_key,
         "topic": topic,

@@ -628,6 +628,41 @@ def test_paypal_topup_reversal_debits_both_wallets_exactly_once(
     assert billing._paypal_orders["order-refund"]["unified_credits_debited"] == 30
 
 
+def test_stripe_subscription_checkout_grants_selected_plan_once(
+    isolated_billing_state: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan = "studio_pro_5k"
+    event = {
+        "id": "evt-stripe-subscription",
+        "type": "checkout.session.completed",
+        "data": {
+            "object": {
+                "id": "cs-subscription",
+                "mode": "subscription",
+                "subscription": "sub-studio-pro-5k",
+                "client_reference_id": "user-a",
+                "customer_email": "creator@example.com",
+                "metadata": {"user_id": "user-a", "plan": plan},
+            }
+        },
+    }
+    monkeypatch.setattr(backend, "STRIPE_WEBHOOK_SECRET", "test-secret")
+    monkeypatch.setattr(backend, "SUPABASE_URL", "")
+    monkeypatch.setattr(backend.stripe_lib.Webhook, "construct_event", lambda *_args: event)
+    request = DummyRequest({}, stripe=True)
+
+    assert asyncio.run(backend._stripe_webhook(request))["status"] == "ok"
+    first = unified_credits.get_state("user-a")
+    assert first["plan"] == plan
+    assert first["monthly_balance"] == int(backend.UNIFIED_PLANS[plan]["monthly_credits"])
+
+    assert asyncio.run(backend._stripe_webhook(request))["action"] == "duplicate"
+    duplicate = unified_credits.get_state("user-a")
+    assert duplicate["monthly_balance"] == first["monthly_balance"]
+    assert duplicate["balance"] == first["balance"]
+
+
 def test_stripe_retry_after_partial_effect_does_not_double_grant(
     isolated_billing_state: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -95,6 +95,27 @@ interface ChatMessage {
     productionUpdate?: ProductionProgressUpdate;
 }
 
+type DeliverableSource = 'stream' | 'poll' | 'rehydrate' | 'action';
+
+const REPAIR_STALE_SNAPSHOT_GRACE_MS = 30_000;
+const REPAIR_ACTIVE_GUARD_MAX_MS = 10 * 60_000;
+
+function jobIdsMatch(left?: string | null, right?: string | null): boolean {
+    const a = String(left || '').trim();
+    const b = String(right || '').trim();
+    if (!a || !b) return false;
+    return a === b || a.slice(0, 8) === b.slice(0, 8);
+}
+
+function isRepairableShortformFailure(snap?: AgentJobSnapshot | null): boolean {
+    return Boolean(
+        snap
+        && snap.kind === 'shortform'
+        && snap.status === 'failed'
+        && snap.scenes?.length,
+    );
+}
+
 function deliverableDisplayText(messageText: string, snap?: AgentJobSnapshot) {
     if (!snap || snap.kind !== 'cliplab') return messageText;
     const jobType = String(snap.job_type || '').toLowerCase();
@@ -542,6 +563,11 @@ type CreativeModelProfile = {
     speed?: string;
     estimated_unit_usd?: number;
     billing_unit?: string;
+    pricing_source?: string;
+    pricing_fetched_at?: number;
+    pricing_live?: boolean;
+    input_image_usd?: number;
+    pricing_assumptions?: string;
     enabled?: boolean;
 };
 
@@ -556,25 +582,27 @@ const DEFAULT_VIDEO_MODEL = 'seedance';
 
 const FALLBACK_IMAGE_MODELS: AgentModelOption[] = [
     { id: 'seedream_edit', name: 'Seedream 4.5 Edit', provider: 'fal', recommended: true, intelligence: 5, speed: 4, estimated_unit_usd: 0.04, billing_unit: 'image', description: 'Canonical reference editing and high-fidelity stills.' },
+    { id: 'seedream_v5_lite', name: 'Seedream 5.0 Lite', provider: 'fal', intelligence: 5, speed: 5, estimated_unit_usd: 0.035, billing_unit: 'image', description: 'Fast latest-generation Seedream stills with reference-aware editing.' },
+    { id: 'seedream_v4', name: 'Seedream 4.0', provider: 'fal', intelligence: 4, speed: 5, estimated_unit_usd: 0.03, billing_unit: 'image', description: 'Lower-cost Seedream generation and reference editing.' },
     { id: 'grok_imagine', name: 'Grok Imagine Quality', provider: 'xAI', intelligence: 5, speed: 5, estimated_unit_usd: 0.05, billing_unit: '1K image', description: '$0.05 per 1K output; $0.07 at 2K. Premium history still lane.' },
     { id: 'grok_imagine_standard', name: 'Grok Imagine', provider: 'xAI', intelligence: 4, speed: 5, estimated_unit_usd: 0.02, billing_unit: 'image', description: '$0.02 per 1K or 2K output. Lower-cost Grok still lane.' },
     { id: 'ernie_image', name: 'ERNIE-Image', provider: 'fal', intelligence: 4, speed: 5, estimated_unit_usd: 0.03, billing_unit: 'megapixel', description: '$0.03 per megapixel. Cost scales with output resolution.' },
 ];
 
 const FALLBACK_VIDEO_MODELS: AgentModelOption[] = [
-    { id: 'grok_imagine_video', name: 'Grok Imagine Video', provider: 'xAI', recommended: true, intelligence: 4, speed: 5, estimated_unit_usd: 0.05, billing_unit: 'second', description: '$0.05/sec at 720p. Cheapest Grok I2V lane.' },
-    { id: 'grok_imagine_video_15', name: 'Grok Imagine Video 1.5', provider: 'xAI', intelligence: 5, speed: 4, estimated_unit_usd: 0.08, billing_unit: 'second', description: '$0.08/sec at 720p. Higher quality Grok I2V.' },
-    { id: 'grok_imagine_video_15_1080p', name: 'Grok Imagine Video 1.5 1080p', provider: 'xAI', intelligence: 5, speed: 2, estimated_unit_usd: 0.25, billing_unit: 'second', description: '$0.25/sec at 1080p. Expensive final tests only.' },
-    { id: 'seedance', name: 'Seedance 2.0', provider: 'fal', intelligence: 5, speed: 4, description: 'Premium cinematic motion. Exact provider cost is included in the render preflight.' },
+    { id: 'grok_imagine_video', name: 'Grok Imagine Video', provider: 'xAI', recommended: true, intelligence: 4, speed: 5, estimated_unit_usd: 0.07, billing_unit: 'second', input_image_usd: 0.002, pricing_source: 'xai_published', pricing_assumptions: '720p', description: 'Current published 720p Grok I2V rate.' },
+    { id: 'grok_imagine_video_15', name: 'Grok Imagine Video 1.5', provider: 'xAI', intelligence: 5, speed: 4, estimated_unit_usd: 0.14, billing_unit: 'second', input_image_usd: 0.01, pricing_source: 'xai_published', pricing_assumptions: '720p', description: 'Current published 720p Grok I2V 1.5 rate.' },
+    { id: 'grok_imagine_video_15_1080p', name: 'Grok Imagine Video 1.5 1080p', provider: 'xAI', intelligence: 5, speed: 2, estimated_unit_usd: 0.25, billing_unit: 'second', input_image_usd: 0.01, pricing_source: 'xai_published', pricing_assumptions: '1080p', description: 'Current published 1080p Grok I2V 1.5 rate.' },
+    { id: 'seedance', name: 'Seedance 2.0', provider: 'fal', intelligence: 5, speed: 4, estimated_unit_usd: 0.3024, billing_unit: 'second', pricing_source: 'fallback', pricing_assumptions: '720p, standard, no audio', description: 'Premium cinematic motion. Live provider base pricing is converted to Studio effective render cost.' },
     { id: 'pixverse', name: 'PixVerse V6', provider: 'fal', intelligence: 4, speed: 4, estimated_unit_usd: 0.045, billing_unit: 'second', description: '~$0.225 per 5s at 720p. Strong value and moderation fallback.' },
     { id: 'kling_pro', name: 'Kling 2.1 Pro', provider: 'fal', intelligence: 5, speed: 3, estimated_unit_usd: 0.098, billing_unit: 'second', description: '~$0.49 per 5s at 720p. Premium hero-scene motion with model-specific prompt adapter.' },
-    { id: 'ltx_budget', name: 'LTX 13B Budget', provider: 'fal', intelligence: 3, speed: 5, description: 'Lowest-cost full-motion lane. Exact provider cost is included in the render preflight.' },
+    { id: 'ltx_budget', name: 'LTX 13B Budget', provider: 'fal', intelligence: 3, speed: 5, estimated_unit_usd: 0.02, billing_unit: 'second', pricing_source: 'fallback', description: 'Lowest-cost full-motion lane. Live provider pricing replaces this fallback when available.' },
 ];
 
 // These are the model keys with a real Studio Agent adapter: prompt compiler,
 // provider request shape, pricing ledger, fallback behavior, and QA. Do not
 // surface a catalog-only model that the short-form renderer cannot actually run.
-const SUPPORTED_AGENT_IMAGE_MODEL_IDS = new Set(['seedream_edit', 'grok_imagine', 'grok_imagine_standard', 'ernie_image']);
+const SUPPORTED_AGENT_IMAGE_MODEL_IDS = new Set(['seedream_edit', 'seedream_v5_lite', 'seedream_v4', 'seedream_v5_lite_modal', 'grok_imagine', 'grok_imagine_standard', 'ernie_image']);
 const SUPPORTED_AGENT_VIDEO_MODEL_IDS = new Set(FALLBACK_VIDEO_MODELS.map((item) => item.id));
 
 const VIDEO_MODEL_OPTIONS = FALLBACK_VIDEO_MODELS.map((model) => ({
@@ -623,8 +651,24 @@ function creativeModelOption(profile: CreativeModelProfile): AgentModelOption | 
         speed: speedStars(profile.speed),
         estimated_unit_usd: typeof profile.estimated_unit_usd === 'number' ? profile.estimated_unit_usd : undefined,
         billing_unit: String(profile.billing_unit || '').trim() || undefined,
+        pricing_source: String(profile.pricing_source || '').trim() || undefined,
+        pricing_fetched_at: typeof profile.pricing_fetched_at === 'number' ? profile.pricing_fetched_at : undefined,
+        pricing_live: profile.pricing_live === true,
+        input_image_usd: typeof profile.input_image_usd === 'number' ? profile.input_image_usd : undefined,
+        pricing_assumptions: String(profile.pricing_assumptions || '').trim() || undefined,
         description: [cost, profile.summary].filter(Boolean).join('. '),
     };
+}
+
+function mergeCreativeModelOptions(
+    fallback: AgentModelOption[],
+    providerModels: AgentModelOption[],
+): AgentModelOption[] {
+    const merged = new Map(fallback.map((model) => [model.id, { ...model }]));
+    for (const model of providerModels) {
+        merged.set(model.id, { ...(merged.get(model.id) || {}), ...model });
+    }
+    return Array.from(merged.values());
 }
 
 function selectedModelLabel(models: AgentModelOption[], selectedId: string, fallback: string): string {
@@ -870,7 +914,6 @@ function explicitTitleCandidate(text: string): string {
         /(?:one\s+still\s+for|still\s+for|short\s+for|video\s+for|make(?:\s+exactly)?\s+one\s+still\s+for)\s+(.{8,140}?)(?:\s+using|\s+with|\.|$)/gi,
         /(?:title\s+(?:we'?re\s+going\s+to\s+go\s+with|is|it)\s*[:,]?\s*)([^.\n]{8,140})/gi,
         /(?:we\s+will\s+do|we'?ll\s+do|let'?s\s+do|lets\s+do|if we are making|we are making|we're making)\s+([^.\n]{8,140})/gi,
-        /for\s+['"]?([^'".\n]{8,140})['"]?(?:\s+using|\s+with|\.|$)/gi,
     ];
     for (const pattern of patterns) {
         const matches = Array.from(value.matchAll(pattern))
@@ -1090,6 +1133,16 @@ function isStaleShortformPendingAction(
 
 function isNewProductionRequest(text: string): boolean {
     const low = String(text || '').toLowerCase();
+    // Scene repairs are continuations of the existing production. Without
+    // this guard, ordinary phrasing such as "fix scenes 2-6 and make sure the
+    // video follows the script" matched the broad `make ... video` fallback,
+    // marked the repaired job stale, and hid its persisted scene gallery.
+    if (
+        /\b(?:audit|fix|repair|correct|redo|regenerate|rerender|re-render|reanimate|re-animate|edit|revise|restage|re-stage)\b[\s\S]{0,220}\b(?:scenes?|stills?|clips?|animations?|shots?)\b/i.test(low)
+        || /\b(?:scenes?|stills?|clips?|animations?|shots?)\b[\s\S]{0,220}\b(?:fix|repair|correct|redo|regenerate|rerender|re-render|reanimate|re-animate|edit|revise|restage|re-stage)\b/i.test(low)
+    ) {
+        return false;
+    }
     if (/\b(?:next video|next short|next one|the next short|new video|new short|plan the next|make a new|lets make a|let's make a)\b/.test(low)) {
         return true;
     }
@@ -1593,6 +1646,10 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
     const sessionIdRef = useRef<string | null>(null);
     const jobSessionRef = useRef<Map<string, string>>(new Map());
     const deliverablesByJobRef = useRef<Map<string, AgentJobSnapshot>>(new Map());
+    const repairSnapshotGuardRef = useRef<Map<string, number>>(new Map());
+    const repairingJobIdRef = useRef('');
+    const repairActiveRunSeenRef = useRef<Set<string>>(new Set());
+    const dismissedDockJobIdsRef = useRef<Set<string>>(new Set());
     const sessionLoadSeqRef = useRef(0);
     const autoSyncTimerRef = useRef<number | null>(null);
     const sessionUiCacheRef = useRef<Map<string, SessionUiCache>>(new Map());
@@ -1600,6 +1657,7 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
     const [dockDismissed, setDockDismissed] = useState(false);
     const [pollResetKey, setPollResetKey] = useState(0);
     const [retryingProduction, setRetryingProduction] = useState(false);
+    const [repairingJobId, setRepairingJobId] = useState('');
     const [cancellingProduction, setCancellingProduction] = useState(false);
     const [deleteTarget, setDeleteTarget] = useState<SessionSummary | null>(null);
     const userCancelledJobsRef = useRef<Set<string>>(new Set());
@@ -1965,7 +2023,19 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
         return true;
     }, [mergeThumbnailReviewIntoDeliverable]);
 
-    const appendJobDeliverable = useCallback((snap: AgentJobSnapshot) => {
+    const appendJobDeliverable = useCallback((
+        snap: AgentJobSnapshot,
+        options?: { source?: DeliverableSource; pinToLatest?: boolean },
+    ) => {
+        const source = options?.source || 'action';
+        const guardedUntil = repairSnapshotGuardRef.current.get(snap.job_id) || 0;
+        if (
+            (source === 'poll' || source === 'rehydrate')
+            && snap.status === 'failed'
+            && guardedUntil > Date.now()
+        ) {
+            return;
+        }
         if (absorbThumbnailSnapshot(snap)) return;
         if (shouldSuppressProductionJob(snap.job_id, snap.title, messagesRef.current, blockedJobIdsRef.current)) {
             dropGhostShortformTrack(snap.job_id);
@@ -2064,7 +2134,7 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                 if (existing.job_id === snap.job_id) return true;
                 return existing.job_id.slice(0, 8) === snap.job_id.slice(0, 8);
             };
-            const pinReviewCard = (
+            const pinReviewCard = Boolean(options?.pinToLatest) || (
                 snap.kind === 'shortform'
                 && snap.status === 'awaiting_approval'
             );
@@ -2217,7 +2287,20 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
         [],
     );
 
-    const { snapshots, primary: dockTrack, primarySnap: dockSnap } = useAgentProductionJobs({
+    const shouldAcceptPolledSnapshot = useCallback((snap: AgentJobSnapshot) => {
+        const guardedUntil = repairSnapshotGuardRef.current.get(snap.job_id) || 0;
+        return !(
+            snap.status === 'failed'
+            && guardedUntil > Date.now()
+        );
+    }, []);
+
+    const {
+        snapshots,
+        primary: dockTrack,
+        primarySnap: dockSnap,
+        clearSnapshot: clearPolledSnapshot,
+    } = useAgentProductionJobs({
         sessionId,
         tracks: jobTracks,
         pollResetKey,
@@ -2225,8 +2308,9 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
         shouldPollJobTrack: (track) => (
             !shouldSuppressProductionJob(track.job_id, track.title, messagesRef.current, blockedJobIdsRef.current)
         ),
+        shouldAcceptSnapshot: shouldAcceptPolledSnapshot,
         onProgress: upsertProgressLine,
-        onRunningPreview: appendJobDeliverable,
+        onRunningPreview: (snap) => appendJobDeliverable(snap, { source: 'poll' }),
         onGhostJobDropped: (track) => {
             dropGhostShortformTrack(track.job_id);
         },
@@ -2240,7 +2324,7 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                 return next;
             });
             setMessages((rows) => rows.filter((row) => row.productionUpdate?.job_id !== snap.job_id));
-            appendJobDeliverable(snap);
+            appendJobDeliverable(snap, { source: 'poll' });
         },
         onJobFailed: (snap: AgentJobSnapshot) => {
             const ownerSession = jobSessionRef.current.get(snap.job_id);
@@ -2277,9 +2361,9 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
             setPending([]);
             setDockDismissed(false);
             setError(snap.error || 'Production failed');
-            appendJobDeliverable(snap);
+            appendJobDeliverable(snap, { source: 'poll' });
         },
-        onAwaitingApproval: appendJobDeliverable,
+        onAwaitingApproval: (snap) => appendJobDeliverable(snap, { source: 'poll' }),
         autoFinalizeLongform: approvalMode === 'auto',
         onAutoFinalizeStarted: handleFinalizeStarted,
     });
@@ -2300,20 +2384,44 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
         return undefined;
     }, [isImplicitCancelFailure, messages, snapshots]);
 
-    const resolvedDockSnap = awaitingDeliverableSnap?.status === 'awaiting_approval'
+    const repairingDockSnap = useMemo<AgentJobSnapshot | undefined>(() => {
+        if (!repairingJobId) return undefined;
+        const cached = deliverablesByJobRef.current.get(repairingJobId)
+            || [...messages].reverse().find((row) => jobIdsMatch(row.jobDeliverable?.job_id, repairingJobId))?.jobDeliverable;
+        return {
+            ...(cached || {}),
+            job_id: repairingJobId,
+            kind: 'shortform',
+            status: 'running',
+            running: true,
+            progress: Number(cached?.progress || 0),
+            stage: 'repairing_scenes',
+            stage_label: 'Repairing selected scenes',
+            stage_detail: 'Auditing and repairing only the requested scenes. Existing good assets stay preserved.',
+            error: null,
+            client_updated_at: Date.now(),
+        };
+    }, [messages, repairingJobId]);
+
+    const resolvedDockSnap = repairingDockSnap
+        || (awaitingDeliverableSnap?.status === 'awaiting_approval'
         ? awaitingDeliverableSnap
         : dockSnap?.status === 'failed'
         ? dockSnap
         : failedDeliverableSnap?.status === 'failed'
           ? failedDeliverableSnap
-          : dockSnap;
+          : dockSnap);
 
-    const resolvedDockTrack = dockTrack ?? (resolvedDockSnap ? {
-        job_id: resolvedDockSnap.job_id,
-        kind: (resolvedDockSnap.kind || 'longform') as AgentJobTrack['kind'],
-        title: resolvedDockSnap.title,
-        started_at: Date.now(),
-    } : undefined);
+    const resolvedDockTrack = (
+        dockTrack
+        && resolvedDockSnap
+        && jobIdsMatch(dockTrack.job_id, resolvedDockSnap.job_id)
+    ) ? dockTrack : (resolvedDockSnap ? {
+            job_id: resolvedDockSnap.job_id,
+            kind: (resolvedDockSnap.kind || 'longform') as AgentJobTrack['kind'],
+            title: resolvedDockSnap.title,
+            started_at: Date.now(),
+        } : undefined);
 
     const showRenderDock = Boolean(
         resolvedDockTrack
@@ -2322,8 +2430,15 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
         && !isStaleAwaitingSnapshot(resolvedDockSnap, messages)
         && !isStaleDeadLongformPoll(resolvedDockSnap)
         && !isStaleIdleLongformFailure(resolvedDockSnap)
-        && (!dockDismissed || resolvedDockSnap.status === 'failed'),
+        && !dismissedDockJobIdsRef.current.has(resolvedDockSnap.job_id)
+        && !dockDismissed,
     );
+    const dockRepairableFailedSnap = isRepairableShortformFailure(resolvedDockSnap)
+        ? resolvedDockSnap
+        : undefined;
+    // `/retry-production` repeats the production-start action. Never expose it
+    // for a scene-bearing failed short; use the existing chat command compiler
+    // until the backend provides a dedicated scene-repair endpoint.
 
 
     const appendDictation = useCallback((text: string) => {
@@ -2681,6 +2796,30 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
             }
             const sid = String(raw.session_id || '');
             if (!sid) return;
+            const activeRuns = Array.isArray(raw.active_runs)
+                ? raw.active_runs as SessionSummary['active_runs']
+                : [];
+            const repairJobId = repairingJobIdRef.current;
+            if (repairJobId) {
+                if (activeRunLabel({ active_runs: activeRuns })) {
+                    repairActiveRunSeenRef.current.add(repairJobId);
+                } else if (repairActiveRunSeenRef.current.has(repairJobId)) {
+                    // A disconnected stream may finish entirely server-side.
+                    // Once Sync observes the run transition from active to
+                    // terminal, release the synthetic repair state and allow a
+                    // fresh status read after the short stale-result grace.
+                    repairActiveRunSeenRef.current.delete(repairJobId);
+                    repairSnapshotGuardRef.current.set(
+                        repairJobId,
+                        Date.now() + REPAIR_STALE_SNAPSHOT_GRACE_MS,
+                    );
+                    repairingJobIdRef.current = '';
+                    setRepairingJobId((current) => (
+                        jobIdsMatch(current, repairJobId) ? '' : current
+                    ));
+                    setPollResetKey((key) => key + 1);
+                }
+            }
             const serverJobs = Array.isArray(raw.active_jobs) ? (raw.active_jobs as AgentJobTrack[]) : [];
             const persisted = opts?.forceServer
                 ? []
@@ -2744,7 +2883,7 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                         blockedJobIdsRef.current,
                     )) continue;
                     if (snap.status === 'failed' && snap.kind === 'longform' && hasThumbnailReview) continue;
-                    appendJobDeliverable(snap);
+                    appendJobDeliverable(snap, { source: 'rehydrate' });
                 }
                 setPollResetKey((k) => k + 1);
                 const cachedDeliverableJobs = new Map<string, AgentJobTrack>();
@@ -2763,7 +2902,9 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                 });
                 if (missingMp4.length) {
                     const refreshed = await rehydrateJobSnapshots(sid, missingMp4, tok);
-                    for (const snap of refreshed.deliverables) appendJobDeliverable(snap);
+                    for (const snap of refreshed.deliverables) {
+                        appendJobDeliverable(snap, { source: 'rehydrate' });
+                    }
                 }
             } catch {
                 /* polling optional on resume */
@@ -3219,16 +3360,26 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                             // baked-in list with it hid direct xAI Grok Imagine whenever the
                             // catalog happened to contain only a FAL profile.  Merge instead,
                             // so every model with a real Agent adapter remains selectable.
-                            if (imageOptions.length) setImageModelCatalog([...FALLBACK_IMAGE_MODELS, ...imageOptions].filter((m, i, arr) => arr.findIndex((x) => x.id === m.id) === i));
-                            if (videoOptions.length) setVideoModelCatalog([...FALLBACK_VIDEO_MODELS, ...videoOptions].filter((m, i, arr) => arr.findIndex((x) => x.id === m.id) === i));
+                            if (imageOptions.length) setImageModelCatalog(mergeCreativeModelOptions(FALLBACK_IMAGE_MODELS, imageOptions));
+                            if (videoOptions.length) setVideoModelCatalog(mergeCreativeModelOptions(FALLBACK_VIDEO_MODELS, videoOptions));
                         }
                     })
                     .catch(() => { /* baked picker catalog is already ready */ });
                 const [modelData, listData] = await Promise.all([modelsRequest, sessionsRequest]);
                 const catalog = (modelData?.models as AgentModelOption[]) || [];
+                const modelDataImageOptions = ((modelData?.image_models as CreativeModelProfile[]) || [])
+                    .map(creativeModelOption)
+                    .filter((m): m is AgentModelOption => Boolean(m))
+                    .filter((m) => SUPPORTED_AGENT_IMAGE_MODEL_IDS.has(m.id));
+                const modelDataVideoOptions = ((modelData?.video_models as CreativeModelProfile[]) || [])
+                    .map(creativeModelOption)
+                    .filter((m): m is AgentModelOption => Boolean(m))
+                    .filter((m) => SUPPORTED_AGENT_VIDEO_MODEL_IDS.has(m.id));
                 const rec = (modelData?.recommended as string[]) || [];
                 let pickModel = FALLBACK_MODELS[0].id;
                 if (!cancelled) {
+                    if (modelDataImageOptions.length) setImageModelCatalog(mergeCreativeModelOptions(FALLBACK_IMAGE_MODELS, modelDataImageOptions));
+                    if (modelDataVideoOptions.length) setVideoModelCatalog(mergeCreativeModelOptions(FALLBACK_VIDEO_MODELS, modelDataVideoOptions));
                     if (catalog.length) {
                         setModelCatalog(catalog);
                         pickModel = catalog.find((m) => m.recommended)?.id || catalog[0].id;
@@ -3565,6 +3716,9 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                 setPollResetKey((k) => k + 1);
             }
             let completedCleanly = false;
+            let backendRunStillActive = false;
+            let latestTurnJobSnapshot: AgentJobSnapshot | undefined;
+            let turnRepairJobId = '';
             const thinkingRecover = window.setTimeout(() => {
                 if (sessionIdRef.current !== activeSessionId) return;
                 void (async () => {
@@ -3573,16 +3727,28 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                             timeoutMs: 60_000,
                             retries: SESSION_LOAD_RETRIES,
                         });
-                        await resumeSession((refreshed?.session as Record<string, unknown>) || {}, {
+                        const recoveredSession = (refreshed?.session as Record<string, unknown>) || {};
+                        const recoveredRuns = Array.isArray(recoveredSession.active_runs)
+                            ? recoveredSession.active_runs as SessionSummary['active_runs']
+                            : [];
+                        const recoveredRunLabel = activeRunLabel({ active_runs: recoveredRuns });
+                        backendRunStillActive = Boolean(recoveredRunLabel);
+                        await resumeSession(recoveredSession, {
                             rehydrateJobs: true,
                         });
-                        setQueueHint('Recovered your saved run after a slow connection — no need to resend.');
+                        if (recoveredRunLabel) {
+                            markSessionRunning(activeSessionId, recoveredRunLabel);
+                            setQueueHint(`${recoveredRunLabel} — Studio is still working; no need to resend.`);
+                        } else {
+                            setQueueHint('Recovered your saved run after a slow connection — no need to resend.');
+                            clearSessionRunning(activeSessionId);
+                            setActivitySteps((prev) => completeRunningSteps(prev));
+                        }
                         setError('');
                     } catch {
+                        backendRunStillActive = true;
+                        markSessionRunning(activeSessionId, 'Still working...');
                         setQueueHint('Still working server-side — press Sync if this hangs past 2 minutes.');
-                    } finally {
-                        clearSessionRunning(activeSessionId);
-                        setActivitySteps((prev) => completeRunningSteps(prev));
                     }
                 })();
             }, THINKING_RECOVER_MS);
@@ -3600,6 +3766,40 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                         });
                     } else if (ev.event === 'tool_start' && ev.tool) {
                         const toolName = String(ev.tool);
+                        if (toolName === 'audit_and_repair_production_scenes') {
+                            const requestedJobId = String(ev.args?.job_id || '').trim();
+                            const replyJobId = String(replyingTo?.job_id || '').trim();
+                            const latestRepairable = [...messagesRef.current]
+                                .reverse()
+                                .map((row) => row.jobDeliverable)
+                                .find((snap) => snap?.kind === 'shortform' && Boolean(snap.scenes?.length));
+                            turnRepairJobId = requestedJobId || replyJobId || latestRepairable?.job_id || '';
+                            if (turnRepairJobId) {
+                                const guardedRepairJobId = turnRepairJobId;
+                                const guardExpiresAt = Date.now() + REPAIR_ACTIVE_GUARD_MAX_MS;
+                                repairSnapshotGuardRef.current.set(guardedRepairJobId, guardExpiresAt);
+                                repairingJobIdRef.current = guardedRepairJobId;
+                                repairActiveRunSeenRef.current.delete(guardedRepairJobId);
+                                dismissedDockJobIdsRef.current.delete(guardedRepairJobId);
+                                clearPolledSnapshot(guardedRepairJobId);
+                                setRepairingJobId(guardedRepairJobId);
+                                setDockDismissed(false);
+                                window.setTimeout(() => {
+                                    const currentDeadline = repairSnapshotGuardRef.current.get(guardedRepairJobId);
+                                    if (currentDeadline !== guardExpiresAt || currentDeadline > Date.now()) return;
+                                    repairSnapshotGuardRef.current.delete(guardedRepairJobId);
+                                    repairActiveRunSeenRef.current.delete(guardedRepairJobId);
+                                    if (jobIdsMatch(repairingJobIdRef.current, guardedRepairJobId)) {
+                                        repairingJobIdRef.current = '';
+                                        setRepairingJobId('');
+                                    }
+                                    if (sessionIdRef.current === activeSessionId) {
+                                        setPollResetKey((key) => key + 1);
+                                        scheduleAutoSync({ delayMs: 0, rehydrateJobs: true });
+                                    }
+                                }, REPAIR_ACTIVE_GUARD_MAX_MS + 250);
+                            }
+                        }
                         // Production starts are only shown if they succeed; blocked research turns stay quiet.
                         if (/^start_(shortform|longform)/i.test(toolName)) {
                             return;
@@ -3778,7 +3978,11 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                             messagesRef.current,
                             blockedJobIdsRef.current,
                         )) {
-                            appendJobDeliverable(snap);
+                            latestTurnJobSnapshot = snap;
+                            appendJobDeliverable(snap, {
+                                source: 'stream',
+                                pinToLatest: Boolean(turnRepairJobId && jobIdsMatch(snap.job_id, turnRepairJobId)),
+                            });
                         }
                     } else if (ev.event === 'thumbnail_review' && ev.review && typeof ev.review === 'object') {
                         mergeThumbnailReviewIntoDeliverable(ev.review as ThumbnailReview);
@@ -3811,6 +4015,7 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                             channel_title: selectedChannel.title || '',
                         } : null,
                     });
+                    backendRunStillActive = false;
                 } catch (streamError) {
                     const recoverSessionAfterStreamDrop = async () => {
                         try {
@@ -3827,9 +4032,18 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                     };
                     try {
                         const refreshed = await recoverSessionAfterStreamDrop();
-                        await resumeSession((refreshed?.session as Record<string, unknown>) || {}, {
+                        const recoveredSession = (refreshed?.session as Record<string, unknown>) || {};
+                        const recoveredRuns = Array.isArray(recoveredSession.active_runs)
+                            ? recoveredSession.active_runs as SessionSummary['active_runs']
+                            : [];
+                        const recoveredRunLabel = activeRunLabel({ active_runs: recoveredRuns });
+                        backendRunStillActive = Boolean(recoveredRunLabel);
+                        await resumeSession(recoveredSession, {
                             rehydrateJobs: true,
                         });
+                        if (recoveredRunLabel) {
+                            markSessionRunning(activeSessionId, recoveredRunLabel);
+                        }
                     } catch (refreshError) {
                         throw new Error(
                             `Studio Agent connection dropped and the recovery refresh could not reach the backend. Your chat is preserved; press Resume in a few seconds. ${String((streamError as Error).message || (refreshError as Error).message || '')}`,
@@ -3840,7 +4054,11 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                     // We already recovered the authoritative session above, so
                     // do not turn a successful recovery into a red error banner
                     // or force the creator to press Resume manually.
-                    setQueueHint('Reconnected — Studio is continuing from the saved run.');
+                    setQueueHint(
+                        backendRunStillActive
+                            ? 'Reconnected — Studio is still working from the saved run.'
+                            : 'Reconnected — the saved run is synchronized.',
+                    );
                     scheduleAutoSync({ delayMs: 1200, rehydrateJobs: true });
                     completedCleanly = true;
                     return;
@@ -3875,7 +4093,22 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                 });
                 if (reply) {
                     setMessages((m) => {
-                        const next = [...m, { role: 'assistant' as const, content: reply }];
+                        const replyDeliverable = latestTurnJobSnapshot;
+                        const withoutPriorCard = replyDeliverable
+                            ? m.map((row) => {
+                                if (!jobIdsMatch(row.jobDeliverable?.job_id, replyDeliverable.job_id)) return row;
+                                const { jobDeliverable: _drop, ...rest } = row;
+                                return rest as ChatMessage;
+                            })
+                            : m;
+                        const next = [
+                            ...withoutPriorCard,
+                            {
+                                role: 'assistant' as const,
+                                content: reply,
+                                jobDeliverable: replyDeliverable,
+                            },
+                        ];
                         messagesRef.current = next;
                         return next;
                     });
@@ -3917,10 +4150,27 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                 setQueueHint('');
             } finally {
                 window.clearTimeout(thinkingRecover);
-                clearSessionRunning(activeSessionId);
+                if (turnRepairJobId && !backendRunStillActive) {
+                    repairSnapshotGuardRef.current.set(
+                        turnRepairJobId,
+                        Date.now() + REPAIR_STALE_SNAPSHOT_GRACE_MS,
+                    );
+                    repairActiveRunSeenRef.current.delete(turnRepairJobId);
+                    if (jobIdsMatch(repairingJobIdRef.current, turnRepairJobId)) {
+                        repairingJobIdRef.current = '';
+                    }
+                    setRepairingJobId((current) => (
+                        jobIdsMatch(current, turnRepairJobId) ? '' : current
+                    ));
+                }
+                if (!backendRunStillActive) {
+                    clearSessionRunning(activeSessionId);
+                }
                 if (sessionIdRef.current === activeSessionId) {
-                    setToolActivity('');
-                    setActivitySteps((prev) => completeRunningSteps(prev));
+                    if (!backendRunStillActive) {
+                        setToolActivity('');
+                        setActivitySteps((prev) => completeRunningSteps(prev));
+                    }
                     // Keep the professional timeline visible briefly after the reply lands.
                     window.setTimeout(() => {
                         if (sessionIdRef.current === activeSessionId) {
@@ -3940,10 +4190,12 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
             buildOutboundMessage,
             captionMode,
             clearSessionRunning,
+            clearPolledSnapshot,
             getToken,
             ingestActiveJobs,
             markSessionRunning,
             refreshHistory,
+            replyingTo,
             resetVerificationChecklist,
             resumeSession,
             chatSessionReady,
@@ -3952,6 +4204,7 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
             agentMode,
             selectedChannel,
             sessionId,
+            appendJobDeliverable,
             updateVerificationStep,
         ],
     );
@@ -4227,6 +4480,33 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
             setToolActivity('');
         }
     }, [authFetch, currentSessionRunning, dockSnap?.status, retryingProduction, sessionId]);
+
+    const handlePrepareSceneRepair = useCallback((snapshot: AgentJobSnapshot) => {
+        const repairSceneNumbers = (snapshot.scenes || [])
+            .filter((scene) => {
+                const status = String(scene.status || '').toLowerCase();
+                return /fail|error|blocked|missing/.test(status)
+                    || scene.still_qa?.pass === false
+                    || (scene.animate === true && scene.has_clip !== true);
+            })
+            .map((scene) => Number(scene.index) + 1)
+            .filter((sceneNumber) => Number.isInteger(sceneNumber) && sceneNumber > 0);
+        const totalScenes = Math.max(
+            1,
+            Number(snapshot.total_scenes || snapshot.scenes?.length || 1),
+        );
+        const explicitScope = repairSceneNumbers.length
+            ? `Scenes ${repairSceneNumbers.join(', ')}`
+            : `Scenes 1 through ${totalScenes}`;
+        setReplyingTo(snapshot);
+        setAgentMode('studio');
+        setInput(
+            `Audit and repair ${explicitScope} in this existing video. Preserve every passing scene and approved asset, `
+            + 'regenerate only what fails script, prompt, continuity, or artifact QA, then reanimate only the scenes whose still changed.',
+        );
+        setDockDismissed(true);
+        window.setTimeout(() => inputRef.current?.focus(), 0);
+    }, []);
 
     const handleCancelProduction = useCallback(async (jobId?: string, kind: string = 'shortform') => {
         const targetId = jobId || dockTrack?.job_id;
@@ -4874,7 +5154,16 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                 {error && (
                     <div className="mx-auto mb-2 flex w-full max-w-3xl shrink-0 items-start gap-2 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2">
                         <p className="flex-1 text-xs leading-relaxed text-red-200">{error}</p>
-                        {/production failed|LFRenderError|start_longform_render failed/i.test(error) ? (
+                        {dockRepairableFailedSnap ? (
+                            <button
+                                type="button"
+                                onClick={() => handlePrepareSceneRepair(dockRepairableFailedSnap)}
+                                className="shrink-0 rounded-md border border-cyan-400/35 bg-cyan-400/10 px-2 py-1 text-[10px] font-semibold text-cyan-100 hover:bg-cyan-400/20"
+                                title="Prepare a scene-scoped repair request; do not restart the whole production"
+                            >
+                                Repair scenes
+                            </button>
+                        ) : /production failed|LFRenderError|start_longform_render failed/i.test(error) ? (
                             <button
                                 type="button"
                                 disabled={retryingProduction}
@@ -5078,6 +5367,7 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                                                         onSnapshotUpdate={appendJobDeliverable}
                                                         onRetry={
                                                             m.jobDeliverable.status === 'failed'
+                                                            && !isRepairableShortformFailure(m.jobDeliverable)
                                                                 ? () => void handleRetryProduction()
                                                                 : undefined
                                                         }
@@ -5429,11 +5719,19 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                     track={resolvedDockTrack ?? null}
                     snapshot={resolvedDockSnap}
                     accessToken={session?.access_token}
-                    onRetry={handleRetryProduction}
+                    onRetry={dockRepairableFailedSnap ? undefined : handleRetryProduction}
+                    onRepair={dockRepairableFailedSnap
+                        ? () => handlePrepareSceneRepair(dockRepairableFailedSnap)
+                        : undefined}
                     retrying={retryingProduction}
                     onCancel={handleCancelProduction}
                     cancelling={cancellingProduction}
-                    onDismiss={() => setDockDismissed(true)}
+                    onDismiss={() => {
+                        if (resolvedDockSnap?.job_id) {
+                            dismissedDockJobIdsRef.current.add(resolvedDockSnap.job_id);
+                        }
+                        setDockDismissed(true);
+                    }}
                 />
             ) : null}
         </>

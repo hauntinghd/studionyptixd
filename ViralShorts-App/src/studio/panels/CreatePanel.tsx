@@ -18,6 +18,8 @@ type Tab = 'script' | 'scenes' | 'audio';
 
 const IMAGE_MODEL_OPTIONS = [
     { id: 'seedream_edit', label: 'Seedream 4.5 Edit' },
+    { id: 'seedream_v5_lite', label: 'Seedream 5.0 Lite' },
+    { id: 'seedream_v4', label: 'Seedream 4.0' },
     { id: 'grok_imagine', label: 'Grok Imagine Quality' },
     { id: 'grok_imagine_standard', label: 'Grok Imagine' },
     { id: 'ernie_image', label: 'ERNIE-Image' },

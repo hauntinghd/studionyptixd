@@ -8,6 +8,7 @@ export default function AgentRenderDock({
     accessToken,
     onDismiss,
     onRetry,
+    onRepair,
     retrying = false,
     onCancel,
     cancelling = false,
@@ -17,6 +18,7 @@ export default function AgentRenderDock({
     accessToken?: string;
     onDismiss?: () => void;
     onRetry?: () => void;
+    onRepair?: () => void;
     retrying?: boolean;
     onCancel?: () => void;
     cancelling?: boolean;
@@ -122,7 +124,11 @@ export default function AgentRenderDock({
                         </p>
                         <p className="mt-0.5 line-clamp-2 text-[11px] text-gray-400">
                             {failed
-                                ? snapshot.error || (isAnalysis ? 'Ask Studio Agent to re-run the reference analysis.' : 'Tap Retry to run the same brief again.')
+                                ? snapshot.error || (isAnalysis
+                                    ? 'Ask Studio Agent to re-run the reference analysis.'
+                                    : onRepair
+                                        ? 'Repair the failed scenes in this production without restarting it.'
+                                        : 'Retry the production when it is safe to rebuild the full job.')
                                 : complete
                                   ? isAnalysis
                                       ? 'The pacing and blueprint signals are ready in chat.'
@@ -191,6 +197,17 @@ export default function AgentRenderDock({
                                     className="inline-flex items-center gap-1 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-2 py-1 text-[11px] font-semibold text-emerald-100 hover:bg-emerald-500/20"
                                 >
                                     <Download className="h-3 w-3" /> {downloadBusy ? 'Savingâ€¦' : 'Download'}
+                                </button>
+                            ) : null}
+                            {failed && onRepair ? (
+                                <button
+                                    type="button"
+                                    onClick={onRepair}
+                                    className="inline-flex items-center gap-1 rounded-lg border border-cyan-400/30 bg-cyan-400/10 px-2 py-1 text-[11px] font-semibold text-cyan-100 hover:bg-cyan-400/20"
+                                    title="Prepare a scene-scoped repair request without restarting the production"
+                                >
+                                    <RefreshCw className="h-3 w-3" />
+                                    Repair scenes
                                 </button>
                             ) : null}
                             {downloadError ? <span className="text-[10px] text-red-300">{downloadError}</span> : null}

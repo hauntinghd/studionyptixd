@@ -100,6 +100,19 @@ _GUARD_CLAUSE_RE = re.compile(
     r"no text|no watermark|single full-frame|one continuous full-frame|"
     r"no split|no diptych|no side-by-side|no comparison)\b"
 )
+_GENERIC_CAST_CLAUSE_RE = re.compile(
+    r"(?i)^(?:"
+    r"\d+\s*:\s*\d+|"
+    r"two identical ivory skeletons standing apart in one room|"
+    r"one (?:canonical )?(?:ivory )?skeleton host|"
+    r"left offers open empty hands|"
+    r"right (?:takes a )?half[- ]step back(?: guarded)?|"
+    r"clear air gap between torsos|"
+    r"each host has (?:its|their) own thin glass shell|"
+    r"never one shared bubble or fused chest glass|"
+    r"lock:|no (?:human skin|text|watermark)"
+    r")\s*$"
+)
 
 
 def compact_skeleton_scene_direction(visual_description: str, *, max_chars: int = 180) -> str:
@@ -139,6 +152,11 @@ def compact_skeleton_scene_direction(visual_description: str, *, max_chars: int 
     for clause in clauses:
         if len(clause) < 8 or _NON_PHYSICAL_VISUAL_RE.search(clause):
             continue
+        # Cast/identity prefixes are compiled separately. Keeping them in the
+        # creative tier used to consume the entire budget before the actual
+        # location and story action were reached.
+        if _GENERIC_CAST_CLAUSE_RE.search(clause):
+            continue
         # Skip orphan fragments left after aggressive splits ("or fused chest glass").
         if re.match(r"(?i)^(?:or|and|never)\b", clause) and len(clause) < 40:
             continue
@@ -148,6 +166,11 @@ def compact_skeleton_scene_direction(visual_description: str, *, max_chars: int 
         seen.add(key)
         candidate = "; ".join([*selected, clause])
         if len(candidate) > max_chars:
+            # A concrete location/action may be one long planner sentence.
+            # Preserve its leading physical direction instead of falling back
+            # to a generic studio because no complete clause fit.
+            if not selected:
+                selected.append(_clip(clause, max_chars))
             continue
         selected.append(clause)
         if len(selected) >= 4:

@@ -62,6 +62,9 @@ class StudioStateContext(ContractModel):
     agent_mode: Literal["plan", "studio", "cliplab"] = "studio"
     approval_mode: Literal["auto", "confirm"] = "confirm"
     content_format: Literal["short", "long", "both"] = "both"
+    image_model_id: str = ""
+    video_model: str = ""
+    media_route_revision: int = Field(default=1, ge=1)
     reply_target_job_id: str = ""
     reply_target_scene_number: int | None = Field(default=None, ge=1)
     jobs: list[CompactJobState] = Field(default_factory=list, max_length=8)
@@ -104,6 +107,13 @@ def _safe_kind(raw: Any) -> JobKind:
     return "shortform"
 
 
+def _positive_int(raw: Any, default: int = 1) -> int:
+    try:
+        return max(1, int(raw or default))
+    except (TypeError, ValueError):
+        return max(1, int(default))
+
+
 def compact_job_snapshot(
     snapshot: dict[str, Any],
     *,
@@ -143,8 +153,11 @@ def compact_job_snapshot(
             )
         )
     scene_count = _as_nonnegative_int(snapshot.get("current_scene"), default=len(scenes))
-    if scene_count <= 0:
-        scene_count = len(scenes)
+    # ``current_scene`` is progress, not an authoritative cardinality.  A
+    # snapshot can already contain later scene rows while that progress field
+    # still points at the preceding scene, so never let it hide a valid row
+    # from command validation/targeting.
+    scene_count = max(scene_count, len(scenes))
     planned = _as_nonnegative_int(snapshot.get("total_scenes"), default=scene_count)
     planned = max(scene_count, planned)
     return CompactJobState(
@@ -361,6 +374,11 @@ def build_studio_state_context(
 
     revision_payload = {
         "updated_at": session.get("updated_at"),
+        "media_route": {
+            "revision": session.get("media_route_revision") or 1,
+            "image_model_id": session.get("image_model") or "",
+            "video_model": session.get("video_model") or "",
+        },
         "reply_job_id": reply_job_id,
         "jobs": [job.model_dump(mode="json") for job in jobs],
         "pending": session.get("short_expansion_intake") or {},
@@ -394,6 +412,9 @@ def build_studio_state_context(
         agent_mode=agent_mode,  # type: ignore[arg-type]
         approval_mode=approval_mode,  # type: ignore[arg-type]
         content_format=content_format,  # type: ignore[arg-type]
+        image_model_id=str(session.get("image_model") or ""),
+        video_model=str(session.get("video_model") or ""),
+        media_route_revision=_positive_int(session.get("media_route_revision")),
         reply_target_job_id=reply_job_id,
         reply_target_scene_number=reply_scene,
         jobs=jobs,

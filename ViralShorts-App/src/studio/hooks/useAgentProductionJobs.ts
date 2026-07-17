@@ -87,6 +87,7 @@ export function useAgentProductionJobs({
     autoFinalizeLongform = false,
     onAutoFinalizeStarted,
     shouldPollJobTrack,
+    shouldAcceptSnapshot,
     pollResetKey = 0,
 }: {
     sessionId: string | null;
@@ -94,6 +95,8 @@ export function useAgentProductionJobs({
     getToken: () => Promise<string>;
     /** Skip polling/rendering dock tracks that belong to a prior short. */
     shouldPollJobTrack?: (track: AgentJobTrack) => boolean;
+    /** Reject a stale status read before it can replace live stream state. */
+    shouldAcceptSnapshot?: (snapshot: AgentJobSnapshot, track: AgentJobTrack) => boolean;
     /** Bump after Retry to drop stale failed snapshots and restart polling. */
     pollResetKey?: number;
     onJobComplete?: (snap: AgentJobSnapshot) => void;
@@ -142,6 +145,7 @@ export function useAgentProductionJobs({
                 job_id: data.job_id || track.job_id,
                 client_updated_at: Date.now(),
             };
+            if (shouldAcceptSnapshot && !shouldAcceptSnapshot(snapshot, track)) return;
             const stageKey = `${snapshot.stage || ''}:${snapshot.progress}:${snapshot.status}`;
             const prevStage = lastStageRef.current[track.job_id];
             if (prevStage !== stageKey) {
@@ -215,6 +219,7 @@ export function useAgentProductionJobs({
             onRunningPreview,
             onProgress,
             sessionId,
+            shouldAcceptSnapshot,
             shouldPollJobTrack,
         ],
     );
@@ -295,5 +300,21 @@ export function useAgentProductionJobs({
           }
         : undefined;
 
-    return { snapshots, activeTracks, primary, primarySnap, pollOne };
+    const clearSnapshot = useCallback((jobId: string) => {
+        const key = String(jobId || '').trim();
+        if (!key) return;
+        setSnapshots((prev) => {
+            if (!prev[key]) return prev;
+            const next = { ...prev };
+            delete next[key];
+            return next;
+        });
+        delete lastStageRef.current[key];
+        delete lastDeliverableSigRef.current[key];
+        for (const completedKey of [...completedRef.current]) {
+            if (completedKey.endsWith(`:${key}`)) completedRef.current.delete(completedKey);
+        }
+    }, []);
+
+    return { snapshots, activeTracks, primary, primarySnap, pollOne, clearSnapshot };
 }

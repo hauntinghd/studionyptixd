@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import Callable
 
 from auth import FALLBACK_SUPABASE_ANON_KEY, FALLBACK_SUPABASE_URL
@@ -36,6 +37,7 @@ from backend_settings import (
     YOUTUBE_OAUTH_MODE,
 )
 from studio_agent.queue import queue_config
+from studio_agent.image_model_catalog import seedream_model_profiles
 from video_pipeline import (
     CREATIVE_IMAGE_MODEL_PROFILES,
     CREATIVE_VIDEO_MODEL_PROFILES,
@@ -110,7 +112,14 @@ def build_public_config_payload(
                 "elite_image_credit_multiplier": 5,
                 "premium_video_credit_multiplier": 4,
                 "elite_video_credit_multiplier": 5,
-                "image_models": _creative_model_catalog_copy(CREATIVE_IMAGE_MODEL_PROFILES),
+                "image_models": _creative_model_catalog_copy([
+                    *CREATIVE_IMAGE_MODEL_PROFILES,
+                    *seedream_model_profiles(
+                        fal_enabled=bool(
+                            str(os.getenv("FAL_KEY") or os.getenv("FAL_AI_KEY") or "").strip()
+                        )
+                    ),
+                ]),
                 "video_models": _creative_model_catalog_copy(CREATIVE_VIDEO_MODEL_PROFILES),
             },
             "billing_model": {

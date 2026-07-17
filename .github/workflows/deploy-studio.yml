@@ -1,12 +1,13 @@
-name: Deploy Studio
+name: Deploy Studio (legacy disabled)
 
 on:
-  push:
-    branches: [master]
   workflow_dispatch:
 
 jobs:
   deploy:
+    # This SSH path has no immutable image/provenance attestation and must not
+    # race the gated Fly release. Kept only as historical recovery reference.
+    if: ${{ false }}
     runs-on: ubuntu-latest
     steps:
       - name: Deploy over SSH

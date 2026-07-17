@@ -26,6 +26,10 @@ ENDPOINTS: dict[str, str] = {
     "ltx_098_distilled": "fal-ai/ltxv-13b-098-distilled/image-to-video",
     "seedream_v45": "fal-ai/bytedance/seedream/v4.5/text-to-image",
     "seedream_v45_edit": "fal-ai/bytedance/seedream/v4.5/edit",
+    "seedream_v4": "fal-ai/bytedance/seedream/v4/text-to-image",
+    "seedream_v4_edit": "fal-ai/bytedance/seedream/v4/edit",
+    "seedream_v5_lite": "bytedance/seedream/v5/lite/text-to-image",
+    "seedream_v5_lite_edit": "bytedance/seedream/v5/lite/edit",
     "mmaudio_v2": "fal-ai/mmaudio-v2/text-to-audio",
     "minimax_speech": "fal-ai/minimax/speech-02-hd",
     "kling_v21_standard": "fal-ai/kling-video/v2.1/standard/image-to-video",
@@ -42,13 +46,19 @@ FALLBACK_USD: dict[str, float] = {
     "ltx_098_distilled_per_second": 0.02,
     "seedream_v45_per_image": 0.04,
     "seedream_v45_edit_per_image": 0.04,
+    "seedream_v4_per_image": 0.03,
+    "seedream_v4_edit_per_image": 0.03,
+    "seedream_v5_lite_per_image": 0.035,
+    "seedream_v5_lite_edit_per_image": 0.035,
     "mmaudio_v2_per_second": 0.001,
     "fal_minimax_per_1k_chars": 0.10,
     "elevenlabs_per_1k_chars": 0.10,
     "kling_v21_standard_per_second": 0.056,
     "kling_v21_pro_per_second": 0.098,
     "pixverse_v6_per_second": 0.045,
-    "seedance_20_i2v_per_second": 0.03,
+    # Effective Studio request rate: $0.014 / 1k tokens * 21.6k tokens/sec
+    # for standard 720p Seedance output.
+    "seedance_20_i2v_per_second": 0.3024,
     "wan_i2v_per_second": 0.05,
     "ernie_per_image": 0.03,
     "cushion_pct": 0.15,
@@ -56,6 +66,13 @@ FALLBACK_USD: dict[str, float] = {
     # Script expansion via xAI Grok — not billed to fal wallet.
     "grok_chapter_expand": 0.0,
     "grok_outline": 0.0,
+}
+
+# Provider pricing rows use base billing units. Convert them into the actual
+# per-second cost for the request shapes Studio sends.
+EFFECTIVE_VIDEO_MULTIPLIERS: dict[str, float] = {
+    "seedance_20_i2v": 21.6,
+    "pixverse_v6": 9.0,
 }
 
 DEFAULT_CACHE_PATH = Path(
@@ -237,6 +254,15 @@ def _unit_cost(
 
     unit = str(row.get("unit") or "").lower()
     price = float(row["unit_price"])
+
+    multiplier = float(EFFECTIVE_VIDEO_MULTIPLIERS.get(key, 1.0) or 1.0)
+    if multiplier != 1.0:
+        effective = price * multiplier
+        return (
+            round(effective * quantity, 4),
+            f"live:{key}@${effective:.6f}/s*{quantity}s "
+            f"(provider_base=${price}/{unit or 'unit'}*{multiplier:g})",
+        )
 
     if unit in ("images", "image", "units", "unit", "videos", "video"):
         return round(price * quantity, 4), f"live:{key}@{price}/{unit}×{quantity}"

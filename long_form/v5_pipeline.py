@@ -55,6 +55,7 @@ from long_form.pipeline import (
     _chapters_path,
     _chunk_text,
     _download,
+    _dispatch_longform_media_revision_aware,
     _ensure_job_dir,
     _fal_post,
     _ffmpeg_concat_audio,
@@ -231,7 +232,9 @@ def _gen_em_thumbnails(outline: dict, thumbs_dir: Path) -> list[Path]:
 
 
 def _gen_em_clip(still_path: Path, motion_prompt: str, out_path: Path,
-                 *, duration_sec: int | None = None) -> Path:
+                 *, duration_sec: int | None = None,
+                 video_model: str = "",
+                 route_guard: Callable[[], bool] | None = None) -> Path:
     """Animate the still via LTX 13B distilled (the v5_pipeline_locked recipe
     winner — 'not even a competition, fucking flawless' per Casey's
     2026-04-24 bakeoff).
@@ -249,6 +252,19 @@ def _gen_em_clip(still_path: Path, motion_prompt: str, out_path: Path,
     num_frames = clip_sec * EM_LTX_FPS
     if out_path.exists() and out_path.stat().st_size > 1024:
         return out_path
+
+    if str(video_model or "").strip():
+        from skeleton_ai.i2v_engine import generate as generate_i2v
+
+        return generate_i2v(
+            still_path,
+            motion_prompt,
+            out_path,
+            video_model=str(video_model).strip(),
+            duration_sec=clip_sec,
+            aspect_ratio="16:9",
+            fallback_guard=route_guard,
+        )
 
     # Lazy import — keeps v5_pipeline.py importable on machines without
     # fal_client wheel installed (sleep_doc renders don't need it).
@@ -608,6 +624,7 @@ def _process_scene(
     voice_id: str,
     fps: int,
     job_dir: Path,
+    job_id: str = "",
     paid_motion: bool = True,
 ) -> Path:
     """End-to-end per-scene render. Returns the path to the assembled
@@ -661,7 +678,26 @@ def _process_scene(
             render_motion_graphic_clip(treatment, clip, duration_sec=vo_dur + 0.5, fps=fps)
     elif paid_motion:
         motion = (motion_prompt_hint or "").strip() or "slow camera push-in, subtle parallax"
-        _gen_em_clip(still, motion, clip, duration_sec=EM_LTX_CLIP_SEC)
+        if clip.exists() and clip.stat().st_size > 1024:
+            pass
+        elif job_id:
+            _dispatch_longform_media_revision_aware(
+                job_id,
+                stage="video",
+                scene_index=global_idx,
+                destination=clip,
+                dispatch=lambda model, candidate, guard: _gen_em_clip(
+                    still,
+                    motion,
+                    candidate,
+                    duration_sec=EM_LTX_CLIP_SEC,
+                    video_model=model,
+                    route_guard=guard,
+                ),
+                fallback_model="ltx_budget",
+            )
+        else:
+            _gen_em_clip(still, motion, clip, duration_sec=EM_LTX_CLIP_SEC)
     elif not clip.exists() or clip.stat().st_size < 1024:
         frames = max(1, int((vo_dur + 0.5) * fps))
         cmd = [
@@ -1026,7 +1062,7 @@ async def finalize_v5_episode_pipeline(job_id: str) -> None:
             chapter_index=ch_idx, local_idx=local_idx, global_idx=global_idx,
             scene_brief=sb, visual_style=visual_style,
             motion_prompt_hint=motion_hint, voice_id=voice_id, fps=fps,
-            job_dir=job_dir,
+            job_dir=job_dir, job_id=job_id,
             paid_motion=global_idx in paid_motion_indices,
         )
 

@@ -39,6 +39,8 @@ from studio_agent.dictation import transcribe_audio_bytes
 
 from studio_agent import model_registry, openrouter, skills
 from studio_agent import memory, production_budget, runner, store, training_capture
+from studio_agent.image_model_catalog import seedream_model_profiles
+from studio_agent.video_model_catalog import video_model_profiles
 from studio_agent.queue import (
     StudioAgentQueueFullError,
     StudioAgentQueueTimeoutError,
@@ -295,6 +297,21 @@ def build_studio_agent_router(
         cached = _MODELS_CACHE.get("payload")
         if isinstance(cached, dict) and now - float(_MODELS_CACHE.get("at") or 0) < _MODELS_CACHE_SEC:
             return cached
+        fal_enabled = bool(str(os.getenv("FAL_KEY") or os.getenv("FAL_AI_KEY") or "").strip())
+
+        async def _video_profiles() -> list[dict[str, Any]]:
+            try:
+                return await asyncio.wait_for(
+                    run_in_threadpool(video_model_profiles, fal_enabled=fal_enabled),
+                    timeout=5.0,
+                )
+            except Exception:
+                # Pricing must never delay Agent boot. Verified effective
+                # fallbacks stay visible until the provider cache warms.
+                return video_model_profiles(
+                    fal_enabled=fal_enabled,
+                    pricing_snapshot={"source": "fallback", "prices": {}},
+                )
         try:
             live = await openrouter.list_models()
             catalog = openrouter.build_model_catalog(live)
@@ -305,6 +322,10 @@ def build_studio_agent_router(
             providers = sorted({str(m.get("provider") or "") for m in catalog if m.get("provider")})
             payload = {
                 "models": catalog,
+                "image_models": seedream_model_profiles(
+                    fal_enabled=bool(str(os.getenv("FAL_KEY") or os.getenv("FAL_AI_KEY") or "").strip())
+                ),
+                "video_models": await _video_profiles(),
                 "recommended": recommended,
                 "count": len(ids),
                 "providers": providers,
@@ -316,6 +337,10 @@ def build_studio_agent_router(
             catalog = openrouter.build_model_catalog(None)
             payload = {
                 "models": catalog,
+                "image_models": seedream_model_profiles(
+                    fal_enabled=bool(str(os.getenv("FAL_KEY") or os.getenv("FAL_AI_KEY") or "").strip())
+                ),
+                "video_models": await _video_profiles(),
                 "recommended": openrouter.RECOMMENDED_MODELS,
                 "error": str(exc),
                 "xai_configured": bool(getattr(openrouter, "xai_api_key", lambda: "")()),
@@ -1786,6 +1811,10 @@ def _session_summary(session: dict[str, Any]) -> dict[str, Any]:
         "render_style": session.get("render_style") or store.DEFAULT_RENDER_STYLE,
         "image_model": store.normalize_image_model(session.get("image_model")),
         "video_model": store.normalize_video_model(session.get("video_model")),
+        "media_route_revision": store.media_route_snapshot(session)["revision"],
+        "interaction_state": str(session.get("interaction_state") or "plan"),
+        "production_gate_open": bool(session.get("production_gate_open", False)),
+        "active_command_id": str(session.get("active_command_id") or ""),
         "channel_id": session.get("channel_id") or "",
         "registry_key": session.get("registry_key") or "",
         "channel_title": session.get("channel_title") or "",

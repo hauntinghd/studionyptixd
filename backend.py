@@ -18828,7 +18828,7 @@ mount_router(
         # Without this, WS always returns "Sign in required" even for valid sessions.
         get_current_user=get_current_user,
         is_admin_check=_is_admin_user,
-        lane_access_check=lambda user: bool((_public_lane_access_for_user(user) or {}).get("studio_agent")),
+        lane_access_check=lambda user: bool((_public_lane_access_for_user(user) or {}).get("agent")),
     )
 )
 

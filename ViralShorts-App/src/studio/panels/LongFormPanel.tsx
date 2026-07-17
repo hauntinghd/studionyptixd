@@ -35,6 +35,8 @@ import { useAuthenticatedMediaUrl } from '../hooks/useAuthenticatedMedia';
 
 const FALLBACK_IMAGE_MODELS: AgentModelOption[] = [
     { id: 'seedream_edit', name: 'Seedream 4.5 Edit', provider: 'fal', recommended: true, intelligence: 5, speed: 4, estimated_unit_usd: 0.04, billing_unit: 'image', description: 'Canonical reference editing and high-fidelity stills.' },
+    { id: 'seedream_v5_lite', name: 'Seedream 5.0 Lite', provider: 'fal', intelligence: 5, speed: 5, estimated_unit_usd: 0.035, billing_unit: 'image', description: 'Fast latest-generation Seedream stills with reference-aware editing.' },
+    { id: 'seedream_v4', name: 'Seedream 4.0', provider: 'fal', intelligence: 4, speed: 5, estimated_unit_usd: 0.03, billing_unit: 'image', description: 'Lower-cost Seedream generation and reference editing.' },
     { id: 'grok_imagine', name: 'Grok Imagine Quality', provider: 'xAI', intelligence: 5, speed: 5, estimated_unit_usd: 0.05, billing_unit: '1K image', description: '$0.05 per 1K output; premium still lane.' },
     { id: 'grok_imagine_standard', name: 'Grok Imagine', provider: 'xAI', intelligence: 4, speed: 5, estimated_unit_usd: 0.02, billing_unit: 'image', description: '$0.02 per 1K or 2K output. Lower-cost Grok still lane.' },
     { id: 'ernie_image', name: 'ERNIE-Image', provider: 'fal', intelligence: 4, speed: 5, estimated_unit_usd: 0.03, billing_unit: 'megapixel', description: '$0.03 per megapixel. Cost scales with output resolution.' },

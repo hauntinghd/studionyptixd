@@ -14,6 +14,12 @@ export interface AgentModelOption {
     /** Exact unit price for image/video generation profiles. */
     estimated_unit_usd?: number;
     billing_unit?: string;
+    /** Provider pricing provenance for media-generation models. */
+    pricing_source?: string;
+    pricing_fetched_at?: number;
+    pricing_live?: boolean;
+    input_image_usd?: number;
+    pricing_assumptions?: string;
     recommended?: boolean;
     intelligence?: number;
     speed?: number;
@@ -72,7 +78,20 @@ function formatGenerationPrice(m: AgentModelOption) {
     if (typeof m.estimated_unit_usd !== 'number') return null;
     const value = m.estimated_unit_usd;
     const amount = value < 0.01 ? value.toFixed(4) : value.toFixed(3).replace(/0+$/, '').replace(/\.$/, '');
-    return `$${amount}/${m.billing_unit || 'unit'}`;
+    const input = typeof m.input_image_usd === 'number'
+        ? ` + $${m.input_image_usd < 0.01 ? m.input_image_usd.toFixed(3) : m.input_image_usd.toFixed(2)}/input image`
+        : '';
+    return `$${amount}/${m.billing_unit || 'unit'}${input}`;
+}
+
+function formatPricingSource(m: AgentModelOption) {
+    const source = String(m.pricing_source || '').toLowerCase();
+    if (!source) return null;
+    if (m.pricing_live || source === 'fal_api') return 'Live provider rate';
+    if (source.includes('disk_cache')) return 'Last-known provider rate';
+    if (source === 'xai_published') return 'Published xAI rate';
+    if (source === 'fallback') return 'Fallback estimate';
+    return null;
 }
 
 export default function AgentModelPicker({
@@ -235,6 +254,7 @@ export default function AgentModelPicker({
                             const active = m.id === selectedId;
                             const disabled = m.disabled === true || m.selectable === false;
                             const sample = formatSampleCost(m);
+                            const pricingSource = formatPricingSource(m);
                             return (
                                 <button
                                     key={m.id}
@@ -295,6 +315,14 @@ export default function AgentModelPicker({
                                                 {formatGenerationPrice(m) || formatPricePerM(m.prompt_price_per_m, m.completion_price_per_m)}
                                             </span>
                                         </div>
+                                        {pricingSource && (
+                                            <div className={m.pricing_live ? 'text-emerald-500/80' : 'text-gray-600'}>
+                                                {pricingSource}
+                                            </div>
+                                        )}
+                                        {m.pricing_assumptions && (
+                                            <div className="text-gray-600">For {m.pricing_assumptions}</div>
+                                        )}
                                         {sample && (
                                             <div className="text-[10px] text-emerald-500/80 group-hover:text-emerald-400/90">
                                                 {sample}

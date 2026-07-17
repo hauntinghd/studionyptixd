@@ -12,6 +12,11 @@ from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any
 
+from studio_agent.image_model_catalog import (
+    normalize_seedream_model_id,
+    seedream_provider,
+)
+
 USD_QUANT = Decimal("0.000001")
 XAI_IMAGE_RATES = {
     "grok_imagine": Decimal("0.05"),
@@ -21,11 +26,16 @@ XAI_IMAGE_RATES = {
     "grok-imagine-image": Decimal("0.02"),
 }
 XAI_VIDEO_RATES = {
-    "grok_imagine_video": Decimal("0.05"),
-    "grok_imagine_video_15": Decimal("0.08"),
+    "grok_imagine_video": Decimal("0.07"),
+    "grok_imagine_video_15": Decimal("0.14"),
     "grok_imagine_video_15_1080p": Decimal("0.25"),
-    "xai:grok-imagine-video": Decimal("0.05"),
-    "xai:grok-imagine-video-1.5": Decimal("0.08"),
+    "xai:grok-imagine-video": Decimal("0.07"),
+    "xai:grok-imagine-video-1.5": Decimal("0.14"),
+}
+XAI_VIDEO_INPUT_IMAGE_RATES = {
+    "grok_imagine_video": Decimal("0.002"),
+    "grok_imagine_video_15": Decimal("0.01"),
+    "grok_imagine_video_15_1080p": Decimal("0.01"),
 }
 XAI_TTS_PER_MILLION_CHARS = Decimal("15.00")
 PROVIDER_LABELS = {
@@ -263,9 +273,23 @@ def fal_unit_cost(key: str, *, fallback_key: str, quantity: float = 1.0) -> tupl
         return Decimal("0.000000"), f"pricing_error:{str(exc)[:120]}"
 
 
-def price_fal_image(*, edit: bool = False, quantity: int = 1) -> tuple[Decimal, str, str]:
-    key = "seedream_v45_edit" if edit else "seedream_v45"
-    fallback = "seedream_v45_edit_per_image" if edit else "seedream_v45_per_image"
+def price_fal_image(
+    *,
+    edit: bool = False,
+    quantity: int = 1,
+    model_id: str = "seedream_edit",
+) -> tuple[Decimal, str, str]:
+    normalized = normalize_seedream_model_id(model_id) or "seedream_edit"
+    if seedream_provider(normalized) == "modal":
+        # Modal pricing is operator-account specific. Never invent a fal price.
+        key = f"{normalized}_{'edit' if edit else 't2i'}"
+        return Decimal("0.000000"), "modal:operator_metered_cost_unknown", key
+    stem = {
+        "seedream_v4": "seedream_v4",
+        "seedream_v5_lite": "seedream_v5_lite",
+    }.get(normalized, "seedream_v45")
+    key = f"{stem}_edit" if edit else stem
+    fallback = f"{stem}_edit_per_image" if edit else f"{stem}_per_image"
     amount, note = fal_unit_cost(key, fallback_key=fallback, quantity=max(1, int(quantity or 1)))
     return amount, note, key
 
@@ -346,8 +370,9 @@ def price_xai_video(model_or_endpoint: str, *, seconds: float, resolution: str =
     else:
         key = "grok_imagine_video"
     qty = max(0.0, float(seconds or 0.0))
-    amount = _usd(XAI_VIDEO_RATES[key] * Decimal(str(qty)))
-    return amount, f"xai:{key}_per_second", key
+    input_image = XAI_VIDEO_INPUT_IMAGE_RATES[key]
+    amount = _usd(XAI_VIDEO_RATES[key] * Decimal(str(qty)) + input_image)
+    return amount, f"xai:{key}_per_second+input_image", key
 
 
 def attach_to_progress(workspace: Path, payload: dict[str, Any]) -> dict[str, Any]:

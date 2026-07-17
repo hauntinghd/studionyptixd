@@ -4,9 +4,13 @@ WORKDIR /frontend
 COPY ViralShorts-App/package*.json ./
 RUN npm ci
 COPY ViralShorts-App/ ./
-ARG FRONTEND_BUILD_ID=studio-agent-local
-ARG GIT_SHA=unknown
-RUN echo "frontend build ${FRONTEND_BUILD_ID} git=${GIT_SHA}" && npm run build
+ARG FRONTEND_BUILD_ID
+ARG GIT_SHA
+RUN test -n "${FRONTEND_BUILD_ID}" \
+    && test -n "${GIT_SHA}" \
+    && test "${GIT_SHA}" != "unknown" \
+    && echo "frontend build ${FRONTEND_BUILD_ID} git=${GIT_SHA}" \
+    && npm run build
 
 FROM python:3.11-slim
 
@@ -57,8 +61,14 @@ RUN sed -i 's/\r$//' ./ops/run_render_service.sh \
 
 RUN mkdir -p generated_videos temp_assets demo_uploads
 
-ARG FRONTEND_BUILD_ID=studio-agent-local
-ARG GIT_SHA=unknown
+ARG FRONTEND_BUILD_ID
+ARG GIT_SHA
+RUN test -n "${FRONTEND_BUILD_ID}" \
+    && test -n "${GIT_SHA}" \
+    && test "${GIT_SHA}" != "unknown"
+LABEL org.opencontainers.image.source="https://github.com/hauntinghd/studionyptixd" \
+      org.opencontainers.image.revision="${GIT_SHA}" \
+      org.opencontainers.image.version="${FRONTEND_BUILD_ID}"
 ENV PORT=10000
 ENV STUDIO_BUILD_ID=${FRONTEND_BUILD_ID}
 ENV STUDIO_GIT_SHA=${GIT_SHA}
@@ -70,7 +80,8 @@ EXPOSE 10000
 # async and do not require extra OS processes.
 ENV WEB_CONCURRENCY=1
 
-# Write deploy meta into the image so /api/health can prove which snapshot is live.
-RUN printf '{"build_id":"%s","git_sha":"%s"}\n' "$STUDIO_BUILD_ID" "$STUDIO_GIT_SHA" > /app/ops/deploy_meta.json || true
+# Write immutable deploy metadata into the image so /api/health can prove
+# exactly which Git snapshot and frontend bundle are serving customers.
+RUN printf '{"build_id":"%s","git_sha":"%s"}\n' "$STUDIO_BUILD_ID" "$STUDIO_GIT_SHA" > /app/ops/deploy_meta.json
 
 CMD ["uvicorn", "backend:app", "--host", "0.0.0.0", "--port", "10000", "--workers", "1"]

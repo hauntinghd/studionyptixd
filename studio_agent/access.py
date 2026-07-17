@@ -3,7 +3,13 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
-STUDIO_AGENT_PLANS = frozenset({"creator", "studio"})
+from backend_settings import UNIFIED_PLANS
+
+
+# Every server-defined unified plan is a paid Studio Agent plan.  Keeping a
+# second handwritten allowlist here previously locked out every newer
+# ``studio_pro_*`` customer even after Stripe had activated their account.
+STUDIO_AGENT_PLANS = frozenset(UNIFIED_PLANS)
 
 
 def is_owner(user: dict | None, is_admin_check: Callable[[dict], bool] | None) -> bool:

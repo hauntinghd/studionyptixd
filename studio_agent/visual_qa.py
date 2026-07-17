@@ -17,16 +17,78 @@ from pathlib import Path
 from typing import Any
 
 VISUAL_QA_VERSION = 4
-SEMANTIC_QA_VERSION = 3
+SEMANTIC_QA_VERSION = 4
 # Bump whenever the acceptance contract changes so old cached decisions
 # cannot keep a scene blocked after the rules have been corrected.
-STILL_SEMANTIC_QA_VERSION = 6
+STILL_SEMANTIC_QA_VERSION = 7
 PRODUCT_SEMANTIC_QA_VERSION = 1
 
 
 def _env_bool(name: str, default: bool) -> bool:
     raw = str(os.getenv(name, "1" if default else "0") or "").strip().lower()
     return raw in {"1", "true", "yes", "on"}
+
+
+def _asset_cast_count(asset_path: Path, requested: Any = None) -> int:
+    """Resolve an omitted cast from the durable job/scene contract near an asset."""
+    try:
+        explicit = int(requested)
+    except Exception:
+        explicit = 0
+    if explicit in {1, 2}:
+        return explicit
+
+    asset_path = Path(asset_path)
+    workspace: Path | None = None
+    for depth, parent in enumerate(asset_path.parents):
+        if (parent / "job_spec.json").is_file() or (parent / "scenes.json").is_file():
+            workspace = parent
+            break
+        if depth >= 5:
+            break
+    if workspace is None:
+        return 1
+
+    try:
+        spec = json.loads((workspace / "job_spec.json").read_text(encoding="utf-8"))
+        if not isinstance(spec, dict):
+            spec = {}
+    except Exception:
+        spec = {}
+    try:
+        raw_scenes = json.loads((workspace / "scenes.json").read_text(encoding="utf-8"))
+        scenes = [item for item in raw_scenes if isinstance(item, dict)] if isinstance(raw_scenes, list) else []
+    except Exception:
+        scenes = []
+
+    resolved_asset = asset_path.resolve()
+    scene: dict[str, Any] = {}
+    for item in scenes:
+        candidates = [item.get("still_rel"), item.get("clip_rel")]
+        matches_path = False
+        for rel in candidates:
+            if not str(rel or "").strip():
+                continue
+            try:
+                if (workspace / str(rel)).resolve() == resolved_asset:
+                    matches_path = True
+                    break
+            except Exception:
+                continue
+        if matches_path or str(item.get("sid") or "").strip() == asset_path.stem:
+            scene = item
+            break
+
+    from skeleton_ai.prompt_compose import resolve_cast_count
+
+    return resolve_cast_count(
+        job_cast=spec.get("cast_count"),
+        scene_cast=scene.get("cast_count"),
+        topic=str(scene.get("topic") or spec.get("topic") or ""),
+        visual_brief=str(scene.get("visual_brief") or spec.get("visual_brief") or ""),
+        narration=str(scene.get("narration") or ""),
+        scene_action=str(scene.get("scene_action") or ""),
+    )
 
 
 def analyze_shortform_workspace(workspace: Path) -> dict[str, Any]:
@@ -47,10 +109,12 @@ def analyze_shortform_workspace(workspace: Path) -> dict[str, Any]:
     locked_outfit = ""
     render_style = ""
     product_identity_required = False
+    job_cast_count: Any = None
     try:
         spec = json.loads((workspace / "job_spec.json").read_text(encoding="utf-8"))
         locked_outfit = str((spec or {}).get("locked_outfit") or "").strip()
         render_style = str((spec or {}).get("render_style") or "").strip().lower()
+        job_cast_count = (spec or {}).get("cast_count")
         product = (spec or {}).get("product_reference")
         product_identity_required = isinstance(product, dict) and bool(product.get("images"))
     except Exception:
@@ -64,6 +128,7 @@ def analyze_shortform_workspace(workspace: Path) -> dict[str, Any]:
             locked_outfit=locked_outfit,
             strict_skeleton_identity=strict_skeleton_identity,
             product_identity_required=product_identity_required,
+            job_cast_count=job_cast_count,
         )
         scene_reports.append(report)
         for c in report.get("checks") or []:
@@ -118,6 +183,7 @@ def _scene_visual_report(
     locked_outfit: str = "",
     strict_skeleton_identity: bool = False,
     product_identity_required: bool = False,
+    job_cast_count: Any = None,
 ) -> dict[str, Any]:
     idx = int(sc.get("index", -1))
     checks: list[dict[str, Any]] = []
@@ -125,6 +191,17 @@ def _scene_visual_report(
     action = str(sc.get("scene_action") or "")
     outfit = str(sc.get("outfit") or "")
     motion = str(sc.get("motion_prompt") or "")
+    scene_cast_count = 1
+    if strict_skeleton_identity:
+        from skeleton_ai.prompt_compose import resolve_cast_count
+
+        scene_cast_count = resolve_cast_count(
+            job_cast=job_cast_count,
+            scene_cast=sc.get("cast_count"),
+            topic=str(sc.get("topic") or ""),
+            narration=str(sc.get("narration") or ""),
+            scene_action=action,
+        )
     still_rel = str(sc.get("still_rel") or f"stills/{sc.get('sid') or f'b{idx:02d}'}.png")
     still = workspace / still_rel
 
@@ -193,6 +270,7 @@ def _scene_visual_report(
                 still,
                 reference=_workspace_skeleton_reference(workspace),
                 locked_outfit=locked_outfit or outfit,
+                cast_count=scene_cast_count,
             )
             checks.append({
                 "id": f"scene_{idx}_still_semantic_identity",
@@ -262,6 +340,7 @@ def _scene_visual_report(
                 clip_path,
                 still=still if still.is_file() else None,
                 locked_outfit=locked_outfit or outfit,
+                cast_count=scene_cast_count,
             )
             checks.append({
                 "id": f"scene_{idx}_semantic_identity",
@@ -431,11 +510,17 @@ def _semantic_cache_path(clip_path: Path) -> Path:
     return clip_path.with_suffix(clip_path.suffix + ".visualqa.json")
 
 
-def _semantic_fingerprint(clip_path: Path, still: Path | None, locked_outfit: str) -> str:
+def _semantic_fingerprint(
+    clip_path: Path,
+    still: Path | None,
+    locked_outfit: str,
+    cast_count: int = 1,
+) -> str:
     parts = [str(SEMANTIC_QA_VERSION), str(clip_path.stat().st_size), str(clip_path.stat().st_mtime_ns)]
     if still and still.is_file():
         parts.extend([str(still.stat().st_size), str(still.stat().st_mtime_ns)])
     parts.append(str(locked_outfit or ""))
+    parts.append(f"cast_count={2 if int(cast_count or 1) >= 2 else 1}")
     return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()
 
 
@@ -540,11 +625,17 @@ def _still_semantic_cache_path(still: Path) -> Path:
     return still.with_suffix(still.suffix + ".stillqa.json")
 
 
-def _still_semantic_fingerprint(still: Path, reference: Path | None, locked_outfit: str) -> str:
+def _still_semantic_fingerprint(
+    still: Path,
+    reference: Path | None,
+    locked_outfit: str,
+    cast_count: int = 1,
+) -> str:
     parts = [str(STILL_SEMANTIC_QA_VERSION), str(still.stat().st_size), str(still.stat().st_mtime_ns)]
     if reference and reference.is_file():
         parts.extend([str(reference.stat().st_size), str(reference.stat().st_mtime_ns)])
     parts.append(str(locked_outfit or ""))
+    parts.append(f"cast_count={2 if int(cast_count or 1) >= 2 else 1}")
     return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()
 
 
@@ -613,11 +704,12 @@ def audit_skeleton_still(
     reference: Path | None,
     locked_outfit: str = "",
     force: bool = False,
-    cast_count: int = 1,
+    cast_count: Any = None,
 ) -> dict[str, Any]:
     """Compare frame zero with the canonical master before approval or animation."""
     still = Path(still)
     reference = Path(reference) if reference else None
+    cast_count = _asset_cast_count(still, cast_count)
     required = _env_bool("STUDIO_STILL_SEMANTIC_QA_REQUIRED", True)
     if not still.is_file():
         return {"status": "fail", "pass": False, "summary": "Still is missing"}
@@ -629,7 +721,12 @@ def audit_skeleton_still(
             "summary": "Canonical skeleton reference is unavailable",
         }
 
-    fingerprint = _still_semantic_fingerprint(still, reference, locked_outfit)
+    fingerprint = _still_semantic_fingerprint(
+        still,
+        reference,
+        locked_outfit,
+        cast_count=cast_count,
+    )
     cache_path = _still_semantic_cache_path(still)
     if not force and cache_path.is_file():
         try:
@@ -672,6 +769,7 @@ def audit_skeleton_still(
                 "Still preserves the canonical skeleton" if passed else "Still identity was not proven"
             ))[:500],
             "issues": issues, "fingerprint": fingerprint, "created_at": time.time(),
+            "cast_count": 2 if int(cast_count or 1) >= 2 else 1,
         }
         try:
             cache_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
@@ -1078,11 +1176,12 @@ def audit_skeleton_clip(
     still: Path | None,
     locked_outfit: str = "",
     force: bool = False,
-    cast_count: int = 1,
+    cast_count: Any = None,
 ) -> dict[str, Any]:
     """Return a cached semantic multi-frame skeleton identity verdict."""
     clip_path = Path(clip_path)
     still = Path(still) if still else None
+    cast_count = _asset_cast_count(clip_path, cast_count)
     required = _env_bool("STUDIO_I2V_SEMANTIC_QA_REQUIRED", True)
     if not clip_path.is_file():
         return {"status": "fail", "pass": False, "summary": "Clip is missing"}
@@ -1103,7 +1202,12 @@ def audit_skeleton_clip(
     except Exception:
         pass
 
-    fingerprint = _semantic_fingerprint(clip_path, still, locked_outfit)
+    fingerprint = _semantic_fingerprint(
+        clip_path,
+        still,
+        locked_outfit,
+        cast_count=cast_count,
+    )
     cache_path = _semantic_cache_path(clip_path)
     if not force and cache_path.is_file():
         try:
@@ -1162,6 +1266,7 @@ def audit_skeleton_clip(
             "frame_subjects": list(parsed.get("frame_subjects") or [])[:8],
             "frames_reviewed": len(frames),
             "fingerprint": fingerprint,
+            "cast_count": 2 if int(cast_count or 1) >= 2 else 1,
             "created_at": time.time(),
         }
         try:

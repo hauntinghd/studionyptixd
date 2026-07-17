@@ -175,11 +175,27 @@ def audit_scene_still(workspace: Path, scene_index: int, *, still_path: Path | N
     """Diagnose likely artifact causes for a scene still before regeneration."""
     workspace = Path(workspace)
     from skeleton_ai.styled_pipeline import load_scenes
+    from skeleton_ai.prompt_compose import dual_host_staging_brief, resolve_cast_count
 
     scenes = load_scenes(workspace)
     scene = next((s for s in scenes if int(s.get("index", -1)) == int(scene_index)), None)
     if not scene:
         raise ValueError(f"scene {scene_index} not found")
+
+    try:
+        job_spec = json.loads((workspace / "job_spec.json").read_text(encoding="utf-8"))
+        if not isinstance(job_spec, dict):
+            job_spec = {}
+    except Exception:
+        job_spec = {}
+    hosts = resolve_cast_count(
+        job_cast=job_spec.get("cast_count"),
+        scene_cast=scene.get("cast_count"),
+        topic=str(scene.get("topic") or job_spec.get("topic") or ""),
+        visual_brief=str(scene.get("visual_brief") or job_spec.get("visual_brief") or ""),
+        narration=str(scene.get("narration") or ""),
+        scene_action=str(scene.get("scene_action") or ""),
+    )
 
     if still_path is None:
         rel = str(scene.get("still_rel") or "").strip()
@@ -193,7 +209,13 @@ def audit_scene_still(workspace: Path, scene_index: int, *, still_path: Path | N
     issues: list[str] = []
     details: list[str] = []
 
-    _, prompt_risky = sanitize_skeleton_scene_action(str(scene.get("scene_action") or ""))
+    _, prompt_risky = sanitize_skeleton_scene_action(
+        str(scene.get("scene_action") or ""),
+        topic=str(scene.get("topic") or job_spec.get("topic") or ""),
+        visual_brief=str(scene.get("visual_brief") or job_spec.get("visual_brief") or ""),
+        narration=str(scene.get("narration") or ""),
+        cast_count=hosts,
+    )
     if prompt_risky:
         issues.append("prompt_split_language")
         details.append("Scene action contained split-screen / comparison language.")
@@ -237,6 +259,7 @@ def audit_scene_still(workspace: Path, scene_index: int, *, still_path: Path | N
                 still_path,
                 reference=_workspace_skeleton_reference(workspace),
                 locked_outfit=str(scene.get("outfit") or ""),
+                cast_count=hosts,
             )
             if semantic.get("status") != "pass":
                 semantic_failed = True
@@ -273,23 +296,6 @@ def audit_scene_still(workspace: Path, scene_index: int, *, still_path: Path | N
         )
 
     issues = list(dict.fromkeys(issues))
-    from skeleton_ai.prompt_compose import dual_host_staging_brief, resolve_cast_count
-
-    try:
-        hosts = resolve_cast_count(
-            scene_cast=scene.get("cast_count"),
-            topic=str(scene.get("topic") or ""),
-            narration=str(scene.get("narration") or ""),
-            scene_action=str(scene.get("scene_action") or ""),
-            user_feedback=" ".join(str(d) for d in details),
-        )
-    except Exception:
-        try:
-            hosts = int(scene.get("cast_count") or 1)
-        except Exception:
-            hosts = 1
-        if hosts not in {1, 2}:
-            hosts = 1
     setting = compact_skeleton_scene_direction(
         str(scene.get("scene_action") or scene.get("prompt") or ""), max_chars=120
     )

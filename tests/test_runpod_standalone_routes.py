@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 import long_form_router
 import skeleton_ai_router
 from long_form import pipeline as longform_pipeline
+from studio_agent import jobs as agent_jobs
 from studio_agent import runpod_bridge, tools
 
 
@@ -37,6 +38,19 @@ def _longform_body() -> dict:
         },
         "image_model": "seedream_edit",
     }
+
+
+def _mock_owned_longform_job(monkeypatch, owner_id: str = "user-1") -> None:
+    monkeypatch.setattr(
+        agent_jobs,
+        "job_access_metadata",
+        lambda job_id, kind="": {
+            "exists": True,
+            "job_id": job_id,
+            "kind": "longform",
+            "owner_id": owner_id,
+        },
+    )
 
 
 def test_runpod_short_generate_uses_logged_contract_once(monkeypatch) -> None:
@@ -204,6 +218,7 @@ def test_enabled_longform_start_uses_logged_contract_once(monkeypatch) -> None:
 
 def test_enabled_longform_scene_and_finalize_use_logged_tools(monkeypatch) -> None:
     calls: list[tuple[str, dict]] = []
+    _mock_owned_longform_job(monkeypatch)
     monkeypatch.setattr(tools, "_runpod_production_enabled", lambda: True)
     monkeypatch.setenv("STUDIO_RUNPOD_LONGFORM_ENABLED", "true")
 
@@ -234,6 +249,7 @@ def test_thumbnail_only_stays_local_even_when_longform_runpod_enabled(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
+    _mock_owned_longform_job(monkeypatch)
     monkeypatch.setattr(tools, "_runpod_production_enabled", lambda: True)
     monkeypatch.setenv("STUDIO_RUNPOD_LONGFORM_ENABLED", "1")
     monkeypatch.setattr(
@@ -255,6 +271,7 @@ def test_thumbnail_only_stays_local_even_when_longform_runpod_enabled(
 
 
 def test_runpod_owned_cancel_fails_closed_instead_of_claiming_local_cancel(monkeypatch) -> None:
+    _mock_owned_longform_job(monkeypatch)
     monkeypatch.setattr(
         runpod_bridge,
         "get_dispatch_receipt_by_studio_job_id",

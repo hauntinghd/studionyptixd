@@ -597,7 +597,10 @@ export function collectTracksFromTranscript(
         if (!extracted.job_id || map.has(extracted.job_id)) continue;
         map.set(extracted.job_id, {
             job_id: extracted.job_id,
-            kind: normalizeAgentJobKind(extracted.job_id, 'longform', extracted.title),
+            // A bare 12-hex Studio job id is the native short-form shape. Do
+            // not force transcript-recovered ids into the long-form lane;
+            // the status response can still correct the kind after polling.
+            kind: normalizeAgentJobKind(extracted.job_id, undefined, extracted.title),
             title: extracted.title,
             started_at: Date.now(),
         });

@@ -20,6 +20,7 @@ LOCAL_IDEMPOTENT_TOOLS = {
     "edit_production_scene_still",
     "edit_production_scenes_still",
     "repair_production_scene_animation",
+    "audit_and_repair_production_scenes",
     "re_edit_production",
     "expand_longform_visual_proof",
     "regenerate_longform_still",

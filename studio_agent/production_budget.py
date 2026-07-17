@@ -11,6 +11,11 @@ import os
 from dataclasses import dataclass
 from typing import Any
 
+from studio_agent.image_model_catalog import (
+    normalize_seedream_model_id,
+    seedream_provider,
+)
+
 
 class BudgetExceededError(RuntimeError):
     pass
@@ -47,6 +52,7 @@ EXPENSIVE_TOOLS = frozenset({
     "regenerate_production_scene",
     "animate_production_scenes",
     "repair_production_scene_animation",
+    "audit_and_repair_production_scenes",
     "finalize_production",
     "re_edit_production",
     "regenerate_longform_still",
@@ -66,6 +72,7 @@ DEFAULT_CAPS_USD = {
     "regenerate_production_scene": 2.0,
     "animate_production_scenes": 3.0,
     "repair_production_scene_animation": 2.0,
+    "audit_and_repair_production_scenes": 12.0,
     "finalize_production": 1.0,
     "re_edit_production": 1.5,
     "regenerate_longform_still": 0.25,
@@ -75,12 +82,16 @@ DEFAULT_CAPS_USD = {
 FALLBACK_USD = {
     "seedream_v45_per_image": 0.04,
     "seedream_v45_edit_per_image": 0.04,
+    "seedream_v4_per_image": 0.03,
+    "seedream_v4_edit_per_image": 0.03,
+    "seedream_v5_lite_per_image": 0.035,
+    "seedream_v5_lite_edit_per_image": 0.035,
     "fal_minimax_per_1k_chars": 0.10,
     "xai_tts_per_1m_chars": 15.00,
     "kling_v21_standard_per_second": 0.056,
     "kling_v21_pro_per_second": 0.098,
     "pixverse_v6_per_second": 0.045,
-    "seedance_20_i2v_per_second": 0.03,
+    "seedance_20_i2v_per_second": 0.3024,
     "ltx_098_distilled_per_second": 0.02,
     "mmaudio_v2_per_second": 0.001,
     "shortform_compose_allowance_usd": 0.05,
@@ -95,6 +106,7 @@ APPROVAL_REQUIRED_TOOLS = frozenset({
     "set_production_scenes_animate",
     "animate_production_scenes",
     "repair_production_scene_animation",
+    "audit_and_repair_production_scenes",
     "finalize_production",
     "finalize_longform_render",
 })
@@ -113,6 +125,7 @@ TOOL_LANES = {
     "regenerate_longform_still": "render",
     "animate_production_scenes": "render",
     "repair_production_scene_animation": "render",
+    "audit_and_repair_production_scenes": "render",
     "finalize_production": "render",
     "re_edit_production": "render",
     "analyze_reference_video": "analysis",
@@ -138,6 +151,14 @@ STAGE_GATES = {
     "regenerate_production_scene": ["cost_preflight", "regenerate_still", "image_to_video", "await_animation_result"],
     "animate_production_scenes": ["scene_approval_required", "image_to_video", "await_animation_result"],
     "repair_production_scene_animation": ["approved_still_preserved", "image_to_video", "sampled_frame_qa", "await_animation_result"],
+    "audit_and_repair_production_scenes": [
+        "confirmed_scene_scope",
+        "cost_preflight",
+        "transactional_still_repair",
+        "semantic_qa",
+        "image_to_video",
+        "atomic_commit",
+    ],
     "finalize_production": ["compose", "package", "publish_ready_artifact"],
     "start_longform_render": ["cost_preflight", "outline", "create_stills", "await_chapter_review"],
     "expand_longform_visual_proof": ["proof_approved", "cost_preflight", "gallery_stills", "await_chapter_review"],
@@ -198,10 +219,12 @@ def estimate_tool_cost(tool_name: str, args: dict[str, Any] | None = None) -> Bu
         est, breakdown = _estimate_longform_finalize(args)
     elif name == "generate_longform_thumbnails":
         count = max(1, min(3, int(args.get("count") or 3)))
-        est, note = _priced_unit("seedream_v45", fallback_key="seedream_v45_per_image", quantity=count)
+        image_model = str(args.get("image_model_id") or args.get("image_model") or "seedream_edit")
+        est, note, pricing_key = _seedream_image_estimate(image_model, edit=False, quantity=count)
         breakdown = {
             "thumbnails": count,
-            "seedream_v45_per_image": _unit_rate(est, count),
+            "image_model_pricing_unit": pricing_key,
+            "image_usd_per_image": _unit_rate(est, count),
             "pricing_note": note,
         }
     elif name == "edit_production_scenes_still":
@@ -211,29 +234,53 @@ def estimate_tool_cost(tool_name: str, args: dict[str, Any] | None = None) -> Bu
         except Exception:
             count = 12
         count = max(1, min(60, count))
-        est, note = _priced_unit("seedream_v45_edit", fallback_key="seedream_v45_edit_per_image", quantity=count)
+        image_model = str(args.get("image_model_id") or args.get("image_model") or "seedream_edit")
+        est, note, pricing_key = _seedream_image_estimate(image_model, edit=True, quantity=count)
         breakdown = {
-            "seedream_v45_edit_images": count,
-            "seedream_v45_edit_per_image": _unit_rate(est, count),
+            "image_model_pricing_unit": pricing_key,
+            "image_edit_count": count,
+            "image_edit_usd_per_image": _unit_rate(est, count),
             "scope": str(args.get("scope") or "character"),
             "pricing_note": note,
         }
     elif name in {"edit_production_scene_still", "regenerate_production_scene_still", "regenerate_longform_still"}:
-        est, note = _priced_unit("seedream_v45_edit", fallback_key="seedream_v45_edit_per_image", quantity=1.0)
-        breakdown = {"seedream_v45_edit_images": 1, "seedream_v45_edit_per_image": est, "pricing_note": note}
+        image_model = str(args.get("image_model_id") or args.get("image_model") or "seedream_edit")
+        est, note, pricing_key = _seedream_image_estimate(image_model, edit=True, quantity=1)
+        breakdown = {"image_model_pricing_unit": pricing_key, "image_edit_count": 1, "image_edit_usd_per_image": est, "pricing_note": note}
     elif name == "regenerate_production_scene":
-        still_est, still_note = _priced_unit(
-            "seedream_v45_edit",
-            fallback_key="seedream_v45_edit_per_image",
-            quantity=1.0,
-        )
+        image_model = str(args.get("image_model_id") or args.get("image_model") or "seedream_edit")
+        still_est, still_note, pricing_key = _seedream_image_estimate(image_model, edit=True, quantity=1)
         seconds = _video_seconds(args, count=1, default_per_scene=5.0)
         video_model = str(args.get("video_model") or args.get("model") or "seedance").strip().lower()
         video_est, video_rate, video_note = _video_cost(video_model, seconds)
         est = still_est + video_est
         breakdown = {
-            "seedream_v45_edit_images": 1,
-            "seedream_v45_edit_usd": round(still_est, 4),
+            "image_model_pricing_unit": pricing_key,
+            "image_edit_count": 1,
+            "image_edit_usd": round(still_est, 4),
+            "video_seconds": seconds,
+            "video_model": video_model,
+            "video_usd_per_second": video_rate,
+            "video_usd": round(video_est, 4),
+            "pricing_note": [still_note, video_note],
+        }
+    elif name == "audit_and_repair_production_scenes":
+        count = _scene_index_count(args, default=1)
+        image_model = str(args.get("image_model_id") or args.get("image_model") or "seedream_edit")
+        still_est, still_note, pricing_key = _seedream_image_estimate(
+            image_model,
+            edit=True,
+            quantity=count,
+        )
+        seconds = _video_seconds(args, count=count, default_per_scene=5.0)
+        video_model = str(args.get("video_model") or args.get("model") or "seedance").strip().lower()
+        video_est, video_rate, video_note = _video_cost(video_model, seconds)
+        est = still_est + video_est
+        breakdown = {
+            "scene_count": count,
+            "image_model_pricing_unit": pricing_key,
+            "image_edit_count": count,
+            "image_edit_usd": round(still_est, 4),
             "video_seconds": seconds,
             "video_model": video_model,
             "video_usd_per_second": video_rate,
@@ -312,6 +359,7 @@ def durable_state_contract(tool_name: str, args: dict[str, Any] | None = None) -
         "regenerate_production_scene_still",
         "animate_production_scenes",
         "repair_production_scene_animation",
+        "audit_and_repair_production_scenes",
         "finalize_production",
         "re_edit_production",
     }:
@@ -319,6 +367,30 @@ def durable_state_contract(tool_name: str, args: dict[str, Any] | None = None) -
     if "longform" in name:
         return {"kind": "longform", "key": "job_id", "job_id": job_id or None, "must_persist": True}
     return {"kind": "generic", "must_persist": False}
+
+
+def _seedream_image_estimate(
+    model_id: str,
+    *,
+    edit: bool,
+    quantity: int,
+) -> tuple[float, str, str]:
+    normalized = normalize_seedream_model_id(model_id) or "seedream_edit"
+    if seedream_provider(normalized) == "modal":
+        configured = max(0.0, _float(os.getenv("MODAL_SEEDREAM_ESTIMATED_UNIT_USD"), 0.0) or 0.0)
+        return (
+            round(configured * max(0, int(quantity or 0)), 4),
+            "modal:operator_metered_estimate" if configured else "modal:operator_cost_unknown",
+            f"{normalized}_{'edit' if edit else 't2i'}",
+        )
+    stem = {
+        "seedream_v4": "seedream_v4",
+        "seedream_v5_lite": "seedream_v5_lite",
+    }.get(normalized, "seedream_v45")
+    key = f"{stem}_edit" if edit else stem
+    fallback_key = f"{stem}_edit_per_image" if edit else f"{stem}_per_image"
+    amount, note = _priced_unit(key, fallback_key=fallback_key, quantity=quantity)
+    return amount, note, key
 
 
 def _estimate_shortform_start(args: dict[str, Any]) -> tuple[float, dict[str, Any]]:
@@ -338,10 +410,9 @@ def _estimate_shortform_start(args: dict[str, Any]) -> tuple[float, dict[str, An
         stills = round(still_rate * scenes, 4)
         still_note = "xai:grok-imagine-image_per_edit_fallback"
         still_model_note = "grok-imagine-image"
-    elif image_model in {"seedream_edit", "seedream_v45_edit"}:
-        stills, still_note = _priced_unit("seedream_v45_edit", fallback_key="seedream_v45_edit_per_image", quantity=scenes)
+    elif image_model in {"seedream_edit", "seedream_v45_edit", "seedream_v4", "seedream_v5_lite", "seedream_v5_lite_modal"}:
+        stills, still_note, still_model_note = _seedream_image_estimate(image_model, edit=True, quantity=scenes)
         still_rate = _unit_rate(stills, scenes)
-        still_model_note = "seedream_v45_edit"
     else:
         stills, still_note = _priced_unit("seedream_v45_edit", fallback_key="seedream_v45_edit_per_image", quantity=scenes)
         still_rate = _unit_rate(stills, scenes)
@@ -365,7 +436,7 @@ def _estimate_shortform_start(args: dict[str, Any]) -> tuple[float, dict[str, An
         "image_model": image_model or still_model_note,
         "image_model_pricing_unit": still_model_note,
         "still_usd_per_image": still_rate,
-        "seedream_v45_edit_per_image": _unit_rate(stills, scenes) if not image_model.startswith("grok") else 0.0,
+        "seedream_edit_per_image": _unit_rate(stills, scenes) if not image_model.startswith("grok") else 0.0,
         "stills_usd": round(stills, 4),
         "stills_pricing_note": still_note,
         "video_seconds": seconds,
@@ -432,13 +503,13 @@ def _estimate_shortform_expand(args: dict[str, Any]) -> tuple[float, dict[str, A
         still_note = "xai:grok-imagine-image_per_edit_fallback"
         still_model_note = "grok-imagine-image"
     else:
-        stills, still_note = _priced_unit(
-            "seedream_v45_edit",
-            fallback_key="seedream_v45_edit_per_image",
+        stills, still_note, priced_model = _seedream_image_estimate(
+            image_model,
+            edit=True,
             quantity=additional_scene_count,
         )
         still_rate = _unit_rate(stills, additional_scene_count)
-        still_model_note = image_model or "seedream_v45_edit"
+        still_model_note = image_model or priced_model
 
     new_scene_indices = list(range(existing_scene_count, target_scene_count))
     raw_animate_indices = args.get("animate_scene_indices")
@@ -728,13 +799,13 @@ def _video_cost(video_model: str, seconds: float) -> tuple[float, float, str]:
     model = str(video_model or "").strip().lower()
     qty = max(0.0, seconds)
     if model == "grok_imagine_video_15_1080p":
-        cost = round(0.25 * qty, 4)
+        cost = round(0.25 * qty + (0.01 if qty > 0 else 0.0), 4)
         return cost, _unit_rate(cost, qty), "xai:grok_imagine_video_15_1080p_per_second"
     if model == "grok_imagine_video_15":
-        cost = round(0.08 * qty, 4)
+        cost = round(0.14 * qty + (0.01 if qty > 0 else 0.0), 4)
         return cost, _unit_rate(cost, qty), "xai:grok_imagine_video_15_per_second"
     if model == "grok_imagine_video":
-        cost = round(0.05 * qty, 4)
+        cost = round(0.07 * qty + (0.002 if qty > 0 else 0.0), 4)
         return cost, _unit_rate(cost, qty), "xai:grok_imagine_video_per_second"
     if model == "kling21_master":
         cost = round(0.28 * qty, 4)
@@ -843,6 +914,9 @@ MODEL_DISPLAY_NAMES = {
     "seedream_v45_edit": "Seedream 4.5 Edit",
     "seedream45": "Seedream 4.5 T2I",
     "seedream_v45": "Seedream 4.5 T2I",
+    "seedream_v4": "Seedream 4.0",
+    "seedream_v5_lite": "Seedream 5.0 Lite",
+    "seedream_v5_lite_modal": "Seedream 5.0 Lite (Modal)",
     "ernie_image": "ERNIE-Image",
     "grok_imagine_video": "Grok Imagine Video",
     "grok_imagine_video_15": "Grok Imagine Video 1.5",

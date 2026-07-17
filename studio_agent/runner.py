@@ -5522,7 +5522,12 @@ def _verified_expand_command_target(session: dict[str, Any], job_id: str) -> boo
 
 
 def _verified_scene_repair_command_target(session: dict[str, Any], job_id: str) -> bool:
-    """Verify ownership and a live short-form scene set before any repair."""
+    """Verify ownership and a durable short-form scene set before any repair.
+
+    A failed render is still editable: repairing failed scenes is the purpose of
+    this command.  Active-job pruning may hide terminal work from the polling
+    ledger, but it must not turn an owned workspace into an unowned target.
+    """
 
     wanted_job = str(job_id or "").strip()
     wanted_user = str(session.get("user_id") or "").strip()
@@ -5545,11 +5550,8 @@ def _verified_scene_repair_command_target(session: dict[str, Any], job_id: str) 
         snapshot = get_job_snapshot(wanted_job, "shortform")
         status = str(snapshot.get("status") or "").strip().lower()
         stage = str(snapshot.get("stage") or "").strip().lower()
-        return status not in {"failed", "error", "cancelled", "missing"} and stage not in {
-            "failed",
-            "error",
-            "cancelled",
-        }
+        non_editable = {"cancelled", "canceled", "missing"}
+        return status not in non_editable and stage not in non_editable
     except Exception:
         return False
 
@@ -5575,6 +5577,26 @@ def _find_repairable_shortform_job(
     recovered = _recover_shortform_job_from_session(session)
     if recovered:
         candidate_ids.append(recovered)
+    # A terminal job is intentionally removed from active_jobs, but the typed
+    # command ledger remains durable same-session evidence for follow-up repair.
+    # Ownership and scene files are still re-verified below before selection.
+    last_command = session.get("last_studio_command")
+    if isinstance(last_command, dict):
+        for validation_key in ("validation", "command_validation"):
+            validation = last_command.get(validation_key)
+            resolved = validation.get("resolved_action") if isinstance(validation, dict) else None
+            arguments = resolved.get("arguments") if isinstance(resolved, dict) else None
+            if isinstance(arguments, dict):
+                candidate_ids.append(str(arguments.get("job_id") or ""))
+        for receipt_key in ("receipt", "execution_receipt"):
+            receipt = last_command.get(receipt_key)
+            if isinstance(receipt, dict):
+                candidate_ids.extend([
+                    str(receipt.get("target_job_id") or ""),
+                    str((receipt.get("result") or {}).get("job_id") or "")
+                    if isinstance(receipt.get("result"), dict)
+                    else "",
+                ])
     for message in reversed(list(session.get("messages") or [])[-120:]):
         if not isinstance(message, dict):
             continue
@@ -5686,6 +5708,50 @@ async def _bill_studio_command_compiler(
     }
 
 
+def _scene_repair_failure_message(
+    selected_scene_numbers: list[int],
+    result: dict[str, Any],
+    error: str = "",
+) -> str:
+    """Describe partial repair truth without treating attempted work as success."""
+
+    selected_text = ", ".join(str(number) for number in selected_scene_numbers)
+    failed_indices = {
+        int(value)
+        for value in list(result.get("failed") or [])
+        if isinstance(value, (int, float)) or str(value).strip().isdigit()
+    }
+    repaired_stills = sorted({
+        int(value) + 1
+        for value in list(result.get("repaired_stills") or [])
+        if (isinstance(value, (int, float)) or str(value).strip().isdigit())
+        and int(value) not in failed_indices
+    })
+    repaired_clips = sorted({
+        int(value) + 1
+        for value in list(result.get("repaired_animations") or [])
+        if (isinstance(value, (int, float)) or str(value).strip().isdigit())
+        and int(value) not in failed_indices
+    })
+    failed_scenes = sorted(index + 1 for index in failed_indices)
+    details: list[str] = []
+    if repaired_stills:
+        details.append(f"rebuilt stills for Scene(s) {', '.join(map(str, repaired_stills))}")
+    if repaired_clips:
+        details.append(f"re-animated Scene(s) {', '.join(map(str, repaired_clips))}")
+    if details or failed_scenes:
+        completed = "; ".join(details) if details else "no selected scene completed cleanly"
+        failed = ", ".join(map(str, failed_scenes)) or selected_text
+        return (
+            f"I audited exactly Scene(s) {selected_text}. The repair only partially completed: {completed}. "
+            f"Scene(s) {failed} still failed, so I am not claiming those scenes are fixed."
+        )
+    return (
+        f"I did not claim a repair for Scene(s) {selected_text} because the validated audit failed: "
+        f"{str(error or result.get('error') or 'unknown error')[:400]}"
+    )
+
+
 async def _apply_model_agnostic_studio_command(
     *,
     session: dict[str, Any],
@@ -5713,7 +5779,6 @@ async def _apply_model_agnostic_studio_command(
     from studio_agent.command_contract import (
         scene_repair_candidate,
         scene_repair_cancellation_evidence,
-        scene_repair_followup_candidate,
     )
 
     pending_repair = session.get("pending_scene_repair")
@@ -5728,6 +5793,10 @@ async def _apply_model_agnostic_studio_command(
             sid,
             messages=messages,
             pending_scene_repair={},
+            agent_mode="plan",
+            interaction_state="plan",
+            production_gate_open=False,
+            active_command_id="",
         ) or fresh
         return _turn_result(updated, {
             "session_id": sid,
@@ -5744,17 +5813,31 @@ async def _apply_model_agnostic_studio_command(
                 "completion_tokens": 0,
             },
         })
-    if has_pending_repair and not scene_repair_followup_candidate(user_text):
-        # An unrelated turn abandons the one-question repair clarification;
-        # it must not hijack later planning or conversation.
+    if has_pending_repair and re.search(
+        r"\b(?:work|focus|talk|move\s+on)\b.{0,80}\b(?:instead|something\s+else)\b",
+        str(user_text or ""),
+        flags=re.IGNORECASE,
+    ):
+        # An explicit topic switch is cancellation, not an ambiguous repair
+        # answer. Clear it without forcing the creator through repair dialogue.
         try:
-            store.update_session(str(session.get("session_id") or ""), pending_scene_repair={})
+            store.update_session(
+                str(session.get("session_id") or ""),
+                pending_scene_repair={},
+                agent_mode="plan",
+                interaction_state="plan",
+                production_gate_open=False,
+                active_command_id="",
+            )
         except Exception:
             pass
         return None
     wants_repair = bool(
         scene_repair_candidate(user_text)
-        or (has_pending_repair and scene_repair_followup_candidate(user_text))
+        # Once clarification is pending, every non-cancellation answer goes
+        # back through the compiler. Natural contextual answers such as "the
+        # second one" or "visuals only" must not be discarded by regex.
+        or has_pending_repair
     )
     wants_expand = bool(_wants_expand_visual_proof_short(user_text) and not wants_repair)
     if not wants_expand and not wants_repair:
@@ -5789,6 +5872,10 @@ async def _apply_model_agnostic_studio_command(
         updated = store.update_session(
             sid,
             messages=messages,
+            agent_mode="plan",
+            interaction_state="clarification",
+            production_gate_open=False,
+            active_command_id="",
             pending_actions=[],
             last_production={},
             short_expansion_intake={},
@@ -5826,7 +5913,15 @@ async def _apply_model_agnostic_studio_command(
         messages = list(fresh.get("messages") or [])
         assistant_text = f"That Studio Agent model cannot be used: {str(exc)[:300]} Select another model and try again."
         messages.append({"role": "assistant", "content": assistant_text})
-        updated = store.update_session(sid, messages=messages, short_expansion_intake={}) or fresh
+        updated = store.update_session(
+            sid,
+            messages=messages,
+            short_expansion_intake={},
+            agent_mode="plan",
+            interaction_state="clarification",
+            production_gate_open=False,
+            active_command_id="",
+        ) or fresh
         return _turn_result(updated, {
             "session_id": sid,
             "assistant_message": assistant_text,
@@ -5917,6 +6012,13 @@ async def _apply_model_agnostic_studio_command(
     )
 
     if validation.decision == "no_op":
+        store.update_session(
+            sid,
+            agent_mode="plan",
+            interaction_state="plan",
+            production_gate_open=False,
+            active_command_id="",
+        )
         return None
     if not validation.can_execute:
         fresh = store.get_session(sid) or session
@@ -5946,6 +6048,10 @@ async def _apply_model_agnostic_studio_command(
         updated = store.update_session(
             sid,
             messages=messages,
+            agent_mode="plan",
+            interaction_state="clarification",
+            production_gate_open=False,
+            active_command_id="",
             pending_actions=[],
             last_production={},
             short_expansion_intake={},
@@ -5972,33 +6078,110 @@ async def _apply_model_agnostic_studio_command(
     action = validation.resolved_action
     assert action is not None
     tool_args = action.arguments.as_legacy_dict()
-    profile = billing_profile or {}
-    await _fire_tool_start(
-        emit,
-        action.tool_name,
-        args=tool_args,
-        round=0,
-        awaiting_approval=False,
-        semantic_command=True,
+    # A validated, confirmed command is the only transition that opens the
+    # production gate. Clarification turns above close it and stay resource-free.
+    claimed_session = store.claim_production_gate(
+        sid,
         command_id=command.command_id,
+        job_id=candidate,
     )
-    async with studio_agent_slot(
-        user_id=user_id,
-        plan=membership_plan,
-        operation=action.tool_name,
-        unlimited=bool(profile.get("unlimited")),
-    ):
-        receipt = execute_validated_command(
-            validation,
-            user_id=user_id,
-            session_id=sid,
-            content_format=content_format,
-            tool_executor=execute_tool_logged,
+    if claimed_session is None:
+        fresh = store.get_session(sid) or session
+        assistant_text = (
+            "Another validated production command is already changing this Studio session. "
+            "I did not start a second mutation; wait for the active command to finish, then retry."
         )
-    verdict = verify_execution(
-        receipt,
-        snapshot_loader=get_job_snapshot,
-        fingerprint_loader=fingerprint_loader,
+        messages = list(fresh.get("messages") or [])
+        messages.append({"role": "assistant", "content": assistant_text})
+        updated = store.update_session(sid, messages=messages) or fresh
+        return _turn_result(updated, {
+            "session_id": sid,
+            "assistant_message": assistant_text,
+            "pending_actions": list(updated.get("pending_actions") or []),
+            "active_jobs": list(updated.get("active_jobs") or []),
+            "approval_mode": approval_mode,
+            "reasoning_depth": reasoning_depth,
+            "studio_command": command.model_dump(mode="json", exclude_none=True),
+            "command_validation": validation.model_dump(mode="json", exclude_none=True),
+            "usage": openrouter.usage_from_response(compiler_response) if compiler_response else {},
+            "billing": compiler_billing,
+        })
+    session = claimed_session
+    profile = billing_profile or {}
+
+    def _gate_checked_tool_executor(tool_name: str, arguments: dict[str, Any], **kwargs: Any) -> Any:
+        """Reject a mutation unless this exact validated command owns the gate."""
+
+        current = store.get_session(
+            sid,
+            reconcile_jobs=False,
+            _prune_active_jobs=False,
+        ) or {}
+        gate_matches = bool(
+            current.get("production_gate_open")
+            and str(current.get("interaction_state") or "") == "production"
+            and str(current.get("active_command_id") or "") == command.command_id
+        )
+        if not gate_matches:
+            return {
+                "ok": False,
+                "status": "rejected",
+                "error": "Production gate is closed or owned by a different validated command.",
+            }
+        return execute_tool_logged(tool_name, arguments, **kwargs)
+
+    def _execute_with_job_lock():
+        with store.production_job_mutation_lock(candidate):
+            return execute_validated_command(
+                validation,
+                user_id=user_id,
+                session_id=sid,
+                content_format=content_format,
+                tool_executor=_gate_checked_tool_executor,
+            )
+
+    try:
+        await _fire_tool_start(
+            emit,
+            action.tool_name,
+            args=tool_args,
+            round=0,
+            awaiting_approval=False,
+            semantic_command=True,
+            command_id=command.command_id,
+        )
+        async with studio_agent_slot(
+            user_id=user_id,
+            plan=membership_plan,
+            operation=action.tool_name,
+            unlimited=bool(profile.get("unlimited")),
+        ):
+            # Production tools are synchronous and may spend several minutes in
+            # provider I/O. Running them on the event loop prevents tool_start and
+            # heartbeat SSE frames from reaching the browser, making a real repair
+            # look idle until the UI times out.
+            receipt = await asyncio.to_thread(_execute_with_job_lock)
+        verdict = verify_execution(
+            receipt,
+            snapshot_loader=get_job_snapshot,
+            fingerprint_loader=fingerprint_loader,
+        )
+    except BaseException:
+        # Cancellation, slot failures, provider exceptions, and verifier errors
+        # must never leave a spend-capable gate open for a later turn.
+        store.close_production_gate(
+            sid,
+            command_id=command.command_id,
+            interaction_state="verification",
+        )
+        raise
+
+    # Close before response/UI bookkeeping so a serialization or SSE failure
+    # cannot leave production authorized after provider work has ended.
+    store.close_production_gate(
+        sid,
+        command_id=command.command_id,
+        interaction_state="verification",
     )
     tool_status = "ok" if receipt.status in {"accepted", "completed", "duplicate"} else "error"
     await _fire_tool_end(
@@ -6020,9 +6203,10 @@ async def _apply_model_agnostic_studio_command(
         repaired_stills = [int(value) + 1 for value in receipt.result.get("repaired_stills") or []]
         repaired_clips = [int(value) + 1 for value in receipt.result.get("repaired_animations") or []]
         if receipt.status in {"failed", "rejected"}:
-            assistant_text = (
-                f"I did not claim a repair for Scene(s) {selected_text} because the validated audit failed: "
-                f"{str(receipt.error or receipt.result.get('error') or 'unknown error')[:400]}"
+            assistant_text = _scene_repair_failure_message(
+                selected,
+                receipt.result,
+                receipt.error,
             )
         elif receipt.status == "duplicate" and receipt.result.get("idempotency_claim_pending"):
             assistant_text = (
@@ -6107,7 +6291,18 @@ async def _apply_model_agnostic_studio_command(
         ensure_ascii=False,
     )
     messages.append(_tool_observation_message(action.tool_name, observation))
-    messages.append({"role": "assistant", "content": assistant_text})
+    try:
+        command_snapshot = get_job_snapshot(candidate, "shortform")
+    except Exception:
+        command_snapshot = {}
+    assistant_message: dict[str, Any] = {"role": "assistant", "content": assistant_text}
+    if command_snapshot:
+        # Persist the owned production card with the answer. Terminal jobs are
+        # intentionally pruned from active_jobs, so relying on a browser-only
+        # snapshot or transcript id inference makes failed scene grids vanish
+        # after Sync/reload.
+        assistant_message["jobDeliverable"] = command_snapshot
+    messages.append(assistant_message)
     active_jobs = list(fresh.get("active_jobs") or [])
     if receipt.status in {"accepted", "completed", "duplicate"}:
         active_jobs = merge_active_jobs(
@@ -6115,7 +6310,17 @@ async def _apply_model_agnostic_studio_command(
             [{
                 "job_id": candidate,
                 "kind": "shortform",
-                "title": str(receipt.result.get("topic") or "Short-form video"),
+                # A repair receipt normally has no topic. Using the generic
+                # fallback here made stale-job reconciliation treat the
+                # repaired job as unrelated to the current production, add it
+                # back to blocked_job_ids, and hide its six-scene deliverable.
+                "title": str(
+                    command_snapshot.get("title")
+                    or receipt.result.get("topic")
+                    or "Short-form video"
+                ),
+                "status": str(command_snapshot.get("status") or "awaiting_approval"),
+                "stage": str(command_snapshot.get("stage") or "awaiting_animation_review"),
                 "started_at": time.time(),
             }],
         )
@@ -6127,6 +6332,7 @@ async def _apply_model_agnostic_studio_command(
     updated = store.update_session(
         sid,
         messages=messages,
+        interaction_state="verification",
         active_jobs=active_jobs,
         blocked_job_ids=blocked,
         skip_job_recovery=False,
@@ -6143,10 +6349,8 @@ async def _apply_model_agnostic_studio_command(
     ) or fresh
     await _fire_event(emit, "pending_actions", actions=[])
     await _fire_event(emit, "active_jobs", jobs=active_jobs)
-    try:
-        await _fire_event(emit, "job_snapshot", snapshot=get_job_snapshot(candidate, "shortform"))
-    except Exception:
-        pass
+    if command_snapshot:
+        await _fire_event(emit, "job_snapshot", snapshot=command_snapshot)
     return _turn_result(updated, {
         "session_id": sid,
         "assistant_message": assistant_text,
@@ -10374,10 +10578,10 @@ async def _run_turn_impl(
         await _fire_event(emit, "active_jobs", jobs=[])
         await _fire_event(emit, "session_state", **store.production_session_fields(session))
     messages.append({"role": "user", "content": _build_user_content(user_text, attachments)})
-    # Keep the in-flight session aligned with the turn transcript. Deterministic
-    # runner paths execute before the normal end-of-turn save and must still see
-    # (and persist) the user's latest answer.
-    session = {**session, "messages": messages}
+    # Persist the initiating user turn before any deterministic or paid tool
+    # path. Those paths return before the normal end-of-turn save, and a process
+    # or provider failure must not leave an assistant result without its prompt.
+    session = store.update_session(sid, messages=messages) or {**session, "messages": messages}
     try:
         session = store.reconcile_production_state(
             session,
@@ -10392,7 +10596,12 @@ async def _run_turn_impl(
         "session_state",
         **store.production_session_fields(session),
     )
-    if not plan_only:
+    pending_command_answer = bool(
+        str(session.get("interaction_state") or "") == "clarification"
+        and isinstance(session.get("pending_scene_repair"), dict)
+        and session.get("pending_scene_repair")
+    )
+    if not plan_only or pending_command_answer:
         semantic_command = await _apply_model_agnostic_studio_command(
             session=session,
             user_id=user_id,

@@ -52,6 +52,9 @@ def _state(snapshot=None, *, session_updates=None, repairable=False):
         "agent_mode": "studio",
         "approval_mode": "confirm",
         "content_format": "short",
+        "image_model": "seedream_edit",
+        "video_model": "seedance",
+        "media_route_revision": 7,
         "updated_at": 123.0,
         "active_jobs": [
             {"job_id": JOB_ID, "kind": "shortform", "title": "Skeleton psychology short"}
@@ -469,6 +472,9 @@ def test_scene_defect_language_compiles_model_agnostically_to_exact_repair(selec
     assert validation.resolved_action.tool_name == "audit_and_repair_production_scenes"
     assert validation.resolved_action.arguments.scene_indices == [1, 2, 3, 4, 5]
     assert validation.resolved_action.arguments.reason == text
+    assert validation.resolved_action.arguments.image_model_id == "seedream_edit"
+    assert validation.resolved_action.arguments.video_model == "seedance"
+    assert validation.resolved_action.arguments.media_route_revision == 7
     assert validation.resolved_action.expected.selected_scene_numbers == [2, 3, 4, 5, 6]
     assert validation.resolved_action.expected.untouched_scene_numbers == [1]
 
@@ -479,6 +485,7 @@ def test_scene_defect_language_compiles_model_agnostically_to_exact_repair(selec
         "Scenes 2 through 6 aren't properly doing what the script says.",
         "Those 2 through 6 aren't right for their narration.",
         "Fix scenes 2, 3, 4, 5 and 6 so each one tells its own story beat.",
+        "Fix scenes two, three, four, five, and six so each one tells its own story beat.",
     ],
 )
 def test_scene_repair_accepts_ordinary_wording_variants_without_model_inventing_scope(text):
@@ -489,6 +496,22 @@ def test_scene_repair_accepts_ordinary_wording_variants_without_model_inventing_
     assert command.repair is not None
     assert command.repair.scene_numbers == [2, 3, 4, 5, 6]
     assert validation.can_execute
+
+
+def test_compact_state_scene_rows_override_lagging_current_scene_for_scene_six_targeting():
+    snapshot = _snapshot(scene_count=6)
+    snapshot["current_scene"] = 5
+    state = _state(snapshot, repairable=True)
+    text = "Fix Scene 6 so it adheres to its prompt and the script."
+
+    assert state.job(JOB_ID).scene_count == 6
+    command = _plan(text, _tool_response(_proposal()), state=state)
+    validation = validate_studio_command(command, state, user_text=text)
+
+    assert command.repair is not None
+    assert command.repair.scene_numbers == [6]
+    assert validation.can_execute
+    assert validation.resolved_action.arguments.scene_indices == [5]
 
 
 @pytest.mark.parametrize(

@@ -93,6 +93,7 @@ RUNNER_ONLY_AGENT_TOOLS = frozenset({
     "set_production_scene_duration",
     "animate_production_scenes",
     "repair_production_scene_animation",
+    "audit_and_repair_production_scenes",
     "finalize_production",
     "finalize_longform_render",
     "re_edit_production",
@@ -1425,6 +1426,14 @@ def tool_schemas() -> list[dict[str, Any]]:
                             "description": "Zero-based scenes to audit. Required so excluded scenes remain untouched.",
                         },
                         "reason": {"type": "string"},
+                        "image_model_id": {
+                            "type": "string",
+                            "description": "Current Studio image picker override for this repair run.",
+                        },
+                        "video_model": {
+                            "type": "string",
+                            "description": "Current Studio i2v picker override for this repair run.",
+                        },
                     },
                     "required": ["job_id", "scene_indices"],
                 },
@@ -2448,6 +2457,56 @@ def _session_production_models(session_id: str | None) -> dict[str, Any]:
     }
 
 
+def _repair_route_snapshot(
+    session_id: str | None,
+    *,
+    image_model_id: str | None = None,
+    video_model: str | None = None,
+    route_revision: int | None = None,
+) -> dict[str, Any]:
+    """Read the binding media route immediately before a provider dispatch."""
+
+    session: dict[str, Any] = {}
+    if session_id:
+        session = store.get_session(
+            session_id,
+            reconcile_jobs=False,
+            _prune_active_jobs=False,
+        ) or {}
+    selected_image = (
+        store.normalize_image_model(session.get("image_model"))
+        if session
+        else (store.normalize_image_model(image_model_id) if image_model_id else "")
+    )
+    selected_video = (
+        store.normalize_video_model(session.get("video_model"))
+        if session
+        else (store.normalize_video_model(video_model) if video_model else "")
+    )
+    try:
+        revision = int(
+            session.get("media_route_revision")
+            if session
+            else route_revision or 1
+        )
+    except (TypeError, ValueError):
+        revision = 1
+    return {
+        "session_id": str(session_id or ""),
+        "revision": max(1, revision),
+        "image_model_id": selected_image,
+        "video_model": selected_video,
+    }
+
+
+def _same_media_route(left: dict[str, Any], right: dict[str, Any], *, stage: str) -> bool:
+    key = "image_model_id" if stage == "image" else "video_model"
+    return (
+        int(left.get("revision") or 1) == int(right.get("revision") or 1)
+        and str(left.get(key) or "") == str(right.get(key) or "")
+    )
+
+
 def _is_studio_admin_user(user_id: str) -> bool:
     uid = str(user_id or "").strip()
     if uid and uid in CLIPLAB_AGENT_ADMIN_USER_IDS:
@@ -3157,6 +3216,99 @@ def _expandable_proof_job(spec: dict[str, Any], ws: Path) -> bool:
     return False
 
 
+def _capture_shortform_background_state(workspace: Path) -> dict[str, Any]:
+    """Capture the small mutable surface needed to roll back a stale route."""
+
+    workspace = Path(workspace)
+    json_files: dict[str, bytes | None] = {}
+    for name in ("scenes.json", "result.json", "progress.json", "scene_plan.json"):
+        path = workspace / name
+        json_files[name] = path.read_bytes() if path.is_file() else None
+    media_files: set[str] = set()
+    for dirname in ("stills", "clips", "trimmed"):
+        root = workspace / dirname
+        if root.is_dir():
+            media_files.update(
+                str(path.relative_to(workspace)).replace("\\", "/")
+                for path in root.rglob("*")
+                if path.is_file()
+            )
+    return {"json_files": json_files, "media_files": media_files}
+
+
+def _rollback_stale_shortform_route(
+    workspace: Path,
+    snapshot: dict[str, Any],
+    *,
+    command_id: str,
+    revision: int,
+    stage: str,
+) -> list[str]:
+    """Quarantine new media and restore job metadata after a picker switch."""
+
+    workspace = Path(workspace)
+    before = set(snapshot.get("media_files") or set())
+    quarantined: list[str] = []
+    quarantine_root = (
+        workspace
+        / "stale_media_routes"
+        / f"{re.sub(r'[^a-zA-Z0-9_-]+', '-', command_id or 'background')[:48]}-r{int(revision)}-{stage}-{uuid.uuid4().hex[:8]}"
+    )
+    for dirname in ("stills", "clips", "trimmed"):
+        root = workspace / dirname
+        if not root.is_dir():
+            continue
+        for path in list(root.rglob("*")):
+            if not path.is_file():
+                continue
+            rel = str(path.relative_to(workspace)).replace("\\", "/")
+            if rel in before:
+                continue
+            target = quarantine_root / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            path.replace(target)
+            quarantined.append(str(target.relative_to(workspace)).replace("\\", "/"))
+    for name, payload in dict(snapshot.get("json_files") or {}).items():
+        path = workspace / str(name)
+        if payload is None:
+            path.unlink(missing_ok=True)
+            continue
+        temporary = path.parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
+        temporary.write_bytes(payload)
+        os.replace(temporary, path)
+    return quarantined
+
+
+def _shortform_background_route_is_current(
+    *,
+    session_id: str,
+    command_id: str,
+    job_id: str,
+    expected: dict[str, Any],
+    stage: str,
+) -> bool:
+    """Validate both picker revision and any newer production-gate owner."""
+
+    if not session_id:
+        return True
+    session = store.get_session(
+        session_id,
+        reconcile_jobs=False,
+        _prune_active_jobs=False,
+    ) or {}
+    if not session:
+        return False
+    if session.get("production_gate_open"):
+        active_command = str(session.get("active_command_id") or "").strip()
+        active_job = str(session.get("active_command_job_id") or "").strip()
+        if active_command and active_command != str(command_id or "").strip():
+            return False
+        if active_job and active_job != str(job_id or "").strip():
+            return False
+    current = _repair_route_snapshot(session_id)
+    return _same_media_route(expected, current, stage=stage)
+
+
 def expand_visual_proof_shortform(
     job_id: str,
     scene_count: int = 12,
@@ -3168,6 +3320,9 @@ def expand_visual_proof_shortform(
     preserve_scene_indices: list[int] | None = None,
     animate_scene_indices: list[int] | None = None,
     *,
+    image_model_id: str | None = None,
+    video_model: str | None = None,
+    route_revision: int | None = None,
     credit_reservation: dict[str, Any] | None = None,
     credit_user_id: str = "",
     credit_session_id: str = "",
@@ -3363,6 +3518,17 @@ def expand_visual_proof_shortform(
         default=str(animate_policy or "heroes") if str(animate_policy or "") in {"heroes", "all", "none"} else "heroes",
     )
     spec["expand_animate_policy"] = policy
+    initial_route = _repair_route_snapshot(
+        credit_session_id,
+        image_model_id=image_model_id,
+        video_model=video_model,
+        route_revision=route_revision,
+    )
+    spec["image_model_id"] = initial_route.get("image_model_id") or spec.get("image_model_id")
+    spec["video_model"] = initial_route.get("video_model") or spec.get("video_model")
+    spec["media_route_revision"] = int(initial_route.get("revision") or 1)
+    spec["media_route_session_id"] = str(credit_session_id or "")
+    spec["background_command_id"] = normalized_command_id
     if str(creative_direction or "").strip():
         # Keep expansion direction SHORT — long sludge in visual_brief caused artifacting.
         direction = re.sub(r"\s+", " ", str(creative_direction).strip())[:400]
@@ -3431,6 +3597,7 @@ def expand_visual_proof_shortform(
 
         hb_path = ws / "heartbeat.txt"
         stop_hb = threading.Event()
+        job_mutation = None
         hb_thread = threading.Thread(
             target=_heartbeat_loop,
             args=(stop_hb, hb_path),
@@ -3439,24 +3606,68 @@ def expand_visual_proof_shortform(
         )
         hb_thread.start()
         try:
+            # The validated runner's lock ends when this asynchronous tool
+            # returns. Re-acquire it inside the worker so no later command can
+            # mutate this job while expansion is still writing artifacts.
+            job_mutation = store.production_job_mutation_lock(job_id)
+            job_mutation.__enter__()
             hb_path.touch(exist_ok=True)
-            with production_slot("render"):
-                plan_scenes(
-                    category_key=str(spec.get("category_key") or "people_blogs"),
-                    topic=spec.get("topic"),
-                    workspace=ws,
-                    render_style=str(spec.get("render_style") or "cinematic"),
-                    tier=str(spec.get("tier") or "standard"),
-                    image_model_id=spec.get("image_model_id"),
-                    video_model=spec.get("video_model"),
-                    visual_brief=spec.get("visual_brief"),
-                    beats_target=target_scenes,
-                    script_override=spec.get("script"),
-                    user_id=spec.get("user_id"),
-                    default_animate=False,
-                    reference_images=list(spec.get("reference_images") or []),
-                    sound_design_brief=str(spec.get("sound_design_brief") or ""),
+            still_route: dict[str, Any] = {}
+            for _route_attempt in range(4):
+                still_route = _repair_route_snapshot(
+                    credit_session_id,
+                    image_model_id=image_model_id or spec.get("image_model_id"),
+                    video_model=video_model or spec.get("video_model"),
+                    route_revision=route_revision or spec.get("media_route_revision"),
                 )
+                spec["image_model_id"] = still_route.get("image_model_id") or spec.get("image_model_id")
+                spec["video_model"] = still_route.get("video_model") or spec.get("video_model")
+                spec["media_route_revision"] = int(still_route.get("revision") or 1)
+                with _expand_command_lock, _expand_job_file_lock(ws):
+                    latest_spec = json.loads(spec_path.read_text(encoding="utf-8"))
+                    latest_spec.update({
+                        "image_model_id": spec.get("image_model_id"),
+                        "video_model": spec.get("video_model"),
+                        "media_route_revision": spec.get("media_route_revision"),
+                        "media_route_session_id": str(credit_session_id or ""),
+                        "background_command_id": normalized_command_id,
+                    })
+                    _atomic_write_json(spec_path, latest_spec)
+                route_snapshot = _capture_shortform_background_state(ws)
+                with production_slot("render"):
+                    plan_scenes(
+                        category_key=str(spec.get("category_key") or "people_blogs"),
+                        topic=spec.get("topic"),
+                        workspace=ws,
+                        render_style=str(spec.get("render_style") or "cinematic"),
+                        tier=str(spec.get("tier") or "standard"),
+                        image_model_id=spec.get("image_model_id"),
+                        video_model=spec.get("video_model"),
+                        visual_brief=spec.get("visual_brief"),
+                        beats_target=target_scenes,
+                        script_override=spec.get("script"),
+                        user_id=spec.get("user_id"),
+                        default_animate=False,
+                        reference_images=list(spec.get("reference_images") or []),
+                        sound_design_brief=str(spec.get("sound_design_brief") or ""),
+                    )
+                if _shortform_background_route_is_current(
+                    session_id=str(credit_session_id or ""),
+                    command_id=normalized_command_id,
+                    job_id=job_id,
+                    expected=still_route,
+                    stage="image",
+                ):
+                    break
+                _rollback_stale_shortform_route(
+                    ws,
+                    route_snapshot,
+                    command_id=normalized_command_id,
+                    revision=int(still_route.get("revision") or 1),
+                    stage="image",
+                )
+            else:
+                raise RuntimeError("media route kept changing during short-form still generation")
             # Harden onto known-good ≤300 prompts; animate only per policy (not weak batch-all).
             planned = harden_planned_scenes_for_expand(
                 load_scenes(ws),
@@ -3497,7 +3708,42 @@ def expand_visual_proof_shortform(
                 ),
             }, indent=2), encoding="utf-8")
             if animate_indices:
-                animate_scenes_stage(ws, indices=animate_indices, tier=str(spec.get("tier") or "standard"))
+                for _route_attempt in range(4):
+                    animation_route = _repair_route_snapshot(
+                        credit_session_id,
+                        image_model_id=spec.get("image_model_id"),
+                        video_model=video_model or spec.get("video_model"),
+                        route_revision=route_revision or spec.get("media_route_revision"),
+                    )
+                    current_scenes = load_scenes(ws)
+                    for scene in current_scenes:
+                        if int(scene.get("index", -1)) in animate_indices:
+                            scene["video_model"] = animation_route.get("video_model")
+                            scene["media_route_revision"] = int(animation_route.get("revision") or 1)
+                    save_scenes(ws, current_scenes)
+                    animation_snapshot = _capture_shortform_background_state(ws)
+                    animate_scenes_stage(
+                        ws,
+                        indices=animate_indices,
+                        tier=str(spec.get("tier") or "standard"),
+                    )
+                    if _shortform_background_route_is_current(
+                        session_id=str(credit_session_id or ""),
+                        command_id=normalized_command_id,
+                        job_id=job_id,
+                        expected=animation_route,
+                        stage="video",
+                    ):
+                        break
+                    _rollback_stale_shortform_route(
+                        ws,
+                        animation_snapshot,
+                        command_id=normalized_command_id,
+                        revision=int(animation_route.get("revision") or 1),
+                        stage="video",
+                    )
+                else:
+                    raise RuntimeError("media route kept changing during short-form animation")
             final_scenes = load_scenes(ws)
             qa_blocked = [
                 int(scene.get("index", -1))
@@ -3600,6 +3846,8 @@ def expand_visual_proof_shortform(
                 pass
         finally:
             stop_hb.set()
+            if job_mutation is not None:
+                job_mutation.__exit__(None, None, None)
 
     threading.Thread(target=_work, daemon=False, name=f"expand-{job_id}").start()
     return json.dumps(immediate_result, indent=2, ensure_ascii=False)
@@ -3665,111 +3913,333 @@ def edit_production_scenes_still(
     }, indent=2)
 
 
+def _still_candidate_sidecars(path: Path) -> tuple[Path, ...]:
+    return (
+        path.with_suffix(path.suffix + ".stillqa.json"),
+        path.with_suffix(path.suffix + ".productqa.json"),
+    )
+
+
+def _discard_still_candidate(
+    workspace: Path,
+    candidate: Path,
+    *,
+    scene_index: int,
+    label: str,
+) -> str:
+    """Quarantine a complete but uncommitted candidate for operator forensics."""
+
+    if not candidate.is_file():
+        for sidecar in _still_candidate_sidecars(candidate):
+            sidecar.unlink(missing_ok=True)
+        return ""
+    rejected = workspace / "rejected_stills"
+    rejected.mkdir(parents=True, exist_ok=True)
+    safe_label = re.sub(r"[^a-z0-9_-]+", "-", str(label or "rejected").lower()).strip("-")[:36]
+    target = rejected / f"scene-{int(scene_index) + 1}-{safe_label}-{uuid.uuid4().hex[:8]}.png"
+    candidate.replace(target)
+    for source in _still_candidate_sidecars(candidate):
+        if source.is_file():
+            source.replace(target.with_suffix(target.suffix + source.name[len(candidate.name):]))
+    try:
+        return str(target.relative_to(workspace)).replace("\\", "/")
+    except Exception:
+        return str(target)
+
+
 def regenerate_production_scene_still(
     job_id: str,
     scene_index: int,
     *,
     reason: str = "",
     force_master_regenerate: bool = False,
+    image_model_id: str | None = None,
+    fallback_image_model_id: str | None = None,
+    session_id: str | None = None,
+    route_revision: int | None = None,
 ) -> str:
     ws = _shortform_workspace(job_id)
     from studio_agent.catalyst_still_audit import audit_scene_still, record_catalyst_still_artifact_learning
-    from skeleton_ai.styled_pipeline import regenerate_scene_with_catalyst
+    from skeleton_ai.styled_pipeline import (
+        MediaRouteChangedError,
+        load_scenes,
+        regenerate_scene_with_catalyst,
+        save_scenes,
+    )
+    from studio_agent import visual_qa
 
     idx = int(scene_index)
-    # The first audit is only repair input.  It describes the *old* still and
-    # must never be returned as the QA state for the replacement asset.
-    # Doing so made the review grid bind a newly generated scene to a stale
-    # failure (for example, scene 6 being blocked for an artifact it no longer
-    # contained).
-    repair_audit = audit_scene_still(ws, idx)
-    if force_master_regenerate:
-        # A creative redesign must render a new composition from the canonical
-        # reference. Editing the previous bland still would preserve the very
-        # staging the user asked Studio to replace.
-        repair_audit["method"] = "regenerate"
-        repair_audit["fix_instruction"] = ""
-        repair_audit["creative_redesign"] = True
-    if str(reason or "").strip():
-        repair_audit["user_reason"] = str(reason).strip()[:500]
-    res = regenerate_scene_with_catalyst(ws, idx, audit=repair_audit)
+    route_switches: list[dict[str, Any]] = []
+    quarantined: list[str] = []
+    last_route = _repair_route_snapshot(
+        session_id,
+        image_model_id=image_model_id,
+        route_revision=route_revision,
+    )
+    last_error = ""
 
-    # Re-audit the file written by the regeneration.  This is the only audit
-    # that may control the visible QA badge, approval gate, or Catalyst
-    # learning outcome for this generation.
-    current_audit = audit_scene_still(ws, idx)
-    if str(reason or "").strip():
-        current_audit["user_reason"] = str(reason).strip()[:500]
-
-    # A successful provider request is not a successful regeneration. Retry a
-    # real semantic failure with its QA correction folded into the next compact
-    # prompt. The cap prevents runaway spend while giving the model a genuine
-    # recovery chance rather than repeating an identical candidate.
-    retry_count = 0
-    while str(current_audit.get("method") or "").lower() == "regenerate" and retry_count < 2:
-        retry_result = regenerate_scene_with_catalyst(ws, idx, audit=current_audit)
-        retry_count += 1
-        if isinstance(retry_result, dict):
-            res = retry_result
-            res["catalyst_retry_count"] = retry_count
-        current_audit = audit_scene_still(ws, idx)
-        if str(reason or "").strip():
-            current_audit["user_reason"] = str(reason).strip()[:500]
-
-    # `regenerate_scene` replaces the image but historically left `still_qa`
-    # from the prior asset in scenes.json.  The client renders that persisted
-    # value, so a replacement could show an unrelated old-frame explanation.
-    # Persist QA from the replacement file atomically with its status.
-    from skeleton_ai.styled_pipeline import load_scenes, save_scenes
-    scenes = load_scenes(ws)
-    scene = next((item for item in scenes if int(item.get("index", -1)) == idx), None)
-    current_still_qa: dict[str, Any] | None = None
-    if scene is not None:
+    # A creator can switch provider/model while an earlier remote request is in
+    # flight. Bound restart churn, but never commit an old-revision result.
+    for route_attempt in range(1, 5):
+        route = _repair_route_snapshot(
+            session_id,
+            image_model_id=image_model_id,
+            route_revision=route_revision,
+        )
+        last_route = route
+        scenes = load_scenes(ws)
+        scene = next((item for item in scenes if int(item.get("index", -1)) == idx), None)
+        if scene is None:
+            raise ValueError(f"scene {idx} not found")
         try:
             spec = json.loads((ws / "job_spec.json").read_text(encoding="utf-8"))
         except Exception:
             spec = {}
-        if "skeleton" in str((spec or {}).get("render_style") or "").lower():
-            from studio_agent.visual_qa import audit_skeleton_still, _workspace_skeleton_reference
+        sid = str(scene.get("sid") or f"b{idx:02d}")
+        still_rel = str(scene.get("still_rel") or f"stills/{sid}.png")
+        still_target = ws / still_rel
+        selected_image = str(route.get("image_model_id") or image_model_id or "").strip()
+        selected_fallback = str(fallback_image_model_id or "").strip()
+        if not selected_fallback and selected_image and not selected_image.startswith("grok"):
+            selected_fallback = selected_image
+        if not selected_fallback:
+            selected_fallback = "seedream_edit"
 
-            sid = str(scene.get("sid") or f"b{idx:02d}")
-            still_rel = str(scene.get("still_rel") or f"stills/{sid}.png")
-            current_still_qa = audit_skeleton_still(
-                ws / still_rel,
-                reference=_workspace_skeleton_reference(ws),
+        repair_audit = audit_scene_still(ws, idx)
+        if force_master_regenerate:
+            repair_audit["method"] = "regenerate"
+            repair_audit["fix_instruction"] = ""
+            repair_audit["creative_redesign"] = True
+        if str(reason or "").strip():
+            repair_audit["user_reason"] = str(reason).strip()[:500]
+
+        candidate = ws / "stills" / (
+            f".{sid}.route-{int(route.get('revision') or 1)}-{uuid.uuid4().hex[:10]}.candidate.png"
+        )
+        current_audit: dict[str, Any] = {}
+        res: dict[str, Any] = {}
+        retry_count = 0
+        route_changed = False
+        while True:
+            dispatch_route = _repair_route_snapshot(
+                session_id,
+                image_model_id=selected_image,
+                route_revision=int(route.get("revision") or 1),
+            )
+            if not _same_media_route(route, dispatch_route, stage="image"):
+                route_changed = True
+                break
+
+            def _fallback_route_is_current() -> bool:
+                current_route = _repair_route_snapshot(
+                    session_id,
+                    image_model_id=selected_image,
+                    route_revision=int(route.get("revision") or 1),
+                )
+                return _same_media_route(route, current_route, stage="image")
+
+            try:
+                res = regenerate_scene_with_catalyst(
+                    ws,
+                    idx,
+                    audit=repair_audit if retry_count == 0 else current_audit,
+                    image_model_id=selected_image or None,
+                    fallback_image_model_id=selected_fallback,
+                    candidate_path=candidate,
+                    defer_commit=True,
+                    fallback_guard=_fallback_route_is_current,
+                )
+            except MediaRouteChangedError:
+                route_changed = True
+                break
+            current_audit = audit_scene_still(ws, idx, still_path=candidate)
+            if str(reason or "").strip():
+                current_audit["user_reason"] = str(reason).strip()[:500]
+            after_provider = _repair_route_snapshot(
+                session_id,
+                image_model_id=selected_image,
+                route_revision=int(route.get("revision") or 1),
+            )
+            if not _same_media_route(route, after_provider, stage="image"):
+                route_changed = True
+                break
+            if str(current_audit.get("method") or "").lower() != "regenerate" or retry_count >= 2:
+                break
+            rejected = _discard_still_candidate(
+                ws, candidate, scene_index=idx, label=f"qa-retry-{retry_count + 1}"
+            )
+            if rejected:
+                quarantined.append(rejected)
+            candidate = ws / "stills" / (
+                f".{sid}.route-{int(route.get('revision') or 1)}-{uuid.uuid4().hex[:10]}.candidate.png"
+            )
+            retry_count += 1
+
+        if route_changed:
+            rejected = _discard_still_candidate(ws, candidate, scene_index=idx, label="stale-route")
+            if rejected:
+                quarantined.append(rejected)
+            latest = _repair_route_snapshot(session_id, image_model_id=image_model_id, route_revision=route_revision)
+            route_switches.append({"from": route, "to": latest, "stage": "image"})
+            continue
+
+        skeleton_mode = "skeleton" in str((spec or {}).get("render_style") or "").lower()
+        if skeleton_mode:
+            current_still_qa = visual_qa.audit_skeleton_still(
+                candidate,
+                reference=visual_qa._workspace_skeleton_reference(ws),
                 locked_outfit=str((spec or {}).get("locked_outfit") or scene.get("outfit") or ""),
                 cast_count=int(scene.get("cast_count") or (spec or {}).get("cast_count") or 1),
+                force=True,
             )
-            scene["still_qa"] = current_still_qa
-            passed = current_still_qa.get("status") == "pass" and current_still_qa.get("pass") is True
-            scene["status"] = "still_ready" if passed else "qa_blocked"
-            if not passed:
-                scene["approved_for_video"] = False
-                scene["approved_for_animation"] = False
-                scene["animate"] = False
+        else:
+            current_still_qa = visual_qa.audit_generic_still(
+                candidate,
+                scene_contract=" ".join(
+                    str(scene.get(key) or "") for key in ("prompt", "scene_action", "narration")
+                ),
+                force=True,
+            )
+        passed = bool(
+            current_still_qa.get("status") == "pass"
+            and current_still_qa.get("pass") is True
+            and str(current_audit.get("method") or "").lower() != "regenerate"
+        )
+        learning = record_catalyst_still_artifact_learning(
+            channel_key=str(current_audit.get("channel_key") or ""),
+            audit=current_audit,
+            job_id=job_id,
+            scene_index=idx,
+        )
+        if not passed:
+            rejected = _discard_still_candidate(ws, candidate, scene_index=idx, label="qa-failed")
+            if rejected:
+                quarantined.append(rejected)
+            scenes = load_scenes(ws)
+            current = next((item for item in scenes if int(item.get("index", -1)) == idx), None)
+            if current is not None:
+                current["last_repair_error"] = str(
+                    current_still_qa.get("summary")
+                    or current_still_qa.get("error")
+                    or "Replacement candidate did not pass still QA"
+                )[:300]
+                current["last_repair_route"] = route
+                save_scenes(ws, scenes)
+            res.update({
+                "candidate_path": None,
+                "catalyst_retry_count": retry_count,
+                "catalyst_repair_audit": repair_audit,
+                "catalyst_audit": current_audit,
+                "still_qa": current_still_qa,
+                "committed": False,
+            })
+            return json.dumps({
+                "ok": False,
+                "job_id": job_id,
+                "scene_index": idx,
+                "scene": res,
+                "still_qa": current_still_qa,
+                "catalyst_audit": current_audit,
+                "catalyst_repair_audit": repair_audit,
+                "catalyst_learning": learning,
+                "route": route,
+                "route_switches": route_switches,
+                "quarantined_candidates": quarantined,
+                "error": "Replacement still failed visual QA; the previous still and clip were retained.",
+            }, indent=2)
+
+        # Re-read immediately before the atomic swap. A stale provider result is
+        # forensic evidence only; it can never overwrite the approved asset.
+        before_commit = _repair_route_snapshot(
+            session_id,
+            image_model_id=selected_image,
+            route_revision=int(route.get("revision") or 1),
+        )
+        if not _same_media_route(route, before_commit, stage="image"):
+            rejected = _discard_still_candidate(ws, candidate, scene_index=idx, label="stale-before-commit")
+            if rejected:
+                quarantined.append(rejected)
+            route_switches.append({"from": route, "to": before_commit, "stage": "image_commit"})
+            continue
+
+        prior = still_target.with_name(f".{still_target.name}.{uuid.uuid4().hex[:8]}.prior")
+        if still_target.is_file():
+            shutil.copy2(still_target, prior)
+        candidate.replace(still_target)
+        post_commit = _repair_route_snapshot(
+            session_id,
+            image_model_id=selected_image,
+            route_revision=int(route.get("revision") or 1),
+        )
+        if not _same_media_route(route, post_commit, stage="image"):
+            stale = candidate.with_name(f".{sid}.{uuid.uuid4().hex[:8]}.stale.png")
+            still_target.replace(stale)
+            if prior.is_file():
+                prior.replace(still_target)
+            rejected = _discard_still_candidate(ws, stale, scene_index=idx, label="stale-after-commit")
+            if rejected:
+                quarantined.append(rejected)
+            for sidecar in _still_candidate_sidecars(candidate):
+                sidecar.unlink(missing_ok=True)
+            route_switches.append({"from": route, "to": post_commit, "stage": "image_commit"})
+            continue
+        prior.unlink(missing_ok=True)
+        for source in _still_candidate_sidecars(candidate):
+            destination = still_target.with_suffix(still_target.suffix + source.name[len(candidate.name):])
+            destination.unlink(missing_ok=True)
+            if source.is_file():
+                source.replace(destination)
+
+        # Only a committed still invalidates its dependent animation.
+        clip = ws / "clips" / f"{sid}.mp4"
+        clip.unlink(missing_ok=True)
+        clip.with_suffix(clip.suffix + ".fal.json").unlink(missing_ok=True)
+        clip.with_suffix(clip.suffix + ".visualqa.json").unlink(missing_ok=True)
+        scenes = load_scenes(ws)
+        current = next((item for item in scenes if int(item.get("index", -1)) == idx), None)
+        if current is not None:
+            current["still_qa"] = current_still_qa
+            current["status"] = "still_ready"
+            current["clip_rel"] = None
+            current["approved_for_video"] = False
+            current["approved_for_animation"] = False
+            current["image_model_id"] = str(res.get("image_model_id") or selected_image or "")
+            current["media_route_revision"] = int(route.get("revision") or 1)
+            current.pop("last_repair_error", None)
             save_scenes(ws, scenes)
-    if isinstance(res, dict):
-        res["catalyst_repair_audit"] = repair_audit
-        res["catalyst_audit"] = current_audit
-        res["still_qa"] = current_still_qa
-    learning = record_catalyst_still_artifact_learning(
-        channel_key=str(current_audit.get("channel_key") or ""),
-        audit=current_audit,
-        job_id=job_id,
-        scene_index=idx,
-    )
+        res.update({
+            "candidate_path": None,
+            "catalyst_retry_count": retry_count,
+            "catalyst_repair_audit": repair_audit,
+            "catalyst_audit": current_audit,
+            "still_qa": current_still_qa,
+            "committed": True,
+            "media_route_revision": int(route.get("revision") or 1),
+        })
+        return json.dumps({
+            "ok": True,
+            "job_id": job_id,
+            "scene_index": idx,
+            "scene": res,
+            "still_qa": current_still_qa,
+            "catalyst_audit": current_audit,
+            "catalyst_repair_audit": repair_audit,
+            "catalyst_learning": learning,
+            "route": route,
+            "route_switches": route_switches,
+            "quarantined_candidates": quarantined,
+            "note": "Replacement still passed QA and was committed atomically; its prior clip was invalidated.",
+        }, indent=2)
+
+    last_error = "Media route changed repeatedly before a safe still commit."
     return json.dumps({
-        "ok": True,
+        "ok": False,
         "job_id": job_id,
-        "scene": res,
-        "catalyst_audit": current_audit,
-        "catalyst_repair_audit": repair_audit,
-        "catalyst_learning": learning,
-        "note": (
-            "Catalyst audited the scene still, preserved the exact channel style, and rebuilt it "
-            f"via {res.get('regenerate_method', 'catalyst')} to remove artifacting "
-            f"({', '.join(current_audit.get('issue_labels') or [])}). Review the updated still before approving."
-        ),
+        "scene_index": idx,
+        "route": last_route,
+        "route_switches": route_switches,
+        "quarantined_candidates": quarantined,
+        "error": last_error,
     }, indent=2)
 
 
@@ -3779,6 +4249,11 @@ def regenerate_production_scene(
     *,
     reason: str = "",
     animate: bool = True,
+    restage_direction: str = "",
+    image_model_id: str | None = None,
+    video_model: str | None = None,
+    session_id: str | None = None,
+    route_revision: int | None = None,
 ) -> str:
     """Rebuild one complete scene: still QA, then its I2V clip QA.
 
@@ -3791,13 +4266,22 @@ def regenerate_production_scene(
     # Short notes such as "fix the hand" remain Catalyst feedback. A real
     # spoken/typed art direction becomes the replacement scene brief.
     reason_text = str(reason or "").strip()
+    structured_restage = str(restage_direction or "").strip()
     reuse_existing_direction = bool(re.search(
         r"\b(?:current|actual|existing|stored)\s+(?:scene\s+)?prompt\b|\bbased\s+off\s+(?:the\s+)?(?:current|actual|existing|stored)\s+prompt\b",
         reason_text,
         re.I,
     ))
     try:
-        if reuse_existing_direction:
+        if structured_restage:
+            # QA's concrete restage is structured execution input. Do not let
+            # the generic "correspondence QA" reason branch discard it.
+            from skeleton_ai.styled_pipeline import apply_scene_direction
+
+            direction_update = apply_scene_direction(
+                _shortform_workspace(job_id), int(scene_index), structured_restage,
+            )
+        elif reuse_existing_direction:
             # "Regenerate scene 1 from its current prompt" means preserve a real
             # locked direction, but repair a lazy generic one from narration before
             # it is sent back to the image model.
@@ -3886,6 +4370,9 @@ def regenerate_production_scene(
         scene_index,
         reason=reason,
         force_master_regenerate=creative_redesign or force_master_for_artifact,
+        image_model_id=image_model_id,
+        session_id=session_id,
+        route_revision=route_revision,
     )
     still_result = json.loads(still_raw)
     if not animate:
@@ -3895,7 +4382,7 @@ def regenerate_production_scene(
     # structured per-scene result so one blocked scene cannot abort a selected
     # five-scene batch and falsely report that later scenes were handled.
     still_qa = still_result.get("still_qa") if isinstance(still_result.get("still_qa"), dict) else {}
-    if still_qa and still_qa.get("pass") is not True:
+    if not bool(still_result.get("ok", False)) or (still_qa and still_qa.get("pass") is not True):
         return json.dumps({
             "ok": False,
             "job_id": job_id,
@@ -3904,13 +4391,27 @@ def regenerate_production_scene(
             "scene_direction": direction_update,
             "catalyst_audit": still_result.get("catalyst_audit"),
             "still_qa": still_qa,
+            "route": still_result.get("route"),
+            "route_switches": still_result.get("route_switches") or [],
             "animation": None,
-            "error": "Replacement still is awaiting visual QA; animation was not started.",
-            "note": "Still rebuilt, but not animated because it did not yet pass visual QA.",
+            "error": str(still_result.get("error") or "Replacement still is awaiting visual QA; animation was not started."),
+            "note": "The previous approved asset was retained; animation was not started.",
         }, indent=2)
     # This performs the semantic still approval gate before any I2V spend.
     set_production_scenes_animate(job_id, True, [int(scene_index)])
-    animation_raw = animate_production_scenes(job_id, [int(scene_index)])
+    animation_route = _repair_route_snapshot(
+        session_id,
+        image_model_id=image_model_id,
+        video_model=video_model,
+        route_revision=route_revision,
+    )
+    animation_raw = animate_production_scenes(
+        job_id,
+        [int(scene_index)],
+        video_model=str(animation_route.get("video_model") or video_model or "") or None,
+        session_id=session_id,
+        route_revision=int(animation_route.get("revision") or 1),
+    )
     animation = json.loads(animation_raw)
     return json.dumps({
         "ok": bool(animation.get("ok", False)),
@@ -3921,6 +4422,11 @@ def regenerate_production_scene(
         "catalyst_audit": still_result.get("catalyst_audit"),
         "catalyst_learning": still_result.get("catalyst_learning"),
         "animation": animation,
+        "route": {
+            "image": still_result.get("route"),
+            "video": animation.get("route") or animation_route,
+        },
+        "route_switches": list(still_result.get("route_switches") or []) + list(animation.get("route_switches") or []),
         "note": "Scene regenerated end-to-end: compact still prompt, still QA, I2V, and sampled-frame identity QA.",
     }, indent=2)
 
@@ -4349,6 +4855,10 @@ def animate_production_scenes(
     job_id: str,
     scene_indices: list[int] | None = None,
     max_budget_usd: float | None = None,
+    *,
+    video_model: str | None = None,
+    session_id: str | None = None,
+    route_revision: int | None = None,
 ) -> str:
     ws = _shortform_workspace(job_id)
     from skeleton_ai.styled_pipeline import animate_scenes_stage, load_scenes, save_scenes
@@ -4361,6 +4871,11 @@ def animate_production_scenes(
         except Exception:
             if len(scenes) == 1:
                 scene_indices = [int(scenes[0].get("index", 0))]
+    initial_route = _repair_route_snapshot(
+        session_id,
+        video_model=video_model,
+        route_revision=route_revision,
+    )
     idx_set = set(scene_indices) if scene_indices else None
     targets: list[int] = []
     for sc in scenes:
@@ -4371,6 +4886,9 @@ def animate_production_scenes(
             continue
         sc["animate"] = True
         sc["approved_for_animation"] = True
+        if str(initial_route.get("video_model") or "").strip():
+            sc["video_model"] = str(initial_route["video_model"])
+            sc["media_route_revision"] = int(initial_route.get("revision") or 1)
         targets.append(idx)
     if not targets:
         raise ValueError(
@@ -4378,17 +4896,43 @@ def animate_production_scenes(
         )
     save_scenes(ws, scenes)
     scene_indices = targets
-    res = animate_scenes_stage(ws, indices=scene_indices, tier="standard")
+    res = animate_scenes_stage(
+        ws,
+        indices=scene_indices,
+        tier="standard",
+        route_resolver=(
+            lambda: _repair_route_snapshot(
+                session_id,
+                video_model=video_model,
+                route_revision=route_revision,
+            )
+        ) if session_id or video_model else None,
+    )
     scenes_after = load_scenes(ws)
-    failed = [
+    reported_failed = {
+        int(value)
+        for value in (res.get("failed") or [])
+        if str(value).lstrip("-").isdigit()
+    }
+    failed = sorted(reported_failed | {
         int(sc.get("index", -1))
         for sc in scenes_after
         if int(sc.get("index", -1)) in set(targets) and str(sc.get("status") or "") == "error"
-    ]
+    })
+    reported_animated = {
+        int(value)
+        for value in (res.get("animated") or [])
+        if str(value).lstrip("-").isdigit()
+    }
     animated_ok = [
         int(sc.get("index", -1))
         for sc in scenes_after
-        if int(sc.get("index", -1)) in set(targets) and sc.get("clip_rel")
+        if (
+            int(sc.get("index", -1)) in set(targets)
+            and int(sc.get("index", -1)) in reported_animated
+            and int(sc.get("index", -1)) not in set(failed)
+            and sc.get("clip_rel")
+        )
     ]
     result_path = ws / "result.json"
     result: dict[str, Any] = {}
@@ -4398,16 +4942,30 @@ def animate_production_scenes(
             result = loaded
     except Exception:
         pass
-    if failed and not animated_ok:
+    prior_failed = {
+        int(value)
+        for value in (result.get("animation_failed") or [])
+        if str(value).lstrip("-").isdigit()
+    }
+    # A repair command may invoke this tool once per selected scene.  Each
+    # invocation supersedes prior state for its own targets, while failures for
+    # the other selected scenes must remain visible in the shared result.
+    aggregate_failed = sorted((prior_failed - set(targets)) | set(failed))
+    human_failed = [index + 1 for index in aggregate_failed]
+    if aggregate_failed:
         result.update({
-            "status": "failed",
+            "status": "failed" if failed and not animated_ok else "partial",
             "job_id": job_id,
-            "error": f"Animation failed for scene(s): {failed}",
+            "scene_count": len(scenes_after),
+            "animated_scene_count": sum(bool(sc.get("clip_rel")) for sc in scenes_after),
+            "animation_failed": aggregate_failed,
+            "animation_failed_scene_numbers": human_failed,
+            "error": f"Animation failed for scene(s): {human_failed}",
         })
         result_path.write_text(json.dumps(result, indent=2), encoding="utf-8")
         (ws / "progress.json").write_text(json.dumps({
-            "stage": "failed",
-            "progress": 0,
+            "stage": "failed" if failed and not animated_ok else "awaiting_animation_review",
+            "progress": 0 if failed and not animated_ok else 88,
             "detail": result["error"],
         }, indent=2), encoding="utf-8")
     else:
@@ -4415,8 +4973,9 @@ def animate_production_scenes(
             "status": "awaiting_animation_review" if animated_ok else str(result.get("status") or "scenes_approved"),
             "job_id": job_id,
             "scene_count": len(scenes_after),
-            "animated_scene_count": len(animated_ok),
-            "animation_failed": failed,
+            "animated_scene_count": sum(bool(sc.get("clip_rel")) for sc in scenes_after),
+            "animation_failed": [],
+            "animation_failed_scene_numbers": [],
         })
         result.pop("error", None)
         result_path.write_text(json.dumps(result, indent=2), encoding="utf-8")
@@ -4435,6 +4994,8 @@ def animate_production_scenes(
         "animated": res.get("animated"),
         "failed": failed,
         "max_budget_usd": max_budget_usd,
+        "route": res.get("route") or initial_route,
+        "route_switches": res.get("route_switches") or [],
         "note": (
             "Animation completed for approved scenes. Review the clip in the Studio chat card."
             if not failed
@@ -4443,7 +5004,15 @@ def animate_production_scenes(
     }, indent=2)
 
 
-def repair_production_scene_animation(job_id: str, scene_index: int, reason: str = "") -> str:
+def repair_production_scene_animation(
+    job_id: str,
+    scene_index: int,
+    reason: str = "",
+    *,
+    video_model: str | None = None,
+    session_id: str | None = None,
+    route_revision: int | None = None,
+) -> str:
     """Re-animate an approved still after the creator rejects the clip.
 
     This deliberately does not regenerate or edit the still. Natural-language
@@ -4530,17 +5099,32 @@ def repair_production_scene_animation(job_id: str, scene_index: int, reason: str
     scene["approved_for_video"] = True
     scene["approved_for_animation"] = True
     scene["animate"] = True
-    scene["status"] = "still_ready"
     scene.pop("motion_fallback", None)
+    route = _repair_route_snapshot(
+        session_id,
+        video_model=video_model,
+        route_revision=route_revision,
+    )
+    if str(route.get("video_model") or "").strip():
+        scene["video_model"] = str(route["video_model"])
+        scene["media_route_revision"] = int(route.get("revision") or 1)
     sid = str(scene.get("sid") or f"b{idx:02d}")
     clip = ws / "clips" / f"{sid}.mp4"
-    clip.unlink(missing_ok=True)
-    for suffix in (".fal.json", ".visualqa.json"):
-        clip.with_suffix(clip.suffix + suffix).unlink(missing_ok=True)
-    scene["clip_rel"] = None
+    # Keep the currently playable clip attached until its replacement has
+    # completed.  animate_scenes_stage performs a transactional swap and will
+    # restore this artifact if the provider or QA path fails.
+    if not clip.is_file() or clip.stat().st_size <= 1024:
+        scene["status"] = "still_ready"
+        scene["clip_rel"] = None
     save_scenes(ws, scenes)
 
-    raw = animate_production_scenes(job_id, [idx])
+    raw = animate_production_scenes(
+        job_id,
+        [idx],
+        video_model=str(route.get("video_model") or video_model or "") or None,
+        session_id=session_id,
+        route_revision=int(route.get("revision") or 1),
+    )
     result = json.loads(raw or "{}")
     result["repair_kind"] = "animation_only"
     result["still_preserved"] = True
@@ -4549,10 +5133,161 @@ def repair_production_scene_animation(job_id: str, scene_index: int, reason: str
     return json.dumps(result, indent=2)
 
 
+_SCENE_CORRESPONDENCE_STILL_ISSUES = frozenset({
+    "narrative_mismatch",
+    "duplicate_adjacent",
+    "generic_staging",
+    "layout_artifact",
+    "identity_drift",
+    "text_artifact",
+    "artifact",
+})
+
+
+def _scene_correspondence_motion_only(report: dict[str, Any] | None) -> bool:
+    """Return True only for an explicit animation-only QA finding.
+
+    Scene-correspondence QA is primarily a *still* gate.  Structured narrative
+    or staging issues always require a restage, even when the prose also uses
+    words such as "emotional".  The previous substring check for ``"motion"``
+    accidentally matched ``"emotional"`` and sent bad stills down the i2v-only
+    path.
+    """
+
+    payload = report if isinstance(report, dict) else {}
+    issues = {
+        str(value or "").strip().lower()
+        for value in (payload.get("issues") or [])
+        if str(value or "").strip()
+    }
+    if issues & _SCENE_CORRESPONDENCE_STILL_ISSUES:
+        return False
+    # Unknown structured failures are not safe to downgrade to animation-only.
+    if issues:
+        return False
+
+    text = " ".join(
+        str(payload.get(key) or "")
+        for key in ("summary", "recommended_restage")
+    ).lower()
+    still_signal = re.search(
+        r"\b(?:narrative|generic|staging|composition|location|setting|opening\s+pose|"
+        r"frame[- ]zero|body\s+language|duplicate|adjacent|wrong\s+room|symmetr(?:y|ical)|"
+        r"single\s+skeleton|two\s+skeletons|emotional\s+beat|pose)\b",
+        text,
+    )
+    motion_signal = re.search(
+        r"\b(?:animation|animated|multi[- ]second\s+motion|motion\s+over\s+time|"
+        r"camera\s+push|background\s+parallax|vfx\s+(?:travel|movement)|"
+        r"weight\s+shift\s+over\s+time|head\s+snap\s+sequence|"
+        r"lacks?\s+(?:dynamic\s+)?movement)\b",
+        text,
+    )
+    return bool(motion_signal and not still_signal)
+
+
+def _reconcile_audit_repair_state(
+    workspace: Path,
+    *,
+    job_id: str,
+    selected: list[int],
+    failed: list[int],
+    reports: list[dict[str, Any]],
+    repaired_stills: list[int],
+    repaired_animations: list[int],
+) -> None:
+    """Replace stale production errors with the outcome of this repair run."""
+
+    result_path = workspace / "result.json"
+    try:
+        loaded = json.loads(result_path.read_text(encoding="utf-8"))
+        result = dict(loaded) if isinstance(loaded, dict) else {}
+    except Exception:
+        result = {}
+    try:
+        from skeleton_ai.styled_pipeline import load_scenes
+
+        scenes = load_scenes(workspace)
+    except Exception:
+        scenes = []
+    selected_set = set(selected)
+    failed_set = set(failed)
+    current_animation_failures = {
+        int(row.get("scene_index"))
+        for row in reports
+        if row.get("status") == "failed" and row.get("failure_stage") == "animation"
+    }
+    prior_animation_failures = {
+        int(value)
+        for value in (result.get("animation_failed") or [])
+        if str(value).lstrip("-").isdigit()
+    }
+    animation_failed = sorted((prior_animation_failures - selected_set) | current_animation_failures)
+    still_or_qa_failed = sorted(failed_set - current_animation_failures)
+    human_animation = [index + 1 for index in animation_failed]
+    human_still = [index + 1 for index in still_or_qa_failed]
+    failure_details = [
+        {
+            "scene_index": int(row.get("scene_index", -1)),
+            "scene_number": int(row.get("scene_index", -1)) + 1,
+            "stage": str(row.get("failure_stage") or "unknown"),
+            "error": str((row.get("repair") or {}).get("error") or row.get("error") or "repair failed")[:500],
+        }
+        for row in reports
+        if row.get("status") == "failed"
+    ]
+    if human_still and human_animation:
+        error = (
+            f"Scene repair/QA blocked scene(s): {human_still}; "
+            f"animation failed for scene(s): {human_animation}."
+        )
+    elif human_still:
+        error = f"Scene repair/QA blocked scene(s): {human_still}; animation was not started for those scenes."
+    elif human_animation:
+        error = f"Animation failed for scene(s): {human_animation}."
+    else:
+        error = ""
+    has_clip = any(bool(scene.get("clip_rel")) for scene in scenes)
+    status = "failed" if error else ("awaiting_animation_review" if has_clip else "awaiting_scene_review")
+    result.update({
+        "job_id": job_id,
+        "status": status,
+        "scene_count": len(scenes),
+        "animated_scene_count": sum(bool(scene.get("clip_rel")) for scene in scenes),
+        "animation_failed": animation_failed,
+        "animation_failed_scene_numbers": human_animation,
+        "repair_selected": selected,
+        "repair_failed": sorted(failed_set),
+        "repair_failed_scene_numbers": [index + 1 for index in sorted(failed_set)],
+        "repair_failure_details": failure_details,
+        "repair_status": "failed" if failed_set else "complete",
+        "repaired_stills": sorted(set(repaired_stills)),
+        "repaired_animations": sorted(set(repaired_animations)),
+    })
+    if error:
+        result["error"] = error
+    else:
+        result.pop("error", None)
+    result_path.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
+    (workspace / "progress.json").write_text(
+        json.dumps({
+            "stage": status,
+            "progress": 0 if error else (88 if has_clip else 80),
+            "detail": error or "Selected scenes passed repair QA and are ready for review.",
+        }, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+
 def audit_and_repair_production_scenes(
     job_id: str,
     scene_indices: list[int],
     reason: str = "",
+    *,
+    image_model_id: str | None = None,
+    video_model: str | None = None,
+    session_id: str | None = None,
+    route_revision: int | None = None,
 ) -> str:
     """Audit selected stills + clips and repair only failed assets.
 
@@ -4615,13 +5350,28 @@ def audit_and_repair_production_scenes(
     reports: list[dict[str, Any]] = []
     repaired_stills: list[int] = []
     repaired_animations: list[int] = []
+    attempted_still_repairs: list[int] = []
+    attempted_animation_repairs: list[int] = []
+    route_history: list[dict[str, Any]] = []
     failed: list[int] = []
     for index in selected:
+        scene_route = _repair_route_snapshot(
+            session_id,
+            image_model_id=image_model_id,
+            video_model=video_model,
+            route_revision=route_revision,
+        )
+        route_history.append({"scene_index": index, **scene_route})
         scenes = load_scenes(ws)
         scene = next((row for row in scenes if int(row.get("index", -1)) == index), None)
         if not scene:
             failed.append(index)
-            reports.append({"scene_index": index, "status": "failed", "error": "scene missing"})
+            reports.append({
+                "scene_index": index,
+                "status": "failed",
+                "failure_stage": "still",
+                "error": "scene missing",
+            })
             continue
         sid = str(scene.get("sid") or f"b{index:02d}")
         still = ws / str(scene.get("still_rel") or f"stills/{sid}.png")
@@ -4644,20 +5394,30 @@ def audit_and_repair_production_scenes(
         scene["still_qa"] = still_qa
         save_scenes(ws, scenes)
         if still_qa.get("pass") is not True:
+            attempted_still_repairs.append(index)
             try:
                 repair = json.loads(regenerate_production_scene(
-                    job_id, index, reason=reason or "Fresh visual QA detected still artifacting", animate=True,
+                    job_id,
+                    index,
+                    reason=reason or "Fresh visual QA detected still artifacting",
+                    animate=True,
+                    image_model_id=str(scene_route.get("image_model_id") or image_model_id or "") or None,
+                    video_model=str(scene_route.get("video_model") or video_model or "") or None,
+                    session_id=session_id,
+                    route_revision=int(scene_route.get("revision") or 1),
                 ))
             except Exception as exc:
                 repair = {"ok": False, "error": str(exc)}
-            repaired_stills.append(index)
-            if not repair.get("ok"):
+            if repair.get("ok"):
+                repaired_stills.append(index)
+            else:
                 failed.append(index)
             reports.append({
                 "scene_index": index,
                 "status": "repaired_still" if repair.get("ok") else "failed",
                 "still_qa": still_qa,
                 "repair": repair,
+                "failure_stage": None if repair.get("ok") else "still",
             })
             continue
 
@@ -4672,28 +5432,24 @@ def audit_and_repair_production_scenes(
         scene["scene_correspondence_qa"] = correspondence_qa
         save_scenes(ws, scenes)
         if correspondence_qa.get("pass") is not True:
-            summary_low = str(correspondence_qa.get("summary") or "").lower()
-            restage_low = str(correspondence_qa.get("recommended_restage") or "").lower()
-            motion_only_fail = any(
-                term in f"{summary_low} {restage_low}"
-                for term in (
-                    "weight shift", "torso twist", "shrug", "parallax", "camera push",
-                    "dynamic action", "no dynamic", "static anatomical", "static frontal",
-                    "neutral stance", "motion", "animation", "performance",
-                )
-            )
+            motion_only_fail = _scene_correspondence_motion_only(correspondence_qa)
             # Motion belongs in i2v. Do not rebuild the still for a performance brief.
-            if motion_only_fail and clip.is_file() and clip.stat().st_size > 1024:
+            if motion_only_fail:
+                attempted_animation_repairs.append(index)
                 try:
                     repair = json.loads(repair_production_scene_animation(
                         job_id,
                         index,
                         reason or str(correspondence_qa.get("summary") or "still is frame-zero; strengthen silent animation performance"),
+                        video_model=str(scene_route.get("video_model") or video_model or "") or None,
+                        session_id=session_id,
+                        route_revision=int(scene_route.get("revision") or 1),
                     ))
                 except Exception as exc:
                     repair = {"ok": False, "error": str(exc)}
-                repaired_animations.append(index)
-                if not repair.get("ok"):
+                if repair.get("ok"):
+                    repaired_animations.append(index)
+                else:
                     failed.append(index)
                 reports.append({
                     "scene_index": index,
@@ -4701,30 +5457,32 @@ def audit_and_repair_production_scenes(
                     "correspondence_qa": correspondence_qa,
                     "still_qa": still_qa,
                     "repair": repair,
+                    "failure_stage": None if repair.get("ok") else "animation",
                     "note": "Correspondence cited motion/performance — preserved still and re-animated",
-                })
-                continue
-            if motion_only_fail:
-                reports.append({
-                    "scene_index": index,
-                    "status": "passed",
-                    "correspondence_qa": correspondence_qa,
-                    "still_qa": still_qa,
-                    "note": "Motion/performance gaps are handled at animation time; still kept as frame-zero",
                 })
                 continue
             restage = str(correspondence_qa.get("recommended_restage") or "").strip()
             repair_reason = "Scene correspondence QA failed: " + str(correspondence_qa.get("summary") or "scene does not tell its own beat")
             if restage:
                 repair_reason += ". Re-stage as: " + restage
+            attempted_still_repairs.append(index)
             try:
                 repair = json.loads(regenerate_production_scene(
-                    job_id, index, reason=repair_reason[:1100], animate=True,
+                    job_id,
+                    index,
+                    reason=repair_reason[:1100],
+                    restage_direction=restage,
+                    animate=True,
+                    image_model_id=str(scene_route.get("image_model_id") or image_model_id or "") or None,
+                    video_model=str(scene_route.get("video_model") or video_model or "") or None,
+                    session_id=session_id,
+                    route_revision=int(scene_route.get("revision") or 1),
                 ))
             except Exception as exc:
                 repair = {"ok": False, "error": str(exc)}
-            repaired_stills.append(index)
-            if not repair.get("ok"):
+            if repair.get("ok"):
+                repaired_stills.append(index)
+            else:
                 failed.append(index)
             reports.append({
                 "scene_index": index,
@@ -4732,6 +5490,7 @@ def audit_and_repair_production_scenes(
                 "scene_contract": _scene_contract(scene)[:500],
                 "correspondence_qa": correspondence_qa,
                 "repair": repair,
+                "failure_stage": None if repair.get("ok") else "still",
             })
             continue
 
@@ -4752,14 +5511,21 @@ def audit_and_repair_production_scenes(
             current["i2v_qa"] = clip_qa
             save_scenes(ws, scenes)
         if clip_qa.get("pass") is not True:
+            attempted_animation_repairs.append(index)
             try:
                 repair = json.loads(repair_production_scene_animation(
-                    job_id, index, reason or "Fresh sampled-frame QA detected animation artifacting",
+                    job_id,
+                    index,
+                    reason or "Fresh sampled-frame QA detected animation artifacting",
+                    video_model=str(scene_route.get("video_model") or video_model or "") or None,
+                    session_id=session_id,
+                    route_revision=int(scene_route.get("revision") or 1),
                 ))
             except Exception as exc:
                 repair = {"ok": False, "error": str(exc)}
-            repaired_animations.append(index)
-            if not repair.get("ok"):
+            if repair.get("ok"):
+                repaired_animations.append(index)
+            else:
                 failed.append(index)
             reports.append({
                 "scene_index": index,
@@ -4768,6 +5534,7 @@ def audit_and_repair_production_scenes(
                 "still_qa": still_qa,
                 "clip_qa": clip_qa,
                 "repair": repair,
+                "failure_stage": None if repair.get("ok") else "animation",
             })
         else:
             reports.append({
@@ -4777,6 +5544,18 @@ def audit_and_repair_production_scenes(
                 "still_qa": still_qa,
                 "clip_qa": clip_qa,
             })
+    failed = sorted(set(failed))
+    repaired_stills = sorted(set(repaired_stills))
+    repaired_animations = sorted(set(repaired_animations))
+    _reconcile_audit_repair_state(
+        ws,
+        job_id=job_id,
+        selected=selected,
+        failed=failed,
+        reports=reports,
+        repaired_stills=repaired_stills,
+        repaired_animations=repaired_animations,
+    )
     return json.dumps({
         "ok": not failed,
         "job_id": job_id,
@@ -4784,7 +5563,10 @@ def audit_and_repair_production_scenes(
         "passed_without_changes": [row["scene_index"] for row in reports if row.get("status") == "passed"],
         "repaired_stills": repaired_stills,
         "repaired_animations": repaired_animations,
+        "attempted_still_repairs": sorted(set(attempted_still_repairs)),
+        "attempted_animation_repairs": sorted(set(attempted_animation_repairs)),
         "failed": failed,
+        "routes": route_history,
         "scenes": reports,
         "note": "Fresh artifact, identity, animation, and narrative-correspondence QA completed; only failed scenes were regenerated.",
     }, indent=2)
@@ -5307,6 +6089,7 @@ _SHORTFORM_EXISTING_JOB_TOOLS = frozenset({
     "set_production_scene_duration",
     "animate_production_scenes",
     "repair_production_scene_animation",
+    "audit_and_repair_production_scenes",
     "finalize_production",
     "re_edit_production",
 })
@@ -5449,6 +6232,22 @@ def execute_tool(
         render_args["title"] = resolved_title
         render_args["topic"] = resolved_topic
         outline = _build_outline_from_args(render_args)
+        initial_route = _repair_route_snapshot(
+            session_id,
+            image_model_id=str(render_args.get("image_model_id") or ""),
+            video_model=str(models.get("video_model") or ""),
+            route_revision=int(args.get("_media_route_revision") or 1),
+        )
+        # Bind the job to its Studio session, while provider workers continue
+        # re-reading this route before every dispatch, fallback, and commit.
+        outline["_session_id"] = str(session_id or "")
+        outline["image_model_id"] = str(
+            initial_route.get("image_model_id") or render_args.get("image_model_id") or ""
+        )
+        outline["video_model"] = str(
+            initial_route.get("video_model") or models.get("video_model") or ""
+        )
+        outline["media_route_revision"] = int(initial_route.get("revision") or 1)
         selected_image_model = str(args.get("image_model_id") or "").strip()
         if selected_image_model:
             channel["image_model_default"] = selected_image_model
@@ -5856,6 +6655,9 @@ def execute_tool(
             existing_scene_count=existing_count,
             preserve_scene_indices=preserve_indices,
             animate_scene_indices=animate_indices,
+            image_model_id=str(args.get("image_model_id") or "") or None,
+            video_model=str(args.get("video_model") or "") or None,
+            route_revision=int(args.get("_media_route_revision") or 1),
             credit_reservation=args.get("_credit_reservation") if isinstance(args.get("_credit_reservation"), dict) else None,
             credit_user_id=str(user_id or ""),
             credit_session_id=str(args.get("_credit_session_id") or session_id or ""),
@@ -5885,6 +6687,9 @@ def execute_tool(
             str(args.get("job_id") or ""),
             int(args.get("scene_index") or 0),
             reason=str(args.get("reason") or ""),
+            image_model_id=str(args.get("image_model_id") or "") or None,
+            session_id=session_id,
+            route_revision=int(args.get("_media_route_revision") or 1),
         )
 
     if name == "regenerate_production_scene":
@@ -5893,6 +6698,11 @@ def execute_tool(
             int(args.get("scene_index") or 0),
             reason=str(args.get("reason") or ""),
             animate=bool(args.get("animate", True)),
+            restage_direction=str(args.get("restage_direction") or ""),
+            image_model_id=str(args.get("image_model_id") or "") or None,
+            video_model=str(args.get("video_model") or "") or None,
+            session_id=session_id,
+            route_revision=int(args.get("_media_route_revision") or 1),
         )
 
     if name == "regenerate_production_scenes":
@@ -5929,13 +6739,23 @@ def execute_tool(
             max_budget_usd = float(raw_budget) if raw_budget is not None else None
         except (TypeError, ValueError):
             max_budget_usd = None
-        return animate_production_scenes(str(args.get("job_id") or ""), indices, max_budget_usd)
+        return animate_production_scenes(
+            str(args.get("job_id") or ""),
+            indices,
+            max_budget_usd,
+            video_model=str(args.get("video_model") or "") or None,
+            session_id=session_id,
+            route_revision=int(args.get("_media_route_revision") or 1),
+        )
 
     if name == "repair_production_scene_animation":
         return repair_production_scene_animation(
             str(args.get("job_id") or ""),
             int(args.get("scene_index") or 0),
             str(args.get("reason") or ""),
+            video_model=str(args.get("video_model") or "") or None,
+            session_id=session_id,
+            route_revision=int(args.get("_media_route_revision") or 1),
         )
 
     if name == "audit_and_repair_production_scenes":
@@ -5945,6 +6765,10 @@ def execute_tool(
             str(args.get("job_id") or ""),
             indices,
             str(args.get("reason") or ""),
+            image_model_id=str(args.get("image_model_id") or "") or None,
+            video_model=str(args.get("video_model") or "") or None,
+            session_id=session_id,
+            route_revision=int(args.get("_media_route_revision") or 1),
         )
 
     if name == "finalize_production":
@@ -7560,6 +8384,22 @@ def execute_tool_logged(
     session_id: str | None = None,
 ) -> str:
     """Run a tool with telemetry, budget enforcement, and atomic credit hold."""
+    if session_id and name in {
+        "expand_visual_proof_shortform",
+        "regenerate_production_scene_still",
+        "regenerate_production_scene",
+        "animate_production_scenes",
+        "repair_production_scene_animation",
+        "audit_and_repair_production_scenes",
+    }:
+        # Picker state is binding execution input, not an LLM-authored hint.
+        # Capture it before idempotency/budget/RunPod routing, while local repair
+        # loops continue re-reading the same session before each provider call.
+        route = _repair_route_snapshot(session_id)
+        arguments = dict(arguments or {})
+        arguments["image_model_id"] = route.get("image_model_id")
+        arguments["video_model"] = route.get("video_model")
+        arguments["_media_route_revision"] = int(route.get("revision") or 1)
     budget_estimate = None
     credit_reservation: dict[str, Any] | None = None
     billed_with_actuals = False
@@ -7683,13 +8523,22 @@ def execute_tool_logged(
                 },
                 # Animation can make one full-cost repair attempt after semantic
                 # QA rejection. Actual spend reconciliation refunds unused hold.
-                repair_reserve_pct=1.0 if name in {"animate_production_scenes", "repair_production_scene_animation"} else 0.25,
+                repair_reserve_pct=(
+                    1.0
+                    if name in {
+                        "animate_production_scenes",
+                        "repair_production_scene_animation",
+                        "audit_and_repair_production_scenes",
+                    }
+                    else 0.25
+                ),
             )
             if name in {
                 "start_shortform_generate",
                 "expand_visual_proof_shortform",
                 "animate_production_scenes",
                 "repair_production_scene_animation",
+                "audit_and_repair_production_scenes",
                 "finalize_production",
                 "edit_production_scene_still",
                 "edit_production_scenes_still",
@@ -7767,6 +8616,7 @@ def execute_tool_logged(
         if credit_reservation and not runpod_dispatched and name in {
             "animate_production_scenes",
             "repair_production_scene_animation",
+            "audit_and_repair_production_scenes",
             "finalize_production",
             "edit_production_scene_still",
             "edit_production_scenes_still",
@@ -7898,6 +8748,7 @@ def execute_tool_logged(
                 elif job_id and name in {
                     "animate_production_scenes",
                     "repair_production_scene_animation",
+                    "audit_and_repair_production_scenes",
                     "finalize_production",
                     "edit_production_scene_still",
                     "edit_production_scenes_still",

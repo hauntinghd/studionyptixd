@@ -2,24 +2,110 @@ name: Publish API Image
 
 on:
   workflow_dispatch:
+  pull_request:
+    branches:
+      - master
   push:
     branches:
       - master
       - codex/render-studio-backend
+      - "release/**"
     paths:
       - Dockerfile
+      - .dockerignore
+      - fly.toml
       - requirements.txt
       - "**/*.py"      # recursive so zerotier_private/, skeleton_ai/, long_form/ subpackage edits trigger the rebuild
       - client_secrets.json
-      - ops/run_render_service.sh
+      - ops/**
+      - cliplab/**
+      - long_form/**
+      - media_sources/**
+      - skeleton_ai/**
+      - studio/**
+      - studio_agent/**
+      - zerotier_private/**
       - ViralShorts-App/**
-      - .github/workflows/publish-api-image.yml
+      - .github/workflows/**
 
 permissions:
   contents: read
 
+# Serialize releases from the same branch so two master pushes cannot race and
+# leave production (or the verified `latest` tag) on the older commit.
+concurrency:
+  group: publish-api-image-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
+  verify-candidate:
+    name: Verify exact release candidate
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout exact candidate
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install backend test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pytest
+
+      - name: Run release-critical backend suites
+        run: |
+          python -m pytest -q \
+            tests/test_studio_paid_access.py \
+            tests/test_seedream_model_catalog.py \
+            tests/test_video_model_catalog.py \
+            tests/test_video_pricing.py \
+            tests/test_billing_webhook_idempotency.py \
+            test_unified_credits.py \
+            tests/test_unified_credits_settlement.py \
+            tests/test_runtime_security.py \
+            tests/test_security_boundaries.py \
+            tests/test_public_api_authorization.py \
+            tests/test_private_media_auth.py \
+            tests/test_media_file_ownership.py \
+            tests/test_studio_agent_job_ownership.py \
+            tests/test_long_form_router_job_ownership.py \
+            tests/test_static_security_remediation.py \
+            tests/test_clone_billing.py \
+            tests/test_longform_media_revision.py \
+            tests/test_shortform_background_route.py \
+            tests/test_skeleton_cast_integrity.py \
+            tests/test_studio_media_routing.py \
+            tests/test_studio_repair_safety.py \
+            tests/test_studio_session_store.py \
+            tests/test_studio_command_layer.py \
+            tests/test_studio_command_runner.py \
+            tests/test_runpod_standalone_routes.py
+
+      - name: Set up Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: ViralShorts-App/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: ViralShorts-App
+        run: npm ci
+
+      - name: Build production frontend
+        working-directory: ViralShorts-App
+        run: npm run build
+
   build-and-publish:
+    name: Publish and deploy verified candidate
+    needs: verify-candidate
+    if: ${{ github.event_name != 'pull_request' }}
     runs-on: ubuntu-latest
     env:
       DOCKERHUB_IMAGE: docker.io/nyptid/nyptid-studio-api
@@ -41,8 +127,14 @@ jobs:
         with:
           context: .
           push: true
+          build-args: |
+            GIT_SHA=${{ github.sha }}
+            FRONTEND_BUILD_ID=${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           tags: |
-            ${{ env.DOCKERHUB_IMAGE }}:latest
             ${{ env.DOCKERHUB_IMAGE }}:${{ github.sha }}
 
       # Auto-deploy from this checkout using fly.toml so Fly receives the same
@@ -58,15 +150,20 @@ jobs:
       # #119 / #120 / #121 to all push fresh images to Docker Hub but never
       # update Fly — Fly stayed pinned to whatever Casey last `flyctl deploy`'d
       # manually. Replaced with a step-output check so the condition
-      # evaluates against an explicit shell-tested value, and moved the
-      # FLY_API_TOKEN env into the deploy step (so flyctl picks it up) rather
-      # than the job (where it just polluted the if-context).
+      # evaluates against an explicit shell-tested value. The token is exposed
+      # only to the two steps that need it, never to the job-level `if` context.
       - name: Check Fly token availability
         id: fly_token_check
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
         run: |
-          if [ -z "${{ secrets.FLY_API_TOKEN }}" ]; then
+          if [ -z "${FLY_API_TOKEN:-}" ]; then
             echo "has_token=false" >> "$GITHUB_OUTPUT"
-            echo "::warning::FLY_API_TOKEN secret is unset — Fly deploy will be skipped."
+            if [ "$GITHUB_REF" = "refs/heads/master" ]; then
+              echo "::error::FLY_API_TOKEN is unset; refusing to report a successful master release without deploying it."
+              exit 1
+            fi
+            echo "::notice::FLY_API_TOKEN is unset; this non-production candidate will be built but not deployed."
           else
             echo "has_token=true" >> "$GITHUB_OUTPUT"
           fi
@@ -84,6 +181,38 @@ jobs:
             --remote-only \
             --config fly.toml \
             -a nyptid-studio \
+            --build-arg GIT_SHA="${GITHUB_SHA}" \
+            --build-arg FRONTEND_BUILD_ID="${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
             --strategy immediate \
             --wait-timeout 180
+
+      - name: Verify deployed release provenance
+        if: ${{ github.ref == 'refs/heads/master' && steps.fly_token_check.outputs.has_token == 'true' }}
+        run: |
+          set -euo pipefail
+          expected_bundle="${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          actual_sha=""
+          actual_bundle=""
+          for attempt in $(seq 1 18); do
+            health="$(curl --fail --silent --show-error --connect-timeout 3 --max-time 5 https://nyptid-studio.fly.dev/api/health || true)"
+            actual_sha="$(printf '%s' "$health" | jq -r '.backend_commit // ""' 2>/dev/null || true)"
+            actual_bundle="$(printf '%s' "$health" | jq -r '.frontend_bundle // ""' 2>/dev/null || true)"
+            if [ "$actual_sha" = "$GITHUB_SHA" ] && [ "$actual_bundle" = "$expected_bundle" ]; then
+              break
+            fi
+            echo "Waiting for release provenance (attempt ${attempt}/18): sha=${actual_sha:-missing} bundle=${actual_bundle:-missing}"
+            sleep 5
+          done
+          test "$actual_sha" = "$GITHUB_SHA"
+          test "$actual_bundle" = "$expected_bundle"
+          printf 'Verified Fly release sha=%s bundle=%s\n' "$actual_sha" "$actual_bundle"
+
+      # `latest` means "verified production", never merely "most recently
+      # built". Candidate branches retain their immutable commit-SHA tag.
+      - name: Promote verified image to latest
+        if: ${{ github.ref == 'refs/heads/master' && steps.fly_token_check.outputs.has_token == 'true' }}
+        run: |
+          docker buildx imagetools create \
+            --tag "${DOCKERHUB_IMAGE}:latest" \
+            "${DOCKERHUB_IMAGE}:${GITHUB_SHA}"
 # Force rebuild Mon Apr 13 09:21:18 EDT 2026

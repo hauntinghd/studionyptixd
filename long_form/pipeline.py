@@ -40,6 +40,7 @@ import base64
 import json
 import os
 import re
+import shutil
 import subprocess
 import threading
 import time
@@ -49,6 +50,14 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 import httpx
+
+from studio_agent.image_model_catalog import (
+    is_seedream_model,
+    normalize_seedream_model_id,
+    seedream_endpoint,
+    seedream_model_spec,
+    seedream_provider,
+)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -140,6 +149,14 @@ def _spawn_lf_background_coro(coro, job_id: str) -> asyncio.Task | None:
 
 class LFRenderError(RuntimeError):
     """Long-form render failure — caught by _run_render to mark the job failed."""
+
+
+class LFMediaRouteChanged(LFRenderError):
+    """A provider result became stale before it could be committed safely."""
+
+    def __init__(self, message: str, *, receipts: list[dict[str, Any]] | None = None):
+        super().__init__(message)
+        self.receipts = list(receipts or [])
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -328,9 +345,17 @@ def compute_render_cost(
         elif image_model in {"grok_imagine_standard", "grok-imagine-image"}:
             still_per = 0.02
             still_key = "stills_grok_imagine"
-        elif image_model in {"seedream_45", "seedream_edit", "seedream_v45"}:
+        elif is_seedream_model(image_model):
+            normalized_seedream = normalize_seedream_model_id(image_model)
+            seedream_stem = {
+                "seedream_v4": "seedream_v4",
+                "seedream_v5_lite": "seedream_v5_lite",
+            }.get(normalized_seedream, "seedream_v45")
             still_per, _ = _fal_unit_cost(
-                pricing, "seedream_v45", fallback_key="seedream_v45_per_image", quantity=1.0
+                pricing,
+                seedream_stem,
+                fallback_key=f"{seedream_stem}_per_image",
+                quantity=1.0,
             )
             still_key = "stills_seedream"
         else:
@@ -459,6 +484,376 @@ def load_state(job_id: str) -> dict[str, Any] | None:
         return json.loads(p.read_text(encoding="utf-8"))
     except Exception:
         return None
+
+
+def _longform_media_route_snapshot(
+    job_id: str,
+    *,
+    fallback_image_model: str = "",
+    fallback_video_model: str = "",
+) -> dict[str, Any]:
+    """Resolve the binding picker route immediately before a media dispatch.
+
+    Studio Agent persists ``_session_id`` plus the initial route token in the
+    outline.  When a session is available we re-read it, so a picker change is
+    visible to an already-running long-form job.  Router-only jobs retain the
+    immutable outline route instead of silently guessing a different model.
+    """
+
+    state = load_state(job_id) or {}
+    outline = state.get("outline") if isinstance(state.get("outline"), dict) else {}
+    session_id = str(
+        outline.get("_session_id")
+        or outline.get("session_id")
+        or state.get("session_id")
+        or ""
+    ).strip()
+    if session_id:
+        try:
+            from studio_agent import store
+
+            try:
+                session = store.get_session(
+                    session_id,
+                    reconcile_jobs=False,
+                    _prune_active_jobs=False,
+                ) or {}
+            except TypeError:
+                session = store.get_session(session_id) or {}
+            route = store.media_route_snapshot(session)
+            return {
+                "session_id": session_id,
+                "revision": max(1, int(route.get("revision") or 1)),
+                "image_model_id": str(
+                    route.get("image_model_id") or fallback_image_model or ""
+                ).strip(),
+                "video_model": str(
+                    route.get("video_model") or fallback_video_model or ""
+                ).strip(),
+                "updated_at": float(route.get("updated_at") or 0.0),
+            }
+        except Exception:
+            # A transient session read must not replace the route token already
+            # captured on the owned job with global defaults.
+            pass
+
+    try:
+        revision = max(
+            1,
+            int(
+                outline.get("media_route_revision")
+                or outline.get("_media_route_revision")
+                or state.get("media_route_revision")
+                or 1
+            ),
+        )
+    except (TypeError, ValueError):
+        revision = 1
+    return {
+        "session_id": session_id,
+        "revision": revision,
+        "image_model_id": str(
+            outline.get("image_model_id")
+            or state.get("image_model_id")
+            or fallback_image_model
+            or ""
+        ).strip(),
+        "video_model": str(
+            outline.get("video_model")
+            or state.get("video_model")
+            or fallback_video_model
+            or ""
+        ).strip(),
+        "updated_at": float(
+            outline.get("media_route_updated_at")
+            or state.get("media_route_updated_at")
+            or 0.0
+        ),
+    }
+
+
+def _same_longform_media_route(
+    expected: dict[str, Any],
+    current: dict[str, Any],
+    *,
+    stage: str,
+) -> bool:
+    key = "image_model_id" if stage == "image" else "video_model"
+    return (
+        int(expected.get("revision") or 1) == int(current.get("revision") or 1)
+        and str(expected.get(key) or "").strip() == str(current.get(key) or "").strip()
+    )
+
+
+def _longform_media_sidecars(path: Path) -> list[Path]:
+    return [
+        path.with_suffix(path.suffix + ".fal.json"),
+        path.with_suffix(path.suffix + ".visualqa.json"),
+    ]
+
+
+def _write_longform_route_receipt(
+    job_id: str,
+    receipt: dict[str, Any],
+    *,
+    canonical_asset: Path | None = None,
+) -> None:
+    receipts_dir = _job_dir(job_id) / "media_route_receipts"
+    receipts_dir.mkdir(parents=True, exist_ok=True)
+    stamp = time.time_ns()
+    event_path = receipts_dir / (
+        f"{stamp}-{str(receipt.get('stage') or 'media')}-"
+        f"{int(receipt.get('scene_index') or 0):04d}-{uuid.uuid4().hex[:8]}.json"
+    )
+    payload = dict(receipt)
+    payload["receipt_path"] = str(event_path.relative_to(_job_dir(job_id))).replace("\\", "/")
+    tmp = event_path.with_suffix(event_path.suffix + ".tmp")
+    tmp.write_text(json.dumps(payload, indent=2, ensure_ascii=True), encoding="utf-8")
+    tmp.replace(event_path)
+    if canonical_asset is not None and str(receipt.get("status") or "") == "committed":
+        sidecar = canonical_asset.with_suffix(canonical_asset.suffix + ".media-route.json")
+        side_tmp = sidecar.with_suffix(sidecar.suffix + ".tmp")
+        side_tmp.write_text(json.dumps(payload, indent=2, ensure_ascii=True), encoding="utf-8")
+        side_tmp.replace(sidecar)
+
+
+def _quarantine_longform_candidate(
+    job_id: str,
+    candidate: Path,
+    *,
+    stage: str,
+    scene_index: int,
+    reason: str,
+) -> str:
+    if not candidate.is_file():
+        for sidecar in _longform_media_sidecars(candidate):
+            sidecar.unlink(missing_ok=True)
+        return ""
+    quarantine_dir = _job_dir(job_id) / "quarantine" / stage
+    quarantine_dir.mkdir(parents=True, exist_ok=True)
+    safe_reason = re.sub(r"[^a-z0-9_-]+", "-", str(reason).lower()).strip("-")[:32]
+    target = quarantine_dir / (
+        f"scene-{int(scene_index):04d}-{safe_reason or 'stale'}-{uuid.uuid4().hex[:8]}"
+        f"{candidate.suffix}"
+    )
+    candidate.replace(target)
+    for source in _longform_media_sidecars(candidate):
+        if source.is_file():
+            source.replace(target.with_suffix(target.suffix + source.name[len(candidate.name):]))
+    return str(target.relative_to(_job_dir(job_id))).replace("\\", "/")
+
+
+def _dispatch_longform_media_revision_aware(
+    job_id: str,
+    *,
+    stage: str,
+    scene_index: int,
+    destination: Path,
+    dispatch: Callable[[str, Path, Callable[[], bool]], Path],
+    fallback_model: str,
+    route_resolver: Callable[[], dict[str, Any]] | None = None,
+    max_route_restarts: int = 4,
+) -> tuple[Path, dict[str, Any]]:
+    """Dispatch, validate and atomically commit one routed media artifact.
+
+    Remote calls only write hidden candidates. A picker change after dispatch,
+    during a provider fallback, or immediately before/after commit quarantines
+    that candidate and restarts with the latest route. The previous canonical
+    asset is retained until a current-revision candidate is safely committed.
+    """
+
+    normalized_stage = str(stage or "").strip().lower()
+    if normalized_stage not in {"image", "video"}:
+        raise ValueError(f"unsupported long-form media stage: {stage!r}")
+    destination = Path(destination)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    model_key = "image_model_id" if normalized_stage == "image" else "video_model"
+
+    def _resolve() -> dict[str, Any]:
+        if route_resolver is not None:
+            return dict(route_resolver() or {})
+        return _longform_media_route_snapshot(
+            job_id,
+            fallback_image_model=fallback_model if normalized_stage == "image" else "",
+            fallback_video_model=fallback_model if normalized_stage == "video" else "",
+        )
+
+    receipts: list[dict[str, Any]] = []
+    for route_attempt in range(1, max(1, int(max_route_restarts)) + 1):
+        route = _resolve()
+        model = str(route.get(model_key) or fallback_model or "").strip()
+        route[model_key] = model
+        revision = max(1, int(route.get("revision") or 1))
+        candidate = destination.with_name(
+            f".{destination.stem}.{normalized_stage}.route-{revision}-"
+            f"{uuid.uuid4().hex[:10]}{destination.suffix}"
+        )
+        started_at = time.time()
+
+        def _fallback_route_is_current() -> bool:
+            return _same_longform_media_route(route, _resolve(), stage=normalized_stage)
+
+        try:
+            rendered = dispatch(model, candidate, _fallback_route_is_current)
+            candidate = Path(rendered or candidate)
+            if not candidate.is_file() or candidate.stat().st_size <= 0:
+                raise LFRenderError(
+                    f"{normalized_stage} provider returned no candidate for scene {scene_index}"
+                )
+        except Exception as exc:
+            after_error = _resolve()
+            stale = not _same_longform_media_route(route, after_error, stage=normalized_stage)
+            quarantined = _quarantine_longform_candidate(
+                job_id,
+                candidate,
+                stage=normalized_stage,
+                scene_index=scene_index,
+                reason="stale-provider-error" if stale else "provider-failed",
+            )
+            receipt = {
+                "job_id": job_id,
+                "stage": normalized_stage,
+                "scene_index": int(scene_index),
+                "status": "stale_after_provider_error" if stale else "provider_failed",
+                "route_attempt": route_attempt,
+                "media_route_revision": revision,
+                "provider_model": model,
+                "route": route,
+                "current_route": after_error,
+                "quarantined_candidate": quarantined,
+                "prior_asset_retained": destination.is_file(),
+                "error": f"{type(exc).__name__}: {exc}"[:500],
+                "started_at": started_at,
+                "finished_at": time.time(),
+            }
+            receipts.append(receipt)
+            _write_longform_route_receipt(job_id, receipt)
+            if stale:
+                continue
+            raise
+
+        after_provider = _resolve()
+        if not _same_longform_media_route(route, after_provider, stage=normalized_stage):
+            quarantined = _quarantine_longform_candidate(
+                job_id,
+                candidate,
+                stage=normalized_stage,
+                scene_index=scene_index,
+                reason="stale-after-provider",
+            )
+            receipt = {
+                "job_id": job_id,
+                "stage": normalized_stage,
+                "scene_index": int(scene_index),
+                "status": "stale_after_provider",
+                "route_attempt": route_attempt,
+                "media_route_revision": revision,
+                "provider_model": model,
+                "route": route,
+                "current_route": after_provider,
+                "quarantined_candidate": quarantined,
+                "prior_asset_retained": destination.is_file(),
+                "started_at": started_at,
+                "finished_at": time.time(),
+            }
+            receipts.append(receipt)
+            _write_longform_route_receipt(job_id, receipt)
+            continue
+
+        before_commit = _resolve()
+        if not _same_longform_media_route(route, before_commit, stage=normalized_stage):
+            quarantined = _quarantine_longform_candidate(
+                job_id,
+                candidate,
+                stage=normalized_stage,
+                scene_index=scene_index,
+                reason="stale-before-commit",
+            )
+            receipt = {
+                "job_id": job_id,
+                "stage": normalized_stage,
+                "scene_index": int(scene_index),
+                "status": "stale_before_commit",
+                "route_attempt": route_attempt,
+                "media_route_revision": revision,
+                "provider_model": model,
+                "route": route,
+                "current_route": before_commit,
+                "quarantined_candidate": quarantined,
+                "prior_asset_retained": destination.is_file(),
+                "started_at": started_at,
+                "finished_at": time.time(),
+            }
+            receipts.append(receipt)
+            _write_longform_route_receipt(job_id, receipt)
+            continue
+
+        prior = destination.with_name(f".{destination.name}.{uuid.uuid4().hex[:8]}.prior")
+        had_prior = destination.is_file()
+        if had_prior:
+            shutil.copy2(destination, prior)
+        candidate.replace(destination)
+        after_commit = _resolve()
+        if not _same_longform_media_route(route, after_commit, stage=normalized_stage):
+            destination.replace(candidate)
+            if prior.is_file():
+                prior.replace(destination)
+            quarantined = _quarantine_longform_candidate(
+                job_id,
+                candidate,
+                stage=normalized_stage,
+                scene_index=scene_index,
+                reason="stale-after-commit",
+            )
+            receipt = {
+                "job_id": job_id,
+                "stage": normalized_stage,
+                "scene_index": int(scene_index),
+                "status": "stale_after_commit",
+                "route_attempt": route_attempt,
+                "media_route_revision": revision,
+                "provider_model": model,
+                "route": route,
+                "current_route": after_commit,
+                "quarantined_candidate": quarantined,
+                "prior_asset_retained": had_prior,
+                "started_at": started_at,
+                "finished_at": time.time(),
+            }
+            receipts.append(receipt)
+            _write_longform_route_receipt(job_id, receipt)
+            continue
+
+        prior.unlink(missing_ok=True)
+        for source in _longform_media_sidecars(candidate):
+            suffix = source.name[len(candidate.name):]
+            target = destination.with_suffix(destination.suffix + suffix)
+            target.unlink(missing_ok=True)
+            if source.is_file():
+                source.replace(target)
+        receipt = {
+            "job_id": job_id,
+            "stage": normalized_stage,
+            "scene_index": int(scene_index),
+            "status": "committed",
+            "route_attempt": route_attempt,
+            "media_route_revision": revision,
+            "provider_model": model,
+            "route": route,
+            "asset": str(destination.relative_to(_job_dir(job_id))).replace("\\", "/"),
+            "prior_asset_replaced": had_prior,
+            "started_at": started_at,
+            "finished_at": time.time(),
+        }
+        receipts.append(receipt)
+        _write_longform_route_receipt(job_id, receipt, canonical_asset=destination)
+        return destination, receipt
+
+    raise LFMediaRouteChanged(
+        f"{normalized_stage} route changed repeatedly for long-form scene {scene_index}; "
+        "no stale provider result was committed",
+        receipts=receipts,
+    )
 
 
 def update_status(job_id: str, **fields: Any) -> None:
@@ -932,9 +1327,36 @@ def _gen_scene_image(prompt: str, out_path: Path, *, image_model: str = "ernie")
         else:
             raise LFRenderError(f"{xai_model} returned no image data")
         return out_path
-    if normalized in {"seedream_45", "seedream_edit", "seedream_v45"}:
-        url = SEEDREAM_URL
-        payload = {"prompt": prompt, "image_size": {"width": 1920, "height": 1080}}
+    if is_seedream_model(normalized):
+        normalized = normalize_seedream_model_id(normalized)
+        from skeleton_ai.styled_stills import (
+            _modal_seedream_t2i_result,
+            _seedream_t2i_payload,
+        )
+        from skeleton_ai.canonical_edit import _first_result_image_url
+
+        payload = _seedream_t2i_payload(
+            normalized,
+            prompt=prompt,
+            negative_prompt="text, watermark, distorted anatomy, low quality",
+            seed=420042,
+        )
+        payload["image_size"] = "landscape_16_9"
+        provider = seedream_provider(normalized)
+        endpoint = seedream_endpoint(normalized, edit=False)
+        if provider == "modal":
+            spec = seedream_model_spec(normalized)
+            data = _modal_seedream_t2i_result(
+                endpoint,
+                payload,
+                remote_model_id=str(spec.get("remote_model_id") or "bytedance/seedream/v5/lite"),
+            )
+            img_url = _first_result_image_url(data)
+            if not img_url:
+                raise LFRenderError(f"{normalized} returned no image URL")
+            _download(img_url, out_path, timeout_s=120)
+            return out_path
+        url = f"https://fal.run/{endpoint}"
     else:
         url = ERNIE_URL
         payload = {"prompt": prompt, "image_size": {"width": 1920, "height": 1080}}
@@ -965,6 +1387,8 @@ def _gen_skeleton_longform_scene(
     *,
     topic: str = "",
     locked_outfit: str = "",
+    image_model_id: str = "seedream_edit",
+    route_guard: Callable[[], bool] | None = None,
 ) -> Path:
     """Reference-edit + QA one 16:9 skeleton long-form still.
 
@@ -1018,7 +1442,16 @@ def _gen_skeleton_longform_scene(
     compiled = compiled[:PROMPT_CHAR_BUDGET]
     rejected_reports: list[str] = []
     for attempt in (1, 2):
-        generate_still_edit(compiled, out_path, seed=420042 + attempt)
+        if route_guard is not None and not route_guard():
+            raise LFMediaRouteChanged(
+                "image route changed before skeleton still provider retry"
+            )
+        generate_still_edit(
+            compiled,
+            out_path,
+            seed=420042 + attempt,
+            image_model_id=image_model_id or "seedream_edit",
+        )
         qa = _audit(force=True)
         if qa.get("status") == "pass" and qa.get("pass") is True:
             return out_path
@@ -1040,6 +1473,8 @@ def _gen_scenes_batch(
     stills_dir: Path,
     image_model: str,
     *,
+    job_id: str | None = None,
+    route_resolver: Callable[[], dict[str, Any]] | None = None,
     on_progress: Callable[[int, int], None] | None = None,
     concurrency: int = 4,
     skeleton_style: bool = False,
@@ -1081,23 +1516,47 @@ def _gen_scenes_batch(
     if not pending:
         out_paths.sort(key=lambda p: int(re.search(r"scene_(\d+)", p.name).group(1)))
         return out_paths
-    with ThreadPoolExecutor(max_workers=concurrency) as ex:
-        if skeleton_style:
-            future_to_task = {
-                ex.submit(
-                    _gen_skeleton_longform_scene,
+
+    def _generate_one(gi: int, prompt: str, out: Path) -> Path:
+        if not job_id:
+            if skeleton_style:
+                return _gen_skeleton_longform_scene(
                     prompt,
                     out,
                     topic=topic,
                     locked_outfit=locked_outfit,
-                ): (gi, out)
-                for gi, prompt, out in pending
-            }
-        else:
-            future_to_task = {
-                ex.submit(_gen_scene_image, prompt, out, image_model=image_model): (gi, out)
-                for gi, prompt, out in pending
-            }
+                    image_model_id=image_model,
+                )
+            return _gen_scene_image(prompt, out, image_model=image_model)
+
+        def _dispatch(model: str, candidate: Path, route_guard: Callable[[], bool]) -> Path:
+            if skeleton_style:
+                return _gen_skeleton_longform_scene(
+                    prompt,
+                    candidate,
+                    topic=topic,
+                    locked_outfit=locked_outfit,
+                    image_model_id=model,
+                    route_guard=route_guard,
+                )
+            return _gen_scene_image(prompt, candidate, image_model=model)
+
+        committed, _receipt = _dispatch_longform_media_revision_aware(
+            job_id,
+            stage="image",
+            scene_index=gi,
+            destination=out,
+            dispatch=_dispatch,
+            fallback_model=image_model,
+            route_resolver=route_resolver,
+        )
+        return committed
+
+    with ThreadPoolExecutor(max_workers=concurrency) as ex:
+        future_to_task = {
+            ex.submit(_generate_one, gi, prompt, out): (gi, out)
+            for gi, prompt, out in pending
+        }
         for fut in as_completed(future_to_task):
             gi, out = future_to_task[fut]
             try:
@@ -1849,6 +2308,7 @@ async def run_sleep_doc_pipeline(
         None,
         lambda: _gen_scenes_batch(
             scene_chapters, stills_dir, image_model,
+            job_id=job_id,
             on_progress=_on_scene_progress,
             concurrency=4,
             skeleton_style=_outline_uses_skeleton(outline),
@@ -2094,31 +2554,47 @@ def regenerate_sleep_doc_still(job_id: str, scene_idx: int,
     prompt = (new_prompt or prompts[local_idx]).strip()
     if not prompt:
         raise LFRenderError("prompt cannot be empty")
+    job_dir = _job_dir(job_id)
+    out = job_dir / "stills" / f"scene_{scene_idx:04d}.png"
+    from long_form.prompts.channels import get_channel
+    channel = get_channel(state["channel_key"])
+    outline = state.get("outline") or {}
+    image_model = str(
+        outline.get("image_model_id") or channel.get("image_model_default") or "ernie"
+    )
+
+    def _dispatch(model: str, candidate: Path, route_guard: Callable[[], bool]) -> Path:
+        if _outline_uses_skeleton(outline):
+            return _gen_skeleton_longform_scene(
+                prompt,
+                candidate,
+                topic=str(outline.get("title") or outline.get("topic") or ""),
+                locked_outfit=str(
+                    outline.get("locked_outfit")
+                    or "simple dark turtleneck and dark trousers"
+                ),
+                image_model_id=model,
+                route_guard=route_guard,
+            )
+        return _gen_scene_image(prompt, candidate, image_model=model)
+
+    committed, _receipt = _dispatch_longform_media_revision_aware(
+        job_id,
+        stage="image",
+        scene_index=scene_idx,
+        destination=out,
+        dispatch=_dispatch,
+        fallback_model=image_model,
+    )
     if new_prompt and new_prompt != prompts[local_idx]:
         chapters[ch_idx]["scene_prompts"][local_idx] = new_prompt
         chapters_data["chapters"] = chapters
-        chapters_path.write_text(
+        tmp = chapters_path.with_suffix(chapters_path.suffix + ".tmp")
+        tmp.write_text(
             json.dumps(chapters_data, indent=2, ensure_ascii=True), encoding="utf-8"
         )
-    job_dir = _job_dir(job_id)
-    out = job_dir / "stills" / f"scene_{scene_idx:04d}.png"
-    if out.exists():
-        out.unlink()
-    from long_form.prompts.channels import get_channel
-    channel = get_channel(state["channel_key"])
-    image_model = channel.get("image_model_default", "ernie")
-    outline = state.get("outline") or {}
-    if _outline_uses_skeleton(outline):
-        return _gen_skeleton_longform_scene(
-            prompt,
-            out,
-            topic=str(outline.get("title") or outline.get("topic") or ""),
-            locked_outfit=str(
-                outline.get("locked_outfit")
-                or "simple dark turtleneck and dark trousers"
-            ),
-        )
-    return _gen_scene_image(prompt, out, image_model=image_model)
+        tmp.replace(chapters_path)
+    return committed
 
 
 REGENERATE_FUNCTIONS["sleep_doc"] = regenerate_sleep_doc_still
@@ -2276,7 +2752,7 @@ async def _expand_visual_proof(job_id: str) -> None:
     stills = await loop.run_in_executor(
         None,
         lambda: _gen_scenes_batch(
-            chapters, stills_dir, channel.get("image_model_default", "ernie"), concurrency=4,
+            chapters, stills_dir, channel.get("image_model_default", "ernie"), job_id=job_id, concurrency=4,
             on_progress=_on_scene_progress,
             skeleton_style=_outline_uses_skeleton(outline),
             topic=str(outline.get("title") or outline.get("topic") or ""),

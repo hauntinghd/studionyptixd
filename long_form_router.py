@@ -34,6 +34,7 @@ long_form.pipeline.run_sleep_doc_pipeline. PR #122 will register
 'v5_episode' (EM) in the same dispatcher.
 """
 from __future__ import annotations
+import hmac
 import json
 import os
 from pathlib import Path
@@ -147,6 +148,39 @@ def build_long_form_router(
     """
     router = APIRouter(prefix="/api/long-form", tags=["long-form"])
     auth_dep = Depends(require_auth) if require_auth else Depends(lambda: {"user_id": "anon"})
+
+    def _user_id(user: dict) -> str:
+        return str((user or {}).get("id") or (user or {}).get("user_id") or "").strip()
+
+    def _is_admin(user: dict) -> bool:
+        if not is_admin_check:
+            return True
+        try:
+            return bool(is_admin_check(user))
+        except Exception:
+            return False
+
+    def _require_owned_longform_job(job_id: str, user: dict) -> dict[str, Any]:
+        """Fail closed before mutating another creator's long-form workspace."""
+
+        from studio_agent import jobs as agent_jobs
+
+        access = agent_jobs.job_access_metadata(job_id, "longform")
+        if not access.get("exists") or str(access.get("kind") or "") != "longform":
+            raise HTTPException(404, "job_not_found")
+        owner_id = str(access.get("owner_id") or "").strip()
+        uid = _user_id(user)
+        if owner_id:
+            if uid and hmac.compare_digest(owner_id, uid):
+                return access
+            # Do not disclose whether a cross-account job exists, even when an
+            # admin panel accidentally carries another creator's job id.
+            raise HTTPException(404, "job_not_found")
+        # Legacy local jobs predate owner metadata. The surrounding admin gate
+        # is their only compatibility exception; new renders stamp owner below.
+        if _is_admin(user):
+            return access
+        raise HTTPException(404, "job_not_found")
 
     def _gate_admin(user: dict) -> None:
         if not is_admin_check:
@@ -435,13 +469,14 @@ def build_long_form_router(
     @router.post("/render-start")
     async def render_start_route(body: RenderRequest, request: Request, user: dict = auth_dep):
         _gate_admin(user)
+        outline = dict(body.outline or {})
+        outline["user_id"] = _user_id(user)
         from studio_agent.direct_production import (
             execute_logged_production,
             require_longform_runpod_if_global_enabled,
         )
 
         if require_longform_runpod_if_global_enabled():
-            outline = dict(body.outline or {})
             payload = await execute_logged_production(
                 "start_longform_render",
                 {
@@ -475,9 +510,8 @@ def build_long_form_router(
             channel = dict(get_channel(body.channel_key))
         except ValueError as e:
             raise HTTPException(404, str(e))
-        if not isinstance(body.outline, dict) or not (body.outline.get("chapters") or []):
+        if not isinstance(body.outline, dict) or not (outline.get("chapters") or []):
             raise HTTPException(400, "outline must include a non-empty chapters list")
-        outline = dict(body.outline)
         picked_image = str(body.image_model or outline.get("image_model_id") or "").strip()
         if picked_image:
             from studio_agent import store as agent_store
@@ -679,6 +713,7 @@ def build_long_form_router(
     ):
         _gate_admin(user)
         _validate_job_id(job_id)
+        _require_owned_longform_job(job_id, user)
         if body.scene_idx < 0 or body.scene_idx > 9999:
             raise HTTPException(400, "bad_scene_index")
         from studio_agent.direct_production import (
@@ -721,6 +756,7 @@ def build_long_form_router(
     async def job_finalize_route(job_id: str, request: Request, user: dict = auth_dep):
         _gate_admin(user)
         _validate_job_id(job_id)
+        _require_owned_longform_job(job_id, user)
         from studio_agent.direct_production import (
             execute_logged_production,
             require_longform_runpod_if_global_enabled,
@@ -762,6 +798,7 @@ def build_long_form_router(
         Returns cache-busted URL so the <img> reloads."""
         _gate_admin(user)
         _validate_job_id(job_id)
+        _require_owned_longform_job(job_id, user)
         if idx < 1 or idx > 12:
             raise HTTPException(400, "bad_thumbnail_idx")
         try:
@@ -788,6 +825,7 @@ def build_long_form_router(
         later from where it stopped."""
         _gate_admin(user)
         _validate_job_id(job_id)
+        _require_owned_longform_job(job_id, user)
         if _runpod_receipt(job_id) is not None:
             raise HTTPException(
                 409,

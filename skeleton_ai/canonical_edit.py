@@ -13,6 +13,7 @@ from __future__ import annotations
 import os
 import re
 import time
+import base64
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -25,6 +26,13 @@ except Exception:  # pragma: no cover - optional when simulation mode is active
 
 from .fal_auth import require_fal_key
 from . import render_simulation
+from studio_agent.image_model_catalog import (
+    modal_seedream_request_headers,
+    normalize_seedream_model_id,
+    seedream_endpoint,
+    seedream_model_spec,
+    seedream_provider,
+)
 
 SEEDREAM_EDIT_ENDPOINT = "fal-ai/bytedance/seedream/v4.5/edit"
 SEEDREAM_EDIT_URL = f"https://fal.run/{SEEDREAM_EDIT_ENDPOINT}"
@@ -111,7 +119,7 @@ def sanitize_skeleton_scene_action(
     visual_brief: str = "",
     narration: str = "",
     aspect_ratio: str = "9:16",
-    cast_count: int = 1,
+    cast_count: Any = None,
 ) -> tuple[str, bool]:
     """Return one compact, idempotent, physical scene direction."""
     from skeleton_ai.prompt_compose import (
@@ -427,11 +435,22 @@ def resolve_master_reference_urls(
     *,
     master_url: str = "",
     extra_refs: list[str] | None = None,
+    provider: str = "fal",
 ) -> list[str]:
-    """Return fal-uploadable URLs for edit (uploads local files when needed)."""
+    """Return provider-ready reference values, uploading only for fal."""
     if render_simulation.enabled():
         return ["simulation://canonical-master"]
-    _ensure_fal()
+    transport = str(provider or "fal").strip().lower()
+    if transport == "fal":
+        _ensure_fal()
+
+    def _provider_reference(local_path: Path) -> str:
+        if transport == "modal":
+            suffix = local_path.suffix.lower()
+            mime = "image/jpeg" if suffix in {".jpg", ".jpeg"} else "image/png"
+            encoded = base64.b64encode(local_path.read_bytes()).decode("ascii")
+            return f"data:{mime};base64,{encoded}"
+        return str(fal_client.upload_file(str(local_path)))
     urls: list[str] = []
     master = str(master_url or os.getenv("SKELETON_GLOBAL_REFERENCE_IMAGE_URL", "")).strip()
     if not master:
@@ -448,7 +467,7 @@ def resolve_master_reference_urls(
 
     local = _reference_url_to_local(master)
     if local:
-        urls.append(fal_client.upload_file(str(local)))
+        urls.append(_provider_reference(local))
     else:
         urls.append(master)
 
@@ -458,7 +477,7 @@ def resolve_master_reference_urls(
             continue
         local_extra = _reference_url_to_local(ref)
         if local_extra:
-            urls.append(fal_client.upload_file(str(local_extra)))
+            urls.append(_provider_reference(local_extra))
         else:
             urls.append(ref)
     return urls[:3]
@@ -516,7 +535,7 @@ def build_scene_edit_prompt(
     narration: str = "",
     catalyst_block: str = "",
     aspect_ratio: str = "9:16",
-    cast_count: int = 1,
+    cast_count: Any = None,
 ) -> str:
     """Scene-first edit prompt. Creative content is never deleted by guardrail bloat."""
     from skeleton_ai.prompt_compose import compose_skeleton_still_prompt, resolve_cast_count
@@ -579,6 +598,50 @@ def strengthen_skeleton_edit_instruction(instruction: str) -> str:
     )
 
 
+def _modal_seedream_result(endpoint_url: str, payload: dict[str, Any], *, remote_model_id: str) -> dict[str, Any]:
+    """Call an optional operator-supplied Modal HTTP endpoint."""
+    if not endpoint_url:
+        raise CanonicalEditError("Modal Seedream is not configured")
+    headers = modal_seedream_request_headers()
+    timeout = max(30, int(os.getenv("MODAL_SEEDREAM_TIMEOUT_SEC", "300") or "300"))
+    with httpx.Client(timeout=timeout, follow_redirects=False) as client:
+        response = client.post(
+            endpoint_url,
+            headers=headers,
+            json={"task": "image_edit", "model": remote_model_id, "input": payload},
+        )
+    if response.status_code not in (200, 201):
+        raise CanonicalEditError(
+            f"Modal Seedream edit failed ({response.status_code}): {response.text[:300]}"
+        )
+    result = response.json()
+    if not isinstance(result, dict):
+        raise CanonicalEditError("Modal Seedream edit returned a non-object response")
+    for key in ("output", "data"):
+        nested = result.get(key)
+        if isinstance(nested, dict) and (
+            nested.get("images") or nested.get("image") or nested.get("image_url")
+        ):
+            return nested
+    return result
+
+
+def _first_result_image_url(result: dict[str, Any]) -> str:
+    images = list((result or {}).get("images") or [])
+    if images:
+        first = images[0] or {}
+        if isinstance(first, dict):
+            value = str(first.get("url") or first.get("data") or "").strip()
+            if value:
+                return value
+    image = (result or {}).get("image")
+    if isinstance(image, dict):
+        value = str(image.get("url") or image.get("data") or "").strip()
+        if value:
+            return value
+    return str((result or {}).get("image_url") or "").strip()
+
+
 def generate_still_edit(
     prompt: str,
     out_path: Path,
@@ -588,55 +651,76 @@ def generate_still_edit(
     seed: int = DEFAULT_SEED,
     negative_prompt: str = "",
     cast_count: int = 1,
+    image_model_id: str = "seedream_edit",
 ) -> dict[str, Any]:
-    """Sync Seedream edit — one scene still from canonical master."""
+    """Sync reference-aware Seedream edit from the canonical master."""
     out_path = Path(out_path)
+    normalized_model = normalize_seedream_model_id(image_model_id) or "seedream_edit"
+    model_spec = seedream_model_spec(normalized_model)
+    provider = seedream_provider(normalized_model)
+    endpoint = seedream_endpoint(normalized_model, edit=True)
+    if not model_spec or not endpoint:
+        raise CanonicalEditError(f"Seedream edit model is unavailable: {normalized_model}")
     if out_path.exists() and out_path.stat().st_size > 1024:
-        return {"local_path": str(out_path), "provider": "seedream_v45_edit", "cached": True}
+        return {"local_path": str(out_path), "provider": normalized_model, "cached": True}
 
     if render_simulation.enabled():
         render_simulation.write_still(out_path, label="Seedream edit simulation")
         return {
             "local_path": str(out_path),
-            "provider": "simulation_seedream_edit",
+            "provider": f"simulation_{normalized_model}",
             "provider_label": "Simulation Seedream Edit",
             "seed": seed,
             "bytes": out_path.stat().st_size,
             "simulated": True,
         }
 
-    _ensure_fal()
-    image_urls = resolve_master_reference_urls(master_url=master_url, extra_refs=extra_refs)
+    image_urls = resolve_master_reference_urls(
+        master_url=master_url,
+        extra_refs=extra_refs,
+        provider=provider,
+    )
     neg = str(negative_prompt or "").strip() or negative_prompt_for_cast(cast_count)
+    request_payload: dict[str, Any] = {
+        "prompt": str(prompt or "")[:300],
+        "image_urls": image_urls,
+        "image_size": "auto_2K",
+        "num_images": 1,
+    }
+    if normalized_model == "seedream_edit":
+        request_payload["negative_prompt"] = neg[:1500]
+        request_payload["seed"] = int(seed)
+    elif normalized_model == "seedream_v4":
+        request_payload["seed"] = int(seed)
+    else:
+        request_payload["max_images"] = 1
+        request_payload["enable_safety_checker"] = True
     try:
-        result = _queue_result(
-            SEEDREAM_EDIT_ENDPOINT,
-            {
-                "prompt": str(prompt or "")[:300],
-                "image_urls": image_urls,
-                "negative_prompt": neg[:1500],
-                "image_size": "auto_2K",
-                "num_images": 1,
-                "seed": int(seed),
-            },
-            timeout_sec=FAL_EDIT_TIMEOUT_SEC,
-        )
+        if provider == "modal":
+            result = _modal_seedream_result(
+                endpoint,
+                request_payload,
+                remote_model_id=str(model_spec.get("remote_model_id") or "bytedance/seedream/v5/lite"),
+            )
+        else:
+            _ensure_fal()
+            result = _queue_result(endpoint, request_payload, timeout_sec=FAL_EDIT_TIMEOUT_SEC)
     except Exception as exc:
-        raise CanonicalEditError(f"seedream edit failed: {exc}") from exc
+        if isinstance(exc, CanonicalEditError):
+            raise
+        raise CanonicalEditError(f"{normalized_model} edit failed: {exc}") from exc
 
-    images = list((result or {}).get("images") or [])
-    if not images:
-        raise CanonicalEditError(f"seedream edit returned no images: {result!r}")
-    url = str((images[0] or {}).get("url") or "").strip()
+    url = _first_result_image_url(result)
     if not url:
-        raise CanonicalEditError("seedream edit image missing url")
+        raise CanonicalEditError(f"{normalized_model} edit returned no image URL: {result!r}")
 
     _download(url, out_path)
     return {
         "local_path": str(out_path),
         "cdn_url": url,
-        "provider": "seedream_v45_edit",
-        "provider_label": "Seedream 4.5 Edit (canonical)",
+        "provider": normalized_model,
+        "provider_label": f"{model_spec.get('label') or normalized_model} Edit (canonical)",
+        "provider_transport": provider,
         "seed": seed,
         "bytes": out_path.stat().st_size,
     }
@@ -649,6 +733,7 @@ async def generate_still_edit_async(
     master_url: str = "",
     extra_refs: list[str] | None = None,
     seed: int = DEFAULT_SEED,
+    image_model_id: str = "seedream_edit",
 ) -> dict[str, Any]:
     """Async wrapper for FastAPI pipeline (runs sync fal in thread if needed)."""
     import asyncio
@@ -660,4 +745,5 @@ async def generate_still_edit_async(
         master_url=master_url,
         extra_refs=extra_refs,
         seed=seed,
+        image_model_id=image_model_id,
     )

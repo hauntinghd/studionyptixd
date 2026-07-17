@@ -2,7 +2,7 @@
 i2v engine — multi-model fallback for skeleton + character imagery.
 
 Per the i2v bake-off (2026-05-04) + Marvel-vs-DC content-policy run (2026-05-06):
-  - Seedance 2.0   → strong char preservation, $0.10-0.15/clip BUT trips
+  - Seedance 2.0   → strong character preservation; premium token-priced lane
                      Bytedance's content policy on skeleton+weapon imagery
                      (the canonical Skeleton AI signature combination).
                      'Output video has sensitive content' / partner_validation_failed.
@@ -29,6 +29,7 @@ import mimetypes
 import os
 import time
 from pathlib import Path
+from typing import Callable
 
 import httpx
 try:
@@ -48,6 +49,31 @@ class I2VError(RuntimeError):
     pass
 
 
+class I2VRouteChanged(RuntimeError):
+    """The creator changed the selected media route before fallback dispatch."""
+
+
+def _require_current_fallback_route(
+    fallback_guard: Callable[[], bool] | None,
+) -> None:
+    """Fail closed before spending on a lower-priority provider request."""
+
+    if fallback_guard is None:
+        return
+    try:
+        route_is_current = fallback_guard()
+    except I2VRouteChanged:
+        raise
+    except Exception as exc:
+        raise I2VRouteChanged(
+            "Could not verify the current media route before video fallback"
+        ) from exc
+    if route_is_current is not True:
+        raise I2VRouteChanged(
+            "Media route changed before video fallback dispatch"
+        )
+
+
 SEEDANCE_ENDPOINT = "bytedance/seedance-2.0/image-to-video"
 PIXVERSE_V6_ENDPOINT = "fal-ai/pixverse/v6/image-to-video"
 KLING_PRO_ENDPOINT = "fal-ai/kling-video/v2.1/pro/image-to-video"
@@ -64,6 +90,26 @@ STANDARD_FALLBACK_CHAIN = [SEEDANCE_ENDPOINT, PIXVERSE_V6_ENDPOINT]
 
 AC_COST_STANDARD = 5
 AC_COST_PREMIUM = 7
+
+
+def _is_provider_credit_limit_error(exc: Exception) -> bool:
+    """Recognize an exhausted provider balance without masking auth defects."""
+
+    text = str(exc or "").strip().lower()
+    credit_signal = any(
+        phrase in text
+        for phrase in (
+            "used all available credits",
+            "reached its monthly spending limit",
+            "monthly spending limit",
+            "credit balance",
+            "insufficient credits",
+            "insufficient balance",
+            "billing limit",
+            "spending limit",
+        )
+    )
+    return credit_signal and any(signal in text for signal in ("403", "permission-denied", "credit", "billing", "spending"))
 
 VIDEO_MODELS: dict[str, dict[str, object]] = {
     "seedance": {
@@ -152,6 +198,7 @@ def _build_args(endpoint: str, motion_prompt: str, image_url: str,
             "image_url": image_url,
             "duration": str(duration_sec),
             "aspect_ratio": aspect_ratio,
+            "resolution": "720p",
             "generate_audio": False,
         }
     if endpoint == PIXVERSE_V6_ENDPOINT:
@@ -160,6 +207,8 @@ def _build_args(endpoint: str, motion_prompt: str, image_url: str,
             "image_url": image_url,
             "duration": str(duration_sec),
             "aspect_ratio": aspect_ratio,
+            "resolution": "720p",
+            "generate_audio_switch": False,
             "negative_prompt": _NEG_VIDEO,
         }
     if endpoint == KLING_PRO_ENDPOINT:
@@ -404,6 +453,7 @@ def generate(
     video_model: str | None = None,
     duration_sec: int = 5,
     aspect_ratio: str = "9:16",
+    fallback_guard: Callable[[], bool] | None = None,
 ) -> Path:
     """
     Animate a still into a short clip.
@@ -446,9 +496,11 @@ def generate(
     last_exc: Exception | None = None
     used_endpoint: str | None = None
     result: dict | None = None
-    for endpoint in chain:
+    for endpoint_index, endpoint in enumerate(chain):
         try:
             if str(endpoint).startswith("xai:"):
+                if endpoint_index:
+                    _require_current_fallback_route(fallback_guard)
                 result = _xai_i2v_result(
                     endpoint,
                     motion_prompt,
@@ -459,6 +511,8 @@ def generate(
             else:
                 # Lazy FAL upload so xAI-first chains still work without FAL when xAI succeeds.
                 if not image_url:
+                    if endpoint_index:
+                        _require_current_fallback_route(fallback_guard)
                     _ensure_fal()
                     image_url = fal_client.upload_file(str(still_path))
                 # Soften motion prompt on fallback after a moderation reject.
@@ -470,13 +524,20 @@ def generate(
                         + str(motion_prompt or "")
                     )[:300]
                 args = _build_args(endpoint, fb_motion, image_url, duration_sec, aspect_ratio)
+                if endpoint_index:
+                    # Recheck after a potentially slow upload and immediately
+                    # before the billable fallback generation request.
+                    _require_current_fallback_route(fallback_guard)
                 result = _queue_result(endpoint, args, timeout_sec=FAL_SUBSCRIBE_TIMEOUT_SEC)
             used_endpoint = endpoint
             break
+        except I2VRouteChanged:
+            raise
         except Exception as e:
             last_exc = e
             if endpoint != chain[-1] and (
                 _is_content_policy_error(e)
+                or _is_provider_credit_limit_error(e)
                 or "400" in str(e)
                 or "invalid argument" in str(e).lower()
             ):

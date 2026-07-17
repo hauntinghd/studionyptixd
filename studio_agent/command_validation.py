@@ -62,6 +62,9 @@ class LegacySceneRepairArguments(ContractModel):
     job_id: str
     scene_indices: list[int] = Field(min_length=1, max_length=60)
     reason: str = Field(default="", max_length=2_000)
+    image_model_id: str = Field(default="", max_length=128)
+    video_model: str = Field(default="", max_length=128)
+    media_route_revision: int = Field(default=1, ge=1)
 
     def as_legacy_dict(self) -> dict[str, Any]:
         return self.model_dump(mode="json", exclude_none=True)
@@ -360,6 +363,9 @@ def _validate_scene_repair(
             job_id=job.job_id,
             scene_indices=[number - 1 for number in selected],
             reason=reason,
+            image_model_id=state.image_model_id,
+            video_model=state.video_model,
+            media_route_revision=state.media_route_revision,
         ),
         expected=expected,
         state_revision=state.state_revision,

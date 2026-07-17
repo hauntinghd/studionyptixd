@@ -1,4 +1,4 @@
-import { ArrowLeft, Box, Check, CheckCircle2, Clapperboard, Download, FileText, Film, Loader2, Play, RefreshCw, Search, Square, Wand2, X } from 'lucide-react';
+import { AlertTriangle, ArrowLeft, Box, Check, CheckCircle2, Clapperboard, Download, FileText, Film, Loader2, Play, RefreshCw, Search, Square, Wand2, X } from 'lucide-react';
 import { createElement, memo, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import { AuthContext } from '../../shared';
 import { useAuthenticatedMediaUrls } from '../../hooks/useAuthenticatedMedia';
@@ -92,9 +92,12 @@ function StillThumb({
 }) {
     const { session } = useContext(AuthContext);
     const [src, setSrc] = useState('');
+    const [loadState, setLoadState] = useState<'loading' | 'ready' | 'missing' | 'error'>('loading');
 
     useEffect(() => {
         const tok = session?.access_token;
+        setSrc('');
+        setLoadState(tok ? 'loading' : 'error');
         if (!tok) return;
         let cancelled = false;
         let objectUrl = '';
@@ -111,12 +114,19 @@ function StillThumb({
                     headers: { Authorization: `Bearer ${tok}` },
                     cache: 'no-store',
                 });
-                if (!res.ok || cancelled) return;
+                if (cancelled) return;
+                if (!res.ok) {
+                    setLoadState(res.status === 404 ? 'missing' : 'error');
+                    return;
+                }
                 const blob = await res.blob();
                 objectUrl = URL.createObjectURL(blob);
-                if (!cancelled) setSrc(objectUrl);
+                if (!cancelled) {
+                    setSrc(objectUrl);
+                    setLoadState('ready');
+                }
             } catch {
-                /* ignore */
+                if (!cancelled) setLoadState('error');
             }
         })();
         return () => {
@@ -125,7 +135,27 @@ function StillThumb({
         };
     }, [cacheKey, jobId, idx, session?.access_token]);
 
-    if (!src) {
+    if (loadState === 'missing' || loadState === 'error') {
+        const missing = loadState === 'missing';
+        return (
+            <div
+                className="flex aspect-[9/16] max-h-[360px] flex-col items-center justify-center gap-2 rounded-lg border border-red-400/20 bg-red-500/[0.06] px-3 text-center"
+                role="img"
+                aria-label={`Scene ${idx + 1} ${missing ? 'still is missing' : 'still could not be loaded'}`}
+            >
+                <AlertTriangle className="h-4 w-4 text-red-300/80" />
+                <p className="text-[10px] font-semibold text-red-100/90">
+                    {missing ? 'Still missing' : 'Preview unavailable'}
+                </p>
+                <p className="text-[9px] leading-relaxed text-red-200/55">
+                    {missing
+                        ? 'This scene has no committed still. Repair or regenerate it before animation.'
+                        : 'Studio could not load this scene preview. Retry the preview or repair the scene.'}
+                </p>
+            </div>
+        );
+    }
+    if (loadState === 'loading' || !src) {
         return (
             <div className="aspect-[9/16] max-h-[360px] animate-pulse rounded-lg bg-white/[0.035] border border-white/[0.06] flex items-center justify-center">
                 <Loader2 className="h-3 w-3 text-gray-600 animate-spin" />
@@ -566,6 +596,11 @@ function AgentJobDeliverable({
         (scene) => scene.approved_for_video || scene.approved_for_animation,
     ).length;
     const allScenesApproved = sceneCards.length > 0 && approvedSceneCount === sceneCards.length;
+    const isShortform = snapshot.kind === 'shortform';
+    const isLongform = snapshot.kind === 'longform';
+    // A failed short still owns useful, editable scene artifacts. Collapse to
+    // the generic failure tile only when there is no scene review to recover.
+    const failedWithReviewableScenes = failed && isShortform && sceneCards.length > 0;
     const modelPaths = useMemo(() => (
         [
             snapshot.model_url,
@@ -842,7 +877,7 @@ function AgentJobDeliverable({
     };
 
     // Failed state
-    if (failed) {
+    if (failed && !failedWithReviewableScenes) {
         const failLabel = isAnalysis
             ? 'Reference analysis failed'
             : isClipLab
@@ -873,8 +908,6 @@ function AgentJobDeliverable({
     }
 
     // === Main live production card (the "magic happening in the chat") ===
-    const isShortform = snapshot.kind === 'shortform';
-    const isLongform = snapshot.kind === 'longform';
     const isVisualProof = Boolean(snapshot.visual_proof_only) && awaiting;
     const isThumbnailOnly = Boolean(snapshot.thumbnail_only);
     const stageLabel = snapshot.stage_label || (running ? 'Working…' : awaiting ? 'Review stills' : complete ? 'Complete' : '');
@@ -883,7 +916,7 @@ function AgentJobDeliverable({
         !isThumbnailOnly
         && sceneCards.length > 0
         && (isShortform || isLongform)
-        && (awaiting || (isShortform && running))
+        && (awaiting || (isShortform && (running || failedWithReviewableScenes)))
     );
 
     return (
@@ -971,6 +1004,15 @@ function AgentJobDeliverable({
 
             {/* Live content area */}
             <div className="p-3">
+                {failedWithReviewableScenes && (
+                    <div className="mb-3 rounded-xl border border-red-500/30 bg-red-500/10 p-3 text-red-100">
+                        <p className="text-xs font-semibold">Production partially failed — scene assets are preserved below.</p>
+                        {snapshot.error && <p className="mt-1 text-[11px] text-red-200/85">{snapshot.error}</p>}
+                        <p className="mt-1 text-[10px] text-red-200/65">
+                            Inspect, regenerate, or redirect the failed scenes without losing the rest of this short.
+                        </p>
+                    </div>
+                )}
                 {isThumbnailOnly && (
                     <div className="mb-3 rounded-xl border border-violet-400/20 bg-violet-500/[0.06] p-3">
                         <div className="mb-3">

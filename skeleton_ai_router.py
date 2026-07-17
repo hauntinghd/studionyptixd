@@ -47,6 +47,11 @@ from skeleton_ai.stills_engine import (
     StillsError,
 )
 from skeleton_ai.i2v_engine import AC_COST_STANDARD, AC_COST_PREMIUM
+from studio_agent.image_model_catalog import (
+    is_seedream_model,
+    normalize_seedream_model_id,
+    seedream_endpoint,
+)
 
 # Reference videos thread into the Grok system prompt so generated scripts
 # mimic the patterns Casey saved as 'winning' inspiration. Best-effort —
@@ -223,6 +228,7 @@ class RegenerateSceneRequest(BaseModel):
     scene_action: str | None = None
     motion_prompt: str | None = None
     reference_image: str | None = None
+    image_model: str | None = None
 
 
 class CreateCategoryRequest(BaseModel):
@@ -504,13 +510,11 @@ def build_skeleton_ai_router(
             except ValueError as e:
                 raise HTTPException(400, str(e))
         # Stills always use canonical Seedream edit; image_model is kept for API compat.
-        if body.image_model not in MODEL_ENDPOINTS and body.image_model not in (
-            "seedream_edit",
-            "canonical",
-        ):
+        selected_image_model = normalize_seedream_model_id(body.image_model or "seedream_edit")
+        if not is_seedream_model(selected_image_model):
             raise HTTPException(
                 400,
-                f"unknown image_model {body.image_model!r}. valid: {sorted(MODEL_ENDPOINTS.keys())}"
+                f"unknown canonical image_model {body.image_model!r}"
             )
         try:
             grok = GrokClient()
@@ -540,7 +544,7 @@ def build_skeleton_ai_router(
         else:
             master_ref = _resolve_skeleton_reference(workspace)
 
-        endpoint = "fal-ai/bytedance/seedream/v4.5/edit"
+        endpoint = seedream_endpoint(selected_image_model, edit=True)
 
         def sse(event: str, data: dict) -> str:
             return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
@@ -551,7 +555,7 @@ def build_skeleton_ai_router(
                 # 1. Meta + plan up front so the UI can show "Generating x/N" immediately.
                 yield sse("meta", {
                     "job_id": job_id,
-                    "image_model": "seedream_edit",
+                    "image_model": selected_image_model,
                     "endpoint": endpoint,
                     "render_mode": "user_reference_edit" if master_ref else "canonical_master_edit",
                     "reference_locked": bool(master_ref),
@@ -582,6 +586,7 @@ def build_skeleton_ai_router(
                             out_file,
                             master_url=master_ref,
                             seed=420042 + i,
+                            image_model_id=selected_image_model,
                         )
                     except StillsError as e:
                         yield sse("error", {"beat_index": i, "message": str(e)})
@@ -596,6 +601,7 @@ def build_skeleton_ai_router(
                         "scene_action": action,
                         "motion_prompt": motion,
                         "image_path": f"/api/skeleton-ai/jobs/{job_id}/stills/{sid}.png",
+                        "image_model_id": selected_image_model,
                     }
                     scenes_out.append(scene)
                     yield sse("scene", scene)
@@ -659,13 +665,25 @@ def build_skeleton_ai_router(
             visual_description=action,
             outfit=outfit,
         )
-        generate_still_edit(edit_prompt, out_file, master_url=master_ref, seed=880000 + int(body.beat_index))
+        selected_image_model = normalize_seedream_model_id(
+            body.image_model or scene.get("image_model_id") or "seedream_edit"
+        )
+        if not is_seedream_model(selected_image_model):
+            raise HTTPException(400, f"unknown canonical image_model {selected_image_model!r}")
+        generate_still_edit(
+            edit_prompt,
+            out_file,
+            master_url=master_ref,
+            seed=880000 + int(body.beat_index),
+            image_model_id=selected_image_model,
+        )
         scene.update({
             "outfit": outfit,
             "scene_action": action,
             "motion_prompt": motion,
             "edit_prompt": edit_prompt,
             "image_path": f"/api/skeleton-ai/jobs/{job_id}/stills/{sid}.png",
+            "image_model_id": selected_image_model,
         })
         scenes_doc["scenes"] = scenes
         scenes_path.write_text(json.dumps(scenes_doc, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -781,6 +799,11 @@ def build_skeleton_ai_router(
                 script_override=script_text,
                 user_id=uid,
                 master_reference_url=master_ref,
+                image_model_id=(
+                    normalize_seedream_model_id(body.image_model or "seedream_edit")
+                    if is_seedream_model(body.image_model or "seedream_edit")
+                    else "seedream_edit"
+                ),
             )
         except ValueError as e:
             await _maybe_refund(refund_credit, user, credit_source, ac_required)
