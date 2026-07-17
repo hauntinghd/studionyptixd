@@ -2,6 +2,8 @@ import { useState, useEffect, createContext, useCallback, useRef } from 'react';
 import { createClient, Session, SupabaseClient } from '@supabase/supabase-js';
 import { UNIFIED_TOPUP_PACKS } from './lib/studioProduct';
 import { trackAuthCompletion } from './lib/googleAds';
+import { STUDIO_DESKTOP_AUTH_RELAY_URL } from '../desktopAuthRelay';
+export { STUDIO_DESKTOP_AUTH_CALLBACK_URL } from '../desktopAuthRelay';
 import {
     BILLING_CHECKOUT_STARTED_EVENT,
     BILLING_VIEWER_REFRESH_EVENT,
@@ -16,7 +18,6 @@ const viteEnv = ((import.meta as any).env || {}) as Record<string, string>;
 const hostLower = window.location.hostname.toLowerCase();
 export const isLocalDevHost = hostLower === "localhost" || hostLower === "127.0.0.1";
 export const isTauriDesktopApp = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
-export const STUDIO_DESKTOP_AUTH_CALLBACK_URL = "nyptid-studio://auth/callback";
 const billingHostAliases = new Set([
     "billing.nyptidindustries.com",
     "billing.niptidindustries.com",
@@ -1436,7 +1437,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         pendingAuthIntentRef.current = 'google';
         desktopAuthCallbacksSeenRef.current.clear();
         const redirectTo = isTauriDesktopApp
-            ? STUDIO_DESKTOP_AUTH_CALLBACK_URL
+            ? STUDIO_DESKTOP_AUTH_RELAY_URL
             : isLocalDevHost
             ? `${window.location.origin}?page=dashboard&tab=agent`
             : `${STUDIO_SITE_URL}?page=dashboard&tab=agent`;
@@ -1454,8 +1455,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
                 pendingAuthIntentRef.current = '';
                 return 'Studio blocked an invalid Google authorization URL.';
             }
-            // Tauri's Rust navigation guard validates the same Supabase origin,
-            // opens it in the system browser, and keeps the WebView on Studio.
+            // Tauri's Rust navigation guard validates the Supabase origin and
+            // opens it in the system browser. Supabase returns the one-time PKCE
+            // code through the verified Studio web relay, which opens the app's
+            // exact custom-scheme callback without exposing session tokens.
             window.location.assign(authUrl);
             return null;
         }
