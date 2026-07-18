@@ -1,6 +1,6 @@
 import { PROD_API_BASE_URL, isTauriDesktopApp } from '../shared';
 
-export const STUDIO_DESKTOP_VERSION = '0.1.1';
+export const STUDIO_DESKTOP_VERSION = '0.2.0';
 export const STUDIO_DESKTOP_RELEASE_URL = `${PROD_API_BASE_URL}/api/desktop/releases/latest`;
 export const STUDIO_DESKTOP_DOWNLOAD_URL = `${PROD_API_BASE_URL}/api/desktop/download`;
 

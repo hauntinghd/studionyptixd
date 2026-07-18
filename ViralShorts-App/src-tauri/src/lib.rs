@@ -4,6 +4,18 @@ use tauri::{plugin::TauriPlugin, Manager, Runtime, Url};
 use tauri_plugin_deep_link::DeepLinkExt;
 
 const STUDIO_AUTH_SCHEME: &str = "nyptid-studio";
+const STUDIO_WEB_APP_HOST: &str = "studio.nyptidindustries.com";
+#[cfg(not(debug_assertions))]
+const STUDIO_WEB_APP_URL: &str =
+    "https://studio.nyptidindustries.com/?desktop=1&page=dashboard&tab=agent";
+
+fn is_studio_web_app_navigation(url: &Url) -> bool {
+    url.scheme() == "https"
+        && url.host_str() == Some(STUDIO_WEB_APP_HOST)
+        && url.port().is_none()
+        && url.username().is_empty()
+        && url.password().is_none()
+}
 
 fn is_internal_navigation(url: &Url) -> bool {
     if url.scheme() == "tauri" || url.as_str() == "about:blank" {
@@ -12,6 +24,13 @@ fn is_internal_navigation(url: &Url) -> bool {
 
     let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
     if host == "tauri.localhost" {
+        return true;
+    }
+
+    // The desktop app is an evergreen, least-privilege shell around the same
+    // production frontend as Studio Web. Exact-origin matching prevents a
+    // lookalike subdomain from ever receiving Tauri IPC access.
+    if is_studio_web_app_navigation(url) {
         return true;
     }
 
@@ -141,6 +160,15 @@ pub fn run() {
                 apply_studio_windows_frame(&window);
             }
 
+            // Release builds use the live Studio frontend as the source of
+            // truth, so web and desktop never drift apart again. Development
+            // builds retain the local Vite server for normal iteration.
+            #[cfg(not(debug_assertions))]
+            if let Some(window) = app.get_webview_window("main") {
+                let live_url = Url::parse(STUDIO_WEB_APP_URL)?;
+                window.navigate(live_url)?;
+            }
+
             // Bundled installers register this statically. Runtime registration
             // also makes the portable Windows executable return OAuth callbacks
             // to whichever copy the beta tester actually launched.
@@ -167,7 +195,8 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_internal_navigation, is_trusted_auth_deep_link, is_trusted_external_navigation,
+        is_internal_navigation, is_studio_web_app_navigation, is_trusted_auth_deep_link,
+        is_trusted_external_navigation,
     };
     use tauri::Url;
 
@@ -194,6 +223,22 @@ mod tests {
         ));
         assert!(is_internal_navigation(
             &Url::parse("http://tauri.localhost/?page=dashboard").unwrap()
+        ));
+    }
+
+    #[test]
+    fn only_exact_studio_web_origin_is_internal() {
+        assert!(is_studio_web_app_navigation(
+            &Url::parse("https://studio.nyptidindustries.com/?desktop=1").unwrap()
+        ));
+        assert!(is_internal_navigation(
+            &Url::parse("https://studio.nyptidindustries.com/?page=subscription").unwrap()
+        ));
+        assert!(!is_studio_web_app_navigation(
+            &Url::parse("https://studio.nyptidindustries.com.attacker.example/").unwrap()
+        ));
+        assert!(!is_studio_web_app_navigation(
+            &Url::parse("http://studio.nyptidindustries.com/").unwrap()
         ));
     }
 

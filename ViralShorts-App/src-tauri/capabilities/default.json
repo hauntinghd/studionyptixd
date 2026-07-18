@@ -1,7 +1,12 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Core window permissions only. Filesystem, shell, process, and unrestricted URL opening are intentionally not granted.",
+  "description": "Minimal local and exact-origin Studio Web permissions. Filesystem, shell, process, and unrestricted URL opening are intentionally not granted.",
+  "remote": {
+    "urls": [
+      "https://studio.nyptidindustries.com/*"
+    ]
+  },
   "windows": [
     "main"
   ],

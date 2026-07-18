@@ -111,7 +111,10 @@ kill_timeout = 120  # match render.yaml maxShutdownDelaySeconds
   RUNPOD_DISPATCH_MAX_QUEUE_DEPTH = "1"
 
 [[mounts]]
-  source = "studio_data"
+  # Canonical live volume after the 2026-07-18 IAD host-capacity recovery.
+  # Keep the original studio_data volume detached as a rollback copy until
+  # this volume has accumulated fresh verified snapshots.
+  source = "studio_data_recovery"
   destination = "/var/data"
   initial_size = "15gb"
 
