@@ -1,5 +1,5 @@
 import { AlertTriangle, ArrowLeft, Box, Check, CheckCircle2, Clapperboard, Download, FileText, Film, Loader2, Play, RefreshCw, Search, Square, Wand2, X } from 'lucide-react';
-import { createElement, memo, useCallback, useContext, useEffect, useMemo, useState } from 'react';
+import { createElement, memo, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { AuthContext } from '../../shared';
 import { useAuthenticatedMediaUrls } from '../../hooks/useAuthenticatedMedia';
 import type { AgentJobSnapshot, AgentSceneSnapshot } from '../../lib/agentProduction';
@@ -337,6 +337,50 @@ function StillInspectionModal({
     const [zoom, setZoom] = useState(1);
     const [pan, setPan] = useState({ x: 0, y: 0 });
     const [dragStart, setDragStart] = useState<{ pointerId: number; x: number; y: number; panX: number; panY: number } | null>(null);
+    const pointerCaptureRef = useRef<{ element: HTMLDivElement; pointerId: number } | null>(null);
+
+    const releaseCapturedPointer = useCallback((expectedPointerId?: number) => {
+        const capture = pointerCaptureRef.current;
+        if (capture && (expectedPointerId === undefined || capture.pointerId === expectedPointerId)) {
+            try {
+                if (capture.element.hasPointerCapture(capture.pointerId)) {
+                    capture.element.releasePointerCapture(capture.pointerId);
+                }
+            } catch {
+                // The browser may already have released capture during blur or device removal.
+            }
+            pointerCaptureRef.current = null;
+        }
+        setDragStart((current) => (
+            expectedPointerId === undefined || current?.pointerId === expectedPointerId ? null : current
+        ));
+    }, []);
+
+    useEffect(() => {
+        const releaseForLostFocus = () => releaseCapturedPointer();
+        const releaseForHiddenDocument = () => {
+            if (document.visibilityState !== 'visible') releaseCapturedPointer();
+        };
+
+        window.addEventListener('blur', releaseForLostFocus);
+        document.addEventListener('visibilitychange', releaseForHiddenDocument);
+        return () => {
+            window.removeEventListener('blur', releaseForLostFocus);
+            document.removeEventListener('visibilitychange', releaseForHiddenDocument);
+
+            const capture = pointerCaptureRef.current;
+            if (capture) {
+                try {
+                    if (capture.element.hasPointerCapture(capture.pointerId)) {
+                        capture.element.releasePointerCapture(capture.pointerId);
+                    }
+                } catch {
+                    // Unmount must never leave a captured device or block cleanup.
+                }
+                pointerCaptureRef.current = null;
+            }
+        };
+    }, [releaseCapturedPointer]);
 
     useEffect(() => {
         const tok = session?.access_token;
@@ -363,9 +407,9 @@ function StillInspectionModal({
     }, [idx, jobId, session?.access_token]);
 
     const reset = () => {
+        releaseCapturedPointer();
         setZoom(1);
         setPan({ x: 0, y: 0 });
-        setDragStart(null);
     };
 
     const adjustZoom = (next: number) => {
@@ -426,26 +470,46 @@ function StillInspectionModal({
                     </div>
                 ) : (
                 <div
-                    className="relative min-h-0 flex-1 overflow-hidden bg-[radial-gradient(circle_at_center,rgba(34,211,238,0.08),transparent_45%),linear-gradient(180deg,#090d14,#030405)]"
+                    className="relative min-h-0 flex-1 touch-none overflow-hidden bg-[radial-gradient(circle_at_center,rgba(34,211,238,0.08),transparent_45%),linear-gradient(180deg,#090d14,#030405)]"
                     onWheel={(event) => {
                         event.preventDefault();
                         adjustZoom(zoom + (event.deltaY < 0 ? 0.2 : -0.2));
                     }}
                     onPointerDown={(event) => {
-                        event.currentTarget.setPointerCapture(event.pointerId);
+                        // Only a primary left-button/touch drag may capture input. In
+                        // particular, never capture Razer side buttons or right click.
+                        if (!event.isPrimary || event.button !== 0) return;
+                        releaseCapturedPointer();
+                        try {
+                            event.currentTarget.setPointerCapture(event.pointerId);
+                        } catch {
+                            return;
+                        }
+                        pointerCaptureRef.current = { element: event.currentTarget, pointerId: event.pointerId };
+                        event.preventDefault();
                         setDragStart({ pointerId: event.pointerId, x: event.clientX, y: event.clientY, panX: pan.x, panY: pan.y });
                     }}
                     onPointerMove={(event) => {
                         if (!dragStart || dragStart.pointerId !== event.pointerId) return;
+                        if (event.buttons === 0) {
+                            releaseCapturedPointer(event.pointerId);
+                            return;
+                        }
                         setPan({
                             x: dragStart.panX + event.clientX - dragStart.x,
                             y: dragStart.panY + event.clientY - dragStart.y,
                         });
                     }}
                     onPointerUp={(event) => {
-                        if (dragStart?.pointerId === event.pointerId) setDragStart(null);
+                        releaseCapturedPointer(event.pointerId);
                     }}
-                    onPointerCancel={() => setDragStart(null)}
+                    onPointerCancel={(event) => releaseCapturedPointer(event.pointerId)}
+                    onLostPointerCapture={(event) => {
+                        if (pointerCaptureRef.current?.pointerId === event.pointerId) {
+                            pointerCaptureRef.current = null;
+                        }
+                        setDragStart((current) => current?.pointerId === event.pointerId ? null : current);
+                    }}
                 >
                     {src ? (
                         <img

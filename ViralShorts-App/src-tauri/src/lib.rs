@@ -74,6 +74,75 @@ fn focus_main_window<R: Runtime>(app: &tauri::AppHandle<R>) {
 }
 
 #[cfg(windows)]
+fn windows_mouse_button_is_down() -> bool {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        GetAsyncKeyState, VK_LBUTTON, VK_MBUTTON, VK_RBUTTON, VK_XBUTTON1, VK_XBUTTON2,
+    };
+
+    [VK_LBUTTON, VK_RBUTTON, VK_MBUTTON, VK_XBUTTON1, VK_XBUTTON2]
+        .into_iter()
+        .any(|key| unsafe { (GetAsyncKeyState(i32::from(key.0)) as u16 & 0x8000) != 0 })
+}
+
+#[cfg(windows)]
+fn release_stale_windows_mouse_capture(hwnd: windows::Win32::Foundation::HWND) {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{GetCapture, ReleaseCapture};
+
+    // TAO captures all Windows mouse buttons, including X1/X2. Some Razer
+    // Synapse remaps can lose the matching button-up and leave that capture
+    // behind. Only release capture owned by Studio, and never interrupt a
+    // button that Windows still reports as physically pressed.
+    if unsafe { GetCapture() } == hwnd && !windows_mouse_button_is_down() {
+        if let Err(error) = unsafe { ReleaseCapture() } {
+            log::warn!("could not release stale Studio mouse capture: {error}");
+        }
+    }
+}
+
+#[cfg(windows)]
+fn start_windows_input_safety_watchdog<R: Runtime>(app: tauri::AppHandle<R>) {
+    use std::{
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        },
+        thread,
+        time::Duration,
+    };
+
+    let check_pending = Arc::new(AtomicBool::new(false));
+    thread::spawn(move || loop {
+        thread::sleep(Duration::from_millis(250));
+        if app.get_webview_window("main").is_none() {
+            break;
+        }
+        if check_pending
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            continue;
+        }
+
+        let check_app = app.clone();
+        let completed = Arc::clone(&check_pending);
+        if app
+            .run_on_main_thread(move || {
+                if let Some(window) = check_app.get_webview_window("main") {
+                    if let Ok(hwnd) = window.hwnd() {
+                        release_stale_windows_mouse_capture(hwnd);
+                    }
+                }
+                completed.store(false, Ordering::Release);
+            })
+            .is_err()
+        {
+            check_pending.store(false, Ordering::Release);
+            break;
+        }
+    });
+}
+
+#[cfg(windows)]
 fn apply_studio_windows_frame(window: &tauri::WebviewWindow) {
     use std::{ffi::c_void, mem::size_of};
     use windows::Win32::Graphics::Dwm::{
@@ -132,6 +201,14 @@ fn trusted_navigation<R: Runtime>() -> TauriPlugin<R> {
 pub fn run() {
     let mut builder = tauri::Builder::default();
 
+    // Studio does not consume raw device events. On Windows, filtering them
+    // unregisters TAO's generic mouse and keyboard Raw Input listeners and
+    // avoids an unnecessary compatibility surface with Razer Synapse.
+    #[cfg(windows)]
+    {
+        builder = builder.device_event_filter(tauri::DeviceEventFilter::Always);
+    }
+
     // Windows and Linux deliver a desktop deep link by launching the registered
     // executable again. Register single-instance first so the already-running
     // Studio process (which owns the PKCE verifier) receives that callback.
@@ -164,10 +241,19 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .plugin(trusted_navigation())
+        .on_window_event(|window, event| {
+            #[cfg(windows)]
+            if matches!(event, tauri::WindowEvent::Focused(false)) {
+                if let Ok(hwnd) = window.hwnd() {
+                    release_stale_windows_mouse_capture(hwnd);
+                }
+            }
+        })
         .setup(|app| {
             #[cfg(windows)]
             if let Some(window) = app.get_webview_window("main") {
                 apply_studio_windows_frame(&window);
+                start_windows_input_safety_watchdog(app.handle().clone());
             }
 
             // Release builds stay on the reviewed UI bundled into this signed

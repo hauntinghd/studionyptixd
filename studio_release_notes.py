@@ -19,6 +19,18 @@ _ANNOUNCED_PATH = _DATA_DIR / "studio_release_announced.json"
 # Bump id when shipping; startup announces any id not yet in announced store.
 CATALOG: list[dict[str, Any]] = [
     {
+        "id": "release-2026-07-18-studio-1-0-1-input-compat",
+        "kind": "success",
+        "title": "Studio Desktop 1.0.1 mouse compatibility",
+        "body": (
+            "Studio Desktop no longer subscribes to unused Windows raw mouse or keyboard device events. A guarded "
+            "Windows fail-safe now releases only stale mouse capture owned by Studio when no physical button is "
+            "pressed, and scene-inspector drags explicitly release on pointer-up, cancellation, lost focus, and "
+            "unmount. This is designed for reliable use with Razer Synapse and auxiliary mouse buttons."
+        ),
+        "version": "1.0.1",
+    },
+    {
         "id": "release-2026-07-18-studio-1-0-public",
         "kind": "success",
         "title": "NYPTID Studio 1.0 is live",

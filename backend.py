@@ -772,13 +772,13 @@ app = FastAPI(
 app.add_middleware(MultipartContentLengthLimitMiddleware)
 configure_backend_runtime(app)
 
-DESKTOP_RELEASE_VERSION = "1.0.0"
+DESKTOP_RELEASE_VERSION = "1.0.1"
 DESKTOP_RELEASE_DIR = Path(str(os.getenv("APP_DATA_DIR") or TEMP_DIR)) / "studio_releases"
 DESKTOP_RELEASE_FILENAME = f"NYPTID-Studio_{DESKTOP_RELEASE_VERSION}_x64-setup.exe"
 DESKTOP_RELEASE_NOTES = (
-    "NYPTID Studio 1.0: public desktop-first Studio Agent, end-to-end short-form and long-form "
-    "production, signed in-app updates, Stripe memberships and credits, secure Google sign-in, "
-    "provider-aware rendering, scene review and repair, and owned final-video export."
+    "NYPTID Studio 1.0.1: Windows and Razer mouse compatibility hardening. Studio no longer "
+    "subscribes to unused raw mouse or keyboard device events, heals stale Studio-owned Windows "
+    "mouse capture, and safely releases scene-inspector pointer drags on every exit path."
 )
 
 

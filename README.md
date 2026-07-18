@@ -2,7 +2,7 @@
 
 NYPTID Studio is the backend and frontend for Studio Agent, Catalyst, long-form and short-form video generation, YouTube intelligence, billing, and production orchestration.
 
-**Current public release:** 1.0.0 (Windows x64 desktop app plus web billing/auth portal).
+**Current public release:** 1.0.1 (Windows x64 desktop app plus web billing/auth portal).
 
 ## Current Architecture
 

@@ -8,6 +8,12 @@
   "permissions": [
     "core:default",
     "core:event:default",
+    "core:window:deny-set-always-on-bottom",
+    "core:window:deny-set-always-on-top",
+    "core:window:deny-set-cursor-grab",
+    "core:window:deny-set-cursor-position",
+    "core:window:deny-set-cursor-visible",
+    "core:window:deny-set-ignore-cursor-events",
     "deep-link:default",
     "updater:default",
     "process:allow-restart"

@@ -12,9 +12,9 @@ from starlette.responses import FileResponse, JSONResponse, Response
 import backend
 
 
-RELEASE_VERSION = "1.0.0"
+RELEASE_VERSION = "1.0.1"
 RELEASE_FILENAME = f"NYPTID-Studio_{RELEASE_VERSION}_x64-setup.exe"
-RELEASE_BYTES = b"provider-free NYPTID Studio 1.0 release artifact\n"
+RELEASE_BYTES = b"provider-free NYPTID Studio 1.0.1 release artifact\n"
 RELEASE_SIGNATURE = "provider-free-updater-signature"
 
 
@@ -102,7 +102,7 @@ def test_updater_only_offers_windows_x86_64(target: str, arch: str, release_dir:
     assert response.headers["cache-control"] == "no-store"
 
 
-def test_older_windows_x86_64_client_receives_signed_1_0_metadata(release_dir: Path) -> None:
+def test_older_windows_x86_64_client_receives_signed_1_0_1_metadata(release_dir: Path) -> None:
     release_path, _actual_sha256 = _write_release(release_dir)
 
     response = _run(backend.desktop_release_updater("windows", "x86_64", "0.2.3"))

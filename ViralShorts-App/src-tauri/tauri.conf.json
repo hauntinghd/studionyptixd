@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "NYPTID Studio",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "identifier": "com.nyptidindustries.studio",
   "build": {
     "frontendDist": "../dist",
@@ -21,7 +21,16 @@
         "backgroundColor": "#000000",
         "theme": "Dark",
         "resizable": true,
-        "fullscreen": false
+        "fullscreen": false,
+        "maximized": false,
+        "visible": true,
+        "focusable": true,
+        "decorations": true,
+        "transparent": false,
+        "alwaysOnTop": false,
+        "skipTaskbar": false,
+        "contentProtected": false,
+        "dragDropEnabled": false
       }
     ],
     "security": {
