@@ -232,6 +232,7 @@ def build_studio_agent_router(
     get_current_user: Callable | None = None,
     is_admin_check: Callable[[dict], bool] | None = None,
     lane_access_check: Callable[[dict], bool] | None = None,
+    export_access_check: Callable[[dict], bool] | None = None,
 ) -> APIRouter:
     router = APIRouter(prefix="/api/studio-agent", tags=["studio-agent"])
 
@@ -265,6 +266,18 @@ def build_studio_agent_router(
         # Ownerless workspaces predate ownership metadata and are intentionally
         # admin-only. A 404 avoids disclosing another creator's job id.
         raise HTTPException(404, "job_not_found")
+
+    def _require_final_export_access(user: dict) -> None:
+        if is_owner(user, is_admin_check):
+            return
+        if export_access_check is None:
+            return
+        try:
+            if export_access_check(user):
+                return
+        except Exception:
+            pass
+        raise HTTPException(403, "Final video export is disabled for controlled-beta accounts.")
 
     @router.get("/training-consent")
     async def get_training_consent(user: dict = Depends(_agent_user)):
@@ -523,6 +536,7 @@ def build_studio_agent_router(
         user: dict = Depends(_agent_user),
     ):
         access = _require_job_access(job_id, kind, user)
+        _require_final_export_access(user)
         path = agent_jobs.resolve_media_path(job_id, str(access.get("kind") or kind))
         if not path:
             raise HTTPException(404, "media_not_ready")

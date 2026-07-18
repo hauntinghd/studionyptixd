@@ -4381,6 +4381,10 @@ def _public_lane_access_for_user(user: Optional[dict], access_snapshot: Optional
     return {
         "create": public_live,
         "agent": agent_live,
+        # Controlled-beta accounts can exercise planning, generation, scene
+        # review, and finalization, but only the owner/admin or a non-beta
+        # customer may retrieve the final rendered video.
+        "export_final": authenticated and (is_admin or not beta_access),
         "thumbnails": is_admin,
         "cliplab": is_admin,
         "clone": is_admin,
@@ -18905,6 +18909,9 @@ mount_router(
         get_current_user=get_current_user,
         is_admin_check=_is_admin_user,
         lane_access_check=lambda user: bool((_public_lane_access_for_user(user) or {}).get("agent")),
+        export_access_check=lambda user: bool(
+            (_public_lane_access_for_user(user) or {}).get("export_final")
+        ),
     )
 )
 
@@ -19546,6 +19553,9 @@ _download_video_response = build_download_video_response(
     jobs_ref=jobs,
     get_persisted_job_state=get_persisted_job_state,
     admin_emails=ADMIN_EMAILS,
+    export_access_check=lambda user: bool(
+        (_public_lane_access_for_user(user) or {}).get("export_final")
+    ),
 )
 
 

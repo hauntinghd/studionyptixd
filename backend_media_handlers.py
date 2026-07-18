@@ -63,14 +63,22 @@ def build_download_video_response(
     jobs_ref: dict,
     get_persisted_job_state,
     admin_emails: set[str],
+    export_access_check=None,
 ):
     async def download_video_response(filename: str, *, user: dict):
+        caller_is_admin = job_access_allowed({}, user, admin_emails)
+        if not caller_is_admin and export_access_check is not None:
+            try:
+                export_allowed = bool(export_access_check(user))
+            except Exception:
+                export_allowed = False
+            if not export_allowed:
+                raise HTTPException(403, "Final video export is disabled for controlled-beta accounts.")
         safe_filename = Path(filename).name
         if not safe_filename or safe_filename != filename:
             raise HTTPException(400, "Invalid filename")
         path = output_dir / safe_filename
 
-        caller_is_admin = job_access_allowed({}, user, admin_emails)
         if not caller_is_admin:
             matching_jobs = [
                 job

@@ -222,6 +222,37 @@ def test_download_is_owner_scoped_and_supports_persisted_jobs_and_admin(media_ap
     assert client.get("/api/download/orphan.mp4", headers=auth("admin")).status_code == 200
 
 
+def test_controlled_beta_cannot_use_legacy_final_video_download(tmp_path: Path) -> None:
+    output = tmp_path / "output"
+    output.mkdir()
+    (output / "beta.mp4").write_bytes(b"video")
+    handler = build_download_video_response(
+        output_dir=output,
+        jobs_ref={
+            "beta-job": {
+                "job_id": "beta-job",
+                "user_id": "user-a",
+                "output_file": "beta.mp4",
+            }
+        },
+        get_persisted_job_state=lambda _job_id: None,
+        admin_emails=ADMIN_EMAILS,
+        export_access_check=lambda _user: False,
+    )
+    app = FastAPI()
+
+    @app.get("/download/{filename}")
+    async def download(filename: str):
+        return await handler(filename, user=USERS["user-a"])
+
+    response = TestClient(app).get("/download/beta.mp4")
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == (
+        "Final video export is disabled for controlled-beta accounts."
+    )
+
+
 def test_auto_scene_image_requires_owner(media_api) -> None:
     client, _jobs, _scene_root = media_api
 

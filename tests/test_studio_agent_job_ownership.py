@@ -95,6 +95,40 @@ def test_http_job_poll_hides_cross_creator_job() -> None:
     snapshot.assert_not_called()
 
 
+def test_controlled_beta_owner_cannot_export_final_job_media() -> None:
+    app = FastAPI()
+
+    async def require_auth() -> dict:
+        return {"id": "creator-a", "email": "a@example.com"}
+
+    app.include_router(
+        build_studio_agent_router(
+            require_auth=require_auth,
+            lane_access_check=lambda _user: True,
+            export_access_check=lambda _user: False,
+        )
+    )
+    access = {
+        "exists": True,
+        "job_id": "ownedjob123",
+        "kind": "shortform",
+        "owner_id": "creator-a",
+    }
+    with (
+        patch("studio_agent.jobs.job_access_metadata", return_value=access),
+        patch("studio_agent.jobs.resolve_media_path") as resolve_media,
+    ):
+        response = TestClient(app).get(
+            "/api/studio-agent/jobs/ownedjob123/media?kind=shortform"
+        )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == (
+        "Final video export is disabled for controlled-beta accounts."
+    )
+    resolve_media.assert_not_called()
+
+
 def test_finalize_preflight_rejects_clip_path_escape(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
