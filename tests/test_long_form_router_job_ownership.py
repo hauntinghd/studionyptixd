@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -60,14 +62,16 @@ def test_render_start_stamps_authenticated_owner(monkeypatch) -> None:
     captured: dict = {}
     monkeypatch.setattr(tools, "_runpod_production_enabled", lambda: False)
 
-    def start_render(channel, outline):
-        captured["channel"] = dict(channel)
-        captured["outline"] = dict(outline)
-        return "lf_owner_stamped"
+    def execute(name, arguments, **context):
+        captured["name"] = name
+        captured["arguments"] = dict(arguments)
+        captured["context"] = dict(context)
+        return json.dumps({"job_id": "lf_owner_stamped"})
 
-    monkeypatch.setattr(longform_pipeline, "start_render", start_render)
+    monkeypatch.setattr(tools, "execute_tool_logged", execute)
     response = _client("creator-owner").post(
         "/api/long-form/render-start",
+        headers={"X-Idempotency-Key": "owner-start-1"},
         json={
             "channel_key": "history_rewind",
             "outline": {
@@ -80,4 +84,8 @@ def test_render_start_stamps_authenticated_owner(monkeypatch) -> None:
     )
 
     assert response.status_code == 200, response.text
-    assert captured["outline"]["user_id"] == "creator-owner"
+    assert captured["name"] == "start_longform_render"
+    outline = json.loads(captured["arguments"]["chapters_json"])
+    assert outline["user_id"] == "creator-owner"
+    assert captured["arguments"]["_runpod_command_id"] == "owner-start-1"
+    assert captured["context"] == {"user_id": "creator-owner", "content_format": "long"}

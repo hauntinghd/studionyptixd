@@ -28,7 +28,6 @@ def unified_plan(user_id: str) -> str:
     try:
         import unified_credits as uc
 
-        uc.ensure_monthly_grant(uid)
         return str((uc.get_state(uid) or {}).get("plan") or "").strip().lower()
     except Exception:
         return ""

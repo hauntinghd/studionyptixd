@@ -29,6 +29,16 @@ def _run(coro: Coroutine[Any, Any, dict[str, Any]]) -> dict[str, Any]:
 class StudioTextClient:
     def __init__(self, model: str | None = None):
         self.model = str(model or openrouter.DEFAULT_MODEL).strip() or openrouter.DEFAULT_MODEL
+        # The long-form HTTP boundary reserves credits before calling this
+        # adapter, then settles that hold from these provider-reported facts.
+        # Keep the compatibility return type (plain text) while retaining the
+        # exact response usage for the logged tool contract.
+        self.last_usage: dict[str, int] = {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+        }
+        self.last_provider = ""
+        self.last_effective_model = self.model
 
     def complete(
         self,
@@ -50,6 +60,17 @@ class StudioTextClient:
                 max_tokens=max(512, int(max_tokens or 1500)),
             )
         )
+        usage = openrouter.usage_from_response(response)
+        self.last_usage = {
+            "prompt_tokens": int(
+                usage.get("prompt_tokens", usage.get("input_tokens", 0)) or 0
+            ),
+            "completion_tokens": int(
+                usage.get("completion_tokens", usage.get("output_tokens", 0)) or 0
+            ),
+        }
+        self.last_provider = str(response.get("provider") or "").strip()
+        self.last_effective_model = str(response.get("model") or self.model).strip() or self.model
         message = openrouter.message_from_response(response)
         content = message.get("content") if isinstance(message, dict) else ""
         if isinstance(content, list):

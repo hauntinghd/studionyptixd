@@ -29,6 +29,8 @@ ViralShorts-App/project.json
 skeleton_ai/output/
 zerotier_private/output/
 long_form/output/
+studio_agent_telemetry/
+skeleton_training_dataset/lora_validation_*.png
 *.mp4
 *.exe
 *.pkg

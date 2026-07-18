@@ -58,9 +58,6 @@ export default function StudioSidebar({
             >
                 <Wand2 className="h-3.5 w-3.5 text-violet-300" />
                 <span className="hidden md:inline">Studio Agent</span>
-                <span className="ml-auto hidden rounded border border-violet-400/30 bg-violet-500/15 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider text-violet-200 lg:inline">
-                    Beta
-                </span>
             </button>
             )}
 
@@ -104,10 +101,10 @@ export function buildSidebarItems(
     const canAgent = isAdmin || Boolean(laneAccess.agent);
     return ([
         { id: 'create', label: 'Create', icon: Sparkles },
-        { id: 'agent', label: 'Studio Agent', icon: Wand2, hidden: !canAgent, badge: 'Beta' },
+        { id: 'agent', label: 'Studio Agent', icon: Wand2, hidden: !canAgent, badge: 'Live' },
         { id: 'thumbnails', label: 'ThumbLab', icon: ImageIcon, hidden: !isAdmin, badge: 'Beta' },
         { id: 'cliplab', label: 'ClipLab', icon: Clapperboard, hidden: false, comingSoon: !isAdmin && !laneAccess.cliplab, badge: isAdmin || laneAccess.cliplab ? 'Beta' : 'Soon' },
-        { id: 'longform', label: 'Documentary', icon: Film, hidden: !isAdmin && !laneAccess.longform, badge: 'Beta' },
+        { id: 'longform', label: 'Documentary', icon: Film, hidden: !isAdmin && !laneAccess.longform, badge: 'Live' },
         { id: 'automate', label: 'Automate', icon: CalendarClock, comingSoon: true, badge: 'Soon' },
         { id: 'analytics', label: 'Analytics', icon: BrainCircuit, hidden: !isAdmin },
         { id: 'catalyst', label: 'Catalyst', icon: BrainCircuit, hidden: !isAdmin },

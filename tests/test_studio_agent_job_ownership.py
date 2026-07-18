@@ -95,7 +95,7 @@ def test_http_job_poll_hides_cross_creator_job() -> None:
     snapshot.assert_not_called()
 
 
-def test_controlled_beta_owner_cannot_export_final_job_media() -> None:
+def test_account_without_export_access_cannot_export_final_job_media() -> None:
     app = FastAPI()
 
     async def require_auth() -> dict:
@@ -124,7 +124,7 @@ def test_controlled_beta_owner_cannot_export_final_job_media() -> None:
 
     assert response.status_code == 403
     assert response.json()["detail"] == (
-        "Final video export is disabled for controlled-beta accounts."
+        "Final video export is not available for this account."
     )
     resolve_media.assert_not_called()
 

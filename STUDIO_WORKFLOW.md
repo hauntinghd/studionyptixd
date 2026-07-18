@@ -1,8 +1,8 @@
 # Studio End-to-End Workflow
 
-**Purpose:** the canonical, step-by-step recipe for producing a video entirely through Studio (no Claude Code orchestration). Owner-only beta gates apply — admin email must match `ADMIN_EMAILS` env var.
+**Purpose:** the canonical, step-by-step recipe for producing a video entirely through Studio (no Claude Code orchestration). Studio 1.0 is public; signed-in creators use their membership and unified-credit wallet for production.
 
-**Last verified:** 2026-04-30 (audit Round 2). Pipeline plumbing is complete; cost-confirm dialog and mid-chapter resume are still polish items.
+**Last verified:** 2026-07-18 for the Studio 1.0 public release.
 
 ---
 
@@ -10,7 +10,7 @@
 
 You only need to do these once per workstation / per channel.
 
-1. **Be signed in to Studio.** Visit `https://studio.nyptidindustries.com` and sign in with the admin email. The owner-beta gate at [`backend.py:14942`](backend.py) and the new `WAITLIST_ONLY_MODE` gate at [`backend.py:930`](backend.py) both require an admin email.
+1. **Be signed in to Studio.** Install Studio from `https://studio.nyptidindustries.com`, then sign in. Google authentication returns securely to the desktop app. `WAITLIST_ONLY_MODE` is disabled for the public release.
 2. **Connect the YouTube channel** you want to publish from. Studio → "Channels" → connect each of: Empire Magnates, History Rewind, PB Lies, NYPTID Clips. The OAuth flow grants `youtube.upload` + `youtube.readonly` + `yt-analytics.readonly` + `youtube.force-ssl` scopes (see [`youtube.py:53-58`](youtube.py)).
 3. **Channel visual aesthetic — photoreal premium for every channel** (policy change 2026-04-30; the old porcelain/wooden/skeleton/illustration locks are RETIRED). All channels target cinematic photoreal prestige-TV documentary grade — Lemmino / Coldfusion / Inside Job / The Trade. The `_coerce_*_longform_channel_memory` helpers in [`backend.py`](backend.py) still exist but should be patched to emit `PHOTOREAL_STYLE` + per-episode `CAST` blocks instead of the old porcelain/illustration/skeleton language. Until that backend patch ships, override the visual cue per-episode in the build script (see [`E:/recaps/empire_magnates/parmalat/build_parmalat_real.py`](https://github.com/hauntinghd/studionyptixd/blob/master/STUDIO_WORKFLOW.md) for the canonical photoreal pattern).
    - Channels in scope (long-form): **Empire Magnates · We Are Lacuna · Cryptic Science · Hidden Cortex · PB Lies · History Rewind · Lexi Manhua**

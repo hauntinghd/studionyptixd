@@ -129,7 +129,7 @@ export const STUDIO_NICHES: StudioNiche[] = [
         id: 'longform',
         title: 'Documentary',
         desc: '15–60 min episodes — fraud, mystery, science',
-        badge: 'Beta',
+        badge: 'Live',
         categoryKey: 'v5_episode',
         format: 'long',
     },
@@ -175,7 +175,7 @@ export const STUDIO_TOOLS: StudioTool[] = [
         id: 'agent',
         title: 'Studio Agent',
         desc: 'Chat-first production — long-form, shorts, analytics',
-        badge: 'Beta',
+        badge: 'Live',
         action: 'agent',
     },
     {
@@ -202,7 +202,7 @@ export const STUDIO_TOOLS: StudioTool[] = [
         id: 'longform',
         title: 'Documentary',
         desc: 'Outline → still gallery → LTX + VO compose',
-        badge: 'Beta',
+        badge: 'Live',
         action: 'longform',
     },
     {

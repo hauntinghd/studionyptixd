@@ -462,12 +462,14 @@ export default function LongFormPanel() {
         setOutliningBusy(true);
         setOutlineError('');
         setOutline(null);
+        const commandId = productionIdempotencyKey('longform-outline');
         try {
             const r = await fetch(resolveStudioBackendUrl('/api/long-form/outline'), {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
                     Authorization: `Bearer ${accessToken}`,
+                    'X-Idempotency-Key': commandId,
                 },
                 body: JSON.stringify({
                     channel_key: selectedChannel,
@@ -875,6 +877,7 @@ export default function LongFormPanel() {
     ) => {
         if (!activeJobId) return;
         setRegeneratingThumbIdx(idx);
+        const commandId = productionIdempotencyKey(`longform-thumbnail-${activeJobId}-${idx}`);
         try {
             const tok = await getFreshToken();
             const { ok, data } = await fetchJsonResilient(
@@ -884,6 +887,7 @@ export default function LongFormPanel() {
                     headers: {
                         'Content-Type': 'application/json',
                         Authorization: `Bearer ${tok}`,
+                        'X-Idempotency-Key': commandId,
                     },
                     body: JSON.stringify({ custom_prompt: customPrompt || undefined }),
                 },

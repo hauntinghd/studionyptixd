@@ -177,7 +177,7 @@ pub fn run() {
 
             // Bundled installers register this statically. Runtime registration
             // also makes the portable Windows executable return OAuth callbacks
-            // to whichever copy the beta tester actually launched.
+            // to whichever installed copy the user actually launched.
             #[cfg(any(windows, target_os = "linux"))]
             if let Err(error) = app.deep_link().register_all() {
                 // Installer registration remains authoritative. A locked-down

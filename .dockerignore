@@ -19,6 +19,7 @@ dist/
 generated_videos/
 ref_frames/
 skeleton_training_dataset/
+studio_agent_telemetry/
 temp_assets/
 thumbnails/
 tmp_short_frames/

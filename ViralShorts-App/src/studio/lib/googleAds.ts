@@ -3,6 +3,7 @@ const env = ((import.meta as any).env || {}) as Record<string, string>;
 const GOOGLE_TAG_ID = String(env.VITE_GOOGLE_TAG_ID || '').trim();
 const GOOGLE_ADS_ID = String(env.VITE_GOOGLE_ADS_ID || '').trim();
 const PRIMARY_TAG_ID = GOOGLE_TAG_ID || GOOGLE_ADS_ID;
+const IS_TAURI_DESKTOP = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
 
 const CONVERSION_LABELS = {
     signup: String(env.VITE_GOOGLE_ADS_SIGNUP_LABEL || '').trim(),
@@ -24,6 +25,10 @@ declare global {
 const hasTrackingConfigured = (): boolean => Boolean(PRIMARY_TAG_ID);
 
 const ensureGoogleTag = (): boolean => {
+    // The desktop WebView holds application auth and updater capabilities.
+    // Never execute third-party analytics JavaScript inside that privileged
+    // context; tracking remains a web-only concern.
+    if (IS_TAURI_DESKTOP) return false;
     if (!hasTrackingConfigured()) return false;
     if (typeof window === 'undefined' || typeof document === 'undefined') return false;
 

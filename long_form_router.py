@@ -50,15 +50,12 @@ from long_form.prompts.channels import (
     get_channel,
     channel_outline_prompt_extras,
 )
-from long_form.scripting import generate_outline, expand_chapter
 from long_form.catalyst_bridge import (
     CHANNEL_KEY_TO_ID,
     shape_catalyst_insights,
     insights_to_grok_context,
     fetch_channel_snapshot,
 )
-
-from long_form.text_client import StudioTextClient
 
 from long_form import pipeline as lf_pipeline
 
@@ -202,6 +199,31 @@ def build_long_form_router(
             return
         raise HTTPException(403, "active_studio_plan_required")
 
+    async def _text_metering_args(model: str | None, *, input_chars: int) -> dict[str, Any]:
+        """Resolve model rates before any paid planning inference is sent."""
+
+        from studio_agent import openrouter
+
+        selected = str(model or openrouter.DEFAULT_MODEL).strip() or openrouter.DEFAULT_MODEL
+        try:
+            prompt_ppm, completion_ppm = await openrouter.model_pricing(selected)
+        except Exception as exc:
+            raise HTTPException(
+                503,
+                "Selected text-model pricing is temporarily unavailable; no provider request was sent.",
+            ) from exc
+        if prompt_ppm is None or completion_ppm is None:
+            raise HTTPException(
+                503,
+                "Selected text-model pricing is unavailable; no provider request was sent.",
+            )
+        return {
+            "model": selected,
+            "_billing_prompt_price_per_m": float(prompt_ppm),
+            "_billing_completion_price_per_m": float(completion_ppm),
+            "_billing_input_chars": max(0, int(input_chars or 0)),
+        }
+
     @router.get("/channels")
     async def list_channels_route(user: dict = auth_dep, format: str | None = None):
         _gate_admin(user)
@@ -336,19 +358,17 @@ def build_long_form_router(
         }
 
     @router.post("/outline")
-    async def outline_route(body: OutlineRequest, user: dict = auth_dep):
+    async def outline_route(body: OutlineRequest, request: Request, user: dict = auth_dep):
         _gate_admin(user)
+        from studio_agent.direct_production import require_idempotency_key
+
+        require_idempotency_key(request)
         if not body.topic or not body.topic.strip():
             raise HTTPException(400, "topic is required")
         try:
             channel = get_channel(body.channel_key)
         except ValueError as e:
             raise HTTPException(404, str(e))
-
-        try:
-            grok = StudioTextClient(model=getattr(body, "model", None))
-        except RuntimeError as e:
-            raise HTTPException(503, f"config: {e}")
 
         # Pull Catalyst context from the OAuth connection store (best effort).
         catalyst_text = ""
@@ -383,70 +403,71 @@ def build_long_form_router(
         # outline pass falls back to the existing free-form title generation.
         title_template_block = channel_outline_prompt_extras(body.channel_key)
 
-        outline = generate_outline(
-            grok,
-            channel["system_prompt"],
-            topic=body.topic,
-            target_minutes=int(target_minutes),
-            catalyst_context=combined_context,
-            title_template_block=title_template_block,
+        from studio_agent.direct_production import execute_logged_production
+
+        metering = await _text_metering_args(
+            body.model,
+            input_chars=(
+                len(str(channel.get("system_prompt") or ""))
+                + len(body.topic)
+                + len(combined_context)
+                + len(title_template_block)
+            ),
         )
-        if isinstance(outline, dict):
-            outline["chat_model"] = grok.model
-
-        # Always append the channel's description_tail to outline.description
-        # so the YouTube upload metadata carries the proven CTR signal
-        # (HR's 'Human Voiced, No Ads', EM's 'Loophole Files investigation'
-        # subscribe line) — even when Grok's free-form description omits it.
-        desc_tail = (channel.get("description_tail") or "").strip()
-        if desc_tail and isinstance(outline, dict):
-            existing = (outline.get("description") or "").rstrip()
-            if existing and desc_tail not in existing:
-                outline["description"] = existing + "\n\n" + desc_tail.lstrip()
-            elif not existing:
-                outline["description"] = desc_tail.lstrip()
-
-        # PR #137: compute REAL fal cost estimate from the outline structure
-        # so the frontend can show '$X' instead of the stale channel ceiling.
-        try:
-            cost_est = lf_pipeline.compute_render_cost(channel, outline)
-        except Exception:
-            cost_est = None
-
-        return {
-            "channel_key": body.channel_key,
-            "topic": body.topic,
-            "target_minutes": int(target_minutes),
-            "catalyst_context_used": bool(catalyst_text),
-            "references_used": bool(refs_text),
-            "title_template_enforced": bool(title_template_block),
-            "outline": outline,
-            "cost_estimate": cost_est,
-        }
+        return await execute_logged_production(
+            "generate_longform_outline",
+            {
+                "channel_key": body.channel_key,
+                "topic": body.topic.strip(),
+                "target_minutes": int(target_minutes),
+                "combined_context": combined_context,
+                "catalyst_context_used": bool(catalyst_text),
+                "references_used": bool(refs_text),
+                "title_template_block": title_template_block,
+                **metering,
+            },
+            request=request,
+            user_id=_user_id(user),
+            content_format="long",
+        )
 
     @router.post("/outline/expand-chapter")
-    async def expand_chapter_route(body: ExpandChapterRequest, user: dict = auth_dep):
+    async def expand_chapter_route(
+        body: ExpandChapterRequest,
+        request: Request,
+        user: dict = auth_dep,
+    ):
         _gate_admin(user)
+        from studio_agent.direct_production import require_idempotency_key
+
+        require_idempotency_key(request)
         try:
             channel = get_channel(body.channel_key)
         except ValueError as e:
             raise HTTPException(404, str(e))
-        try:
-            grok = StudioTextClient(model=body.model)
-        except RuntimeError as e:
-            raise HTTPException(503, f"config: {e}")
-        beats = expand_chapter(
-            grok,
-            channel["system_prompt"],
-            outline_title=body.outline_title,
-            chapter=body.chapter,
-            fps=int(channel["fps"]),
+        from studio_agent.direct_production import execute_logged_production
+
+        chapter_json = json.dumps(body.chapter or {}, ensure_ascii=False, sort_keys=True)
+        metering = await _text_metering_args(
+            body.model,
+            input_chars=(
+                len(str(channel.get("system_prompt") or ""))
+                + len(body.outline_title or "")
+                + len(chapter_json)
+            ),
         )
-        return {
-            "channel_key": body.channel_key,
-            "chapter_index": int((body.chapter or {}).get("index", 0)),
-            "beats": beats,
-        }
+        return await execute_logged_production(
+            "expand_longform_chapter",
+            {
+                "channel_key": body.channel_key,
+                "outline_title": body.outline_title,
+                "chapter": dict(body.chapter or {}),
+                **metering,
+            },
+            request=request,
+            user_id=_user_id(user),
+            content_format="long",
+        )
 
     # ─────────────────────────────────────────────────────────────────────
     # Render endpoints (PR #120 — replaces the phase-2 stubs)
@@ -495,66 +516,36 @@ def build_long_form_router(
             require_longform_runpod_if_global_enabled,
         )
 
-        if require_longform_runpod_if_global_enabled():
-            payload = await execute_logged_production(
-                "start_longform_render",
-                {
-                    "channel_key": body.channel_key,
-                    "title": str(outline.get("title") or body.channel_key).strip(),
-                    "topic": str(outline.get("topic") or outline.get("title") or body.channel_key).strip(),
-                    "chapters_json": json.dumps(outline, ensure_ascii=False),
-                    "motion_policy": str(outline.get("motion_policy") or "balanced"),
-                    "render_style": str(outline.get("render_style") or "cinematic"),
-                    "visual_proof_only": bool(outline.get("visual_proof_only", True)),
-                    "image_model_id": str(body.image_model or outline.get("image_model_id") or ""),
-                    "sfx_enabled": bool(outline.get("sfx_enabled", False)),
-                    "sound_design_brief": str(outline.get("sound_design_brief") or ""),
-                    "background_music": str(outline.get("background_music") or "off"),
-                },
-                request=request,
-                user_id=str((user or {}).get("id") or (user or {}).get("user_id") or ""),
-                content_format="long",
-            )
-            job_id = str(payload.get("job_id") or payload.get("studio_job_id") or "").strip()
-            payload.update({
-                "job_id": job_id,
-                "phase": "queued",
-                "poll_url": f"/api/long-form/jobs/{job_id}/status",
-                "state_url": f"/api/long-form/jobs/{job_id}/state",
-                "mp4_url_when_done": f"/api/long-form/jobs/{job_id}/mp4",
-                "legacy_route": "/api/long-form/render-start",
-            })
-            return payload
-        try:
-            channel = dict(get_channel(body.channel_key))
-        except ValueError as e:
-            raise HTTPException(404, str(e))
-        try:
-            lf_pipeline.validate_channel_pipeline(channel)
-        except lf_pipeline.LFRenderError as e:
-            raise HTTPException(400, f"render_start_failed: {e}")
-        if not isinstance(body.outline, dict) or not (outline.get("chapters") or []):
-            raise HTTPException(400, "outline must include a non-empty chapters list")
-        picked_image = str(body.image_model or outline.get("image_model_id") or "").strip()
-        if picked_image:
-            from studio_agent import store as agent_store
-
-            normalized = agent_store.normalize_image_model(picked_image)
-            channel["image_model_default"] = normalized
-            outline["image_model_id"] = normalized
-        try:
-            job_id = lf_pipeline.start_render(channel, outline)
-        except lf_pipeline.LFRenderError as e:
-            raise HTTPException(400, f"render_start_failed: {e}")
-        return {
+        require_longform_runpod_if_global_enabled()
+        payload = await execute_logged_production(
+            "start_longform_render",
+            {
+                "channel_key": body.channel_key,
+                "title": str(outline.get("title") or body.channel_key).strip(),
+                "topic": str(outline.get("topic") or outline.get("title") or body.channel_key).strip(),
+                "chapters_json": json.dumps(outline, ensure_ascii=False),
+                "motion_policy": str(outline.get("motion_policy") or "balanced"),
+                "render_style": str(outline.get("render_style") or "cinematic"),
+                "visual_proof_only": bool(outline.get("visual_proof_only", True)),
+                "image_model_id": str(body.image_model or outline.get("image_model_id") or ""),
+                "sfx_enabled": bool(outline.get("sfx_enabled", False)),
+                "sound_design_brief": str(outline.get("sound_design_brief") or ""),
+                "background_music": str(outline.get("background_music") or "off"),
+            },
+            request=request,
+            user_id=_user_id(user),
+            content_format="long",
+        )
+        job_id = str(payload.get("job_id") or payload.get("studio_job_id") or "").strip()
+        payload.update({
             "job_id": job_id,
-            "channel_key": body.channel_key,
-            "pipeline_kind": channel.get("pipeline_kind") or "sleep_doc",
-            "image_model": channel.get("image_model_default"),
+            "phase": "queued",
             "poll_url": f"/api/long-form/jobs/{job_id}/status",
             "state_url": f"/api/long-form/jobs/{job_id}/state",
             "mp4_url_when_done": f"/api/long-form/jobs/{job_id}/mp4",
-        }
+            "legacy_route": "/api/long-form/render-start",
+        })
+        return payload
 
     @router.get("/jobs")
     async def list_jobs_route(user: dict = auth_dep, limit: int = 20):
@@ -755,36 +746,20 @@ def build_long_form_router(
             require_longform_runpod_if_global_enabled,
         )
 
-        if require_longform_runpod_if_global_enabled():
-            payload = await execute_logged_production(
-                "regenerate_longform_still",
-                {
-                    "job_id": job_id,
-                    "scene_idx": int(body.scene_idx),
-                    "reason": str(body.new_prompt or ""),
-                },
-                request=request,
-                user_id=str((user or {}).get("id") or (user or {}).get("user_id") or ""),
-                content_format="long",
-            )
-            payload.update({"job_id": job_id, "scene_idx": int(body.scene_idx)})
-            return payload
-        try:
-            new_path = lf_pipeline.regenerate_still(
-                job_id, body.scene_idx, body.new_prompt
-            )
-        except lf_pipeline.LFRenderError as e:
-            raise HTTPException(400, f"regenerate_failed: {e}")
-        # Cache-bust the served still by appending a version query param.
-        version = int(new_path.stat().st_mtime)
-        return {
-            "job_id": job_id,
-            "scene_idx": body.scene_idx,
-            "still_url": (
-                f"/api/long-form/jobs/{job_id}/still/{body.scene_idx}?v={version}"
-            ),
-            "new_prompt_used": bool(body.new_prompt),
-        }
+        require_longform_runpod_if_global_enabled()
+        payload = await execute_logged_production(
+            "regenerate_longform_still",
+            {
+                "job_id": job_id,
+                "scene_idx": int(body.scene_idx),
+                "reason": str(body.new_prompt or ""),
+            },
+            request=request,
+            user_id=_user_id(user),
+            content_format="long",
+        )
+        payload.update({"job_id": job_id, "scene_idx": int(body.scene_idx)})
+        return payload
 
     @router.post("/jobs/{job_id}/finalize")
     async def job_finalize_route(job_id: str, request: Request, user: dict = auth_dep):
@@ -796,34 +771,26 @@ def build_long_form_router(
             require_longform_runpod_if_global_enabled,
         )
 
-        if require_longform_runpod_if_global_enabled():
-            payload = await execute_logged_production(
-                "finalize_longform_render",
-                {"job_id": job_id},
-                request=request,
-                user_id=str((user or {}).get("id") or (user or {}).get("user_id") or ""),
-                content_format="long",
-            )
-            payload.update({
-                "job_id": job_id,
-                "phase": "finalizing",
-                "poll_url": f"/api/long-form/jobs/{job_id}/status",
-            })
-            return payload
-        try:
-            lf_pipeline.start_finalize(job_id)
-        except lf_pipeline.LFRenderError as e:
-            raise HTTPException(400, f"finalize_failed: {e}")
-        return {
+        require_longform_runpod_if_global_enabled()
+        payload = await execute_logged_production(
+            "finalize_longform_render",
+            {"job_id": job_id},
+            request=request,
+            user_id=_user_id(user),
+            content_format="long",
+        )
+        payload.update({
             "job_id": job_id,
             "phase": "finalizing",
             "poll_url": f"/api/long-form/jobs/{job_id}/status",
-        }
+        })
+        return payload
 
     @router.post("/jobs/{job_id}/regenerate-thumbnail/{idx}")
     async def job_regenerate_thumbnail_route(
         job_id: str,
         idx: int,
+        request: Request,
         body: RegenerateThumbnailRequest = RegenerateThumbnailRequest(),
         user: dict = auth_dep,
     ):
@@ -835,21 +802,19 @@ def build_long_form_router(
         _require_owned_longform_job(job_id, user)
         if idx < 1 or idx > 12:
             raise HTTPException(400, "bad_thumbnail_idx")
-        try:
-            new_path = lf_pipeline.regenerate_thumbnail(
-                job_id, idx, body.custom_prompt
-            )
-        except lf_pipeline.LFRenderError as e:
-            raise HTTPException(400, f"regenerate_thumbnail_failed: {e}")
-        version = int(new_path.stat().st_mtime)
-        return {
-            "job_id": job_id,
-            "idx": idx,
-            "thumbnail_url": (
-                f"/api/long-form/jobs/{job_id}/thumbnail/{idx}?v={version}"
-            ),
-            "custom_prompt_used": bool(body.custom_prompt),
-        }
+        from studio_agent.direct_production import execute_logged_production
+
+        return await execute_logged_production(
+            "regenerate_longform_thumbnail",
+            {
+                "job_id": job_id,
+                "idx": int(idx),
+                "custom_prompt": str(body.custom_prompt or ""),
+            },
+            request=request,
+            user_id=_user_id(user),
+            content_format="long",
+        )
 
     @router.post("/jobs/{job_id}/cancel")
     async def job_cancel_route(job_id: str, user: dict = auth_dep):

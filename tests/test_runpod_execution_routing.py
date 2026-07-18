@@ -165,6 +165,7 @@ def test_new_runpod_production_gets_stable_studio_job_id(
     tool_name,
     expected_prefix,
 ):
+    monkeypatch.setattr(tools, "_require_longform_entitlement", lambda _user_id: None)
     monkeypatch.setenv("STUDIO_RUNPOD_PRODUCTION_ENABLED", "1")
     if "longform" in tool_name:
         monkeypatch.setenv("STUDIO_RUNPOD_LONGFORM_ENABLED", "1")
@@ -186,8 +187,11 @@ def test_new_runpod_production_gets_stable_studio_job_id(
         lambda *_args, **_kwargs: pytest.fail("RunPod start executed locally"),
     )
 
-    first = json.loads(_call(tool_name, {"command_id": "start-command-1"}))
-    second = json.loads(_call(tool_name, {"command_id": "start-command-1"}))
+    arguments = {"command_id": "start-command-1"}
+    if tool_name == "start_longform_render":
+        arguments.update({"channel_key": "history_rewind", "title": "Test", "topic": "Test"})
+    first = json.loads(_call(tool_name, arguments))
+    second = json.loads(_call(tool_name, arguments))
 
     assert first["job_id"].startswith(expected_prefix)
     assert second["job_id"] == first["job_id"]
@@ -197,6 +201,7 @@ def test_new_runpod_production_gets_stable_studio_job_id(
 
 
 def test_runpod_longform_is_default_off_without_local_fallback(monkeypatch):
+    monkeypatch.setattr(tools, "_require_longform_entitlement", lambda _user_id: None)
     monkeypatch.setenv("STUDIO_RUNPOD_PRODUCTION_ENABLED", "1")
     monkeypatch.setattr(
         runpod_bridge,
@@ -210,7 +215,15 @@ def test_runpod_longform_is_default_off_without_local_fallback(monkeypatch):
     )
 
     with pytest.raises(RuntimeError, match="STUDIO_RUNPOD_LONGFORM_ENABLED"):
-        _call("start_longform_render", {"command_id": "longform-disabled"})
+        _call(
+            "start_longform_render",
+            {
+                "command_id": "longform-disabled",
+                "channel_key": "history_rewind",
+                "title": "Test",
+                "topic": "Test",
+            },
+        )
 
 
 def test_read_and_poll_tool_never_dispatches_even_when_enabled(monkeypatch):

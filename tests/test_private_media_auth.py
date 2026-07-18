@@ -10,6 +10,7 @@ import long_form_router
 import studio_agent_router
 import zerotier_private_router
 from long_form import pipeline as long_form_pipeline
+from studio_agent import jobs as studio_agent_jobs
 from studio_agent import render_styles
 
 
@@ -43,6 +44,15 @@ def long_form_media_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> T
     monkeypatch.setattr(long_form_pipeline, "job_mp4_path", lambda _job_id: mp4)
     monkeypatch.setattr(long_form_pipeline, "job_thumbnail_path", lambda _job_id, _idx: thumbnail)
     monkeypatch.setattr(long_form_pipeline, "job_still_path", lambda _job_id, _idx: still)
+    monkeypatch.setattr(
+        studio_agent_jobs,
+        "job_access_metadata",
+        lambda job_id, kind: {
+            "exists": job_id == "job_abc",
+            "kind": kind,
+            "owner_id": "owner",
+        },
+    )
 
     app = FastAPI()
     app.include_router(

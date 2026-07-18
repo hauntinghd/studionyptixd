@@ -431,8 +431,10 @@ from billing import (
     _topup_wallets,
     _subscription_interval_months,
     _supabase_find_user_id_by_email,
+    _supabase_get_billing_profile,
     _supabase_get_waitlist_rows,
     _supabase_set_user_plan,
+    _supabase_set_stripe_identity,
     _supabase_upsert_waitlist_entry,
     _supabase_delete_waitlist_entry,
     _to_unix,
@@ -770,12 +772,13 @@ app = FastAPI(
 app.add_middleware(MultipartContentLengthLimitMiddleware)
 configure_backend_runtime(app)
 
-DESKTOP_RELEASE_VERSION = "0.2.3"
+DESKTOP_RELEASE_VERSION = "1.0.0"
 DESKTOP_RELEASE_DIR = Path(str(os.getenv("APP_DATA_DIR") or TEMP_DIR)) / "studio_releases"
 DESKTOP_RELEASE_FILENAME = f"NYPTID-Studio_{DESKTOP_RELEASE_VERSION}_x64-setup.exe"
 DESKTOP_RELEASE_NOTES = (
-    "Desktop-first Studio Agent, bundled reviewed desktop UI, secure app launch links, strict web "
-    "security headers, and reliable live scene-still reconciliation after provider rendering."
+    "NYPTID Studio 1.0: public desktop-first Studio Agent, end-to-end short-form and long-form "
+    "production, signed in-app updates, Stripe memberships and credits, secure Google sign-in, "
+    "provider-aware rendering, scene review and repair, and owned final-video export."
 )
 
 
@@ -787,9 +790,18 @@ def _desktop_release_metadata() -> tuple[Path, str, str]:
     release_path = _desktop_release_path()
     sha_path = release_path.with_suffix(f"{release_path.suffix}.sha256")
     signature_path = release_path.with_suffix(f"{release_path.suffix}.sig")
-    sha256 = sha_path.read_text(encoding="utf-8").strip().lower() if sha_path.is_file() else ""
+    declared_sha256 = sha_path.read_text(encoding="utf-8").strip().lower() if sha_path.is_file() else ""
     signature = signature_path.read_text(encoding="utf-8").strip() if signature_path.is_file() else ""
-    return release_path, sha256, signature
+    verified_sha256 = ""
+    if release_path.is_file() and re.fullmatch(r"[0-9a-f]{64}", declared_sha256):
+        digest = hashlib.sha256()
+        with release_path.open("rb") as release_file:
+            for chunk in iter(lambda: release_file.read(1024 * 1024), b""):
+                digest.update(chunk)
+        actual_sha256 = digest.hexdigest()
+        if actual_sha256 == declared_sha256:
+            verified_sha256 = actual_sha256
+    return release_path, verified_sha256, signature
 
 
 def _desktop_release_is_published(release_path: Path, sha256: str, signature: str) -> bool:
@@ -810,21 +822,22 @@ def _desktop_version_tuple(raw: str) -> tuple[int, int, int] | None:
 @app.get("/api/desktop/releases/latest")
 async def desktop_release_latest():
     release_path, sha256, signature = _desktop_release_metadata()
+    published = _desktop_release_is_published(release_path, sha256, signature)
     return {
         "version": DESKTOP_RELEASE_VERSION,
-        "available": _desktop_release_is_published(release_path, sha256, signature),
+        "available": published,
         "download_url": f"https://nyptid-studio.fly.dev/api/desktop/download/{DESKTOP_RELEASE_VERSION}",
         "sha256": sha256,
         "published_at": datetime.fromtimestamp(release_path.stat().st_mtime, timezone.utc).isoformat()
-        if release_path.is_file() else "",
+        if published else "",
         "notes": DESKTOP_RELEASE_NOTES,
     }
 
 
 @app.get("/api/desktop/download")
 async def desktop_release_download():
-    release_path = _desktop_release_path()
-    if not release_path.is_file():
+    release_path, sha256, signature = _desktop_release_metadata()
+    if not _desktop_release_is_published(release_path, sha256, signature):
         raise HTTPException(404, "Studio desktop release is not published yet")
     return FileResponse(
         str(release_path),
@@ -838,8 +851,8 @@ async def desktop_release_download():
 async def desktop_release_download_versioned(version: str):
     if str(version or "").strip() != DESKTOP_RELEASE_VERSION:
         raise HTTPException(404, "Studio desktop release version was not found")
-    release_path = _desktop_release_path()
-    if not release_path.is_file():
+    release_path, sha256, signature = _desktop_release_metadata()
+    if not _desktop_release_is_published(release_path, sha256, signature):
         raise HTTPException(404, "Studio desktop release is not published yet")
     return FileResponse(
         str(release_path),
@@ -853,7 +866,9 @@ async def desktop_release_download_versioned(version: str):
 async def desktop_release_updater(target: str, arch: str, current_version: str):
     current = _desktop_version_tuple(current_version)
     latest = _desktop_version_tuple(DESKTOP_RELEASE_VERSION)
-    if target != "windows" or arch not in {"x86_64", "i686", "aarch64"}:
+    # Studio currently publishes one Windows x64 NSIS artifact. Never offer it
+    # to ARM or 32-bit clients as though it were architecture-compatible.
+    if target != "windows" or arch != "x86_64":
         return Response(status_code=204, headers={"Cache-Control": "no-store"})
     if current is None or latest is None:
         raise HTTPException(400, "Invalid Studio desktop version")
@@ -1114,7 +1129,10 @@ def _resolve_user_plan_for_limits(user: dict | None) -> tuple[str, dict]:
 
 
 def _longform_owner_beta_enabled(user: dict | None) -> bool:
-    return bool((_public_lane_access_for_user(user) or {}).get("longform"))
+    # The hyphenated /api/long-form surface is the public metered 1.0 lane.
+    # Keep the older /api/longform compatibility workspace owner-only until
+    # every legacy operation has the same reservation/settlement contract.
+    return _is_admin_user(user)
 
 
 def _longform_deep_analysis_enabled(user: dict | None) -> bool:
@@ -4434,14 +4452,6 @@ def _public_lane_access_for_user(user: Optional[dict], access_snapshot: Optional
     snapshot = access_snapshot or _paid_access_snapshot_for_user(user)
     public_live = authenticated
     membership_plan = _membership_plan_for_user(user, snapshot)
-    beta_access = False
-    if authenticated and not is_admin:
-        try:
-            import unified_credits as uc
-
-            beta_access = bool(uc.get_state(str((user or {}).get("id", "") or "")).get("beta_access"))
-        except Exception:
-            beta_access = False
     chatstory_live = is_admin or (
         bool((snapshot or {}).get("billing_active"))
         and membership_plan in CHAT_STORY_ALLOWED_PLANS
@@ -4454,10 +4464,9 @@ def _public_lane_access_for_user(user: Optional[dict], access_snapshot: Optional
     return {
         "create": public_live,
         "agent": agent_live,
-        # Controlled-beta accounts can exercise planning, generation, scene
-        # review, and finalization, but only the owner/admin or a non-beta
-        # customer may retrieve the final rendered video.
-        "export_final": authenticated and (is_admin or not beta_access),
+        # Public 1.0 creators may retrieve final media only after the normal
+        # authenticated job-ownership checks have passed.
+        "export_final": authenticated,
         "thumbnails": is_admin,
         "cliplab": is_admin,
         "clone": is_admin,
@@ -4601,17 +4610,20 @@ def _paid_access_snapshot_for_user(user: Optional[dict]) -> dict:
         return out
     stripe_diag = _stripe_subscription_snapshot(email) if email else {}
     stripe_status = str(stripe_diag.get("status", "") or "").strip().lower()
-    stripe_ok = bool(stripe_diag.get("ok")) and stripe_status in {"active", "trialing", "past_due"}
+    stripe_ok = bool(stripe_diag.get("ok")) and stripe_status in {"active", "trialing"}
     if stripe_ok:
         stripe_plan = str(stripe_diag.get("plan", "") or "").strip().lower()
         stored_plan = str((user or {}).get("plan", "none") or "none").strip().lower()
+        # A known active Stripe subscription with an unknown price/plan is not
+        # evidence for the stale profile plan. Unknown billing identity fails
+        # closed until Stripe metadata or a configured Price resolves it.
         effective_plan = (
             stripe_plan
             if stripe_plan in PLAN_LIMITS or stripe_plan in UNIFIED_PLANS
-            else stored_plan
-            if stored_plan in PLAN_LIMITS or stored_plan in UNIFIED_PLANS
             else "none"
         )
+        if effective_plan == "none":
+            return out
         out.update(
             {
                 "billing_active": True,
@@ -4620,17 +4632,6 @@ def _paid_access_snapshot_for_user(user: Optional[dict]) -> dict:
                 "next_renewal_unix": int(stripe_diag.get("next_renewal_unix", 0) or 0),
                 "next_renewal_source": str(stripe_diag.get("next_renewal_source", "") or ""),
                 "billing_anchor_unix": int(stripe_diag.get("paid_at_unix", 0) or 0),
-            }
-        )
-        return out
-    stored_plan = str((user or {}).get("plan", "none") or "none").strip().lower()
-    if _profile_plan_is_paid(stored_plan) and not bool(manual_snapshot.get("known")):
-        log.warning("Stripe check failed/inactive; allowing paid access via profile plan for %s", email)
-        out.update(
-            {
-                "billing_active": True,
-                "plan": stored_plan,
-                "source": "profile_fallback",
             }
         )
         return out
@@ -15353,7 +15354,7 @@ async def _create_longform_session(req: LongFormSessionCreateRequest, request: R
     if not user:
         raise HTTPException(401, "Auth required")
     if not _longform_owner_beta_enabled(user):
-        raise HTTPException(403, "Long-form owner beta is restricted")
+        raise HTTPException(403, "Legacy long-form workspace is owner-only")
     busy_session_id = await _active_longform_capacity_session_id(str(user.get("id", "") or ""))
     if busy_session_id:
         raise HTTPException(
@@ -16161,7 +16162,7 @@ async def _longform_session_status(session_id: str, request: Request = None):
     if not user:
         raise HTTPException(401, "Auth required")
     if not _longform_owner_beta_enabled(user):
-        raise HTTPException(403, "Long-form owner beta is restricted")
+        raise HTTPException(403, "Legacy long-form workspace is owner-only")
     should_resume = False
     should_try_finalize = False
     now = time.time()
@@ -16284,7 +16285,7 @@ async def _list_longform_sessions(request: Request = None, limit: int = 25):
     if not user:
         raise HTTPException(401, "Auth required")
     if not _longform_owner_beta_enabled(user):
-        raise HTTPException(403, "Long-form owner beta is restricted")
+        raise HTTPException(403, "Legacy long-form workspace is owner-only")
 
     limit = max(1, min(100, int(limit or 25)))
     user_id = str(user.get("id", "") or "")
@@ -16325,7 +16326,7 @@ async def _longform_chapter_action(session_id: str, req: LongFormChapterActionRe
     if not user:
         raise HTTPException(401, "Auth required")
     if not _longform_owner_beta_enabled(user):
-        raise HTTPException(403, "Long-form owner beta is restricted")
+        raise HTTPException(403, "Legacy long-form workspace is owner-only")
     action = str(req.action or "").strip().lower()
     if action not in {"approve", "regenerate"}:
         raise HTTPException(400, "action must be approve or regenerate")
@@ -16483,7 +16484,7 @@ async def _longform_resolve_error(session_id: str, req: LongFormResolveErrorRequ
     if not user:
         raise HTTPException(401, "Auth required")
     if not _longform_owner_beta_enabled(user):
-        raise HTTPException(403, "Long-form owner beta is restricted")
+        raise HTTPException(403, "Legacy long-form workspace is owner-only")
     async with _longform_sessions_lock:
         _load_longform_sessions()
         session = _longform_sessions.get(session_id)
@@ -16584,7 +16585,7 @@ async def _longform_resolve_error(session_id: str, req: LongFormResolveErrorRequ
 def _longform_estimated_credit_cost(session: dict) -> int:
     """Compute AC cost for a longform finalize, matching Phase 4's short-form pattern.
 
-    Currently unused because longform is owner-beta-only (`_longform_owner_beta_enabled`
+    Currently unused because the legacy long-form workspace is owner-only (`_longform_owner_beta_enabled`
     gates access) and `_start_longform_finalize_internal` hardcodes credit_charged=False.
     When longform goes public, the finalize path should:
 
@@ -16767,7 +16768,7 @@ async def _longform_finalize(session_id: str, background_tasks: BackgroundTasks,
     if not user:
         raise HTTPException(401, "Auth required")
     if not _longform_owner_beta_enabled(user):
-        raise HTTPException(403, "Long-form owner beta is restricted")
+        raise HTTPException(403, "Legacy long-form workspace is owner-only")
     job_id = await _start_longform_finalize_internal(session_id, user)
     return {"job_id": job_id}
 
@@ -16777,7 +16778,7 @@ async def _longform_stop_session(session_id: str, request: Request = None):
     if not user:
         raise HTTPException(401, "Auth required")
     if not _longform_owner_beta_enabled(user):
-        raise HTTPException(403, "Long-form owner beta is restricted")
+        raise HTTPException(403, "Legacy long-form workspace is owner-only")
 
     normalized_session_id = str(session_id or "").strip()
     if not normalized_session_id:
@@ -16835,7 +16836,7 @@ async def _longform_ingest_outcome(session_id: str, req: CatalystOutcomeIngestRe
     if not user:
         raise HTTPException(401, "Auth required")
     if not _longform_owner_beta_enabled(user):
-        raise HTTPException(403, "Long-form owner beta is restricted")
+        raise HTTPException(403, "Legacy long-form workspace is owner-only")
     user_id = str(user.get("id", "") or "").strip()
     async with _longform_sessions_lock:
         _load_longform_sessions()
@@ -16893,7 +16894,7 @@ async def _longform_auto_ingest_outcome(session_id: str, req: CatalystAutoOutcom
     if not user:
         raise HTTPException(401, "Auth required")
     if not _longform_owner_beta_enabled(user):
-        raise HTTPException(403, "Long-form owner beta is restricted")
+        raise HTTPException(403, "Legacy long-form workspace is owner-only")
     user_id = str(user.get("id", "") or "").strip()
     async with _longform_sessions_lock:
         _load_longform_sessions()
@@ -20232,6 +20233,252 @@ def _price_id_for_plan_id(plan_id: str) -> str:
     return ""
 
 
+def _stripe_object_mapping(value: object) -> dict:
+    """Return a plain mapping for Stripe SDK objects without trusting attributes."""
+    if isinstance(value, dict):
+        return dict(value)
+    for method_name in ("to_dict_recursive", "to_dict"):
+        converter = getattr(value, method_name, None)
+        if callable(converter):
+            try:
+                converted = converter()
+            except Exception:
+                continue
+            if isinstance(converted, dict):
+                return dict(converted)
+    return {}
+
+
+def _stripe_metadata(*sources: object) -> dict:
+    """Merge metadata sources in priority order, keeping the first non-empty value."""
+    merged: dict = {}
+    for source in sources:
+        for key, value in _stripe_object_mapping(source).items():
+            if key not in merged and str(value or "").strip():
+                merged[str(key)] = value
+    return merged
+
+
+def _stripe_lifecycle_plan(metadata: object = None, price_id: str = "") -> str:
+    """Resolve a paid plan with merchant-owned Price mapping first."""
+    mapped = str(STRIPE_PRICE_TO_PLAN.get(str(price_id or "").strip(), "") or "").strip().lower()
+    if _profile_plan_is_paid(mapped):
+        return mapped
+    candidate = str(_stripe_object_mapping(metadata).get("plan", "") or "").strip().lower()
+    return candidate if _profile_plan_is_paid(candidate) else ""
+
+
+def _stripe_price_id_from_subscription(subscription: object) -> str:
+    sub = _stripe_object_mapping(subscription)
+    items = _stripe_object_mapping(sub.get("items"))
+    rows = list(items.get("data", []) or [])
+    if not rows:
+        return ""
+    price = _stripe_object_mapping(_stripe_object_mapping(rows[0]).get("price"))
+    return str(price.get("id", "") or "").strip()
+
+
+def _stripe_price_id_from_invoice(invoice: object) -> str:
+    inv = _stripe_object_mapping(invoice)
+    lines = _stripe_object_mapping(inv.get("lines"))
+    rows = list(lines.get("data", []) or [])
+    if not rows:
+        return ""
+    line = _stripe_object_mapping(rows[0])
+    price = _stripe_object_mapping(line.get("price"))
+    price_id = str(price.get("id", "") or "").strip()
+    if price_id:
+        return price_id
+    pricing = _stripe_object_mapping(line.get("pricing"))
+    price_details = _stripe_object_mapping(pricing.get("price_details"))
+    raw_price = price_details.get("price")
+    if isinstance(raw_price, str):
+        return raw_price.strip()
+    return str(_stripe_object_mapping(raw_price).get("id", "") or "").strip()
+
+
+def _stripe_invoice_subscription_context(invoice: object) -> tuple[str, dict]:
+    """Extract subscription identity + copied metadata across Stripe API shapes."""
+    inv = _stripe_object_mapping(invoice)
+    raw_subscription = inv.get("subscription")
+    subscription = _stripe_object_mapping(raw_subscription)
+    subscription_id = (
+        str(subscription.get("id", "") or "").strip()
+        if subscription
+        else str(raw_subscription or "").strip()
+    )
+
+    parent = _stripe_object_mapping(inv.get("parent"))
+    parent_details = _stripe_object_mapping(parent.get("subscription_details"))
+    direct_details = _stripe_object_mapping(inv.get("subscription_details"))
+    for details in (parent_details, direct_details):
+        if not subscription_id:
+            raw = details.get("subscription")
+            mapped = _stripe_object_mapping(raw)
+            subscription_id = (
+                str(mapped.get("id", "") or "").strip()
+                if mapped
+                else str(raw or "").strip()
+            )
+
+    metadata = _stripe_metadata(
+        subscription.get("metadata"),
+        parent_details.get("metadata"),
+        direct_details.get("metadata"),
+        inv.get("metadata"),
+    )
+    return subscription_id, metadata
+
+
+def _stripe_customer_id(value: object) -> str:
+    mapped = _stripe_object_mapping(value)
+    raw = mapped.get("customer")
+    nested = _stripe_object_mapping(raw)
+    return str(nested.get("id", "") or raw or "").strip()
+
+
+def _stripe_subscription_id(value: object) -> str:
+    mapped = _stripe_object_mapping(value)
+    return str(mapped.get("id", "") or "").strip()
+
+
+def _stripe_active_subscription_candidate(
+    customer_id: str,
+    *,
+    exclude_subscription_id: str = "",
+    preferred_subscription_id: str = "",
+) -> dict:
+    """Return a canonical entitled Stripe subscription for one customer.
+
+    Cancellation and failure events are not authoritative for the whole
+    customer: a duplicate subscription may still be valid. Provider lookup
+    errors propagate so a transient Stripe failure cannot erase entitlement.
+    """
+    cid = str(customer_id or "").strip()
+    excluded = str(exclude_subscription_id or "").strip()
+    preferred = str(preferred_subscription_id or "").strip()
+    if not cid or not STRIPE_SECRET_KEY:
+        return {}
+    result = stripe_lib.Subscription.list(
+        customer=cid,
+        status="all",
+        limit=100,
+        expand=["data.items.data.price"],
+    )
+    rows = list(_stripe_value(result, "data", []) or [])
+    candidates: list[dict] = []
+    for raw in rows:
+        sub = _stripe_object_mapping(raw)
+        subscription_id = str(sub.get("id", "") or "").strip()
+        status = str(sub.get("status", "") or "").strip().lower()
+        if not subscription_id or subscription_id == excluded or status not in {"active", "trialing"}:
+            continue
+        price_id = _stripe_price_id_from_subscription(sub)
+        plan = _stripe_lifecycle_plan(sub.get("metadata"), price_id)
+        if not plan:
+            continue
+        candidates.append(
+            {
+                "id": subscription_id,
+                "customer_id": cid,
+                "status": status,
+                "plan": plan,
+                "created": int(sub.get("created", 0) or 0),
+            }
+        )
+    candidates.sort(
+        key=lambda row: (
+            0 if str(row.get("id", "")) == preferred else 1,
+            0 if str(row.get("status", "")) == "active" else 1,
+            -int(row.get("created", 0) or 0),
+        )
+    )
+    return dict(candidates[0]) if candidates else {}
+
+
+async def _stripe_sync_plan(
+    user_id: str,
+    plan: str,
+    *,
+    customer_id: str = "",
+    subscription_id: str = "",
+) -> None:
+    """Synchronize entitlement identity without creating any credits."""
+    await _supabase_set_user_plan(user_id, plan)
+    await _supabase_set_stripe_identity(
+        user_id,
+        customer_id=customer_id,
+        subscription_id=subscription_id,
+    )
+    import unified_credits as uc
+    uc.set_plan(user_id, plan if plan in UNIFIED_PLANS else "", grant_now=False)
+
+
+async def _stripe_reconcile_or_revoke(
+    user_id: str,
+    *,
+    customer_id: str,
+    excluded_subscription_id: str,
+    reason: str,
+) -> dict:
+    """Preserve another valid subscription or revoke the account fail-closed."""
+    profile = await _supabase_get_billing_profile(user_id)
+    preferred = str(profile.get("stripe_subscription_id", "") or "").strip()
+    candidate = _stripe_active_subscription_candidate(
+        customer_id,
+        exclude_subscription_id=excluded_subscription_id,
+        preferred_subscription_id=preferred,
+    )
+    if candidate:
+        await _stripe_sync_plan(
+            user_id,
+            str(candidate["plan"]),
+            customer_id=str(candidate.get("customer_id", "") or customer_id),
+            subscription_id=str(candidate["id"]),
+        )
+        log.info(
+            "Stripe %s preserved entitlement through canonical subscription %s",
+            reason,
+            str(candidate["id"]),
+        )
+        return candidate
+    await _supabase_set_user_plan(user_id, "none")
+    await _supabase_set_stripe_identity(
+        user_id,
+        customer_id=customer_id,
+        clear_subscription=True,
+    )
+    import unified_credits as uc
+    uc.set_plan(user_id, "", grant_now=False)
+    log.info("Stripe %s revoked entitlement after canonical reconciliation", reason)
+    return {}
+
+
+def _stripe_invoice_cycle_key(invoice: object, subscription_id: str) -> str:
+    """Build a stable key shared by invoice.paid and payment_succeeded."""
+    inv = _stripe_object_mapping(invoice)
+    lines = _stripe_object_mapping(inv.get("lines"))
+    rows = list(lines.get("data", []) or [])
+    first = _stripe_object_mapping(rows[0]) if rows else {}
+    period = _stripe_object_mapping(first.get("period"))
+    period_start = int(period.get("start", 0) or 0)
+    period_end = int(period.get("end", 0) or 0)
+    subject = str(subscription_id or inv.get("customer") or "").strip()
+    if subject and (period_start or period_end):
+        return f"stripe:{subject}:{period_start}:{period_end}"
+    invoice_id = str(inv.get("id", "") or "").strip()
+    if invoice_id:
+        return f"stripe:invoice:{invoice_id}"
+    raise RuntimeError("Stripe paid invoice has no stable billing cycle identity")
+
+
+async def _stripe_lifecycle_target_id(metadata: object, customer_email: str) -> str:
+    user_id = str(_stripe_object_mapping(metadata).get("user_id", "") or "").strip()
+    if user_id:
+        return user_id
+    return await _supabase_find_user_id_by_email(str(customer_email or "").strip().lower())
+
+
 _TY_PROMO_ENSURED: set[str] = set()
 
 
@@ -20260,6 +20507,54 @@ def _ensure_ty_beta_promotion(stripe_price_id: str) -> None:
         _TY_PROMO_ENSURED.add(price_id)
     except Exception:
         pass
+
+
+async def _stripe_customer_for_checkout(user: dict) -> tuple[str, dict]:
+    """Reuse one persisted customer and reject duplicate live membership."""
+    user_id = str((user or {}).get("id", "") or "").strip()
+    email = str((user or {}).get("email", "") or "").strip().lower()
+    profile = await _supabase_get_billing_profile(user_id)
+    customer_id = str(profile.get("stripe_customer_id", "") or "").strip()
+    if not customer_id and email:
+        customer_id = _stripe_find_customer_id_by_email(email)
+    if not customer_id:
+        customer_payload: dict[str, object] = {"metadata": {"user_id": user_id}}
+        if email:
+            customer_payload["email"] = email
+        created = stripe_lib.Customer.create(**customer_payload)
+        customer_id = str(_stripe_value(created, "id", "") or "").strip()
+    if not customer_id:
+        raise HTTPException(500, "Stripe customer identity is unavailable")
+    await _supabase_set_stripe_identity(user_id, customer_id=customer_id)
+
+    active = _stripe_active_subscription_candidate(
+        customer_id,
+        preferred_subscription_id=str(profile.get("stripe_subscription_id", "") or ""),
+    )
+    if active:
+        await _stripe_sync_plan(
+            user_id,
+            str(active["plan"]),
+            customer_id=customer_id,
+            subscription_id=str(active["id"]),
+        )
+        portal_url = ""
+        try:
+            portal = stripe_lib.billing_portal.Session.create(
+                customer=customer_id,
+                return_url=f"{_billing_site_url()}?billing=updated",
+            )
+            portal_url = str(_stripe_value(portal, "url", "") or "")
+        except Exception:
+            pass
+        raise HTTPException(
+            409,
+            detail={
+                "message": "An active Studio membership already exists. Manage it in billing.",
+                "portal_url": portal_url,
+            },
+        )
+    return customer_id, profile
 
 
 async def _create_stripe_membership_checkout(user: dict, plan: str, price_usd: float) -> str:
@@ -20295,6 +20590,7 @@ async def _create_stripe_membership_checkout(user: dict, plan: str, price_usd: f
             },
             "quantity": 1,
         }
+    customer_id, _profile = await _stripe_customer_for_checkout(user)
     checkout_payload = {
         "mode": "subscription",
         "line_items": [line_item],
@@ -20305,12 +20601,12 @@ async def _create_stripe_membership_checkout(user: dict, plan: str, price_usd: f
         "client_reference_id": user["id"],
         "metadata": {"user_id": user["id"], "plan": normalized_plan},
         "subscription_data": {"metadata": {"user_id": user["id"], "plan": normalized_plan}},
+        "customer": customer_id,
     }
     if normalized_plan == "studio_pro_1k":
         if stripe_price_id:
             _ensure_ty_beta_promotion(stripe_price_id)
         checkout_payload["allow_promotion_codes"] = True
-    checkout_payload["customer_email"] = user["email"]
     session = stripe_lib.checkout.Session.create(**checkout_payload)
     if not session.url:
         raise HTTPException(500, "Stripe checkout URL missing")
@@ -20645,7 +20941,15 @@ async def _capture_paypal_subscription_order(order_id: str) -> dict:
         await _supabase_set_user_plan(user_id, plan)
         if plan in UNIFIED_PLANS:
             import unified_credits as uc
-            uc.set_plan(user_id, plan, grant_now=True)
+            uc.set_plan(user_id, plan, grant_now=False)
+            uc.grant_plan_cycle(
+                user_id,
+                plan,
+                f"paypal:{capture_id or order_id}:{int(period_start_unix)}:{int(period_end_unix)}",
+                provider="paypal",
+                invoice_id=capture_id or order_id,
+                metadata={"order_id": order_id},
+            )
         # Phase 3 BUG #2 fix: reset monthly AC usage on subscription
         # activation. Before this patch, a user upgrading from a lower tier
         # (or reactivating after a cancellation) kept their old
@@ -21367,9 +21671,13 @@ async def _create_billing_portal_session(user: dict = Depends(require_auth)):
         }
     if not STRIPE_SECRET_KEY:
         raise HTTPException(500, "Stripe not configured")
-    customer_id = _stripe_find_customer_id_by_email(user.get("email", ""))
+    profile = await _supabase_get_billing_profile(str(user.get("id", "") or ""))
+    customer_id = str(profile.get("stripe_customer_id", "") or "").strip()
+    if not customer_id:
+        customer_id = _stripe_find_customer_id_by_email(user.get("email", ""))
     if not customer_id:
         raise HTTPException(404, "No billing profile found yet. Complete a credit-pack purchase first.")
+    await _supabase_set_stripe_identity(str(user.get("id", "") or ""), customer_id=customer_id)
     try:
         portal = stripe_lib.billing_portal.Session.create(
             customer=customer_id,
@@ -21606,26 +21914,51 @@ async def _stripe_apply_webhook_event_unordered(event: dict) -> dict:
             or ""
         )
         if mode == "subscription":
-            plan = str(metadata.get("plan") or "creator").strip().lower()
-            if user_id and SUPABASE_URL:
-                svc_key = SUPABASE_SERVICE_KEY or SUPABASE_ANON_KEY
-                async with httpx.AsyncClient(timeout=15) as client:
-                    profile_response = await client.post(
-                        f"{SUPABASE_URL}/rest/v1/profiles",
-                        headers={
-                            "apikey": svc_key,
-                            "Authorization": f"Bearer {svc_key}",
-                            "Content-Type": "application/json",
-                            "Prefer": "resolution=merge-duplicates",
-                        },
-                        json={"id": user_id, "plan": plan},
-                    )
-                if profile_response.status_code not in {200, 201, 204}:
-                    raise RuntimeError("Stripe profile synchronization failed")
-                log.info("Stripe subscription profile synchronized")
-            if user_id and plan in UNIFIED_PLANS:
-                import unified_credits as uc
-                uc.set_plan(user_id, plan, grant_now=True)
+            payment_status = str(session_data.get("payment_status", "") or "").strip().lower()
+            if payment_status not in {"paid", "no_payment_required"}:
+                log.info(
+                    "Stripe subscription checkout deferred until payment: session=%s status=%s",
+                    str(session_data.get("id", "") or ""),
+                    payment_status or "missing",
+                )
+                return {"status": "ok", "action": "subscription_payment_pending"}
+            raw_subscription = session_data.get("subscription")
+            subscription = _stripe_object_mapping(raw_subscription)
+            subscription_id = (
+                str(subscription.get("id", "") or "").strip()
+                if subscription
+                else str(raw_subscription or "").strip()
+            )
+            subscription_status = str(subscription.get("status", "") or "").strip().lower()
+            subscription_price_id = _stripe_price_id_from_subscription(subscription)
+            if subscription_id and STRIPE_SECRET_KEY:
+                subscription = _stripe_object_mapping(stripe_lib.Subscription.retrieve(subscription_id))
+                metadata = _stripe_metadata(subscription.get("metadata"), metadata)
+                subscription_status = str(subscription.get("status", "") or "").strip().lower()
+                subscription_price_id = _stripe_price_id_from_subscription(subscription)
+            plan = _stripe_lifecycle_plan(metadata, subscription_price_id)
+            if not user_id or not plan or not subscription_id:
+                log.error(
+                    "Stripe checkout subscription is missing a valid Studio user/plan mapping: session=%s",
+                    str(session_data.get("id", "") or ""),
+                )
+                raise RuntimeError("Stripe checkout subscription mapping failed")
+            customer_id = _stripe_customer_id(session_data)
+            if subscription_status not in {"active", "trialing"}:
+                await _stripe_reconcile_or_revoke(
+                    user_id,
+                    customer_id=customer_id,
+                    excluded_subscription_id=subscription_id,
+                    reason=f"checkout_{subscription_status or 'unknown_status'}",
+                )
+                raise RuntimeError("Stripe checkout subscription is not entitled")
+            await _stripe_sync_plan(
+                user_id,
+                plan,
+                customer_id=customer_id,
+                subscription_id=subscription_id,
+            )
+            log.info("Stripe paid checkout synchronized without a credit grant")
             await _append_landing_notification(
                 event_type="subscription",
                 plan=str(plan or "starter"),
@@ -21692,74 +22025,136 @@ async def _stripe_apply_webhook_event_unordered(event: dict) -> dict:
 
     elif event.get("type") in {"customer.subscription.created", "customer.subscription.updated", "customer.subscription.deleted"}:
         sub = event["data"]["object"]
-        customer_email = str(sub.get("customer_email", "") or "")
-        customer_id = str(sub.get("customer", "") or "")
-        if not customer_email and customer_id and STRIPE_SECRET_KEY:
-            customer = stripe_lib.Customer.retrieve(customer_id)
-            customer_email = str(getattr(customer, "email", "") or "")
-        if not customer_email:
-            log.warning("Subscription lifecycle event received without resolvable customer email")
-            return {"status": "ok"}
-
+        metadata = _stripe_metadata(sub.get("metadata"))
         event_type = str(event.get("type", "") or "")
-        status = str(sub.get("status", "") or "")
-        items = (((sub.get("items", {}) or {}).get("data", []) or []))
-        active_price_id = ""
-        if items:
-            active_price_id = str((((items[0] or {}).get("price", {}) or {}).get("id", "") or ""))
-        mapped_plan = STRIPE_PRICE_TO_PLAN.get(active_price_id, "")
-
-        target_id = await _supabase_find_user_id_by_email(customer_email)
-        if not target_id:
-            log.warning("Subscription lifecycle event has no matching Studio account")
-            return {"status": "ok"}
-        if event_type == "customer.subscription.deleted":
-            await _supabase_set_user_plan(target_id, "none")
-            import unified_credits as uc
-            uc.set_plan(target_id, "", grant_now=False)
-            log.info("Stripe subscription deletion synchronized")
-        elif status in {"active", "trialing", "past_due"} and mapped_plan:
-            await _supabase_set_user_plan(target_id, mapped_plan)
-            if mapped_plan in UNIFIED_PLANS:
-                import unified_credits as uc
-                uc.set_plan(target_id, mapped_plan, grant_now=True)
-            log.info("Stripe subscription lifecycle synchronized")
-        elif status in {"canceled", "unpaid", "incomplete_expired"}:
-            await _supabase_set_user_plan(target_id, "none")
-            import unified_credits as uc
-            uc.set_plan(target_id, "", grant_now=False)
-            log.info("Stripe inactive subscription synchronized")
-
-    elif event.get("type") in {"invoice.payment_failed", "invoice.payment_succeeded"}:
-        inv = event["data"]["object"]
-        customer_email = str(inv.get("customer_email", "") or "")
-        customer_id = str(inv.get("customer", "") or "")
-        if not customer_email and customer_id and STRIPE_SECRET_KEY:
+        status = str(sub.get("status", "") or "").strip().lower()
+        active_price_id = _stripe_price_id_from_subscription(sub)
+        mapped_plan = _stripe_lifecycle_plan(metadata, active_price_id)
+        customer_email = str(sub.get("customer_email", "") or "")
+        customer_id = _stripe_customer_id(sub)
+        subscription_id = str(sub.get("id", "") or "").strip()
+        if not metadata.get("user_id") and not customer_email and customer_id and STRIPE_SECRET_KEY:
             customer = stripe_lib.Customer.retrieve(customer_id)
             customer_email = str(getattr(customer, "email", "") or "")
-        if not customer_email:
-            return {"status": "ok"}
-        target_id = await _supabase_find_user_id_by_email(customer_email)
+        target_id = await _stripe_lifecycle_target_id(metadata, customer_email)
         if not target_id:
-            return {"status": "ok"}
-        if event.get("type") == "invoice.payment_failed":
-            await _supabase_set_user_plan(target_id, "none")
-            import unified_credits as uc
-            uc.set_plan(target_id, "", grant_now=False)
-            log.info(f"Invoice payment failed; downgraded {customer_email} -> none")
+            log.error(
+                "Stripe subscription lifecycle has no Studio account mapping: subscription=%s status=%s",
+                str(sub.get("id", "") or ""),
+                status or "missing",
+            )
+            raise RuntimeError("Stripe subscription user mapping failed")
+        if status in {"active", "trialing"} and event_type != "customer.subscription.deleted":
+            if not mapped_plan:
+                log.error(
+                    "Stripe active subscription has no valid Studio plan mapping: subscription=%s price=%s",
+                    str(sub.get("id", "") or ""),
+                    active_price_id or "missing",
+                )
+                await _stripe_reconcile_or_revoke(
+                    target_id,
+                    customer_id=customer_id,
+                    excluded_subscription_id=subscription_id,
+                    reason="unknown_active_plan",
+                )
+                raise RuntimeError("Stripe subscription plan mapping failed")
+            await _stripe_sync_plan(
+                target_id,
+                mapped_plan,
+                customer_id=customer_id,
+                subscription_id=subscription_id,
+            )
+            log.info("Stripe subscription status synchronized without a credit grant")
         else:
-            # Keep profile + Stripe lifecycle in sync on successful recurring renewals.
-            lines = (((inv.get("lines", {}) or {}).get("data", []) or []))
-            price_id = ""
-            if lines:
-                price_id = str((((lines[0] or {}).get("price", {}) or {}).get("id", "") or ""))
-            plan = STRIPE_PRICE_TO_PLAN.get(price_id, "")
-            if plan:
-                await _supabase_set_user_plan(target_id, plan)
-                if plan in UNIFIED_PLANS:
-                    import unified_credits as uc
-                    uc.set_plan(target_id, plan, grant_now=True)
-                log.info("Stripe invoice renewal synchronized")
+            await _stripe_reconcile_or_revoke(
+                target_id,
+                customer_id=customer_id,
+                excluded_subscription_id=subscription_id,
+                reason=event_type or status or "unknown_status",
+            )
+
+    elif event.get("type") in {"invoice.payment_failed", "invoice.payment_succeeded", "invoice.paid"}:
+        inv = event["data"]["object"]
+        subscription_id, metadata = _stripe_invoice_subscription_context(inv)
+        price_id = _stripe_price_id_from_invoice(inv)
+        plan = _stripe_lifecycle_plan(metadata, price_id)
+        raw_subscription = _stripe_object_mapping(inv.get("subscription"))
+        subscription_status = str(raw_subscription.get("status", "") or "").strip().lower()
+        retrieved: dict = {}
+
+        # Inline checkout prices are intentionally created dynamically, so a
+        # renewal invoice may need the subscription metadata Stripe copied from
+        # checkout instead of a preconfigured Price ID.
+        if subscription_id and STRIPE_SECRET_KEY:
+            retrieved = _stripe_object_mapping(stripe_lib.Subscription.retrieve(subscription_id))
+            metadata = _stripe_metadata(retrieved.get("metadata"), metadata)
+            subscription_status = str(retrieved.get("status", "") or "").strip().lower()
+            subscription_price_id = _stripe_price_id_from_subscription(retrieved)
+            if not price_id:
+                price_id = subscription_price_id
+            plan = _stripe_lifecycle_plan(metadata, price_id)
+
+        customer_email = str(inv.get("customer_email", "") or "")
+        customer_id = _stripe_customer_id(inv) or _stripe_customer_id(retrieved)
+        if not metadata.get("user_id") and not customer_email and customer_id and STRIPE_SECRET_KEY:
+            customer = stripe_lib.Customer.retrieve(customer_id)
+            customer_email = str(getattr(customer, "email", "") or "")
+        target_id = await _stripe_lifecycle_target_id(metadata, customer_email)
+        if not target_id:
+            log.error(
+                "Stripe invoice lifecycle has no Studio account mapping: invoice=%s subscription=%s",
+                str(inv.get("id", "") or ""),
+                subscription_id or "missing",
+            )
+            raise RuntimeError("Stripe invoice user mapping failed")
+        if event.get("type") == "invoice.payment_failed":
+            await _stripe_reconcile_or_revoke(
+                target_id,
+                customer_id=customer_id,
+                excluded_subscription_id=subscription_id,
+                reason="invoice_payment_failed",
+            )
+        else:
+            if not plan:
+                log.error(
+                    "Stripe successful invoice has no valid Studio plan mapping: invoice=%s price=%s",
+                    str(inv.get("id", "") or ""),
+                    price_id or "missing",
+                )
+                await _stripe_reconcile_or_revoke(
+                    target_id,
+                    customer_id=customer_id,
+                    excluded_subscription_id=subscription_id,
+                    reason="paid_invoice_unknown_plan",
+                )
+                raise RuntimeError("Stripe invoice plan mapping failed")
+            if subscription_status not in {"active", "trialing"}:
+                await _stripe_reconcile_or_revoke(
+                    target_id,
+                    customer_id=customer_id,
+                    excluded_subscription_id=subscription_id,
+                    reason=f"paid_invoice_{subscription_status or 'unknown_status'}",
+                )
+                raise RuntimeError("Stripe paid invoice subscription is not entitled")
+            await _stripe_sync_plan(
+                target_id,
+                plan,
+                customer_id=customer_id,
+                subscription_id=subscription_id,
+            )
+            if plan in UNIFIED_PLANS:
+                import unified_credits as uc
+                invoice_id = str(inv.get("id", "") or "").strip()
+                cycle_key = _stripe_invoice_cycle_key(inv, subscription_id)
+                uc.grant_plan_cycle(
+                    target_id,
+                    plan,
+                    cycle_key,
+                    provider="stripe",
+                    invoice_id=invoice_id,
+                    metadata={"subscription_id": subscription_id},
+                )
+            log.info("Stripe paid invoice synchronized and cycle grant applied idempotently")
 
     return {"status": "ok", "action": str(event.get("type", "") or "ignored")}
 
@@ -21767,22 +22162,35 @@ async def _stripe_apply_webhook_event_unordered(event: dict) -> dict:
 def _stripe_plan_event_subjects(event: dict) -> list[str]:
     event_type = str((event or {}).get("type", "") or "")
     obj = (((event or {}).get("data", {}) or {}).get("object", {}) or {})
-    if event_type == "checkout.session.completed" and str(obj.get("mode", "") or "") != "subscription":
+    if event_type in {"checkout.session.completed", "checkout.session.async_payment_succeeded"} and str(obj.get("mode", "") or "") != "subscription":
         return []
     if event_type not in {
         "checkout.session.completed",
+        "checkout.session.async_payment_succeeded",
         "customer.subscription.created",
         "customer.subscription.updated",
         "customer.subscription.deleted",
         "invoice.payment_failed",
         "invoice.payment_succeeded",
+        "invoice.paid",
     }:
         return []
 
+    # Paid-invoice grants have their own provider-cycle idempotency and must
+    # not be discarded merely because an unrelated subscription status event
+    # carried a later timestamp. Serialize the two paid event variants by the
+    # invoice identity; grant_plan_cycle converges them on the same mutation.
+    if event_type.startswith("invoice."):
+        invoice_id = str(obj.get("id", "") or "").strip()
+        return [f"invoice:{invoice_id}"] if invoice_id else []
+
     subjects: list[str] = []
     subscription = ""
+    metadata = _stripe_metadata(obj.get("metadata"))
     if event_type.startswith("customer.subscription."):
         subscription = str(obj.get("id", "") or "")
+    elif event_type.startswith("invoice."):
+        subscription, metadata = _stripe_invoice_subscription_context(obj)
     else:
         raw_subscription = obj.get("subscription")
         if isinstance(raw_subscription, dict):
@@ -21804,7 +22212,6 @@ def _stripe_plan_event_subjects(event: dict) -> list[str]:
     customer_id = str((customer or {}).get("id", "") or "") if isinstance(customer, dict) else str(customer or "")
     if customer_id:
         subjects.append(f"customer:{customer_id}")
-    metadata = obj.get("metadata", {}) or {}
     user_id = str(obj.get("client_reference_id") or metadata.get("user_id") or "").strip()
     if user_id:
         subjects.append(f"user:{user_id}")
@@ -21923,7 +22330,7 @@ async def _admin_set_plan(req: SetPlanRequest, user: dict = Depends(require_auth
             if not target_id:
                 return {"error": f"User {req.email} not found in Supabase auth"}
 
-            await client.post(
+            profile_response = await client.post(
                 f"{SUPABASE_URL}/rest/v1/profiles",
                 headers={
                     "apikey": svc_key,
@@ -21933,6 +22340,8 @@ async def _admin_set_plan(req: SetPlanRequest, user: dict = Depends(require_auth
                 },
                 json={"id": target_id, "plan": req.plan, "role": "admin" if req.email in ADMIN_EMAILS else "user"},
             )
+            if profile_response.status_code not in {200, 201, 204}:
+                raise RuntimeError(f"Supabase plan write failed ({profile_response.status_code})")
         return {"status": "ok", "email": req.email, "plan": req.plan}
     except Exception as e:
         log.error(f"Admin set-plan error: {e}")

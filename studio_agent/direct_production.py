@@ -1,8 +1,9 @@
-"""Safety boundary for legacy/direct Studio production HTTP routes.
+"""Safety boundary for direct paid Studio HTTP routes.
 
-Planning, reads, uploads, thumbnails, and chat never enter this module.  A
-covered production mutation uses the same logged tool contract as Studio Agent;
-an uncovered mutation fails closed while RunPod routing is enabled.
+Read-only calls, uploads, and ordinary chat never enter this module. A paid
+planning or production mutation uses the same idempotent, logged credit
+contract as Studio Agent; an uncovered production mutation fails closed while
+RunPod routing is enabled.
 """
 from __future__ import annotations
 
@@ -51,7 +52,7 @@ def require_longform_runpod_if_global_enabled() -> bool:
 def require_idempotency_key(request: Request) -> str:
     command_id = str(request.headers.get("x-idempotency-key") or "").strip()
     if not command_id:
-        raise HTTPException(400, "X-Idempotency-Key is required for RunPod production mutations.")
+        raise HTTPException(400, "X-Idempotency-Key is required for Studio production mutations.")
     if len(command_id) > 512:
         raise HTTPException(400, "X-Idempotency-Key is too long.")
     return command_id
@@ -65,7 +66,7 @@ async def execute_logged_production(
     user_id: str,
     content_format: str,
 ) -> dict[str, Any]:
-    """Execute one covered mutation through Studio's logged RunPod boundary."""
+    """Execute one covered mutation through Studio's logged billing boundary."""
 
     command_id = require_idempotency_key(request)
     dispatched_arguments = dict(arguments or {})
@@ -83,7 +84,7 @@ async def execute_logged_production(
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(503, f"RunPod production dispatch failed: {str(exc)[:400]}") from exc
+        raise HTTPException(503, f"Studio production execution failed: {str(exc)[:400]}") from exc
     try:
         payload = json.loads(raw or "{}")
     except json.JSONDecodeError as exc:

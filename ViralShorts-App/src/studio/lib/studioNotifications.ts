@@ -23,6 +23,13 @@ const RETIRED_IDS = new Set(['studio-campus-live', 'studio-hub-simplified']);
 
 const BUNDLED_RELEASES: Array<Pick<StudioNotification, 'id' | 'kind' | 'title' | 'body'>> = [
     {
+        id: 'release-2026-07-18-studio-1-0-public',
+        kind: 'success',
+        title: 'NYPTID Studio 1.0 is live',
+        body:
+            'Studio is publicly available as a desktop-first production app for owned short-form and long-form planning, production, review, repair, animation, and export.',
+    },
+    {
         id: 'release-2026-07-13-owner-credits-longform-compose',
         kind: 'success',
         title: 'Owner credits, long-form status, HR compose fix',

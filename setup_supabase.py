@@ -88,6 +88,11 @@ def main():
         updated_at TIMESTAMPTZ DEFAULT NOW()
     );
 
+    ALTER TABLE public.profiles
+        ADD COLUMN IF NOT EXISTS stripe_customer_id TEXT;
+    ALTER TABLE public.profiles
+        ADD COLUMN IF NOT EXISTS stripe_subscription_id TEXT;
+
     ALTER TABLE public.profiles ENABLE ROW LEVEL SECURITY;
 
     DO $$ BEGIN

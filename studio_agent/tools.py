@@ -35,6 +35,11 @@ from backend_settings import FAL_PUBLIC_RENDERS_ENABLED, XAI_PUBLIC_RENDERS_ENAB
 ROOT = Path(__file__).resolve().parents[1]
 SKELETON_OUTPUT = skeleton_output_root()
 
+LONGFORM_TEXT_METERED_TOOLS = frozenset({
+    "generate_longform_outline",
+    "expand_longform_chapter",
+})
+
 # Tools that mutate state or spend money â€” require confirm mode approval.
 APPROVAL_REQUIRED = frozenset({
     "start_longform_render",
@@ -49,6 +54,7 @@ APPROVAL_REQUIRED = frozenset({
     "finalize_production",
     "finalize_longform_render",
     "expand_longform_visual_proof",
+    "regenerate_longform_thumbnail",
     "run_build_script",
     "write_project_file",
 })
@@ -77,6 +83,8 @@ OWNER_ONLY_AGENT_TOOLS = frozenset({
 # Mutation / spend tools: runner paths call execute_tool_logged directly.
 # The LLM must not invent these — hide from tool schemas offered to the model.
 RUNNER_ONLY_AGENT_TOOLS = frozenset({
+    "generate_longform_outline",
+    "expand_longform_chapter",
     "start_shortform_generate",
     "start_longform_render",
     "expand_visual_proof_shortform",
@@ -94,6 +102,7 @@ RUNNER_ONLY_AGENT_TOOLS = frozenset({
     "finalize_longform_render",
     "re_edit_production",
     "generate_longform_thumbnails",
+    "regenerate_longform_thumbnail",
 })
 
 _async_pool = concurrent.futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix="studio-agent-async")
@@ -236,6 +245,11 @@ _CREDIT_RESERVATION_FILE = "credit_reservation.json"
 
 
 def _public_provider_block_message(name: str, arguments: dict[str, Any], budget: Any, user_id: str) -> str:
+    # These are metered text/planning calls, not public media renders.  Their
+    # selected Claude/Grok/OpenRouter route is independently priced and held
+    # before inference, so the media-provider kill switches do not apply.
+    if str(name or "") in LONGFORM_TEXT_METERED_TOOLS:
+        return ""
     try:
         import unified_credits as uc
         if uc.is_unlimited(user_id):
@@ -5992,6 +6006,118 @@ def list_longform_scenes(job_id: str) -> str:
     }, indent=2)
 
 
+def _longform_text_billing(client: Any, args: dict[str, Any]) -> dict[str, Any]:
+    usage = dict(getattr(client, "last_usage", {}) or {})
+    prompt_tokens = max(0, int(usage.get("prompt_tokens") or 0))
+    completion_tokens = max(0, int(usage.get("completion_tokens") or 0))
+    prompt_ppm = float(args.get("_billing_prompt_price_per_m") or 0.0)
+    completion_ppm = float(args.get("_billing_completion_price_per_m") or 0.0)
+    usage_reported = bool(prompt_tokens or completion_tokens)
+    provider_usd = 0.0
+    if usage_reported:
+        import unified_credits as uc
+
+        provider_usd = uc.openrouter_usd(
+            {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+            },
+            prompt_ppm,
+            completion_ppm,
+        )
+    return {
+        "provider": str(getattr(client, "last_provider", "") or "unknown"),
+        "model": str(getattr(client, "last_effective_model", "") or args.get("model") or ""),
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "provider_usd": round(float(provider_usd or 0.0), 6),
+        "usage_reported": usage_reported,
+    }
+
+
+def generate_longform_outline_logged(args: dict[str, Any]) -> str:
+    """Run one outline pass after the logged boundary has held credits."""
+
+    from long_form import pipeline as lf_pipeline
+    from long_form.prompts.channels import get_channel
+    from long_form.scripting import generate_outline
+    from long_form.text_client import StudioTextClient
+
+    channel_key = str(args.get("channel_key") or "").strip()
+    topic = str(args.get("topic") or "").strip()
+    if not topic:
+        raise ValueError("topic is required")
+    channel = get_channel(channel_key)
+    target_minutes = int(args.get("target_minutes") or channel.get("default_minutes") or 15)
+    client = StudioTextClient(model=str(args.get("model") or "").strip() or None)
+    outline = generate_outline(
+        client,
+        str(channel.get("system_prompt") or ""),
+        topic=topic,
+        target_minutes=target_minutes,
+        catalyst_context=str(args.get("combined_context") or ""),
+        title_template_block=str(args.get("title_template_block") or ""),
+    )
+    if isinstance(outline, dict):
+        outline["chat_model"] = client.model
+        desc_tail = str(channel.get("description_tail") or "").strip()
+        if desc_tail:
+            existing = str(outline.get("description") or "").rstrip()
+            if existing and desc_tail not in existing:
+                outline["description"] = existing + "\n\n" + desc_tail.lstrip()
+            elif not existing:
+                outline["description"] = desc_tail.lstrip()
+    try:
+        cost_estimate = lf_pipeline.compute_render_cost(channel, outline)
+    except Exception:
+        cost_estimate = None
+    return json.dumps(
+        {
+            "channel_key": channel_key,
+            "topic": topic,
+            "target_minutes": target_minutes,
+            "catalyst_context_used": bool(args.get("catalyst_context_used")),
+            "references_used": bool(args.get("references_used")),
+            "title_template_enforced": bool(str(args.get("title_template_block") or "").strip()),
+            "outline": outline,
+            "cost_estimate": cost_estimate,
+            "billing": _longform_text_billing(client, args),
+        },
+        indent=2,
+        ensure_ascii=False,
+    )
+
+
+def expand_longform_chapter_logged(args: dict[str, Any]) -> str:
+    """Run one paid chapter expansion after pricing and credit preflight."""
+
+    from long_form.prompts.channels import get_channel
+    from long_form.scripting import expand_chapter
+    from long_form.text_client import StudioTextClient
+
+    channel_key = str(args.get("channel_key") or "").strip()
+    channel = get_channel(channel_key)
+    chapter = args.get("chapter") if isinstance(args.get("chapter"), dict) else {}
+    client = StudioTextClient(model=str(args.get("model") or "").strip() or None)
+    beats = expand_chapter(
+        client,
+        str(channel.get("system_prompt") or ""),
+        outline_title=str(args.get("outline_title") or ""),
+        chapter=dict(chapter),
+        fps=int(channel.get("fps") or 30),
+    )
+    return json.dumps(
+        {
+            "channel_key": channel_key,
+            "chapter_index": int(chapter.get("index", 0) or 0),
+            "beats": beats,
+            "billing": _longform_text_billing(client, args),
+        },
+        indent=2,
+        ensure_ascii=False,
+    )
+
+
 def regenerate_longform_still(job_id: str, scene_idx: int, reason: str = "") -> str:
     """Regenerate one long-form still. Artifact complaints use the short-prompt contract."""
     from pathlib import Path
@@ -6017,11 +6143,14 @@ def regenerate_longform_still(job_id: str, scene_idx: int, reason: str = "") -> 
                 outfit=outfit,
                 aspect_ratio="16:9",
             )
-            lf.regenerate_still(job_id, int(scene_idx), new_prompt=plan["still_prompt"])
+            new_path = lf.regenerate_still(job_id, int(scene_idx), new_prompt=plan["still_prompt"])
+            version = int(new_path.stat().st_mtime)
             return json.dumps({
                 "ok": True,
                 "job_id": job_id,
                 "scene_idx": scene_idx,
+                "still_url": f"/api/long-form/jobs/{job_id}/still/{scene_idx}?v={version}",
+                "new_prompt_used": True,
                 "visual_fix_contract": {
                     "method": plan["method"],
                     "prompt_budget": plan["prompt_budget"],
@@ -6030,10 +6159,47 @@ def regenerate_longform_still(job_id: str, scene_idx: int, reason: str = "") -> 
                     "rules": plan["rules"],
                 },
             }, indent=2)
-        lf.regenerate_still(job_id, int(scene_idx), new_prompt=str(reason or "").strip() or None)
-        return json.dumps({"ok": True, "job_id": job_id, "scene_idx": scene_idx}, indent=2)
+        new_path = lf.regenerate_still(job_id, int(scene_idx), new_prompt=str(reason or "").strip() or None)
+        version = int(new_path.stat().st_mtime)
+        return json.dumps({
+            "ok": True,
+            "job_id": job_id,
+            "scene_idx": scene_idx,
+            "still_url": f"/api/long-form/jobs/{job_id}/still/{scene_idx}?v={version}",
+            "new_prompt_used": bool(str(reason or "").strip()),
+        }, indent=2)
     except Exception as e:
-        return json.dumps({"ok": False, "error": str(e)[:300]}, indent=2)
+        raise RuntimeError(f"long-form still regeneration failed: {str(e)[:300]}") from e
+
+
+def regenerate_longform_thumbnail(
+    job_id: str,
+    idx: int,
+    custom_prompt: str = "",
+) -> str:
+    from long_form import pipeline as lf
+
+    try:
+        new_path = lf.regenerate_thumbnail(
+            str(job_id or "").strip(),
+            int(idx),
+            str(custom_prompt or "").strip() or None,
+        )
+    except Exception as exc:
+        raise RuntimeError(f"long-form thumbnail regeneration failed: {str(exc)[:300]}") from exc
+    version = int(new_path.stat().st_mtime)
+    return json.dumps(
+        {
+            "ok": True,
+            "job_id": str(job_id or "").strip(),
+            "idx": int(idx),
+            "thumbnail_url": (
+                f"/api/long-form/jobs/{str(job_id or '').strip()}/thumbnail/{int(idx)}?v={version}"
+            ),
+            "custom_prompt_used": bool(str(custom_prompt or "").strip()),
+        },
+        indent=2,
+    )
 
 
 def _reclaim_orphaned_shortform_jobs() -> int:
@@ -6169,8 +6335,8 @@ _SHORTFORM_EXISTING_JOB_TOOLS = frozenset({
 _LONGFORM_EXISTING_JOB_TOOLS = frozenset({
     "expand_longform_visual_proof",
     "regenerate_longform_still",
+    "regenerate_longform_thumbnail",
     "list_longform_scenes",
-    "regenerate_longform_still",
     "finalize_longform_render",
 })
 _COMPETITOR_EXISTING_JOB_TOOLS = frozenset({
@@ -6229,11 +6395,14 @@ def execute_tool(
     if name in OWNER_ONLY_AGENT_TOOLS:
         _require_cliplab_admin(user_id)
     if name in {
+        "generate_longform_outline",
+        "expand_longform_chapter",
         "start_longform_render",
         "expand_longform_visual_proof",
         "list_longform_scenes",
         "regenerate_longform_still",
         "generate_longform_thumbnails",
+        "regenerate_longform_thumbnail",
         "finalize_longform_render",
     }:
         _require_longform_entitlement(user_id)
@@ -6287,11 +6456,24 @@ def execute_tool(
     if name == "list_longform_scenes":
         return list_longform_scenes(str(args.get("job_id") or "").strip())
 
+    if name == "generate_longform_outline":
+        return generate_longform_outline_logged(dict(args or {}))
+
+    if name == "expand_longform_chapter":
+        return expand_longform_chapter_logged(dict(args or {}))
+
     if name == "regenerate_longform_still":
         return regenerate_longform_still(
             str(args.get("job_id") or "").strip(),
             int(args.get("scene_idx") or 0),
             str(args.get("reason") or ""),
+        )
+
+    if name == "regenerate_longform_thumbnail":
+        return regenerate_longform_thumbnail(
+            str(args.get("job_id") or "").strip(),
+            int(args.get("idx") or 0),
+            str(args.get("custom_prompt") or ""),
         )
 
     if name == "start_longform_render":
@@ -6340,7 +6522,12 @@ def execute_tool(
             initial_route.get("video_model") or models.get("video_model") or ""
         )
         outline["media_route_revision"] = int(initial_route.get("revision") or 1)
-        outline["chat_model"] = str(bound_session.get("model") or "").strip()
+        outline["chat_model"] = str(
+            bound_session.get("model")
+            or render_args.get("chat_model")
+            or outline.get("chat_model")
+            or ""
+        ).strip()
         outline["captions_enabled"] = bool(
             render_args.get("captions_enabled", bound_session.get("captions_enabled", True))
         )
@@ -6943,7 +7130,6 @@ def execute_tool(
         if not uid:
             raise ValueError("sign in required")
         try:
-            uc.ensure_monthly_grant(uid)
             state = uc.get_state(uid)
             state["recent"] = uc.recent_ledger(uid, limit=8)
         except Exception as exc:
@@ -8486,11 +8672,14 @@ def execute_tool_logged(
 ) -> str:
     """Run a tool with telemetry, budget enforcement, and atomic credit hold."""
     if name in {
+        "generate_longform_outline",
+        "expand_longform_chapter",
         "start_longform_render",
         "expand_longform_visual_proof",
         "list_longform_scenes",
         "regenerate_longform_still",
         "generate_longform_thumbnails",
+        "regenerate_longform_thumbnail",
         "finalize_longform_render",
     }:
         # Authorization and static pipeline validation must happen before an
@@ -8731,6 +8920,53 @@ def execute_tool_logged(
                 name, arguments, user_id=user_id, content_format=content_format, session_id=session_id
             )
         result = production_budget.with_budget_metadata(result, budget_estimate, arguments)
+        if credit_reservation and not runpod_dispatched and name in LONGFORM_TEXT_METERED_TOOLS:
+            import unified_credits as uc
+
+            payload = json.loads(result or "{}")
+            if not isinstance(payload, dict):
+                raise RuntimeError("Long-form text execution returned invalid billing data")
+            billing = payload.get("billing") if isinstance(payload.get("billing"), dict) else {}
+            usage_reported = bool(billing.get("usage_reported"))
+            provider_usd = (
+                max(0.0, float(billing.get("provider_usd") or 0.0))
+                if usage_reported
+                else max(0.0, float(budget_estimate.estimated_usd if budget_estimate else 0.0))
+            )
+            actual_credits = uc.usd_to_credits(provider_usd)
+            settlement = uc.settle_reservation(
+                user_id,
+                str(credit_reservation.get("reservation_id") or ""),
+                actual_credits=actual_credits,
+                reason=f"studio_tool_actual:{name}",
+                metadata={
+                    "tool": name,
+                    "session_id": session_id,
+                    "provider": billing.get("provider"),
+                    "model": billing.get("model"),
+                    "prompt_tokens": int(billing.get("prompt_tokens") or 0),
+                    "completion_tokens": int(billing.get("completion_tokens") or 0),
+                    "provider_usd": provider_usd,
+                    "metering_mode": "provider_usage" if usage_reported else "reserved_estimate_fallback",
+                },
+                # The inference has already completed. The preflight hold is a
+                # conservative max-token estimate, but verified overage must
+                # still be recorded atomically if a provider reports an outlier.
+                allow_negative=True,
+            )
+            billing["provider_usd"] = round(provider_usd, 6)
+            billing["metering_mode"] = (
+                "provider_usage" if usage_reported else "reserved_estimate_fallback"
+            )
+            payload["billing"] = billing
+            payload["credits"] = {
+                "charged": int(settlement.get("credits_charged", 0) or 0),
+                "balance_after": int(settlement.get("balance", 0) or 0),
+                "refunded_credits": int(settlement.get("refunded_credits", 0) or 0),
+                "metering_mode": billing["metering_mode"],
+            }
+            result = json.dumps(payload, indent=2, ensure_ascii=False)
+            billed_with_actuals = True
         if credit_reservation and not runpod_dispatched and name in {
             "animate_production_scenes",
             "repair_production_scene_animation",

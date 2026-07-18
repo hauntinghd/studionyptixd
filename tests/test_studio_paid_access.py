@@ -24,6 +24,32 @@ def test_agent_router_uses_the_public_agent_lane_key() -> None:
     assert '.get("studio_agent")' not in source
 
 
+def test_public_release_allows_authenticated_job_owners_to_export() -> None:
+    source = (ROOT / "backend.py").read_text(encoding="utf-8")
+    assert '"export_final": authenticated,' in source
+    assert 'not beta_access' not in source
+
+
+def test_public_app_preserves_backend_emergency_access_controls() -> None:
+    source = (ROOT / "ViralShorts-App" / "src" / "studio" / "shared.tsx").read_text(
+        encoding="utf-8"
+    )
+    assert "setWaitlistOnlyMode(Boolean(cfg.waitlist_only_mode));" in source
+    assert (
+        "setWaitlistRequiresStripePayment(Boolean(cfg.waitlist_requires_stripe_payment));"
+        in source
+    )
+
+
+def test_legacy_unmetered_longform_workspace_remains_owner_only() -> None:
+    source = (ROOT / "backend.py").read_text(encoding="utf-8")
+    helper = source.split("def _longform_owner_beta_enabled", 1)[1].split(
+        "def _longform_deep_analysis_enabled", 1
+    )[0]
+    assert "return _is_admin_user(user)" in helper
+    assert '_public_lane_access_for_user(user)' not in helper
+
+
 def test_visual_proof_duration_is_not_misrouted_as_existing_short_expansion() -> None:
     message = (
         "yes make it -- render that plan for 1 scene first so i can see what it looks like, "

@@ -39,28 +39,37 @@ class UnifiedCreditsTests(unittest.TestCase):
         self.assertTrue(ok)
         self.assertEqual(balance, 999_999_999)
 
-    def test_monthly_credit_rollover_expires_after_one_month(self) -> None:
-        with patch.object(credits, "_month_key", return_value="2026-06"):
-            state = credits.set_plan("user", "creator", grant_now=True)
-            self.assertEqual(state["balance"], 2_000)
-            credits.debit_credits("user", 500, reason="usage")
-        with patch.object(credits, "_month_key", return_value="2026-07"):
+    def test_only_paid_cycles_grant_and_rollover(self) -> None:
+        state = credits.set_plan("user", "creator", grant_now=True)
+        self.assertEqual(state["balance"], 0)
+        first = credits.grant_plan_cycle(
+            "user", "creator", "stripe:sub-a:1:2", provider="stripe", invoice_id="in-a",
+        )
+        self.assertEqual(first["balance"], 2_000)
+        credits.debit_credits("user", 500, reason="usage")
+
+        # Calendar reads and duplicate Stripe event variants cannot mint value.
+        with patch.object(credits, "_month_key", return_value="2099-12"):
             credits.ensure_monthly_grant("user")
-            state = credits.get_state("user")
-            self.assertEqual(state["rollover_balance"], 1_500)
-            self.assertEqual(state["monthly_balance"], 2_000)
-        with patch.object(credits, "_month_key", return_value="2026-08"):
-            credits.ensure_monthly_grant("user")
-            state = credits.get_state("user")
-            self.assertEqual(state["rollover_balance"], 2_000)
-            self.assertEqual(state["monthly_balance"], 2_000)
-            self.assertEqual(state["balance"], 4_000)
+        duplicate = credits.grant_plan_cycle(
+            "user", "creator", "stripe:sub-a:1:2", provider="stripe", invoice_id="in-a",
+        )
+        self.assertEqual(duplicate["balance"], 1_500)
+
+        second = credits.grant_plan_cycle(
+            "user", "creator", "stripe:sub-a:2:3", provider="stripe", invoice_id="in-b",
+        )
+        self.assertEqual(second["rollover_balance"], 1_500)
+        self.assertEqual(second["monthly_balance"], 2_000)
+        self.assertEqual(second["balance"], 3_500)
 
     def test_topup_is_idempotent_and_does_not_expire(self) -> None:
         credits.add_credits("user", 1_000, idempotency_key="stripe_checkout:1")
         credits.add_credits("user", 1_000, idempotency_key="stripe_checkout:1")
-        with patch.object(credits, "_month_key", return_value="2026-06"):
-            credits.set_plan("user", "creator", grant_now=True)
+        credits.set_plan("user", "creator")
+        credits.grant_plan_cycle(
+            "user", "creator", "paypal:capture-a:1:2", provider="paypal", invoice_id="capture-a",
+        )
         with patch.object(credits, "_month_key", return_value="2026-08"):
             credits.ensure_monthly_grant("user")
         self.assertEqual(credits.get_state("user")["topup_balance"], 1_000)

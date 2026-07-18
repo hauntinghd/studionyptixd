@@ -40,12 +40,15 @@ class BudgetEstimate:
 
 
 EXPENSIVE_TOOLS = frozenset({
+    "generate_longform_outline",
+    "expand_longform_chapter",
     "start_shortform_generate",
     "expand_visual_proof_shortform",
     "start_longform_render",
     "expand_longform_visual_proof",
     "finalize_longform_render",
     "generate_longform_thumbnails",
+    "regenerate_longform_thumbnail",
     "edit_production_scene_still",
     "edit_production_scenes_still",
     "regenerate_production_scene_still",
@@ -60,12 +63,15 @@ EXPENSIVE_TOOLS = frozenset({
 
 
 DEFAULT_CAPS_USD = {
+    "generate_longform_outline": 1.0,
+    "expand_longform_chapter": 1.0,
     "start_shortform_generate": 5.0,
     "expand_visual_proof_shortform": 8.0,
     "start_longform_render": 8.0,
     "expand_longform_visual_proof": 12.0,
     "finalize_longform_render": 35.0,
     "generate_longform_thumbnails": 1.0,
+    "regenerate_longform_thumbnail": 0.25,
     "edit_production_scene_still": 0.25,
     "edit_production_scenes_still": 1.0,
     "regenerate_production_scene_still": 0.25,
@@ -109,15 +115,19 @@ APPROVAL_REQUIRED_TOOLS = frozenset({
     "audit_and_repair_production_scenes",
     "finalize_production",
     "finalize_longform_render",
+    "regenerate_longform_thumbnail",
 })
 
 
 TOOL_LANES = {
+    "generate_longform_outline": "analysis",
+    "expand_longform_chapter": "analysis",
     "start_shortform_generate": "render",
     "expand_visual_proof_shortform": "render",
     "start_longform_render": "render",
     "finalize_longform_render": "render",
     "generate_longform_thumbnails": "render",
+    "regenerate_longform_thumbnail": "render",
     "edit_production_scene_still": "render",
     "edit_production_scenes_still": "render",
     "regenerate_production_scene_still": "render",
@@ -137,6 +147,8 @@ TOOL_LANES = {
 
 
 STAGE_GATES = {
+    "generate_longform_outline": ["pricing_preflight", "credit_hold", "outline", "settle_actual_tokens"],
+    "expand_longform_chapter": ["pricing_preflight", "credit_hold", "expand_chapter", "settle_actual_tokens"],
     "start_shortform_generate": ["cost_preflight", "create_stills", "await_scene_review"],
     "expand_visual_proof_shortform": [
         "proof_approved",
@@ -164,6 +176,7 @@ STAGE_GATES = {
     "expand_longform_visual_proof": ["proof_approved", "cost_preflight", "gallery_stills", "await_chapter_review"],
     "finalize_longform_render": ["chapter_approval_required", "compose", "package"],
     "generate_longform_thumbnails": ["cost_preflight", "thumbnail_variants", "await_packaging_review"],
+    "regenerate_longform_thumbnail": ["cost_preflight", "regenerate_thumbnail", "await_packaging_review"],
 }
 
 
@@ -209,6 +222,10 @@ def estimate_tool_cost(tool_name: str, args: dict[str, Any] | None = None) -> Bu
     mode = "explicit" if explicit_cap is not None else "default"
     if name == "start_shortform_generate":
         est, breakdown = _estimate_shortform_start(args)
+    elif name == "generate_longform_outline":
+        est, breakdown = _estimate_longform_text_call(args, max_output_tokens=2000)
+    elif name == "expand_longform_chapter":
+        est, breakdown = _estimate_longform_text_call(args, max_output_tokens=4000)
     elif name == "expand_visual_proof_shortform":
         est, breakdown = _estimate_shortform_expand(args)
     elif name == "start_longform_render":
@@ -225,6 +242,15 @@ def estimate_tool_cost(tool_name: str, args: dict[str, Any] | None = None) -> Bu
             "thumbnails": count,
             "image_model_pricing_unit": pricing_key,
             "image_usd_per_image": _unit_rate(est, count),
+            "pricing_note": note,
+        }
+    elif name == "regenerate_longform_thumbnail":
+        image_model = str(args.get("image_model_id") or args.get("image_model") or "seedream_edit")
+        est, note, pricing_key = _seedream_image_estimate(image_model, edit=True, quantity=1)
+        breakdown = {
+            "thumbnails": 1,
+            "image_model_pricing_unit": pricing_key,
+            "image_edit_usd_per_image": est,
             "pricing_note": note,
         }
     elif name == "edit_production_scenes_still":
@@ -367,6 +393,57 @@ def durable_state_contract(tool_name: str, args: dict[str, Any] | None = None) -
     if "longform" in name:
         return {"kind": "longform", "key": "job_id", "job_id": job_id or None, "must_persist": True}
     return {"kind": "generic", "must_persist": False}
+
+
+def _estimate_longform_text_call(
+    args: dict[str, Any],
+    *,
+    max_output_tokens: int,
+) -> tuple[float, dict[str, Any]]:
+    """Reserve a conservative upper bound before a paid planning call.
+
+    Provider pricing is resolved by the async HTTP route without buying an
+    inference, then passed into the logged tool as private metering input.  A
+    missing rate is a hard stop: Studio must never call an unpriced model and
+    hope it can charge the creator afterward.
+    """
+
+    prompt_ppm = _float(args.get("_billing_prompt_price_per_m"), None)
+    completion_ppm = _float(args.get("_billing_completion_price_per_m"), None)
+    if prompt_ppm is None or completion_ppm is None or prompt_ppm < 0 or completion_ppm < 0:
+        raise BudgetExceededError(
+            json.dumps(
+                {
+                    "error": "model_pricing_unavailable",
+                    "message": (
+                        "Studio could not verify pricing for the selected text model. "
+                        "No provider request was sent; choose a priced model or retry after pricing refreshes."
+                    ),
+                    "model": str(args.get("model") or ""),
+                },
+                indent=2,
+            )
+        )
+
+    # One Unicode character can be one or more tokens depending on language.
+    # Counting every supplied character as a token plus a prompt-template
+    # cushion deliberately over-reserves; settlement refunds to actual usage.
+    input_chars = max(0, int(args.get("_billing_input_chars") or 0))
+    input_token_cap = max(2048, input_chars + 2048)
+    output_token_cap = max(512, int(max_output_tokens or 0))
+    estimate = (
+        float(prompt_ppm) * (input_token_cap / 1_000_000.0)
+        + float(completion_ppm) * (output_token_cap / 1_000_000.0)
+    )
+    return round(max(0.0001, estimate), 6), {
+        "stage": "longform_text",
+        "model": str(args.get("model") or ""),
+        "input_token_cap": input_token_cap,
+        "output_token_cap": output_token_cap,
+        "prompt_price_per_m": float(prompt_ppm),
+        "completion_price_per_m": float(completion_ppm),
+        "settlement": "provider_reported_tokens_with_estimate_fallback",
+    }
 
 
 def _seedream_image_estimate(

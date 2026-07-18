@@ -15,7 +15,15 @@ import httpx
 import stripe as stripe_lib
 
 from backend_catalog import PLAN_LIMITS
-from backend_settings import SUPABASE_ANON_KEY, SUPABASE_SERVICE_KEY, SUPABASE_URL, STRIPE_PRICE_TO_PLAN, STRIPE_SECRET_KEY, TEMP_DIR
+from backend_settings import (
+    SUPABASE_ANON_KEY,
+    SUPABASE_SERVICE_KEY,
+    SUPABASE_URL,
+    STRIPE_PRICE_TO_PLAN,
+    STRIPE_SECRET_KEY,
+    TEMP_DIR,
+    UNIFIED_PLANS,
+)
 
 log = logging.getLogger("nyptid-studio")
 
@@ -995,8 +1003,15 @@ def _stripe_subscription_snapshot(email: str) -> dict:
                     next_renewal_unix = rolled
                     next_renewal_source = "anchor_rollforward"
 
+        metadata = _stripe_value(chosen, "metadata", {}) or {}
+        metadata_plan = str(_stripe_value(metadata, "plan", "") or "").strip().lower()
+        mapped_plan = str(STRIPE_PRICE_TO_PLAN.get(active_price_id, "") or "").strip().lower()
+        valid_plans = (set(PLAN_LIMITS) | set(UNIFIED_PLANS)) - {"", "free", "none"}
         out["ok"] = True
-        out["plan"] = str(STRIPE_PRICE_TO_PLAN.get(active_price_id, "") or "").strip().lower()
+        # A configured Stripe Price is merchant-owned and therefore
+        # authoritative. Metadata is only the fallback for intentionally
+        # dynamic Checkout prices.
+        out["plan"] = mapped_plan if mapped_plan in valid_plans else metadata_plan if metadata_plan in valid_plans else ""
         out["status"] = status
         out["cancel_at_period_end"] = cancel_at_period_end
         out["paid_at_unix"] = int(paid_at_unix or 0)
@@ -1034,12 +1049,69 @@ async def _supabase_find_user_id_by_email(email: str) -> str:
     return ""
 
 
+async def _supabase_get_billing_profile(user_id: str) -> dict:
+    """Read the canonical Stripe identity stored on a Studio profile."""
+    svc_key = SUPABASE_SERVICE_KEY or SUPABASE_ANON_KEY
+    uid = str(user_id or "").strip()
+    if not svc_key or not SUPABASE_URL or not uid:
+        return {}
+    async with httpx.AsyncClient(timeout=15) as client:
+        response = await client.get(
+            f"{SUPABASE_URL}/rest/v1/profiles"
+            f"?id=eq.{quote(uid)}&select=id,plan,stripe_customer_id,stripe_subscription_id",
+            headers={
+                "apikey": svc_key,
+                "Authorization": f"Bearer {svc_key}",
+            },
+        )
+    if response.status_code != 200:
+        raise RuntimeError(f"Supabase billing profile read failed ({response.status_code})")
+    rows = response.json()
+    return dict(rows[0]) if isinstance(rows, list) and rows and isinstance(rows[0], dict) else {}
+
+
+async def _supabase_set_stripe_identity(
+    user_id: str,
+    *,
+    customer_id: str = "",
+    subscription_id: str = "",
+    clear_subscription: bool = False,
+) -> None:
+    """Persist Stripe identity so checkout and reconciliation never fork customers."""
+    svc_key = SUPABASE_SERVICE_KEY or SUPABASE_ANON_KEY
+    uid = str(user_id or "").strip()
+    if not svc_key or not SUPABASE_URL or not uid:
+        return
+    payload: dict[str, object] = {"id": uid}
+    if str(customer_id or "").strip():
+        payload["stripe_customer_id"] = str(customer_id).strip()
+    if str(subscription_id or "").strip():
+        payload["stripe_subscription_id"] = str(subscription_id).strip()
+    elif clear_subscription:
+        payload["stripe_subscription_id"] = None
+    if len(payload) == 1:
+        return
+    async with httpx.AsyncClient(timeout=15) as client:
+        response = await client.post(
+            f"{SUPABASE_URL}/rest/v1/profiles",
+            headers={
+                "apikey": svc_key,
+                "Authorization": f"Bearer {svc_key}",
+                "Content-Type": "application/json",
+                "Prefer": "resolution=merge-duplicates",
+            },
+            json=payload,
+        )
+    if response.status_code not in {200, 201, 204}:
+        raise RuntimeError(f"Supabase Stripe identity write failed ({response.status_code})")
+
+
 async def _supabase_set_user_plan(user_id: str, plan: str):
     svc_key = SUPABASE_SERVICE_KEY or SUPABASE_ANON_KEY
     if not svc_key or not SUPABASE_URL or not user_id:
         return
     async with httpx.AsyncClient(timeout=15) as client:
-        await client.post(
+        response = await client.post(
             f"{SUPABASE_URL}/rest/v1/profiles",
             headers={
                 "apikey": svc_key,
@@ -1049,6 +1121,8 @@ async def _supabase_set_user_plan(user_id: str, plan: str):
             },
             json={"id": user_id, "plan": plan},
         )
+    if response.status_code not in {200, 201, 204}:
+        raise RuntimeError(f"Supabase plan write failed ({response.status_code})")
 
 
 async def _supabase_get_waitlist_rows(limit: int = 2000) -> list[dict]:

@@ -9,6 +9,18 @@ export type LandingUpdatePost = {
 
 export const landingUpdatePosts: LandingUpdatePost[] = [
     {
+        slug: 'studio-1-0-public-release',
+        title: 'NYPTID Studio 1.0 is now available',
+        date: '2026-07-18',
+        label: 'Public release',
+        summary: 'Studio 1.0 brings desktop-first short-form and long-form production, secure sign-in, billing, review, repair, animation, and export into one creator workflow.',
+        bullets: [
+            'Plan and produce short-form or long-form video inside Studio Agent.',
+            'Review and repair individual scenes before animation and final export.',
+            'Use secure Google sign-in, Stripe memberships, unified credits, and signed in-app updates.',
+        ],
+    },
+    {
         slug: 'studio-all-in-one-proof-update',
         title: 'Studio landing page now leads with real proof',
         date: '2026-07-04',

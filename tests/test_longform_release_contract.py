@@ -209,7 +209,12 @@ def test_selected_text_model_is_forwarded_exactly_without_grok_fallback(
 
     async def fake_chat_completion(**kwargs):
         calls.append(dict(kwargs))
-        return {"choices": [{"message": {"content": "Selected model response"}}]}
+        return {
+            "provider": "openrouter",
+            "model": "anthropic/claude-sonnet-4.6",
+            "choices": [{"message": {"content": "Selected model response"}}],
+            "usage": {"prompt_tokens": 321, "completion_tokens": 123},
+        }
 
     monkeypatch.setattr(openrouter, "chat_completion", fake_chat_completion)
     client = StudioTextClient(model="anthropic/claude-sonnet-4.6")
@@ -222,6 +227,9 @@ def test_selected_text_model_is_forwarded_exactly_without_grok_fallback(
         {"role": "system", "content": "system"},
         {"role": "user", "content": "user"},
     ]
+    assert client.last_usage == {"prompt_tokens": 321, "completion_tokens": 123}
+    assert client.last_provider == "openrouter"
+    assert client.last_effective_model == "anthropic/claude-sonnet-4.6"
 
 
 def test_selected_text_model_failure_is_not_silently_retried_on_grok(

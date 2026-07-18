@@ -73,7 +73,7 @@ def build_download_video_response(
             except Exception:
                 export_allowed = False
             if not export_allowed:
-                raise HTTPException(403, "Final video export is disabled for controlled-beta accounts.")
+                raise HTTPException(403, "Final video export is not available for this account.")
         safe_filename = Path(filename).name
         if not safe_filename or safe_filename != filename:
             raise HTTPException(400, "Invalid filename")

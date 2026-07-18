@@ -359,13 +359,19 @@ def build_billing_router(
     admin_grant_credits_endpoint,
 ):
     router = APIRouter()
+
+    async def waitlist_retired():
+        # Studio 1.0 is public. Keep the former URL fail-closed so stale web
+        # clients cannot create obsolete beta-deposit checkouts.
+        raise HTTPException(410, "The Studio beta waitlist is retired. Use the public billing plans instead.")
+
     router.add_api_route("/api/checkout", create_checkout_endpoint, methods=["POST"])
     router.add_api_route("/api/checkout/topup", create_topup_checkout_endpoint, methods=["POST"])
     router.add_api_route("/api/paypal/return", paypal_return_endpoint, methods=["GET"])
     router.add_api_route("/api/paypal/webhook", paypal_webhook_endpoint, methods=["POST"])
     router.add_api_route("/api/paypal/verify/{order_id}", paypal_verify_order_endpoint, methods=["GET"])
     router.add_api_route("/api/billing-portal", create_billing_portal_session_endpoint, methods=["POST"])
-    router.add_api_route("/api/waitlist/join", join_waitlist_endpoint, methods=["POST"])
+    router.add_api_route("/api/waitlist/join", waitlist_retired, methods=["POST"])
     router.add_api_route("/api/stripe-webhook", stripe_webhook_endpoint, methods=["POST"])
     router.add_api_route("/api/admin/set-plan", admin_set_plan_endpoint, methods=["POST"])
     router.add_api_route("/api/admin/cancel-subscription", admin_cancel_subscription_endpoint, methods=["POST"])

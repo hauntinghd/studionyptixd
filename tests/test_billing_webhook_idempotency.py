@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
@@ -67,7 +68,16 @@ def isolated_billing_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     async def no_notification(*_args, **_kwargs) -> None:
         return None
 
+    async def no_profile_write(*_args, **_kwargs) -> None:
+        return None
+
+    async def no_profile_read(*_args, **_kwargs) -> dict:
+        return {}
+
     monkeypatch.setattr(backend, "_append_landing_notification", no_notification)
+    monkeypatch.setattr(backend, "_supabase_set_user_plan", no_profile_write)
+    monkeypatch.setattr(backend, "_supabase_set_stripe_identity", no_profile_write)
+    monkeypatch.setattr(backend, "_supabase_get_billing_profile", no_profile_read)
     yield tmp_path
 
     billing._topup_wallets.clear()
@@ -590,17 +600,17 @@ def test_paypal_subscription_retry_reuses_period_and_finishes_effects_once(
 
     monkeypatch.setattr(backend, "_capture_paypal_order_api", captured)
     monkeypatch.setattr(backend, "_supabase_set_user_plan", set_profile)
-    real_set_plan = unified_credits.set_plan
-    set_plan_calls = 0
+    real_grant_cycle = unified_credits.grant_plan_cycle
+    grant_calls = 0
 
-    def flaky_set_plan(*args, **kwargs):
-        nonlocal set_plan_calls
-        set_plan_calls += 1
-        if set_plan_calls == 1:
+    def flaky_grant_cycle(*args, **kwargs):
+        nonlocal grant_calls
+        grant_calls += 1
+        if grant_calls == 1:
             raise RuntimeError("wallet temporarily unavailable")
-        return real_set_plan(*args, **kwargs)
+        return real_grant_cycle(*args, **kwargs)
 
-    monkeypatch.setattr(unified_credits, "set_plan", flaky_set_plan)
+    monkeypatch.setattr(unified_credits, "grant_plan_cycle", flaky_grant_cycle)
     with pytest.raises(RuntimeError):
         asyncio.run(backend._capture_paypal_subscription_order("subscription-retry"))
     assert not billing._paypal_orders["subscription-retry"].get("activated")
@@ -611,7 +621,7 @@ def test_paypal_subscription_retry_reuses_period_and_finishes_effects_once(
     second_record = next(iter(billing._paypal_subscriptions.values()))
     assert result["activated"] is True
     assert (second_record["period_start_unix"], second_record["period_end_unix"]) == first_period
-    assert set_plan_calls == 2
+    assert grant_calls == 2
     processed = billing._topup_wallets["user-a"]["processed_mutations"]
     assert "activation_reset:paypal:subscription-retry" in processed
     assert capture_calls == 1
@@ -641,11 +651,12 @@ def test_paypal_topup_reversal_debits_both_wallets_exactly_once(
     assert billing._paypal_orders["order-refund"]["unified_credits_debited"] == 30
 
 
-def test_stripe_subscription_checkout_grants_selected_plan_once(
+def test_stripe_subscription_checkout_syncs_plan_without_granting_credits(
     isolated_billing_state: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     plan = "studio_pro_5k"
+    monkeypatch.setattr(backend, "STRIPE_SECRET_KEY", "")
     event = {
         "id": "evt-stripe-subscription",
         "type": "checkout.session.completed",
@@ -653,7 +664,12 @@ def test_stripe_subscription_checkout_grants_selected_plan_once(
             "object": {
                 "id": "cs-subscription",
                 "mode": "subscription",
-                "subscription": "sub-studio-pro-5k",
+                "payment_status": "paid",
+                "subscription": {
+                    "id": "sub-studio-pro-5k",
+                    "status": "active",
+                    "metadata": {"user_id": "user-a", "plan": plan},
+                },
                 "client_reference_id": "user-a",
                 "customer_email": "creator@example.com",
                 "metadata": {"user_id": "user-a", "plan": plan},
@@ -668,12 +684,544 @@ def test_stripe_subscription_checkout_grants_selected_plan_once(
     assert asyncio.run(backend._stripe_webhook(request))["status"] == "ok"
     first = unified_credits.get_state("user-a")
     assert first["plan"] == plan
-    assert first["monthly_balance"] == int(backend.UNIFIED_PLANS[plan]["monthly_credits"])
+    assert first["monthly_balance"] == 0
 
     assert asyncio.run(backend._stripe_webhook(request))["action"] == "duplicate"
     duplicate = unified_credits.get_state("user-a")
     assert duplicate["monthly_balance"] == first["monthly_balance"]
     assert duplicate["balance"] == first["balance"]
+
+
+def test_stripe_dynamic_subscription_metadata_syncs_without_email_or_grant(
+    isolated_billing_state: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile_updates: list[tuple[str, str]] = []
+
+    async def set_profile(user_id: str, plan: str) -> None:
+        profile_updates.append((user_id, plan))
+
+    async def unexpected_email_lookup(_email: str) -> str:
+        raise AssertionError("metadata-owned lifecycle events must not require an email lookup")
+
+    monkeypatch.setattr(backend, "_supabase_set_user_plan", set_profile)
+    monkeypatch.setattr(backend, "_supabase_find_user_id_by_email", unexpected_email_lookup)
+    event = {
+        "id": "evt-dynamic-subscription",
+        "type": "customer.subscription.created",
+        "data": {
+            "object": {
+                "id": "sub-dynamic",
+                "status": "active",
+                "customer": "cus-dynamic",
+                "metadata": {"user_id": "user-a", "plan": "studio_pro_5k"},
+                "items": {"data": [{"price": {"id": "price_dynamic_checkout"}}]},
+            }
+        },
+    }
+
+    result = asyncio.run(backend._stripe_apply_webhook_event_unordered(event))
+
+    assert result["action"] == "customer.subscription.created"
+    assert profile_updates == [("user-a", "studio_pro_5k")]
+    state = unified_credits.get_state("user-a")
+    assert state["plan"] == "studio_pro_5k"
+    assert state["monthly_balance"] == 0
+
+
+def test_stripe_lifecycle_plan_validates_metadata_and_uses_static_price_fallback() -> None:
+    static_price = "price_1T4eTUBL8lRmwao2EK3JDOpy"
+
+    assert backend._stripe_lifecycle_plan(
+        {"plan": "studio_pro_5k"},
+        static_price,
+    ) == "creator"
+    assert backend._stripe_lifecycle_plan(
+        {"plan": "forged_unknown_plan"},
+        static_price,
+    ) == "creator"
+    assert backend._stripe_lifecycle_plan(
+        {"plan": "forged_unknown_plan"},
+        "price_unmapped",
+    ) == ""
+
+
+def test_stripe_past_due_snapshot_is_not_paid_access(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        backend,
+        "_paypal_subscription_snapshot_for_user",
+        lambda _user: {"known": False, "billing_active": False},
+    )
+    monkeypatch.setattr(
+        backend,
+        "_stripe_subscription_snapshot",
+        lambda _email: {"ok": True, "status": "past_due", "plan": "studio_pro_1k"},
+    )
+
+    snapshot = backend._paid_access_snapshot_for_user(
+        {"id": "user-a", "email": "past-due@example.com", "plan": "studio_pro_1k"}
+    )
+
+    assert snapshot["billing_active"] is False
+    assert snapshot["source"] == ""
+
+
+def test_stripe_failed_invoice_then_past_due_stays_revoked_and_success_restores_once(
+    isolated_billing_state: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(backend, "STRIPE_SECRET_KEY", "")
+    profile_updates: list[tuple[str, str]] = []
+    set_plan_calls: list[tuple[str, str, bool]] = []
+    current_event: dict[str, dict] = {}
+
+    async def set_profile(user_id: str, plan: str) -> None:
+        profile_updates.append((user_id, plan))
+
+    real_set_plan = unified_credits.set_plan
+
+    def tracked_set_plan(user_id: str, plan: str, *, grant_now: bool = True):
+        set_plan_calls.append((user_id, plan, grant_now))
+        return real_set_plan(user_id, plan, grant_now=grant_now)
+
+    def invoice_event(event_id: str, event_type: str, created: int) -> dict:
+        return {
+            "id": event_id,
+            "type": event_type,
+            "created": created,
+            "data": {
+                "object": {
+                    "id": f"in_{event_id}",
+                    "customer": "cus-dynamic",
+                    "subscription": {
+                        "id": "sub-dynamic",
+                        "status": "active" if event_type != "invoice.payment_failed" else "past_due",
+                        "metadata": {"user_id": "user-a", "plan": "studio_pro_1k"},
+                    },
+                    "lines": {"data": [{
+                        "price": {"id": "price_dynamic_checkout"},
+                        "period": {"start": 1000, "end": 2000},
+                    }]},
+                }
+            },
+        }
+
+    monkeypatch.setattr(backend, "STRIPE_WEBHOOK_SECRET", "test-secret")
+    monkeypatch.setattr(backend, "_supabase_set_user_plan", set_profile)
+    monkeypatch.setattr(unified_credits, "set_plan", tracked_set_plan)
+    monkeypatch.setattr(
+        backend.stripe_lib.Webhook,
+        "construct_event",
+        lambda *_args: current_event["value"],
+    )
+    request = DummyRequest({}, stripe=True)
+
+    current_event["value"] = invoice_event("evt-invoice-failed", "invoice.payment_failed", 100)
+    assert asyncio.run(backend._stripe_webhook(request))["status"] == "ok"
+    assert unified_credits.get_state("user-a")["plan"] == ""
+
+    current_event["value"] = {
+        "id": "evt-sub-past-due",
+        "type": "customer.subscription.updated",
+        "created": 101,
+        "data": {
+            "object": {
+                "id": "sub-dynamic",
+                "status": "past_due",
+                "customer": "cus-dynamic",
+                "metadata": {"user_id": "user-a", "plan": "studio_pro_1k"},
+                "items": {"data": [{"price": {"id": "price_dynamic_checkout"}}]},
+            }
+        },
+    }
+    assert asyncio.run(backend._stripe_webhook(request))["status"] == "ok"
+    assert unified_credits.get_state("user-a")["plan"] == ""
+
+    current_event["value"] = invoice_event("evt-invoice-succeeded", "invoice.payment_succeeded", 102)
+    assert asyncio.run(backend._stripe_webhook(request))["status"] == "ok"
+    assert unified_credits.get_state("user-a")["plan"] == "studio_pro_1k"
+    assert asyncio.run(backend._stripe_webhook(request))["action"] == "duplicate"
+
+    assert profile_updates == [
+        ("user-a", "none"),
+        ("user-a", "none"),
+        ("user-a", "studio_pro_1k"),
+    ]
+    assert set_plan_calls == [
+        ("user-a", "", False),
+        ("user-a", "", False),
+        ("user-a", "studio_pro_1k", False),
+    ]
+
+
+def test_stripe_invoice_retrieves_subscription_metadata_for_dynamic_price(
+    isolated_billing_state: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile_updates: list[tuple[str, str]] = []
+    retrieve_calls: list[str] = []
+
+    async def set_profile(user_id: str, plan: str) -> None:
+        profile_updates.append((user_id, plan))
+
+    def retrieve(subscription_id: str) -> dict:
+        retrieve_calls.append(subscription_id)
+        return {
+            "id": subscription_id,
+            "status": "active",
+            "customer": "cus-retrieve",
+            "metadata": {"user_id": "user-a", "plan": "studio_pro_2500"},
+            "items": {"data": [{"price": {"id": "price_dynamic_checkout"}}]},
+        }
+
+    monkeypatch.setattr(backend, "STRIPE_SECRET_KEY", "sk_test_lifecycle")
+    monkeypatch.setattr(backend, "_supabase_set_user_plan", set_profile)
+    monkeypatch.setattr(backend.stripe_lib.Subscription, "retrieve", retrieve)
+    event = {
+        "id": "evt-invoice-retrieve",
+        "type": "invoice.payment_succeeded",
+        "data": {
+            "object": {
+                "id": "in-retrieve",
+                "subscription": "sub-retrieve",
+                "customer": "cus-retrieve",
+                "lines": {"data": [{
+                    "price": {"id": "price_dynamic_checkout"},
+                    "period": {"start": 1000, "end": 2000},
+                }]},
+            }
+        },
+    }
+
+    result = asyncio.run(backend._stripe_apply_webhook_event_unordered(event))
+
+    assert result["action"] == "invoice.payment_succeeded"
+    assert retrieve_calls == ["sub-retrieve"]
+    assert profile_updates == [("user-a", "studio_pro_2500")]
+    assert unified_credits.get_state("user-a")["plan"] == "studio_pro_2500"
+
+
+def test_stripe_unknown_successful_lifecycle_mapping_fails_closed(
+    isolated_billing_state: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    event = {
+        "id": "evt-invoice-unknown-plan",
+        "type": "invoice.payment_succeeded",
+        "data": {
+            "object": {
+                "id": "in-unknown-plan",
+                "metadata": {"user_id": "user-a", "plan": "forged_unknown_plan"},
+                "lines": {"data": [{"price": {"id": "price_unmapped"}}]},
+            }
+        },
+    }
+    monkeypatch.setattr(backend, "STRIPE_WEBHOOK_SECRET", "test-secret")
+    monkeypatch.setattr(backend.stripe_lib.Webhook, "construct_event", lambda *_args: event)
+
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(backend._stripe_webhook(DummyRequest({}, stripe=True)))
+
+    assert error.value.status_code == 500
+    assert billing._paypal_webhook_events["stripe:evt-invoice-unknown-plan"]["status"] == "failed"
+
+
+def test_stripe_subscription_snapshot_uses_validated_metadata_plan_for_dynamic_price(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    subscription = {
+        "id": "sub-snapshot-dynamic",
+        "created": 1_700_000_000,
+        "status": "active",
+        "metadata": {"plan": "studio_pro_11k"},
+        "items": {
+            "data": [
+                {
+                    "price": {
+                        "id": "price_dynamic_checkout",
+                        "recurring": {"interval": "month", "interval_count": 1},
+                    }
+                }
+            ]
+        },
+    }
+    monkeypatch.setattr(billing, "STRIPE_SECRET_KEY", "sk_test_snapshot")
+    monkeypatch.setattr(billing, "_stripe_find_customer_id_by_email", lambda _email: "cus-snapshot")
+    monkeypatch.setattr(
+        billing.stripe_lib.Subscription,
+        "list",
+        lambda **_kwargs: {"data": [subscription]},
+    )
+
+    snapshot = billing._stripe_subscription_snapshot("creator@example.com")
+
+    assert snapshot["ok"] is True
+    assert snapshot["status"] == "active"
+    assert snapshot["plan"] == "studio_pro_11k"
+
+
+def test_stripe_paid_invoice_event_variants_grant_one_cycle_once(
+    isolated_billing_state: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(backend, "STRIPE_SECRET_KEY", "")
+
+    def paid_event(event_id: str, event_type: str) -> dict:
+        return {
+            "id": event_id,
+            "type": event_type,
+            "created": 100,
+            "data": {
+                "object": {
+                    "id": "in-shared-cycle",
+                    "customer": "cus-a",
+                    "subscription": {
+                        "id": "sub-a",
+                        "status": "active",
+                        "metadata": {"user_id": "user-a", "plan": "studio_pro_1k"},
+                    },
+                    "lines": {"data": [{
+                        "price": {"id": "price_dynamic_checkout"},
+                        "period": {"start": 1000, "end": 2000},
+                    }]},
+                }
+            },
+        }
+
+    asyncio.run(backend._stripe_apply_webhook_event(paid_event("evt-paid", "invoice.paid")))
+    first = unified_credits.get_state("user-a")
+    asyncio.run(backend._stripe_apply_webhook_event(
+        paid_event("evt-payment-succeeded", "invoice.payment_succeeded")
+    ))
+    second = unified_credits.get_state("user-a")
+
+    assert first["monthly_balance"] == int(backend.UNIFIED_PLANS["studio_pro_1k"]["monthly_credits"])
+    assert second["balance"] == first["balance"]
+    assert len(unified_credits._wallets["user-a"]["plan_grant_cycles"]) == 1
+
+
+def test_stripe_unpaid_subscription_checkout_cannot_sync_or_grant(
+    isolated_billing_state: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def unexpected_sync(*_args, **_kwargs) -> None:
+        raise AssertionError("unpaid checkout must not synchronize entitlement")
+
+    monkeypatch.setattr(backend, "_stripe_sync_plan", unexpected_sync)
+    event = {
+        "id": "evt-unpaid-sub",
+        "type": "checkout.session.completed",
+        "data": {"object": {
+            "id": "cs-unpaid-sub",
+            "mode": "subscription",
+            "payment_status": "unpaid",
+            "client_reference_id": "user-a",
+            "metadata": {"user_id": "user-a", "plan": "studio_pro_1k"},
+        }},
+    }
+
+    result = asyncio.run(backend._stripe_apply_webhook_event_unordered(event))
+    assert result["action"] == "subscription_payment_pending"
+    assert unified_credits.get_state("user-a")["balance"] == 0
+
+
+def test_stripe_unknown_active_snapshot_cannot_use_stored_plan(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        backend,
+        "_paypal_subscription_snapshot_for_user",
+        lambda _user: {"known": False, "billing_active": False},
+    )
+    monkeypatch.setattr(
+        backend,
+        "_stripe_subscription_snapshot",
+        lambda _email: {"ok": True, "status": "active", "plan": ""},
+    )
+
+    snapshot = backend._paid_access_snapshot_for_user(
+        {"id": "user-a", "email": "unknown@example.com", "plan": "studio_pro_11k"}
+    )
+    assert snapshot["billing_active"] is False
+    assert snapshot["plan"] == "none"
+
+
+def test_stripe_unknown_subscription_status_revokes_fail_closed(
+    isolated_billing_state: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile_updates: list[tuple[str, str]] = []
+
+    async def set_profile(user_id: str, plan: str) -> None:
+        profile_updates.append((user_id, plan))
+
+    monkeypatch.setattr(backend, "STRIPE_SECRET_KEY", "")
+    monkeypatch.setattr(backend, "_supabase_set_user_plan", set_profile)
+    monkeypatch.setattr(backend, "_stripe_active_subscription_candidate", lambda *_args, **_kwargs: {})
+    unified_credits.set_plan("user-a", "studio_pro_1k")
+    event = {
+        "id": "evt-unknown-status",
+        "type": "customer.subscription.updated",
+        "data": {"object": {
+            "id": "sub-a",
+            "customer": "cus-a",
+            "status": "paused_by_provider",
+            "metadata": {"user_id": "user-a", "plan": "studio_pro_1k"},
+        }},
+    }
+
+    asyncio.run(backend._stripe_apply_webhook_event_unordered(event))
+    assert profile_updates[-1] == ("user-a", "none")
+    assert unified_credits.get_state("user-a")["plan"] == ""
+
+
+def test_stripe_snapshot_known_price_overrides_stale_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
+    subscription = {
+        "id": "sub-static",
+        "created": 1_700_000_000,
+        "status": "active",
+        "metadata": {"plan": "studio_pro_11k"},
+        "items": {"data": [{"price": {
+            "id": "price_1T4eTUBL8lRmwao2EK3JDOpy",
+            "recurring": {"interval": "month", "interval_count": 1},
+        }}]},
+    }
+    monkeypatch.setattr(billing, "STRIPE_SECRET_KEY", "sk_test_snapshot")
+    monkeypatch.setattr(billing, "_stripe_find_customer_id_by_email", lambda _email: "cus-static")
+    monkeypatch.setattr(billing.stripe_lib.Subscription, "list", lambda **_kwargs: {"data": [subscription]})
+
+    assert billing._stripe_subscription_snapshot("creator@example.com")["plan"] == "creator"
+
+
+def test_stripe_checkout_reuses_customer_and_blocks_duplicate_live_subscription(
+    isolated_billing_state: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def profile(_user_id: str) -> dict:
+        return {"stripe_customer_id": "cus-persisted", "stripe_subscription_id": "sub-live"}
+
+    monkeypatch.setattr(backend, "STRIPE_SECRET_KEY", "sk_test")
+    monkeypatch.setattr(backend, "_supabase_get_billing_profile", profile)
+    monkeypatch.setattr(
+        backend,
+        "_stripe_active_subscription_candidate",
+        lambda *_args, **_kwargs: {
+            "id": "sub-live", "plan": "studio_pro_1k", "status": "active", "customer_id": "cus-persisted",
+        },
+    )
+    monkeypatch.setattr(
+        backend.stripe_lib.billing_portal.Session,
+        "create",
+        lambda **_kwargs: SimpleNamespace(url="https://billing.example/portal"),
+    )
+    monkeypatch.setattr(
+        backend.stripe_lib.checkout.Session,
+        "create",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("duplicate checkout must not be created")),
+    )
+
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(backend._create_stripe_membership_checkout(
+            {"id": "user-a", "email": "creator@example.com"}, "studio_pro_1k", 19.0,
+        ))
+    assert error.value.status_code == 409
+    assert error.value.detail["portal_url"] == "https://billing.example/portal"
+
+
+def test_stripe_checkout_uses_explicit_persisted_customer(
+    isolated_billing_state: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def profile(_user_id: str) -> dict:
+        return {"stripe_customer_id": "cus-persisted", "stripe_subscription_id": ""}
+
+    created_payload: dict = {}
+
+    def create_session(**kwargs):
+        created_payload.update(kwargs)
+        return SimpleNamespace(url="https://checkout.example/session")
+
+    monkeypatch.setattr(backend, "STRIPE_SECRET_KEY", "sk_test")
+    monkeypatch.setattr(backend, "_supabase_get_billing_profile", profile)
+    monkeypatch.setattr(backend, "_stripe_active_subscription_candidate", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(backend.stripe_lib.checkout.Session, "create", create_session)
+
+    url = asyncio.run(backend._create_stripe_membership_checkout(
+        {"id": "user-a", "email": "creator@example.com"}, "studio_pro_1k", 19.0,
+    ))
+    assert url == "https://checkout.example/session"
+    assert created_payload["customer"] == "cus-persisted"
+    assert "customer_email" not in created_payload
+
+
+@pytest.mark.parametrize("event_type", ["customer.subscription.deleted", "invoice.payment_failed"])
+def test_stripe_duplicate_subscription_failure_preserves_other_active_subscription(
+    isolated_billing_state: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    event_type: str,
+) -> None:
+    monkeypatch.setattr(backend, "STRIPE_SECRET_KEY", "")
+    profile_updates: list[tuple[str, str]] = []
+    identity_updates: list[dict] = []
+
+    async def set_profile(user_id: str, plan: str) -> None:
+        profile_updates.append((user_id, plan))
+
+    async def set_identity(user_id: str, **kwargs) -> None:
+        identity_updates.append({"user_id": user_id, **kwargs})
+
+    monkeypatch.setattr(backend, "_supabase_set_user_plan", set_profile)
+    monkeypatch.setattr(backend, "_supabase_set_stripe_identity", set_identity)
+    monkeypatch.setattr(
+        backend,
+        "_stripe_active_subscription_candidate",
+        lambda *_args, **_kwargs: {
+            "id": "sub-good", "plan": "studio_pro_5k", "status": "active", "customer_id": "cus-a",
+        },
+    )
+    unified_credits.set_plan("user-a", "studio_pro_5k")
+    if event_type.startswith("customer."):
+        obj = {
+            "id": "sub-bad", "customer": "cus-a", "status": "canceled",
+            "metadata": {"user_id": "user-a", "plan": "studio_pro_1k"},
+        }
+    else:
+        obj = {
+            "id": "in-failed", "customer": "cus-a",
+            "subscription": {
+                "id": "sub-bad", "status": "past_due",
+                "metadata": {"user_id": "user-a", "plan": "studio_pro_1k"},
+            },
+        }
+    event = {"id": f"evt-{event_type}", "type": event_type, "data": {"object": obj}}
+
+    asyncio.run(backend._stripe_apply_webhook_event_unordered(event))
+    assert unified_credits.get_state("user-a")["plan"] == "studio_pro_5k"
+    assert profile_updates[-1] == ("user-a", "studio_pro_5k")
+    assert identity_updates[-1]["subscription_id"] == "sub-good"
+
+
+def test_supabase_plan_write_raises_on_non_2xx(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FailedResponse:
+        status_code = 500
+
+    class FailedClient:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        async def post(self, *_args, **_kwargs):
+            return FailedResponse()
+
+    monkeypatch.setattr(billing, "SUPABASE_URL", "https://example.supabase.co")
+    monkeypatch.setattr(billing, "SUPABASE_SERVICE_KEY", "service-role")
+    monkeypatch.setattr(billing.httpx, "AsyncClient", FailedClient)
+
+    with pytest.raises(RuntimeError, match="Supabase plan write failed"):
+        asyncio.run(billing._supabase_set_user_plan("user-a", "studio_pro_1k"))
 
 
 def test_stripe_retry_after_partial_effect_does_not_double_grant(

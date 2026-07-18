@@ -12,6 +12,9 @@ from studio_agent.command_execution import ExecutionReceipt, FileExecutionLedger
 
 
 LOCAL_IDEMPOTENT_TOOLS = {
+    "generate_longform_outline",
+    "expand_longform_chapter",
+    "start_longform_render",
     "expand_visual_proof_shortform",
     "animate_production_scenes",
     "finalize_production",
@@ -24,6 +27,7 @@ LOCAL_IDEMPOTENT_TOOLS = {
     "re_edit_production",
     "expand_longform_visual_proof",
     "regenerate_longform_still",
+    "regenerate_longform_thumbnail",
     "finalize_longform_render",
 }
 
@@ -44,7 +48,9 @@ def _public_arguments(arguments: dict[str, Any] | None) -> dict[str, Any]:
     return {
         str(key): value
         for key, value in dict(arguments or {}).items()
-        if not str(key).startswith("_credit_") and str(key) != "_runpod_command_id"
+        if not str(key).startswith("_credit_")
+        and not str(key).startswith("_billing_")
+        and str(key) != "_runpod_command_id"
     }
 
 

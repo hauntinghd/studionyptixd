@@ -51,13 +51,23 @@ if (-not $SkipTests) {
     $python = Find-CommandPath "py"
     if (-not $python) { throw "Python launcher (py) is required for release tests" }
     $tests = @(
+        "test_unified_credits.py",
         "tests/test_studio_command_layer.py",
         "tests/test_studio_command_runner.py",
         "tests/test_channel_data_natural_language.py",
         "tests/test_longform_release_contract.py",
+        "tests/test_longform_billing_boundary.py",
         "tests/test_caption_alignment.py",
         "tests/test_longform_media_revision.py",
+        "tests/test_long_form_router_job_ownership.py",
+        "tests/test_media_file_ownership.py",
+        "tests/test_private_media_auth.py",
+        "tests/test_runpod_standalone_routes.py",
+        "tests/test_runpod_execution_routing.py",
         "tests/test_studio_agent_job_ownership.py",
+        "tests/test_studio_paid_access.py",
+        "tests/test_public_api_authorization.py",
+        "tests/test_desktop_release_channel.py",
         "tests/test_billing_webhook_idempotency.py",
         "tests/test_unified_credits_settlement.py",
         "tests/test_short_caption_sync.py"
@@ -79,6 +89,12 @@ if (-not $SkipTests) {
     }
 }
 
+$dirtyAfterTests = @(& $git -c safe.directory=$($Root.Replace('\', '/')) status --porcelain)
+Assert-NativeSuccess "post-test git status"
+if ($dirtyAfterTests.Count -gt 0) {
+    throw "Release tests changed tracked source. Refusing to deploy a candidate that no longer matches $gitSha."
+}
+
 $fly = Find-CommandPath "fly" @(
     "$env:USERPROFILE\.fly\bin\fly.exe",
     "$env:LOCALAPPDATA\fly\bin\fly.exe",
@@ -98,7 +114,7 @@ for ($attempt = 1; $attempt -le 60; $attempt++) {
         if (
             [string]$health.backend_commit -eq $gitSha -and
             [string]$health.frontend_bundle -eq $buildId -and
-            [string]$health.status -in @("online", "degraded")
+            [string]$health.status -eq "online"
         ) {
             $verified = $true
             break
@@ -139,6 +155,19 @@ if ($DeployVercel) {
         Assert-NativeSuccess "Vercel project link"
         & $vercel --prod --yes --scope $VercelScope --build-env "VITE_STUDIO_BUILD_ID=$buildId"
         Assert-NativeSuccess "Vercel deploy"
+
+        $studioUrl = "https://studio.nyptidindustries.com"
+        $remoteIndex = (Invoke-WebRequest -UseBasicParsing -Uri "$studioUrl/?candidate=$buildId" -Headers @{ "Cache-Control" = "no-cache" } -TimeoutSec 30).Content
+        $assetMatch = [regex]::Match($remoteIndex, 'assets/index-[A-Za-z0-9_-]+\.js')
+        if (-not $assetMatch.Success) {
+            throw "Could not identify the production Studio entry bundle"
+        }
+        $assetUrl = "$studioUrl/$($assetMatch.Value)"
+        $remoteBundle = (Invoke-WebRequest -UseBasicParsing -Uri $assetUrl -Headers @{ "Cache-Control" = "no-cache" } -TimeoutSec 60).Content
+        if (-not $remoteBundle.Contains($buildId)) {
+            throw "The Studio custom domain is not serving candidate $buildId"
+        }
+        Write-Host "==> Vercel provenance verified: $buildId / $($assetMatch.Value)"
     } finally {
         Pop-Location
     }

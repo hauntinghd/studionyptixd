@@ -204,6 +204,7 @@ def _wallet(user_id: str) -> dict[str, Any]:
             "plan": "",              # creator | studio | ""
             "granted_month": "",     # last month a monthly grant was applied
             "granted_credits": 0,
+            "plan_grant_cycles": {}, # paid billing cycle id -> immutable grant fact
             "lifetime_spent": 0,
             "unlimited": False,
             "beta_access": False,
@@ -224,6 +225,7 @@ def _wallet(user_id: str) -> dict[str, Any]:
     w.setdefault("plan", "")
     w.setdefault("granted_month", "")
     w.setdefault("granted_credits", 0)
+    w.setdefault("plan_grant_cycles", {})
     w.setdefault("lifetime_spent", 0)
     w.setdefault("unlimited", False)
     w.setdefault("beta_access", False)
@@ -408,76 +410,118 @@ def plan_monthly_credits(plan: str) -> int:
     return int((spec or {}).get("monthly_credits", 0) or 0)
 
 
-def set_plan(user_id: str, plan: str, *, grant_now: bool = True) -> dict[str, Any]:
-    """Assign a unified plan. Optionally apply this month's credit grant."""
+def set_plan(user_id: str, plan: str, *, grant_now: bool = False) -> dict[str, Any]:
+    """Assign a unified plan without creating credits.
+
+    ``grant_now`` remains accepted for compatibility with older callers, but is
+    intentionally ignored. Recurring credit is money-like state and may only be
+    created by :func:`grant_plan_cycle` after a paid provider cycle is verified.
+    """
     plan = str(plan or "").strip().lower()
     with _lock:
         w = _wallet(user_id)
         w["plan"] = plan
-        if grant_now:
-            _grant_monthly_locked(user_id, plan)
         w["updated_at"] = time.time()
         _save()
         return dict(w)
 
 
-def _grant_monthly_locked(user_id: str, plan: str) -> bool:
+def _grant_plan_cycle_locked(
+    user_id: str,
+    plan: str,
+    cycle_key: str,
+    *,
+    provider: str,
+    invoice_id: str = "",
+    metadata: dict | None = None,
+) -> bool:
     w = _wallet(user_id)
-    mk = _month_key()
+    normalized_cycle = str(cycle_key or "").strip()
+    if not normalized_cycle:
+        raise ValueError("paid billing cycle key is required")
     credits = plan_monthly_credits(plan)
     if credits <= 0:
+        raise ValueError(f"plan {plan!r} has no recurring credit grant")
+    processed = dict(w.get("plan_grant_cycles") or {})
+    if normalized_cycle in processed:
         return False
-    if w.get("granted_month") == mk:
-        prior_grant = max(0, int(w.get("granted_credits", 0) or 0))
-        upgrade_delta = max(0, credits - prior_grant)
-        if upgrade_delta <= 0:
-            return False
-        w["monthly_balance"] = int(w.get("monthly_balance", 0) or 0) + upgrade_delta
-        w["granted_credits"] = credits
-        w["updated_at"] = time.time()
-        _sync_balance(w)
-        _append_ledger({
-            "type": "plan_upgrade_grant",
-            "user_id": user_id,
-            "plan": plan,
-            "credits": upgrade_delta,
-            "month": mk,
-            "balance_after": w["balance"],
-            "ts": time.time(),
-        })
-        return True
-    # Only the immediately previous month's unused grant can roll forward.
-    # Any older rollover expires here. Purchased reloads never expire.
+    # Only the immediately previous paid cycle's unused grant rolls forward.
+    # Time passing by itself never mutates the wallet. Purchased reloads never
+    # expire and are intentionally excluded from this rollover calculation.
     w["rollover_balance"] = min(
         max(0, int(w.get("monthly_balance", 0) or 0)),
         credits,
     )
     w["monthly_balance"] = credits
-    w["granted_month"] = mk
+    w["plan"] = plan
+    w["granted_month"] = ""
     w["granted_credits"] = credits
+    w["last_grant_cycle"] = normalized_cycle
+    processed[normalized_cycle] = {
+        "provider": str(provider or "").strip().lower(),
+        "invoice_id": str(invoice_id or "").strip(),
+        "plan": plan,
+        "credits": credits,
+        "ts": time.time(),
+    }
+    # Bound durable idempotency history while preserving insertion order.
+    w["plan_grant_cycles"] = dict(list(processed.items())[-5000:])
     w["updated_at"] = time.time()
     _sync_balance(w)
     _append_ledger({
-        "type": "monthly_grant",
+        "type": "plan_cycle_grant",
         "user_id": user_id,
         "plan": plan,
         "credits": credits,
         "rollover_credits": int(w.get("rollover_balance", 0) or 0),
-        "month": mk,
+        "cycle_key": normalized_cycle,
+        "provider": str(provider or "").strip().lower(),
+        "invoice_id": str(invoice_id or "").strip(),
+        "metadata": dict(metadata or {}),
         "balance_after": w["balance"],
         "ts": time.time(),
     })
     return True
 
 
-def ensure_monthly_grant(user_id: str) -> dict[str, Any]:
-    """Idempotently apply the current month's grant for the user's plan."""
+def grant_plan_cycle(
+    user_id: str,
+    plan: str,
+    cycle_key: str,
+    *,
+    provider: str,
+    invoice_id: str = "",
+    metadata: dict | None = None,
+) -> dict[str, Any]:
+    """Atomically grant one paid recurring cycle exactly once.
+
+    The caller must derive ``cycle_key`` from a provider-owned paid invoice or
+    capture cycle. Different webhook event types for the same invoice therefore
+    converge on one wallet mutation.
+    """
+    uid = str(user_id or "").strip()
+    normalized_plan = str(plan or "").strip().lower()
+    if not uid:
+        raise ValueError("user id is required")
     with _lock:
-        w = _wallet(user_id)
-        if w.get("plan"):
-            if _grant_monthly_locked(user_id, w["plan"]):
-                _save()
+        w = _wallet(uid)
+        changed = _grant_plan_cycle_locked(
+            uid,
+            normalized_plan,
+            cycle_key,
+            provider=provider,
+            invoice_id=invoice_id,
+            metadata=metadata,
+        )
+        if changed:
+            _save()
         return dict(w)
+
+
+def ensure_monthly_grant(user_id: str) -> dict[str, Any]:
+    """Compatibility read: calendar time must never create paid credits."""
+    with _lock:
+        return dict(_wallet(user_id))
 
 
 def add_credits(

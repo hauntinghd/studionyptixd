@@ -19,6 +19,18 @@ _ANNOUNCED_PATH = _DATA_DIR / "studio_release_announced.json"
 # Bump id when shipping; startup announces any id not yet in announced store.
 CATALOG: list[dict[str, Any]] = [
     {
+        "id": "release-2026-07-18-studio-1-0-public",
+        "kind": "success",
+        "title": "NYPTID Studio 1.0 is live",
+        "body": (
+            "Studio is now publicly available as a desktop-first production app. Signed-in creators can plan, "
+            "build, review, repair, animate, and export owned short-form and long-form productions; Google sign-in "
+            "returns securely to the app, Stripe memberships and unified credits settle to the correct account, "
+            "and signed in-app updates keep the Windows x64 release current."
+        ),
+        "version": "1.0.0",
+    },
+    {
         "id": "release-2026-07-17-desktop-auth-payment-settlement",
         "kind": "success",
         "title": "Desktop sign-in return + verified payment settlement",

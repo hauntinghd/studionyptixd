@@ -13,7 +13,12 @@ from backend_media_handlers import (
     resolve_auto_scene_directory,
     validate_job_id_component,
 )
-from routes import build_generation_router, build_media_router, build_studio_utility_router
+from routes import (
+    build_billing_router,
+    build_generation_router,
+    build_media_router,
+    build_studio_utility_router,
+)
 
 
 ADMIN_EMAILS = {"owner@example.com"}
@@ -35,6 +40,44 @@ async def require_test_auth(request: Request) -> dict:
 
 def auth(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
+
+
+def test_retired_waitlist_route_cannot_create_a_checkout() -> None:
+    calls = 0
+
+    async def obsolete_waitlist_checkout(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return {"checkout_url": "https://example.invalid/obsolete"}
+
+    async def unused(*_args, **_kwargs):
+        return {"ok": True}
+
+    app = FastAPI()
+    app.include_router(
+        build_billing_router(
+            create_checkout_endpoint=unused,
+            create_topup_checkout_endpoint=unused,
+            paypal_return_endpoint=unused,
+            paypal_webhook_endpoint=unused,
+            paypal_verify_order_endpoint=unused,
+            create_billing_portal_session_endpoint=unused,
+            join_waitlist_endpoint=obsolete_waitlist_checkout,
+            stripe_webhook_endpoint=unused,
+            admin_set_plan_endpoint=unused,
+            admin_cancel_subscription_endpoint=unused,
+            admin_refund_credits_endpoint=unused,
+            admin_grant_credits_endpoint=unused,
+        )
+    )
+
+    response = TestClient(app).post(
+        "/api/waitlist/join",
+        json={"email": "stale@example.com", "plan": "creator", "provider": "stripe"},
+    )
+
+    assert response.status_code == 410
+    assert calls == 0
 
 
 def test_generate_auth_runs_before_handler() -> None:
@@ -222,7 +265,7 @@ def test_download_is_owner_scoped_and_supports_persisted_jobs_and_admin(media_ap
     assert client.get("/api/download/orphan.mp4", headers=auth("admin")).status_code == 200
 
 
-def test_controlled_beta_cannot_use_legacy_final_video_download(tmp_path: Path) -> None:
+def test_account_without_export_access_cannot_use_legacy_final_video_download(tmp_path: Path) -> None:
     output = tmp_path / "output"
     output.mkdir()
     (output / "beta.mp4").write_bytes(b"video")
@@ -249,7 +292,7 @@ def test_controlled_beta_cannot_use_legacy_final_video_download(tmp_path: Path) 
 
     assert response.status_code == 403
     assert response.json()["detail"] == (
-        "Final video export is disabled for controlled-beta accounts."
+        "Final video export is not available for this account."
     )
 
 

@@ -63,7 +63,6 @@ def _membership_plan_for_user(user: dict) -> str:
     try:
         import unified_credits as uc
 
-        uc.ensure_monthly_grant(uid)
         state = uc.get_state(uid)
         return str(state.get("plan") or "").strip().lower()
     except Exception:
@@ -286,7 +285,7 @@ def build_studio_agent_router(
                 return
         except Exception:
             pass
-        raise HTTPException(403, "Final video export is disabled for controlled-beta accounts.")
+        raise HTTPException(403, "Final video export is not available for this account.")
 
     @router.get("/training-consent")
     async def get_training_consent(user: dict = Depends(_agent_user)):
@@ -1291,7 +1290,6 @@ def build_studio_agent_router(
         uid = _user_id(user)
         profile = _billing_profile(user)
         try:
-            uc.ensure_monthly_grant(uid)
             state = uc.get_state(uid)
         except Exception as exc:
             state = {"balance": 0, "plan": "", "error": str(exc)}
