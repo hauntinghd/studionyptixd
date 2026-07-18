@@ -1,6 +1,6 @@
 [package]
 name = "nyptid-studio"
-version = "0.2.0"
+version = "0.2.1"
 description = "NYPTID Studio desktop application"
 authors = ["NYPTID Industries"]
 license = ""

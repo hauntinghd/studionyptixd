@@ -966,6 +966,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
         let cancelled = false;
         let unlisten: (() => void) | null = null;
+        let unlistenForwarded: (() => void) | null = null;
 
         const handleDesktopAuthUrls = async (urls: string[]) => {
             for (const rawUrl of urls) {
@@ -1009,12 +1010,18 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         void (async () => {
             try {
                 const { getCurrent, onOpenUrl } = await import('@tauri-apps/plugin-deep-link');
+                const { listen } = await import('@tauri-apps/api/event');
                 unlisten = await onOpenUrl((urls) => {
                     void handleDesktopAuthUrls(urls);
+                });
+                unlistenForwarded = await listen<string[]>('nyptid-desktop-auth-urls', (event) => {
+                    if (Array.isArray(event.payload)) void handleDesktopAuthUrls(event.payload);
                 });
                 if (cancelled) {
                     unlisten();
                     unlisten = null;
+                    unlistenForwarded();
+                    unlistenForwarded = null;
                     return;
                 }
                 const startupUrls = await getCurrent();
@@ -1028,6 +1035,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             cancelled = true;
             try {
                 unlisten?.();
+                unlistenForwarded?.();
             } catch {
                 // Ignore plugin listener cleanup failures during app shutdown.
             }

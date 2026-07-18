@@ -1,4 +1,4 @@
-use tauri::{plugin::TauriPlugin, Manager, Runtime, Url};
+use tauri::{plugin::TauriPlugin, Emitter, Manager, Runtime, Url};
 
 #[cfg(desktop)]
 use tauri_plugin_deep_link::DeepLinkExt;
@@ -120,9 +120,16 @@ fn trusted_navigation<R: Runtime>() -> TauriPlugin<R> {
             }
 
             if is_trusted_external_navigation(url) {
-                if let Err(error) = tauri_plugin_opener::open_url(url.as_str(), None::<&str>) {
-                    log::error!("failed to open trusted external URL: {error}");
-                }
+                // ShellExecute can block on some Windows/browser combinations.
+                // Never run it on Tauri's WebView navigation callback thread.
+                let external_url = url.to_string();
+                std::thread::spawn(move || {
+                    if let Err(error) =
+                        tauri_plugin_opener::open_url(external_url, None::<&str>)
+                    {
+                        log::error!("failed to open trusted external URL: {error}");
+                    }
+                });
             } else {
                 log::warn!("blocked untrusted top-level navigation to {url}");
             }
@@ -141,12 +148,20 @@ pub fn run() {
     #[cfg(desktop)]
     {
         builder = builder.plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
-            let has_auth_callback = argv
+            let auth_callbacks: Vec<String> = argv
                 .iter()
                 .filter_map(|arg| Url::parse(arg).ok())
-                .any(|url| is_trusted_auth_deep_link(&url));
-            if has_auth_callback {
+                .filter(|url| is_trusted_auth_deep_link(url))
+                .map(|url| url.to_string())
+                .collect();
+            if !auth_callbacks.is_empty() {
                 focus_main_window(app);
+                // Explicitly forward the second-instance command line to the
+                // live web UI. The deep-link plugin still handles cold starts;
+                // the event guarantees warm callbacks reach the PKCE owner.
+                if let Err(error) = app.emit("nyptid-desktop-auth-urls", auth_callbacks) {
+                    log::error!("could not forward desktop auth callback: {error}");
+                }
             }
         }));
     }

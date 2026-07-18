@@ -764,7 +764,7 @@ app = FastAPI(
 app.add_middleware(MultipartContentLengthLimitMiddleware)
 configure_backend_runtime(app)
 
-DESKTOP_RELEASE_VERSION = "0.2.0"
+DESKTOP_RELEASE_VERSION = "0.2.1"
 DESKTOP_RELEASE_DIR = Path(str(os.getenv("APP_DATA_DIR") or TEMP_DIR)) / "studio_releases"
 DESKTOP_RELEASE_FILENAME = f"NYPTID-Studio_{DESKTOP_RELEASE_VERSION}_x64-setup.exe"
 
@@ -785,7 +785,7 @@ async def desktop_release_latest():
         "sha256": sha256,
         "published_at": datetime.fromtimestamp(release_path.stat().st_mtime, timezone.utc).isoformat()
         if release_path.is_file() else "",
-        "notes": "Evergreen Studio Web UI, desktop Google auth, secure external billing, and responsive app layout.",
+        "notes": "Non-blocking Google sign-in with reliable warm-app OAuth callback delivery.",
     }
 
 
