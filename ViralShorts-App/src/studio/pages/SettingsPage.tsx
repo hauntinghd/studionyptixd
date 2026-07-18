@@ -78,6 +78,23 @@ export default function SettingsPage({ onNavigate }: { onNavigate: PageNav }) {
         void loadYouTubeChannels(false);
     }, [accessToken, loadYouTubeChannels]);
 
+    useEffect(() => {
+        if (!accessToken) return;
+        const refreshAfterBrowserOAuth = () => {
+            setYoutubeConnecting(false);
+            void loadYouTubeChannels(true);
+        };
+        const onVisibilityChange = () => {
+            if (document.visibilityState === 'visible') refreshAfterBrowserOAuth();
+        };
+        window.addEventListener('focus', refreshAfterBrowserOAuth);
+        document.addEventListener('visibilitychange', onVisibilityChange);
+        return () => {
+            window.removeEventListener('focus', refreshAfterBrowserOAuth);
+            document.removeEventListener('visibilitychange', onVisibilityChange);
+        };
+    }, [accessToken, loadYouTubeChannels]);
+
     const loadTrainingConsent = useCallback(async () => {
         if (!accessToken) return;
         const res = await fetch(resolveStudioBackendUrl('/api/studio-agent/training-consent'), {

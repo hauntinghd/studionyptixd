@@ -117,6 +117,23 @@ export default function AgentYouTubeConnect({
         void loadChannels({ sync: syncAfterOAuth });
     }, [accessToken, loadChannels]);
 
+    useEffect(() => {
+        if (!accessToken) return;
+        const refreshAfterBrowserOAuth = () => {
+            setConnecting(false);
+            void loadChannels({ sync: true });
+        };
+        const onVisibilityChange = () => {
+            if (document.visibilityState === 'visible') refreshAfterBrowserOAuth();
+        };
+        window.addEventListener('focus', refreshAfterBrowserOAuth);
+        document.addEventListener('visibilitychange', onVisibilityChange);
+        return () => {
+            window.removeEventListener('focus', refreshAfterBrowserOAuth);
+            document.removeEventListener('visibilitychange', onVisibilityChange);
+        };
+    }, [accessToken, loadChannels]);
+
     const connect = () => {
         if (!accessToken) return;
         setConnecting(true);

@@ -89,7 +89,13 @@ def test_expand_budget_prices_only_incremental_stills_and_selected_new_animation
     assert estimate.breakdown["animate_scene_indices"] == [1, 2, 3, 4, 5]
     assert estimate.breakdown["animated_new_scene_seconds"] == 25.0
     assert estimate.breakdown["stills_usd"] == 0.5
-    assert estimate.breakdown["video_usd"] == 1.25
+    # The provider rate can change independently of this incremental-scene
+    # contract. Verify that only the 25 new seconds are priced using the
+    # currently resolved model rate instead of pinning a stale dollar amount.
+    assert estimate.breakdown["video_usd"] == pytest.approx(
+        estimate.breakdown["video_usd_per_second"] * 25.0,
+        abs=0.0001,
+    )
 
 
 def test_expand_budget_honors_explicit_no_animation_contract():

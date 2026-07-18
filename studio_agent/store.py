@@ -658,7 +658,7 @@ def is_expand_short_request(text: str) -> bool:
     ):
         return True
     if re.search(r"\bscene\s*(?:1|one|first)\b", low) and re.search(
-        r"\b(?:rest|remaining|finish|complete|seconds?|short|video|other|more)\b",
+        r"\b(?:rest|remaining|finish|complete|other|more)\b",
         low,
     ):
         return True

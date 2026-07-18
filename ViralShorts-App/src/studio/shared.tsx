@@ -25,12 +25,10 @@ const billingHostAliases = new Set([
     "invoicer.niptidindustries.com",
 ]);
 export const isBillingHost = billingHostAliases.has(hostLower) || hostLower.startsWith("billing.") || hostLower.startsWith("invoicer.");
-const CONTROLLED_BETA_SITE_URL = "https://studio-frontend-asd.vercel.app";
-export const STUDIO_SITE_URL = (
-    isTauriDesktopApp || hostLower === "studio-frontend-asd.vercel.app"
-        ? CONTROLLED_BETA_SITE_URL
-        : "https://studio.nyptidindustries.com"
-);
+// Authentication, billing, and OAuth must all return to the canonical origin.
+// Sending desktop users to the old Vercel alias split Supabase storage and left
+// the app unable to observe completed Stripe or YouTube flows.
+export const STUDIO_SITE_URL = "https://studio.nyptidindustries.com";
 export const BILLING_SITE_URL = STUDIO_SITE_URL;
 export const INVOICER_API_BASE_URL = "https://invoicer.nyptidindustries.com";
 // Keep beta traffic on the verified Fly control plane. The api-studio hostname

@@ -85,6 +85,17 @@ def account_profile(
             "monthly_credits": monthly,
             "metering": "unified_credits",
         }
+    if uid and balance > 0:
+        return {
+            "tier": "wallet",
+            "label": "Credit wallet",
+            "unlimited": False,
+            "plan": plan or "free",
+            "plan_name": "Credit wallet",
+            "balance": balance,
+            "monthly_credits": monthly,
+            "metering": "unified_credits",
+        }
     return {
         "tier": "none",
         "label": "",

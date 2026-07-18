@@ -29,7 +29,7 @@ from upload_limits import (
     read_upload_limited,
     write_upload_limited,
 )
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from typing import Optional
 import stripe as stripe_lib
 import uvicorn
@@ -726,6 +726,12 @@ except Exception:
     FasterWhisperModel = None
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+# Third-party request loggers include full query strings and customer lookup
+# URLs at INFO. Keep operational failures while preventing API keys, emails,
+# and provider identifiers from being copied into Fly's retained logs.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("stripe").setLevel(logging.WARNING)
 log = logging.getLogger("nyptid-studio")
 
 CATALYST_REFERENCE_ANALYSIS_DEFAULT_MINUTES = 20.0
@@ -764,28 +770,54 @@ app = FastAPI(
 app.add_middleware(MultipartContentLengthLimitMiddleware)
 configure_backend_runtime(app)
 
-DESKTOP_RELEASE_VERSION = "0.2.1"
+DESKTOP_RELEASE_VERSION = "0.2.2"
 DESKTOP_RELEASE_DIR = Path(str(os.getenv("APP_DATA_DIR") or TEMP_DIR)) / "studio_releases"
 DESKTOP_RELEASE_FILENAME = f"NYPTID-Studio_{DESKTOP_RELEASE_VERSION}_x64-setup.exe"
+DESKTOP_RELEASE_NOTES = (
+    "Automatic signed desktop updates, normal-user Studio Agent access, canonical billing and "
+    "YouTube return paths, and corrected one-scene production tool routing."
+)
 
 
 def _desktop_release_path() -> Path:
     return DESKTOP_RELEASE_DIR / DESKTOP_RELEASE_FILENAME
 
 
-@app.get("/api/desktop/releases/latest")
-async def desktop_release_latest():
+def _desktop_release_metadata() -> tuple[Path, str, str]:
     release_path = _desktop_release_path()
     sha_path = release_path.with_suffix(f"{release_path.suffix}.sha256")
+    signature_path = release_path.with_suffix(f"{release_path.suffix}.sig")
     sha256 = sha_path.read_text(encoding="utf-8").strip().lower() if sha_path.is_file() else ""
+    signature = signature_path.read_text(encoding="utf-8").strip() if signature_path.is_file() else ""
+    return release_path, sha256, signature
+
+
+def _desktop_release_is_published(release_path: Path, sha256: str, signature: str) -> bool:
+    return (
+        release_path.is_file()
+        and bool(re.fullmatch(r"[0-9a-f]{64}", sha256))
+        and bool(signature)
+    )
+
+
+def _desktop_version_tuple(raw: str) -> tuple[int, int, int] | None:
+    match = re.fullmatch(r"v?(\d+)\.(\d+)\.(\d+)(?:-[0-9A-Za-z.-]+)?", str(raw or "").strip())
+    if not match:
+        return None
+    return tuple(int(part) for part in match.groups())
+
+
+@app.get("/api/desktop/releases/latest")
+async def desktop_release_latest():
+    release_path, sha256, signature = _desktop_release_metadata()
     return {
         "version": DESKTOP_RELEASE_VERSION,
-        "available": release_path.is_file() and bool(re.fullmatch(r"[0-9a-f]{64}", sha256)),
-        "download_url": "https://nyptid-studio.fly.dev/api/desktop/download",
+        "available": _desktop_release_is_published(release_path, sha256, signature),
+        "download_url": f"https://nyptid-studio.fly.dev/api/desktop/download/{DESKTOP_RELEASE_VERSION}",
         "sha256": sha256,
         "published_at": datetime.fromtimestamp(release_path.stat().st_mtime, timezone.utc).isoformat()
         if release_path.is_file() else "",
-        "notes": "Non-blocking Google sign-in with reliable warm-app OAuth callback delivery.",
+        "notes": DESKTOP_RELEASE_NOTES,
     }
 
 
@@ -799,6 +831,46 @@ async def desktop_release_download():
         media_type="application/vnd.microsoft.portable-executable",
         filename="NYPTID-Studio-Setup.exe",
         headers={"Cache-Control": "public, max-age=300"},
+    )
+
+
+@app.get("/api/desktop/download/{version}")
+async def desktop_release_download_versioned(version: str):
+    if str(version or "").strip() != DESKTOP_RELEASE_VERSION:
+        raise HTTPException(404, "Studio desktop release version was not found")
+    release_path = _desktop_release_path()
+    if not release_path.is_file():
+        raise HTTPException(404, "Studio desktop release is not published yet")
+    return FileResponse(
+        str(release_path),
+        media_type="application/vnd.microsoft.portable-executable",
+        filename=f"NYPTID-Studio-{DESKTOP_RELEASE_VERSION}-Setup.exe",
+        headers={"Cache-Control": "public, max-age=31536000, immutable"},
+    )
+
+
+@app.get("/api/desktop/updater/{target}/{arch}/{current_version}")
+async def desktop_release_updater(target: str, arch: str, current_version: str):
+    current = _desktop_version_tuple(current_version)
+    latest = _desktop_version_tuple(DESKTOP_RELEASE_VERSION)
+    if target != "windows" or arch not in {"x86_64", "i686", "aarch64"}:
+        return Response(status_code=204, headers={"Cache-Control": "no-store"})
+    if current is None or latest is None:
+        raise HTTPException(400, "Invalid Studio desktop version")
+    if current >= latest:
+        return Response(status_code=204, headers={"Cache-Control": "no-store"})
+    release_path, sha256, signature = _desktop_release_metadata()
+    if not _desktop_release_is_published(release_path, sha256, signature):
+        return Response(status_code=204, headers={"Cache-Control": "no-store"})
+    return JSONResponse(
+        {
+            "version": DESKTOP_RELEASE_VERSION,
+            "pub_date": datetime.fromtimestamp(release_path.stat().st_mtime, timezone.utc).isoformat(),
+            "url": f"https://nyptid-studio.fly.dev/api/desktop/download/{DESKTOP_RELEASE_VERSION}",
+            "signature": signature,
+            "notes": DESKTOP_RELEASE_NOTES,
+        },
+        headers={"Cache-Control": "no-store"},
     )
 
 jobs: dict = {}
@@ -4374,10 +4446,11 @@ def _public_lane_access_for_user(user: Optional[dict], access_snapshot: Optional
         bool((snapshot or {}).get("billing_active"))
         and membership_plan in CHAT_STORY_ALLOWED_PLANS
     )
-    agent_live = is_admin or beta_access or (
-        bool((snapshot or {}).get("billing_active"))
-        and membership_plan in UNIFIED_PLANS
-    )
+    # Every authenticated creator enters Studio Agent immediately. Their
+    # unified wallet still meters model/tool spend, while Stripe membership is
+    # the recurring-credit path. Previously the UI selected the Agent tab for
+    # unpaid users but this flag was false, producing a completely blank page.
+    agent_live = authenticated
     return {
         "create": public_live,
         "agent": agent_live,
@@ -4532,7 +4605,13 @@ def _paid_access_snapshot_for_user(user: Optional[dict]) -> dict:
     if stripe_ok:
         stripe_plan = str(stripe_diag.get("plan", "") or "").strip().lower()
         stored_plan = str((user or {}).get("plan", "none") or "none").strip().lower()
-        effective_plan = stripe_plan if stripe_plan in PLAN_LIMITS else stored_plan if stored_plan in PLAN_LIMITS else "none"
+        effective_plan = (
+            stripe_plan
+            if stripe_plan in PLAN_LIMITS or stripe_plan in UNIFIED_PLANS
+            else stored_plan
+            if stored_plan in PLAN_LIMITS or stored_plan in UNIFIED_PLANS
+            else "none"
+        )
         out.update(
             {
                 "billing_active": True,

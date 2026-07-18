@@ -1,7 +1,14 @@
 import { useContext, useMemo, useRef, useState, useEffect } from 'react';
-import { ChevronDown, Download, LogOut, MessageSquarePlus, Settings, User } from 'lucide-react';
+import { ChevronDown, Download, Loader2, LogOut, MessageSquarePlus, Settings, User } from 'lucide-react';
 import { AuthContext, Logo, isTauriDesktopApp } from '../../shared';
-import { STUDIO_DESKTOP_DOWNLOAD_URL, fetchDesktopRelease, isDesktopUpdate, type DesktopRelease } from '../../lib/desktopRelease';
+import {
+    STUDIO_DESKTOP_DOWNLOAD_URL,
+    fetchDesktopRelease,
+    installDesktopUpdate,
+    isDesktopUpdate,
+    type DesktopRelease,
+    type DesktopUpdateProgress,
+} from '../../lib/desktopRelease';
 import type { PageNav } from '../NavBar';
 import CreditFuelBar from './CreditFuelBar';
 import NotificationBell from './NotificationBell';
@@ -17,6 +24,8 @@ export default function StudioTopBar({ onNavigate }: { onNavigate: PageNav }) {
     } = useContext(AuthContext);
     const [menuOpen, setMenuOpen] = useState(false);
     const [desktopUpdate, setDesktopUpdate] = useState<DesktopRelease | null>(null);
+    const [updateProgress, setUpdateProgress] = useState<DesktopUpdateProgress | null>(null);
+    const [updateError, setUpdateError] = useState('');
     const menuRef = useRef<HTMLDivElement | null>(null);
     const discordUrl = 'https://discord.gg/zMZxRRu7BS';
 
@@ -58,6 +67,32 @@ export default function StudioTopBar({ onNavigate }: { onNavigate: PageNav }) {
 
     const goBilling = () => onNavigate('billing');
 
+    const runDesktopUpdate = async () => {
+        if (!desktopUpdate || updateProgress) return;
+        setUpdateError('');
+        setUpdateProgress({ phase: 'checking' });
+        try {
+            const result = await installDesktopUpdate(desktopUpdate, setUpdateProgress);
+            if (result === 'manual-download') {
+                setUpdateProgress(null);
+                setUpdateError(
+                    'Studio 0.2.2 opened in your browser. Run that installer once; later updates install here automatically.',
+                );
+            }
+        } catch (error) {
+            setUpdateProgress(null);
+            setUpdateError((error as Error).message || 'Studio update failed. Try again.');
+        }
+    };
+
+    const updateTitle = updateProgress
+        ? updateProgress.phase === 'downloading'
+            ? `Downloading Studio ${desktopUpdate?.version || ''}${typeof updateProgress.percent === 'number' ? ` (${updateProgress.percent}%)` : ''}`
+            : updateProgress.phase === 'installing'
+                ? `Installing Studio ${desktopUpdate?.version || ''}`
+                : `Checking Studio ${desktopUpdate?.version || ''}`
+        : updateError || `Install Studio ${desktopUpdate?.version || ''}`;
+
     return (
         <header className="sticky top-0 z-30 flex h-14 items-center justify-between gap-2 border-b border-white/[0.06] bg-[#09090b]/95 px-2 backdrop-blur-md sm:gap-3 sm:px-6">
             <div className="flex shrink-0 items-center gap-1.5">
@@ -77,13 +112,32 @@ export default function StudioTopBar({ onNavigate }: { onNavigate: PageNav }) {
                 {desktopUpdate && (
                     <button
                         type="button"
-                        onClick={() => window.location.assign(desktopUpdate.download_url)}
-                        title={`Download Studio ${desktopUpdate.version}`}
-                        aria-label={`Download Studio update ${desktopUpdate.version}`}
-                        className="grid h-8 w-8 place-items-center rounded-lg border border-cyan-400/25 bg-cyan-400/10 text-cyan-200 transition hover:border-cyan-300/50 hover:bg-cyan-400/20 hover:text-white"
+                        onClick={() => { void runDesktopUpdate(); }}
+                        disabled={Boolean(updateProgress)}
+                        title={updateTitle}
+                        aria-label={updateTitle}
+                        className="grid h-8 w-8 place-items-center rounded-lg border border-cyan-400/25 bg-cyan-400/10 text-cyan-200 transition hover:border-cyan-300/50 hover:bg-cyan-400/20 hover:text-white disabled:cursor-wait disabled:opacity-70"
                     >
-                        <Download className="h-4 w-4" />
+                        {updateProgress
+                            ? <Loader2 className="h-4 w-4 animate-spin" />
+                            : <Download className="h-4 w-4" />}
                     </button>
+                )}
+                {desktopUpdate && updateError && (
+                    <div
+                        role="status"
+                        className="absolute left-2 top-12 z-50 flex max-w-[min(92vw,420px)] items-start gap-2 rounded-lg border border-cyan-400/25 bg-[#071014] px-3 py-2 text-xs leading-relaxed text-cyan-50 shadow-2xl"
+                    >
+                        <span>{updateError}</span>
+                        <button
+                            type="button"
+                            onClick={() => setUpdateError('')}
+                            className="shrink-0 text-cyan-300/70 hover:text-white"
+                            aria-label="Dismiss update message"
+                        >
+                            ×
+                        </button>
+                    </div>
                 )}
             </div>
 

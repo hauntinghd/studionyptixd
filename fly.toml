@@ -66,7 +66,7 @@ kill_timeout = 120  # match render.yaml maxShutdownDelaySeconds
   RUN_EMBEDDED_WORKER = "true"
   SITE_URL = "https://nyptid-studio.fly.dev"
   API_PUBLIC_URL = "https://nyptid-studio.fly.dev"
-  BILLING_SITE_URL = "https://studio-frontend-asd.vercel.app"
+  BILLING_SITE_URL = "https://studio.nyptidindustries.com"
   PAYPAL_ENV = "live"
   IMAGE_PROVIDER_ORDER = "fal"
   # xAI credits are not an implicit safety net. Users can still select an xAI

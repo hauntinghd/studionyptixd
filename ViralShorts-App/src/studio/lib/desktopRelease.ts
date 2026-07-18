@@ -51,7 +51,7 @@ export async function fetchDesktopRelease(): Promise<DesktopRelease | null> {
     }
 }
 
-async function runningDesktopVersion(): Promise<string | null> {
+export async function runningDesktopVersion(): Promise<string | null> {
     if (!isTauriDesktopApp) return null;
     try {
         // The desktop shell loads the live web app, so a version baked into the
@@ -71,4 +71,64 @@ export async function isDesktopUpdate(release: DesktopRelease | null): Promise<b
     if (!release) return false;
     const currentVersion = await runningDesktopVersion();
     return Boolean(currentVersion && compareVersions(release.version, currentVersion) > 0);
+}
+
+export type DesktopUpdateProgress = {
+    phase: 'checking' | 'downloading' | 'installing';
+    percent?: number;
+};
+
+export type DesktopUpdateResult = 'relaunching' | 'manual-download';
+
+/**
+ * Install an update through Tauri's signed native updater. Versions older than
+ * 0.2.2 predate the native bridge, so they receive the one unavoidable manual
+ * installer download; all later versions update in place and relaunch.
+ */
+export async function installDesktopUpdate(
+    release: DesktopRelease,
+    onProgress?: (progress: DesktopUpdateProgress) => void,
+): Promise<DesktopUpdateResult> {
+    const currentVersion = await runningDesktopVersion();
+    if (!currentVersion) throw new Error('Could not verify the installed Studio version.');
+
+    if (compareVersions(currentVersion, '0.2.2') < 0) {
+        window.location.assign(release.download_url);
+        return 'manual-download';
+    }
+
+    onProgress?.({ phase: 'checking' });
+    const [{ check }, { relaunch }] = await Promise.all([
+        import('@tauri-apps/plugin-updater'),
+        import('@tauri-apps/plugin-process'),
+    ]);
+    const update = await check({ timeout: 20_000 });
+    if (!update) throw new Error('The update is no longer available. Check again in a moment.');
+    if (compareVersions(update.version, currentVersion) <= 0) {
+        await update.close();
+        throw new Error('Studio is already current.');
+    }
+
+    let downloaded = 0;
+    let total = 0;
+    await update.downloadAndInstall((event) => {
+        if (event.event === 'Started') {
+            total = Number(event.data.contentLength || 0);
+            downloaded = 0;
+            onProgress?.({ phase: 'downloading', percent: total > 0 ? 0 : undefined });
+            return;
+        }
+        if (event.event === 'Progress') {
+            downloaded += Number(event.data.chunkLength || 0);
+            onProgress?.({
+                phase: 'downloading',
+                percent: total > 0 ? Math.min(99, Math.round((downloaded / total) * 100)) : undefined,
+            });
+            return;
+        }
+        onProgress?.({ phase: 'installing', percent: 100 });
+    }, { timeout: 10 * 60 * 1000 });
+    onProgress?.({ phase: 'installing', percent: 100 });
+    await relaunch();
+    return 'relaunching';
 }

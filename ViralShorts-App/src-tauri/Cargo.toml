@@ -1,6 +1,6 @@
 [package]
 name = "nyptid-studio"
-version = "0.2.1"
+version = "0.2.2"
 description = "NYPTID Studio desktop application"
 authors = ["NYPTID Industries"]
 license = ""
@@ -25,6 +25,8 @@ tauri = { version = "2.8.0", features = [] }
 tauri-plugin-log = "2"
 tauri-plugin-opener = "2"
 tauri-plugin-deep-link = "2"
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
 
 [target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]
 tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }

@@ -88,7 +88,10 @@ export default function DashboardPage({ onNavigate }: { onNavigate: PageNav }) {
         return 'Good evening';
     }, []);
 
-    const canUseAgent = isAdmin || Boolean((laneAccess as Record<string, boolean>).agent);
+    // Authentication is the Agent entry gate. The backend wallet enforces
+    // billable model/render usage and returns a useful balance error instead of
+    // letting this route resolve to an empty black panel.
+    const canUseAgent = Boolean(session);
 
     const isTabUnlocked = useCallback(
         (nextTab: DashboardTab) => {

@@ -1446,10 +1446,6 @@ function keepSingleProductionPending(actions: PendingAction[], messages: Array<{
 }
 
 const OWNER_ONLY_PENDING_TOOLS = new Set([
-    'start_longform_render',
-    'expand_longform_visual_proof',
-    'generate_longform_thumbnails',
-    'finalize_longform_render',
     'ingest_cliplab_attachment',
     'analyze_cliplab_video',
     'render_cliplab_segments',
@@ -1548,8 +1544,9 @@ function friendlyApiError(status: number, data: Record<string, unknown>, fallbac
 }
 
 export default function AgentPanel({ onBack }: { onBack?: () => void }) {
-    const { session, ownerOverride, supabase } = useContext(AuthContext);
+    const { session, ownerOverride, studioLaneAccess, supabase } = useContext(AuthContext);
     const isAdminUser = Boolean(ownerOverride);
+    const canUseLongform = isAdminUser || Boolean(studioLaneAccess.longform);
     const userCacheKey = String((session as any)?.user?.id || (session as any)?.user?.email || 'anon');
     const [sessionId, setSessionId] = useState<string | null>(null);
     const [model, setModel] = useState(FALLBACK_MODELS[0].id);
@@ -2749,7 +2746,7 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
         }
         const fmt = raw.content_format as ContentFormat | undefined;
         if (fmt === 'short' || fmt === 'long' || fmt === 'both') {
-            setContentFormat(!isAdminUser && fmt !== 'short' ? 'short' : fmt);
+            setContentFormat(!canUseLongform && fmt !== 'short' ? 'short' : fmt);
         }
         const depth = raw.reasoning_depth as ReasoningDepth | undefined;
         if (depth === 'fast' || depth === 'balanced' || depth === 'deep') {
@@ -2795,7 +2792,7 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
             setActivitySteps([]);
             setQueueHint('');
         }
-    }, [applyProductionLedger, isAdminUser, lastSessionKey, userCacheKey]);
+    }, [applyProductionLedger, canUseLongform, isAdminUser, lastSessionKey, userCacheKey]);
 
     const resumeSession = useCallback(
         async (raw: Record<string, unknown>, opts?: { rehydrateJobs?: boolean; forceServer?: boolean }) => {
@@ -3051,7 +3048,7 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                     body: JSON.stringify({
                         model: pickModel,
                         approval_mode: approvalMode,
-                        content_format: isAdminUser ? contentFormat : 'short',
+                        content_format: canUseLongform ? contentFormat : 'short',
                         reasoning_depth: reasoningDepth,
                         render_style: renderStyle,
                         image_model: imageModel,
@@ -3095,7 +3092,7 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                 setCreatingSession(false);
             }
         },
-        [applySessionPayload, approvalMode, authFetch, captionMode, contentFormat, creatingSession, imageModel, isAdminUser, productWebsite, reasoningDepth, renderStyle, refreshHistory, selectedChannel, videoModel],
+        [applySessionPayload, approvalMode, authFetch, canUseLongform, captionMode, contentFormat, creatingSession, imageModel, productWebsite, reasoningDepth, renderStyle, refreshHistory, selectedChannel, videoModel],
     );
 
     const openSession = useCallback(
@@ -3438,7 +3435,7 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                         body: JSON.stringify({
                             model: pickModel,
                             approval_mode: 'confirm',
-                            content_format: ownerOverride ? 'both' : 'short',
+                            content_format: canUseLongform ? 'both' : 'short',
                             image_model: loadImageModelPref(DEFAULT_IMAGE_MODEL),
                             video_model: DEFAULT_VIDEO_MODEL,
                         }),
@@ -3536,10 +3533,10 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
     );
 
     useEffect(() => {
-        if (isAdminUser) return;
+        if (canUseLongform) return;
         if (agentMode === 'cliplab') setAgentMode('plan');
         if (contentFormat !== 'short') setContentFormat('short');
-    }, [agentMode, contentFormat, isAdminUser]);
+    }, [agentMode, canUseLongform, contentFormat]);
 
     useEffect(() => {
         if (!sessionId || !productWebsite) return;

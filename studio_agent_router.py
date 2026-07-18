@@ -251,6 +251,15 @@ def build_studio_agent_router(
     def _billing_profile(user: dict) -> dict:
         return account_profile(user, is_admin_check=is_admin_check)
 
+    def _require_chat_balance(user: dict) -> dict:
+        profile = _billing_profile(user)
+        if profile.get("unlimited") or int(profile.get("balance") or 0) > 0:
+            return profile
+        raise HTTPException(
+            402,
+            "Studio Agent needs credits for model calls. Start a membership or top up your wallet.",
+        )
+
     def _require_job_access(job_id: str, kind: str, user: dict) -> dict[str, Any]:
         """Enforce per-user production ownership without leaking job existence."""
         access = agent_jobs.job_access_metadata(job_id, kind)
@@ -1575,7 +1584,7 @@ def build_studio_agent_router(
             raise HTTPException(404, "session not found")
         session = _apply_chat_turn_options(session_id, session, body)
         plan = _membership_plan_for_user(user)
-        profile = _billing_profile(user)
+        profile = _require_chat_balance(user)
         try:
             result = await runner.run_turn(
                 session,
@@ -1607,7 +1616,7 @@ def build_studio_agent_router(
             raise HTTPException(404, "session not found")
         session = _apply_chat_turn_options(session_id, session, body)
         plan = _membership_plan_for_user(user)
-        profile = _billing_profile(user)
+        profile = _require_chat_balance(user)
         try:
             openrouter.api_key()
         except RuntimeError as exc:

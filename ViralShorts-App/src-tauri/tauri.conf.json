@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "NYPTID Studio",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "identifier": "com.nyptidindustries.studio",
   "build": {
     "frontendDist": "../dist",
@@ -31,6 +31,7 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "createUpdaterArtifacts": true,
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -45,6 +46,15 @@
         "schemes": [
           "nyptid-studio"
         ]
+      }
+    },
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEU0RjU0OUVDNzlCMkNBOEEKUldTS3lySjU3RW4xNUxpa1Z0RmYyaTAvS05pc2RITGU0a2NGUGlLYU5nN0oyUTJMNnZoMEVjSC8K",
+      "endpoints": [
+        "https://nyptid-studio.fly.dev/api/desktop/updater/{{target}}/{{arch}}/{{current_version}}"
+      ],
+      "windows": {
+        "installMode": "passive"
       }
     }
   }
