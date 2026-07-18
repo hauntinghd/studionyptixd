@@ -2,7 +2,10 @@ import sys
 import types
 import json
 
-sys.modules.setdefault("stripe", types.SimpleNamespace())
+try:
+    import stripe  # noqa: F401
+except ModuleNotFoundError:
+    sys.modules.setdefault("stripe", types.SimpleNamespace())
 
 from studio_agent import runner
 from studio_agent.anti_hallucination import AuditReport, ToolFire, audit_turn, guard_text

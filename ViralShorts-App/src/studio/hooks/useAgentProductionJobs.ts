@@ -119,18 +119,51 @@ export function useAgentProductionJobs({
     const autoFinalizeRef = useRef<Set<string>>(new Set());
     const tracksRef = useRef(tracks);
     tracksRef.current = tracks;
+    // AgentPanel intentionally supplies context-aware callbacks. Several are
+    // inline because they read refs, so their function identities can change on
+    // harmless parent renders. Keep the polling loop stable and always invoke
+    // the latest callbacks through this ref instead of rebuilding the interval.
+    const configRef = useRef({
+        sessionId,
+        getToken,
+        onJobComplete,
+        onJobFailed,
+        onGhostJobDropped,
+        onAwaitingApproval,
+        onRunningPreview,
+        onProgress,
+        autoFinalizeLongform,
+        onAutoFinalizeStarted,
+        shouldPollJobTrack,
+        shouldAcceptSnapshot,
+    });
+    configRef.current = {
+        sessionId,
+        getToken,
+        onJobComplete,
+        onJobFailed,
+        onGhostJobDropped,
+        onAwaitingApproval,
+        onRunningPreview,
+        onProgress,
+        autoFinalizeLongform,
+        onAutoFinalizeStarted,
+        shouldPollJobTrack,
+        shouldAcceptSnapshot,
+    };
 
     const pollOne = useCallback(
         async (track: AgentJobTrack) => {
-            if (!sessionId) return;
-            if (shouldPollJobTrack && !shouldPollJobTrack(track)) return;
-            const tok = await getToken();
-            const data = await pollJobSnapshot(track, sessionId, tok);
+            const config = configRef.current;
+            if (!config.sessionId) return;
+            if (config.shouldPollJobTrack && !config.shouldPollJobTrack(track)) return;
+            const tok = await config.getToken();
+            const data = await pollJobSnapshot(track, config.sessionId, tok);
             // A transient HTTP/auth/network miss is not proof that a render is
             // gone. Keep the track and retry instead of freezing/removing it.
             if (!data) return;
             if (isGhostJobPollFailure(data)) {
-                onGhostJobDropped?.(track);
+                config.onGhostJobDropped?.(track);
                 return;
             }
 
@@ -145,12 +178,12 @@ export function useAgentProductionJobs({
                 job_id: data.job_id || track.job_id,
                 client_updated_at: Date.now(),
             };
-            if (shouldAcceptSnapshot && !shouldAcceptSnapshot(snapshot, track)) return;
+            if (config.shouldAcceptSnapshot && !config.shouldAcceptSnapshot(snapshot, track)) return;
             const stageKey = `${snapshot.stage || ''}:${snapshot.progress}:${snapshot.status}`;
             const prevStage = lastStageRef.current[track.job_id];
             if (prevStage !== stageKey) {
                 lastStageRef.current[track.job_id] = stageKey;
-                onProgress?.(
+                config.onProgress?.(
                     {
                         job_id: track.job_id,
                         kind: snapshotKind,
@@ -168,7 +201,7 @@ export function useAgentProductionJobs({
                 const sig = deliverableSignature(snapshot);
                 if (lastDeliverableSigRef.current[track.job_id] !== sig) {
                     lastDeliverableSigRef.current[track.job_id] = sig;
-                    onRunningPreview?.(snapshot);
+                    config.onRunningPreview?.(snapshot);
                 }
             }
 
@@ -176,7 +209,7 @@ export function useAgentProductionJobs({
             if (!isTerminalJob(snapshot)) return;
             if (completedRef.current.has(key)) return;
             completedRef.current.add(key);
-            if (snapshot.status === 'complete') onJobComplete?.(snapshot);
+            if (snapshot.status === 'complete') config.onJobComplete?.(snapshot);
             else if (snapshot.status === 'failed' || snapshot.status === 'cancelled') {
                 if (
                     isImplicitProductionCancel(snapshot)
@@ -185,12 +218,12 @@ export function useAgentProductionJobs({
                 ) {
                     return;
                 }
-                onJobFailed?.(snapshot);
+                config.onJobFailed?.(snapshot);
             }
             else if (snapshot.status === 'awaiting_approval') {
-                onAwaitingApproval?.(snapshot);
+                config.onAwaitingApproval?.(snapshot);
                 if (
-                    autoFinalizeLongform
+                    config.autoFinalizeLongform
                     && snapshot.kind === 'longform'
                     && snapshot.can_finalize
                     && !autoFinalizeRef.current.has(track.job_id)
@@ -198,9 +231,9 @@ export function useAgentProductionJobs({
                     autoFinalizeRef.current.add(track.job_id);
                     void (async () => {
                         try {
-                            const tok = await getToken();
+                            const tok = await configRef.current.getToken();
                             const out = await finalizeLongformJob(track.job_id, tok);
-                            onAutoFinalizeStarted?.(track.job_id, out.active_jobs);
+                            configRef.current.onAutoFinalizeStarted?.(track.job_id, out.active_jobs);
                         } catch {
                             autoFinalizeRef.current.delete(track.job_id);
                         }
@@ -208,20 +241,7 @@ export function useAgentProductionJobs({
                 }
             }
         },
-        [
-            autoFinalizeLongform,
-            getToken,
-            onAutoFinalizeStarted,
-            onAwaitingApproval,
-            onJobComplete,
-            onJobFailed,
-            onGhostJobDropped,
-            onRunningPreview,
-            onProgress,
-            sessionId,
-            shouldAcceptSnapshot,
-            shouldPollJobTrack,
-        ],
+        [],
     );
 
     const eligibleTracks = shouldPollJobTrack
@@ -238,17 +258,25 @@ export function useAgentProductionJobs({
     }, [sessionId, pollResetKey]);
 
     useEffect(() => {
-        if (!sessionId || !eligibleTracks.length) return;
-        void Promise.all(eligibleTracks.map((track) => pollOne(track).catch(() => {})));
-    }, [eligibleTrackKey, eligibleTracks, sessionId, pollResetKey, pollOne]);
+        if (!sessionId || !eligibleTrackKey) return;
+        const currentEligibleTracks = tracksRef.current.filter((track) => (
+            !configRef.current.shouldPollJobTrack
+            || configRef.current.shouldPollJobTrack(track)
+        ));
+        void Promise.all(currentEligibleTracks.map((track) => pollOne(track).catch(() => {})));
+    }, [eligibleTrackKey, sessionId, pollResetKey, pollOne]);
 
     useEffect(() => {
-        if (!sessionId || !eligibleTracks.length) return;
+        if (!sessionId || !eligibleTrackKey) return;
 
         let cancelled = false;
         const tick = async () => {
             if (document.visibilityState === 'hidden') return;
-            const running = eligibleTracks.filter((t) => shouldPollTrack(snapshotsRef.current[t.job_id]));
+            const currentEligibleTracks = tracksRef.current.filter((track) => (
+                !configRef.current.shouldPollJobTrack
+                || configRef.current.shouldPollJobTrack(track)
+            ));
+            const running = currentEligibleTracks.filter((t) => shouldPollTrack(snapshotsRef.current[t.job_id]));
             if (!running.length) return;
             await Promise.all(
                 running.map(async (track) => {
@@ -278,7 +306,7 @@ export function useAgentProductionJobs({
             window.removeEventListener('online', refreshNow);
             document.removeEventListener('visibilitychange', refreshWhenVisible);
         };
-    }, [eligibleTrackKey, sessionId, pollOne, eligibleTracks]);
+    }, [eligibleTrackKey, sessionId, pollOne]);
 
     const activeTracks = eligibleTracks.filter((t) => shouldPollTrack(snapshots[t.job_id]));
 

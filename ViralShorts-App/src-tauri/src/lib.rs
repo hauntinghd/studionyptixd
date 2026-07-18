@@ -4,18 +4,6 @@ use tauri::{plugin::TauriPlugin, Emitter, Manager, Runtime, Url};
 use tauri_plugin_deep_link::DeepLinkExt;
 
 const STUDIO_AUTH_SCHEME: &str = "nyptid-studio";
-const STUDIO_WEB_APP_HOST: &str = "studio.nyptidindustries.com";
-#[cfg(not(debug_assertions))]
-const STUDIO_WEB_APP_URL: &str =
-    "https://studio.nyptidindustries.com/?desktop=1&page=dashboard&tab=agent";
-
-fn is_studio_web_app_navigation(url: &Url) -> bool {
-    url.scheme() == "https"
-        && url.host_str() == Some(STUDIO_WEB_APP_HOST)
-        && url.port().is_none()
-        && url.username().is_empty()
-        && url.password().is_none()
-}
 
 fn is_internal_navigation(url: &Url) -> bool {
     if url.scheme() == "tauri" || url.as_str() == "about:blank" {
@@ -24,13 +12,6 @@ fn is_internal_navigation(url: &Url) -> bool {
 
     let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
     if host == "tauri.localhost" {
-        return true;
-    }
-
-    // The desktop app is an evergreen, least-privilege shell around the same
-    // production frontend as Studio Web. Exact-origin matching prevents a
-    // lookalike subdomain from ever receiving Tauri IPC access.
-    if is_studio_web_app_navigation(url) {
         return true;
     }
 
@@ -71,6 +52,17 @@ fn is_trusted_auth_deep_link(url: &Url) -> bool {
         && url.username().is_empty()
         && url.password().is_none()
         && url.port().is_none()
+}
+
+fn is_trusted_app_launch_deep_link(url: &Url) -> bool {
+    url.scheme() == STUDIO_AUTH_SCHEME
+        && url.host_str() == Some("open")
+        && url.path() == "/agent"
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.port().is_none()
+        && url.query().is_none()
+        && url.fragment().is_none()
 }
 
 fn focus_main_window<R: Runtime>(app: &tauri::AppHandle<R>) {
@@ -124,9 +116,7 @@ fn trusted_navigation<R: Runtime>() -> TauriPlugin<R> {
                 // Never run it on Tauri's WebView navigation callback thread.
                 let external_url = url.to_string();
                 std::thread::spawn(move || {
-                    if let Err(error) =
-                        tauri_plugin_opener::open_url(external_url, None::<&str>)
-                    {
+                    if let Err(error) = tauri_plugin_opener::open_url(external_url, None::<&str>) {
                         log::error!("failed to open trusted external URL: {error}");
                     }
                 });
@@ -148,14 +138,17 @@ pub fn run() {
     #[cfg(desktop)]
     {
         builder = builder.plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
-            let auth_callbacks: Vec<String> = argv
+            let deep_links: Vec<Url> = argv.iter().filter_map(|arg| Url::parse(arg).ok()).collect();
+            let launch_requested = deep_links.iter().any(is_trusted_app_launch_deep_link);
+            let auth_callbacks: Vec<String> = deep_links
                 .iter()
-                .filter_map(|arg| Url::parse(arg).ok())
                 .filter(|url| is_trusted_auth_deep_link(url))
                 .map(|url| url.to_string())
                 .collect();
-            if !auth_callbacks.is_empty() {
+            if launch_requested || !auth_callbacks.is_empty() {
                 focus_main_window(app);
+            }
+            if !auth_callbacks.is_empty() {
                 // Explicitly forward the second-instance command line to the
                 // live web UI. The deep-link plugin still handles cold starts;
                 // the event guarantees warm callbacks reach the PKCE owner.
@@ -177,14 +170,10 @@ pub fn run() {
                 apply_studio_windows_frame(&window);
             }
 
-            // Release builds use the live Studio frontend as the source of
-            // truth, so web and desktop never drift apart again. Development
-            // builds retain the local Vite server for normal iteration.
-            #[cfg(not(debug_assertions))]
-            if let Some(window) = app.get_webview_window("main") {
-                let live_url = Url::parse(STUDIO_WEB_APP_URL)?;
-                window.navigate(live_url)?;
-            }
+            // Release builds stay on the reviewed UI bundled into this signed
+            // updater artifact. Studio Web remains the auth, billing, and
+            // download portal, but a web deployment cannot gain native Tauri
+            // privileges or silently replace executable desktop UI code.
 
             // Bundled installers register this statically. Runtime registration
             // also makes the portable Windows executable return OAuth callbacks
@@ -212,7 +201,7 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_internal_navigation, is_studio_web_app_navigation, is_trusted_auth_deep_link,
+        is_internal_navigation, is_trusted_app_launch_deep_link, is_trusted_auth_deep_link,
         is_trusted_external_navigation,
     };
     use tauri::Url;
@@ -244,17 +233,15 @@ mod tests {
     }
 
     #[test]
-    fn only_exact_studio_web_origin_is_internal() {
-        assert!(is_studio_web_app_navigation(
-            &Url::parse("https://studio.nyptidindustries.com/?desktop=1").unwrap()
-        ));
-        assert!(is_internal_navigation(
-            &Url::parse("https://studio.nyptidindustries.com/?page=subscription").unwrap()
-        ));
-        assert!(!is_studio_web_app_navigation(
+    fn studio_web_is_external_and_never_receives_native_privileges() {
+        let studio_web =
+            Url::parse("https://studio.nyptidindustries.com/?page=subscription").unwrap();
+        assert!(!is_internal_navigation(&studio_web));
+        assert!(is_trusted_external_navigation(&studio_web));
+        assert!(!is_trusted_external_navigation(
             &Url::parse("https://studio.nyptidindustries.com.attacker.example/").unwrap()
         ));
-        assert!(!is_studio_web_app_navigation(
+        assert!(!is_trusted_external_navigation(
             &Url::parse("http://studio.nyptidindustries.com/").unwrap()
         ));
     }
@@ -272,6 +259,22 @@ mod tests {
         ));
         assert!(!is_trusted_auth_deep_link(
             &Url::parse("https://auth/callback?code=one-time-code").unwrap()
+        ));
+    }
+
+    #[test]
+    fn desktop_workspace_launch_requires_exact_scheme_host_and_path() {
+        assert!(is_trusted_app_launch_deep_link(
+            &Url::parse("nyptid-studio://open/agent").unwrap()
+        ));
+        assert!(!is_trusted_app_launch_deep_link(
+            &Url::parse("nyptid-studio://open/settings").unwrap()
+        ));
+        assert!(!is_trusted_app_launch_deep_link(
+            &Url::parse("nyptid-studio://attacker/agent").unwrap()
+        ));
+        assert!(!is_trusted_app_launch_deep_link(
+            &Url::parse("nyptid-studio://open/agent?next=https://attacker.example").unwrap()
         ));
     }
 }

@@ -22,6 +22,19 @@ class DummyRequest:
         return self._body
 
 
+def test_stripe_topup_returns_to_the_web_billing_surface(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(backend, "_billing_site_url", lambda: "https://studio.nyptidindustries.com")
+
+    assert backend._stripe_topup_return_url("success") == (
+        "https://studio.nyptidindustries.com?page=billing&topup=success&provider=stripe"
+    )
+    assert backend._stripe_topup_return_url("cancelled") == (
+        "https://studio.nyptidindustries.com?page=billing&topup=cancelled&provider=stripe"
+    )
+    with pytest.raises(ValueError, match="Unsupported Stripe top-up return status"):
+        backend._stripe_topup_return_url("other")
+
+
 @pytest.fixture()
 def isolated_billing_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     wallet_snapshot = dict(billing._topup_wallets)

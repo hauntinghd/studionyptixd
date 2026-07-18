@@ -3,6 +3,7 @@ import AccountPage from './studio/pages/AccountPage';
 import AuthPage from './studio/pages/AuthPage';
 import BillingPage from './studio/pages/BillingPage';
 import DashboardPage from './studio/pages/DashboardPage';
+import DesktopLaunchPage from './studio/pages/DesktopLaunchPage';
 import LandingPage from './studio/pages/LandingPage';
 import PrivacyPage from './studio/pages/PrivacyPage';
 import SettingsPage from './studio/pages/SettingsPage';
@@ -14,6 +15,8 @@ import { AuthContext, AuthProvider, isBillingHost, isTauriDesktopApp } from './s
 import { trackStudioPageView } from './studio/lib/googleAds';
 
 type StudioPage = 'landing' | 'dashboard' | 'auth' | 'account' | 'settings' | 'billing' | 'subscription' | 'privacy' | 'terms' | 'waitlist' | 'waitlist_confirmation';
+
+const WEB_WORKSPACE_FALLBACK_KEY = 'nyptid:web-workspace-fallback:v1';
 
 const hasPendingAuthRedirectArtifacts = (): boolean => {
     if (typeof window === 'undefined') return false;
@@ -41,6 +44,14 @@ function AppShell() {
         supabase,
     } = useContext(AuthContext);
     const [desktopAuthError, setDesktopAuthError] = useState('');
+    const [webWorkspaceFallback, setWebWorkspaceFallback] = useState(() => {
+        if (isTauriDesktopApp || typeof window === 'undefined') return false;
+        try {
+            return window.sessionStorage.getItem(WEB_WORKSPACE_FALLBACK_KEY) === '1';
+        } catch {
+            return false;
+        }
+    });
     const desktopStartupAuthStartedRef = useRef(false);
     const billingHost = isBillingHost;
     const thumblabHost = typeof window !== 'undefined' && window.location.hostname.toLowerCase() === 'thumblab.nyptidindustries.com';
@@ -134,6 +145,15 @@ function AppShell() {
         trackStudioPageView(page);
     }, [page]);
 
+    const continueOnWebForSession = useCallback(() => {
+        try {
+            window.sessionStorage.setItem(WEB_WORKSPACE_FALLBACK_KEY, '1');
+        } catch {
+            // The in-memory state still provides the explicit recovery path.
+        }
+        setWebWorkspaceFallback(true);
+    }, []);
+
     useEffect(() => {
         const handleDesktopAuthError = (event: Event) => {
             const message = String((event as CustomEvent<string>).detail || '').trim();
@@ -222,7 +242,9 @@ function AppShell() {
                 </div>
             )}
             {page === 'landing' && <LandingPage onNavigate={setPage} />}
-            {page === 'dashboard' && <DashboardPage onNavigate={setPage} />}
+            {page === 'dashboard' && session && !isTauriDesktopApp && !webWorkspaceFallback
+                ? <DesktopLaunchPage onContinueWeb={continueOnWebForSession} />
+                : page === 'dashboard' && <DashboardPage onNavigate={setPage} />}
             {page === 'auth' && <AuthPage onNavigate={setPage} />}
             {page === 'account' && <AccountPage onNavigate={setPage} />}
             {page === 'settings' && <SettingsPage onNavigate={setPage} />}

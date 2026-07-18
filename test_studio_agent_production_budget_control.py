@@ -10,7 +10,12 @@ import asyncio
 from contextlib import asynccontextmanager
 from unittest.mock import patch
 
-sys.modules.setdefault("stripe", types.SimpleNamespace())
+try:
+    import stripe  # noqa: F401
+except ModuleNotFoundError:
+    # Keep this focused unit test importable in minimal environments without
+    # replacing a real Stripe SDK for every later test in the same process.
+    sys.modules.setdefault("stripe", types.SimpleNamespace())
 
 from studio_agent import jobs, production_budget
 from studio_agent import runner
@@ -80,7 +85,8 @@ class ProductionBudgetControlTests(unittest.TestCase):
         control = data["production_control"]
 
         self.assertEqual(budget["tool"], "edit_production_scenes_still")
-        self.assertEqual(budget["breakdown"]["seedream_v45_edit_images"], 3)
+        self.assertEqual(budget["breakdown"]["image_edit_count"], 3)
+        self.assertTrue(budget["breakdown"]["image_model_pricing_unit"])
         self.assertEqual(control["lane"], "render")
         self.assertFalse(control["requires_approval"])
         self.assertIn("await_scene_review", control["stage_gates"])

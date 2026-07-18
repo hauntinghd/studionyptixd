@@ -6,7 +6,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-sys.modules.setdefault("stripe", types.SimpleNamespace(api_key="", api_version=""))
+try:
+    import stripe  # noqa: F401
+except ModuleNotFoundError:
+    sys.modules.setdefault("stripe", types.SimpleNamespace(api_key="", api_version=""))
 
 from studio_agent import competitor, jobs, runner
 

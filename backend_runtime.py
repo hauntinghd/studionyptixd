@@ -58,7 +58,7 @@ _CORS_ORIGINS = (
 _CONTENT_SECURITY_POLICY = "; ".join(
     (
         "default-src 'self'",
-        "script-src 'self' 'unsafe-inline' https://www.googletagmanager.com https://unpkg.com",
+        "script-src 'self' 'unsafe-inline' https://www.googletagmanager.com",
         "style-src 'self' 'unsafe-inline'",
         "connect-src 'self' https: wss:",
         "img-src 'self' data: blob: https:",

@@ -7,7 +7,10 @@ import unittest
 os.environ["REDIS_QUEUE_ENABLED"] = "0"
 os.environ["REDIS_URL"] = ""
 os.environ.setdefault("STUDIO_AGENT_QUEUE_ENABLED", "1")
-sys.modules.setdefault("stripe", types.SimpleNamespace())
+try:
+    import stripe  # noqa: F401
+except ModuleNotFoundError:
+    sys.modules.setdefault("stripe", types.SimpleNamespace())
 
 from studio_agent import queue as studio_queue
 

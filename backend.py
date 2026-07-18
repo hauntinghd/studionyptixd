@@ -770,12 +770,12 @@ app = FastAPI(
 app.add_middleware(MultipartContentLengthLimitMiddleware)
 configure_backend_runtime(app)
 
-DESKTOP_RELEASE_VERSION = "0.2.2"
+DESKTOP_RELEASE_VERSION = "0.2.3"
 DESKTOP_RELEASE_DIR = Path(str(os.getenv("APP_DATA_DIR") or TEMP_DIR)) / "studio_releases"
 DESKTOP_RELEASE_FILENAME = f"NYPTID-Studio_{DESKTOP_RELEASE_VERSION}_x64-setup.exe"
 DESKTOP_RELEASE_NOTES = (
-    "Automatic signed desktop updates, normal-user Studio Agent access, canonical billing and "
-    "YouTube return paths, and corrected one-scene production tool routing."
+    "Desktop-first Studio Agent, bundled reviewed desktop UI, secure app launch links, strict web "
+    "security headers, and reliable live scene-still reconciliation after provider rendering."
 )
 
 
@@ -20679,6 +20679,13 @@ async def _capture_paypal_subscription_order(order_id: str) -> dict:
     return latest
 
 
+def _stripe_topup_return_url(status: str) -> str:
+    normalized = str(status or "").strip().lower()
+    if normalized not in {"success", "cancelled"}:
+        raise ValueError("Unsupported Stripe top-up return status")
+    return f"{_billing_site_url()}?page=billing&topup={normalized}&provider=stripe"
+
+
 async def _create_topup_checkout(req: TopupCheckoutRequest, user: dict = Depends(require_auth)):
     pack = TOPUP_PACKS.get(req.price_id)
     if not pack:
@@ -20715,8 +20722,8 @@ async def _create_topup_checkout(req: TopupCheckoutRequest, user: dict = Depends
         checkout_payload = {
             "mode": "payment",
             "line_items": [line_item],
-            "success_url": f"{_billing_site_url()}?topup=success&provider=stripe",
-            "cancel_url": f"{_billing_site_url()}?topup=cancelled&provider=stripe",
+            "success_url": _stripe_topup_return_url("success"),
+            "cancel_url": _stripe_topup_return_url("cancelled"),
             "client_reference_id": user["id"],
             "metadata": {
                 "user_id": user["id"],

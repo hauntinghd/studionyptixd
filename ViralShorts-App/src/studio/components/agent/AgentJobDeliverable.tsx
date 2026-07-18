@@ -85,10 +85,12 @@ function StillThumb({
     jobId,
     idx,
     cacheKey = '',
+    pending = false,
 }: {
     jobId: string;
     idx: number;
     cacheKey?: string;
+    pending?: boolean;
 }) {
     const { session } = useContext(AuthContext);
     const [src, setSrc] = useState('');
@@ -116,7 +118,12 @@ function StillThumb({
                 });
                 if (cancelled) return;
                 if (!res.ok) {
-                    setLoadState(res.status === 404 ? 'missing' : 'error');
+                    // A scene URL is published as soon as the scene is planned,
+                    // before the provider has atomically committed the PNG.  A
+                    // 404 while production is running therefore means "not yet",
+                    // not "the still was lost".  The parent status refresh changes
+                    // cacheKey and retries as soon as the artifact lands.
+                    setLoadState(res.status === 404 && !pending ? 'missing' : 'error');
                     return;
                 }
                 const blob = await res.blob();
@@ -133,10 +140,19 @@ function StillThumb({
             cancelled = true;
             if (objectUrl) URL.revokeObjectURL(objectUrl);
         };
-    }, [cacheKey, jobId, idx, session?.access_token]);
+    }, [cacheKey, jobId, idx, pending, session?.access_token]);
 
     if (loadState === 'missing' || loadState === 'error') {
         const missing = loadState === 'missing';
+        const waiting = pending && loadState === 'error';
+        if (waiting) {
+            return (
+                <div className="aspect-[9/16] max-h-[360px] animate-pulse rounded-lg bg-white/[0.035] border border-white/[0.06] flex flex-col items-center justify-center gap-2 text-center">
+                    <Loader2 className="h-4 w-4 animate-spin text-cyan-300/70" />
+                    <p className="text-[9px] text-gray-500">Still rendering...</p>
+                </div>
+            );
+        }
         return (
             <div
                 className="flex aspect-[9/16] max-h-[360px] flex-col items-center justify-center gap-2 rounded-lg border border-red-400/20 bg-red-500/[0.06] px-3 text-center"
@@ -224,17 +240,20 @@ function useModelViewerScript(enabled: boolean) {
             setReady(true);
             return;
         }
-        const existing = document.querySelector<HTMLScriptElement>('script[data-studio-model-viewer]');
-        if (existing) {
-            existing.addEventListener('load', () => setReady(true), { once: true });
-            return;
-        }
-        const script = document.createElement('script');
-        script.type = 'module';
-        script.src = 'https://unpkg.com/@google/model-viewer/dist/model-viewer.min.js';
-        script.dataset.studioModelViewer = 'true';
-        script.addEventListener('load', () => setReady(true), { once: true });
-        document.head.appendChild(script);
+        // Keep executable UI code inside Studio's reviewed, lockfile-pinned
+        // bundle. Loading an unversioned script from a public CDN at runtime
+        // would let that CDN modify code inside an authenticated Studio session.
+        let cancelled = false;
+        void import('@google/model-viewer')
+            .then(() => {
+                if (!cancelled && customElements.get('model-viewer')) setReady(true);
+            })
+            .catch(() => {
+                if (!cancelled) setReady(false);
+            });
+        return () => {
+            cancelled = true;
+        };
     }, [enabled]);
 
     return ready;
@@ -538,26 +557,34 @@ function AgentJobDeliverable({
     useEffect(() => {
         if (!running || !snapshot.job_id || !onSnapshotUpdate || !sessionId) return;
         const updatedAt = Number(snapshot.client_updated_at || 0);
-        const stale = !updatedAt || (Date.now() - updatedAt > 3500);
-        if (!stale) return;
+        // The old code only checked staleness at mount.  A fresh stream snapshot
+        // therefore returned early and never scheduled the later read that would
+        // discover a committed still.  Schedule the reconciliation explicitly so
+        // a card cannot stay frozen on its first pre-artifact 404.
+        const delayMs = updatedAt
+            ? Math.max(0, 3500 - (Date.now() - updatedAt))
+            : 0;
         let cancelled = false;
-        void (async () => {
-            const tok = session?.access_token;
-            if (!tok) return;
-            const fresh = await fetchJobSnapshot(
-                {
-                    job_id: snapshot.job_id,
-                    kind: normalizeAgentJobKind(snapshot.job_id, snapshot.kind, snapshot.title),
-                    title: snapshot.title,
-                },
-                sessionId,
-                tok,
-            );
-            if (cancelled || !fresh) return;
-            onSnapshotUpdate({ ...fresh, client_updated_at: Date.now() });
-        })();
+        const timer = window.setTimeout(() => {
+            void (async () => {
+                const tok = session?.access_token;
+                if (!tok) return;
+                const fresh = await fetchJobSnapshot(
+                    {
+                        job_id: snapshot.job_id,
+                        kind: normalizeAgentJobKind(snapshot.job_id, snapshot.kind, snapshot.title),
+                        title: snapshot.title,
+                    },
+                    sessionId,
+                    tok,
+                );
+                if (cancelled || !fresh) return;
+                onSnapshotUpdate({ ...fresh, client_updated_at: Date.now() });
+            })();
+        }, delayMs);
         return () => {
             cancelled = true;
+            window.clearTimeout(timer);
         };
     }, [
         running,
@@ -1177,6 +1204,7 @@ function AgentJobDeliverable({
                                                     jobId={snapshot.job_id}
                                                     idx={idx}
                                                     cacheKey={String(snapshot.client_updated_at || scene.still_preview_url || '')}
+                                                    pending={running}
                                                 />
                                             )}
                                         </button>
@@ -1344,6 +1372,7 @@ function AgentJobDeliverable({
                                                 jobId={snapshot.job_id}
                                                 idx={idx}
                                                 cacheKey={String(snapshot.client_updated_at || sceneCards[idx]?.still_preview_url || stills[idx] || '')}
+                                                pending={running}
                                             />
                                         ) : (
                                             <div className="aspect-video flex flex-col items-center justify-center bg-white/[0.015] text-[9px] text-gray-500">

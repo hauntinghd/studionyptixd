@@ -27,6 +27,20 @@ export default defineConfig({
             output: {
                 manualChunks(id: string) {
                     if (!id.includes('node_modules')) return;
+                    // The 3D review stack is optional and comparatively large.
+                    // Keep it behind AgentJobDeliverable's dynamic import so
+                    // normal Studio Agent startup never downloads it.
+                    if (
+                        id.includes('@google/model-viewer')
+                        || id.includes('@monogrid/gainmap-js')
+                        || id.includes('/three/')
+                        || id.includes('\\three\\')
+                        || id.includes('/lit/')
+                        || id.includes('\\lit\\')
+                        || id.includes('lit-element')
+                        || id.includes('@lit/')
+                        || id.includes('@lit\\')
+                    ) return 'vendor-model-viewer';
                     if (id.includes('react-dom') || id.includes('scheduler')) return 'vendor-react';
                     if (id.includes('/react/') || id.includes('react\\')) return 'vendor-react';
                     if (id.includes('lucide-react')) return 'vendor-icons';

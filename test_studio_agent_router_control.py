@@ -7,7 +7,10 @@ from unittest.mock import patch
 
 os.environ["REDIS_QUEUE_ENABLED"] = "0"
 os.environ["REDIS_URL"] = ""
-sys.modules.setdefault("stripe", types.SimpleNamespace())
+try:
+    import stripe  # noqa: F401
+except ModuleNotFoundError:
+    sys.modules.setdefault("stripe", types.SimpleNamespace())
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient

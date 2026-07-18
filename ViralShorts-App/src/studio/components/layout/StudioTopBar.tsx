@@ -76,7 +76,7 @@ export default function StudioTopBar({ onNavigate }: { onNavigate: PageNav }) {
             if (result === 'manual-download') {
                 setUpdateProgress(null);
                 setUpdateError(
-                    'Studio 0.2.2 opened in your browser. Run that installer once; later updates install here automatically.',
+                    `Studio ${desktopUpdate.version} opened in your browser. Run that installer once; later updates install here automatically.`,
                 );
             }
         } catch (error) {

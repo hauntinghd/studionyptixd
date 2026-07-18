@@ -8,8 +8,12 @@ from pathlib import Path
 from unittest.mock import patch
 
 # backend_settings configures Stripe at import time, but wallet unit tests do
-# not make network calls or need the Stripe SDK.
-sys.modules.setdefault("stripe", types.SimpleNamespace(api_key=""))
+# not make network calls. Stub only in genuinely minimal environments so this
+# module cannot replace the real SDK for later tests in the same process.
+try:
+    import stripe  # noqa: F401
+except ModuleNotFoundError:
+    sys.modules.setdefault("stripe", types.SimpleNamespace(api_key=""))
 
 import unified_credits as credits
 
