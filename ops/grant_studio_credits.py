@@ -63,6 +63,11 @@ def main() -> None:
         action="store_true",
         help="Persist the target grant for automatic claim on first login",
     )
+    parser.add_argument(
+        "--beta-access",
+        action="store_true",
+        help="Unlock controlled-beta Studio Agent and long-form lanes",
+    )
     args = parser.parse_args()
     if args.credits <= 0 and args.target_balance <= 0:
         raise SystemExit("credits or --target-balance must be positive")
@@ -79,11 +84,14 @@ def main() -> None:
             args.target_balance,
             reason=args.reason,
             idempotency_key=args.idempotency_key,
+            beta_access=args.beta_access,
         )
         print(f"Pending grant registered for {row['email']} (target={row['target_balance']})")
         return
     current = uc.get_balance(user_id)
     credits = max(0, args.target_balance - current) if args.target_balance > 0 else args.credits
+    if args.beta_access:
+        uc.set_beta_access(user_id, True, reason=args.reason)
     if credits <= 0:
         print(f"No grant needed for {args.email} (balance={current}, target={args.target_balance})")
         return

@@ -206,6 +206,7 @@ def _wallet(user_id: str) -> dict[str, Any]:
             "granted_credits": 0,
             "lifetime_spent": 0,
             "unlimited": False,
+            "beta_access": False,
             "reservations": {},
             "processed_events": [],
             "processed_adjustments": {},
@@ -225,6 +226,7 @@ def _wallet(user_id: str) -> dict[str, Any]:
     w.setdefault("granted_credits", 0)
     w.setdefault("lifetime_spent", 0)
     w.setdefault("unlimited", False)
+    w.setdefault("beta_access", False)
     w.setdefault("reservations", {})
     w.setdefault("processed_events", [])
     w.setdefault("processed_adjustments", {})
@@ -519,6 +521,7 @@ def register_pending_grant(
     *,
     reason: str,
     idempotency_key: str,
+    beta_access: bool = False,
 ) -> dict[str, Any]:
     """Persist a first-login credit grant without creating an auth account."""
     normalized = str(email or "").strip().lower()
@@ -538,6 +541,7 @@ def register_pending_grant(
             "target_balance": target,
             "reason": str(reason or "pending_grant")[:120],
             "idempotency_key": key,
+            "beta_access": bool(beta_access),
             "created_at": time.time(),
         }
         payload[normalized] = row
@@ -572,9 +576,34 @@ def claim_pending_grant(user_id: str, email: str) -> dict[str, Any] | None:
             )
         else:
             wallet = get_state(uid)
+        if bool(row.get("beta_access")):
+            wallet = set_beta_access(uid, True, reason="pending_beta_grant_claimed")
         payload.pop(normalized, None)
         _atomic_write_json(PENDING_GRANTS_PATH, payload)
         return {"credits_added": amount, "target_balance": target, "balance": wallet.get("balance", current)}
+
+
+def set_beta_access(user_id: str, enabled: bool = True, *, reason: str = "controlled_beta") -> dict[str, Any]:
+    """Grant product-lane access independently from paid membership state."""
+    uid = str(user_id or "").strip()
+    if not uid:
+        return {}
+    with _lock:
+        w = _wallet(uid)
+        if bool(w.get("beta_access")) == bool(enabled):
+            return dict(w)
+        w["beta_access"] = bool(enabled)
+        w["updated_at"] = time.time()
+        _save()
+        _append_ledger({
+            "type": "beta_access_changed",
+            "user_id": uid,
+            "enabled": bool(enabled),
+            "reason": str(reason or "controlled_beta")[:120],
+            "balance_after": w["balance"],
+            "ts": time.time(),
+        })
+        return dict(w)
 
 
 def remove_topup_credits(
@@ -682,6 +711,7 @@ def get_state(user_id: str) -> dict[str, Any]:
         return {
             "balance": 999_999_999 if w.get("unlimited") else _sync_balance(w),
             "unlimited": bool(w.get("unlimited")),
+            "beta_access": bool(w.get("beta_access")),
             "plan": plan,
             "plan_name": spec.get("name") or "",
             "monthly_credits": int(spec.get("monthly_credits", 0) or 0),

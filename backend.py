@@ -4362,11 +4362,19 @@ def _public_lane_access_for_user(user: Optional[dict], access_snapshot: Optional
     snapshot = access_snapshot or _paid_access_snapshot_for_user(user)
     public_live = authenticated
     membership_plan = _membership_plan_for_user(user, snapshot)
+    beta_access = False
+    if authenticated and not is_admin:
+        try:
+            import unified_credits as uc
+
+            beta_access = bool(uc.get_state(str((user or {}).get("id", "") or "")).get("beta_access"))
+        except Exception:
+            beta_access = False
     chatstory_live = is_admin or (
         bool((snapshot or {}).get("billing_active"))
         and membership_plan in CHAT_STORY_ALLOWED_PLANS
     )
-    agent_live = is_admin or (
+    agent_live = is_admin or beta_access or (
         bool((snapshot or {}).get("billing_active"))
         and membership_plan in UNIFIED_PLANS
     )
@@ -18733,6 +18741,7 @@ def _credit_state_with_pending_grant(
     billing_active: bool,
     is_admin: bool = False,
 ) -> dict:
+    unified_state: dict = {}
     if not is_admin:
         try:
             import unified_credits as uc
@@ -18741,9 +18750,20 @@ def _credit_state_with_pending_grant(
                 str((user or {}).get("id", "") or ""),
                 str((user or {}).get("email", "") or ""),
             )
+            unified_state = uc.get_state(str((user or {}).get("id", "") or ""))
         except Exception as exc:
             log.warning("Could not claim pending credit grant: %s", exc)
-    return _credit_state_for_user(user, effective_plan, billing_active, is_admin=is_admin)
+    state = _credit_state_for_user(user, effective_plan, billing_active, is_admin=is_admin)
+    if unified_state and not is_admin:
+        balance = max(0, int(unified_state.get("balance", 0) or 0))
+        state.update({
+            "animated_topup_credits": balance,
+            "animated_total_remaining": balance,
+            "topup_credits": balance,
+            "credits_total_remaining": balance,
+            "requires_topup": balance <= 0,
+        })
+    return state
 
 
 mount_router(
