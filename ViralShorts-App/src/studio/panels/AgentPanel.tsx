@@ -3348,7 +3348,10 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                 // Do not serially block the conversation on three unrelated
                 // fetches. The general config endpoint is optional for Agent
                 // boot and may be slower than the Fly-hosted Agent API.
-                const modelsRequest = authFetch('/api/studio-agent/models', { timeoutMs: 12_000 });
+                // The picker already has a complete baked-in catalog. A slow
+                // provider catalog refresh must never fail or block Agent boot.
+                const modelsRequest = authFetch('/api/studio-agent/models', { timeoutMs: 12_000 })
+                    .catch(() => ({} as Record<string, unknown>));
                 const sessionsRequest = authFetch('/api/studio-agent/sessions?limit=50', { timeoutMs: 45_000, retries: SESSION_LOAD_RETRIES });
                 void authFetch('/api/config', { timeoutMs: 3500 })
                     .then((configData) => {

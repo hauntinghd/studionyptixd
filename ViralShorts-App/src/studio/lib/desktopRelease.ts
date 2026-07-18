@@ -1,6 +1,5 @@
 import { PROD_API_BASE_URL, isTauriDesktopApp } from '../shared';
 
-export const STUDIO_DESKTOP_VERSION = '0.2.0';
 export const STUDIO_DESKTOP_RELEASE_URL = `${PROD_API_BASE_URL}/api/desktop/releases/latest`;
 export const STUDIO_DESKTOP_DOWNLOAD_URL = `${PROD_API_BASE_URL}/api/desktop/download`;
 
@@ -52,10 +51,24 @@ export async function fetchDesktopRelease(): Promise<DesktopRelease | null> {
     }
 }
 
-export function isDesktopUpdate(release: DesktopRelease | null): boolean {
-    return Boolean(
-        isTauriDesktopApp
-        && release
-        && compareVersions(release.version, STUDIO_DESKTOP_VERSION) > 0
-    );
+async function runningDesktopVersion(): Promise<string | null> {
+    if (!isTauriDesktopApp) return null;
+    try {
+        // The desktop shell loads the live web app, so a version baked into the
+        // web bundle can be newer or older than the binary that is actually
+        // running. Tauri is the only authoritative source here.
+        const { getVersion } = await import('@tauri-apps/api/app');
+        const version = String(await getVersion()).trim();
+        return VERSION_RE.test(version) ? version : null;
+    } catch {
+        // Fail closed: never advertise an update unless both versions were
+        // verified. The public website still exposes the normal download CTA.
+        return null;
+    }
+}
+
+export async function isDesktopUpdate(release: DesktopRelease | null): Promise<boolean> {
+    if (!release) return false;
+    const currentVersion = await runningDesktopVersion();
+    return Boolean(currentVersion && compareVersions(release.version, currentVersion) > 0);
 }

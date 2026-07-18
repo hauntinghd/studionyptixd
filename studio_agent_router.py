@@ -325,8 +325,11 @@ def build_studio_agent_router(
                     fal_enabled=fal_enabled,
                     pricing_snapshot={"source": "fallback", "prices": {}},
                 )
+        # Provider catalogs are optional enrichment. Bound the live refresh so
+        # a slow Anthropic/xAI/OpenRouter catalog can never hold Agent boot open.
+        video_profiles_task = asyncio.create_task(_video_profiles())
         try:
-            live = await openrouter.list_models()
+            live = await asyncio.wait_for(openrouter.list_models(), timeout=6.0)
             catalog = openrouter.build_model_catalog(live)
             ids = [m.get("id") for m in catalog if m.get("id")]
             recommended = [m["id"] for m in catalog if m.get("recommended")]
@@ -338,7 +341,7 @@ def build_studio_agent_router(
                 "image_models": seedream_model_profiles(
                     fal_enabled=bool(str(os.getenv("FAL_KEY") or os.getenv("FAL_AI_KEY") or "").strip())
                 ),
-                "video_models": await _video_profiles(),
+                "video_models": await video_profiles_task,
                 "recommended": recommended,
                 "count": len(ids),
                 "providers": providers,
@@ -353,7 +356,7 @@ def build_studio_agent_router(
                 "image_models": seedream_model_profiles(
                     fal_enabled=bool(str(os.getenv("FAL_KEY") or os.getenv("FAL_AI_KEY") or "").strip())
                 ),
-                "video_models": await _video_profiles(),
+                "video_models": await video_profiles_task,
                 "recommended": openrouter.RECOMMENDED_MODELS,
                 "error": str(exc),
                 "xai_configured": bool(getattr(openrouter, "xai_api_key", lambda: "")()),

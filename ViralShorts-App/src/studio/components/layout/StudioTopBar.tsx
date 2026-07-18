@@ -42,7 +42,8 @@ export default function StudioTopBar({ onNavigate }: { onNavigate: PageNav }) {
         let cancelled = false;
         const checkForUpdate = async () => {
             const release = await fetchDesktopRelease();
-            if (!cancelled) setDesktopUpdate(isDesktopUpdate(release) ? release : null);
+            const updateAvailable = await isDesktopUpdate(release);
+            if (!cancelled) setDesktopUpdate(updateAvailable ? release : null);
         };
         void checkForUpdate();
         const interval = window.setInterval(checkForUpdate, 30 * 60 * 1000);
