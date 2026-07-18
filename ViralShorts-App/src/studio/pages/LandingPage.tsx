@@ -4,6 +4,7 @@ import {
     BarChart3,
     CheckCircle2,
     Clapperboard,
+    Download,
     Image,
     Mic2,
     Play,
@@ -131,6 +132,8 @@ export default function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
         openBilling();
     };
 
+    const desktopDownloadUrl = `${GENERATION_API}/api/desktop/download`;
+
 
     return (
         <>
@@ -164,6 +167,13 @@ export default function LandingPage({ onNavigate }: { onNavigate: PageNav }) {
                             Research the idea, write the script, generate visuals, animate scenes, add voice, caption, package, publish, and learn from analytics inside one workspace.
                         </p>
                         <div className="mt-7 flex flex-col gap-3 sm:mt-8 sm:flex-row">
+                            <a
+                                href={desktopDownloadUrl}
+                                className="inline-flex items-center justify-center gap-2 rounded-lg bg-cyan-500 px-6 py-3 text-base font-bold text-black transition hover:bg-cyan-300"
+                            >
+                                <Download className="h-5 w-5" />
+                                Download Studio for desktop
+                            </a>
                             <button
                                 type="button"
                                 onClick={openPricingPurchase}

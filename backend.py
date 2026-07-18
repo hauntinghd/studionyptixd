@@ -764,6 +764,43 @@ app = FastAPI(
 app.add_middleware(MultipartContentLengthLimitMiddleware)
 configure_backend_runtime(app)
 
+DESKTOP_RELEASE_VERSION = "0.1.1"
+DESKTOP_RELEASE_DIR = Path(str(os.getenv("APP_DATA_DIR") or TEMP_DIR)) / "studio_releases"
+DESKTOP_RELEASE_FILENAME = f"NYPTID-Studio_{DESKTOP_RELEASE_VERSION}_x64-setup.exe"
+
+
+def _desktop_release_path() -> Path:
+    return DESKTOP_RELEASE_DIR / DESKTOP_RELEASE_FILENAME
+
+
+@app.get("/api/desktop/releases/latest")
+async def desktop_release_latest():
+    release_path = _desktop_release_path()
+    sha_path = release_path.with_suffix(f"{release_path.suffix}.sha256")
+    sha256 = sha_path.read_text(encoding="utf-8").strip().lower() if sha_path.is_file() else ""
+    return {
+        "version": DESKTOP_RELEASE_VERSION,
+        "available": release_path.is_file() and bool(re.fullmatch(r"[0-9a-f]{64}", sha256)),
+        "download_url": "https://nyptid-studio.fly.dev/api/desktop/download",
+        "sha256": sha256,
+        "published_at": datetime.fromtimestamp(release_path.stat().st_mtime, timezone.utc).isoformat()
+        if release_path.is_file() else "",
+        "notes": "Desktop auth, responsive app layout, and automatic update detection.",
+    }
+
+
+@app.get("/api/desktop/download")
+async def desktop_release_download():
+    release_path = _desktop_release_path()
+    if not release_path.is_file():
+        raise HTTPException(404, "Studio desktop release is not published yet")
+    return FileResponse(
+        str(release_path),
+        media_type="application/vnd.microsoft.portable-executable",
+        filename="NYPTID-Studio-Setup.exe",
+        headers={"Cache-Control": "public, max-age=300"},
+    )
+
 jobs: dict = {}
 security, get_current_user, get_current_user_from_request, require_auth = build_auth_helpers(
     supabase_url=SUPABASE_URL,

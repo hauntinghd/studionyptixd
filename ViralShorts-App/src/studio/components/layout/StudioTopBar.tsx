@@ -1,6 +1,7 @@
 import { useContext, useMemo, useRef, useState, useEffect } from 'react';
-import { ChevronDown, LogOut, MessageSquarePlus, Settings, User } from 'lucide-react';
+import { ChevronDown, Download, LogOut, MessageSquarePlus, Settings, User } from 'lucide-react';
 import { AuthContext, Logo } from '../../shared';
+import { fetchDesktopRelease, isDesktopUpdate, type DesktopRelease } from '../../lib/desktopRelease';
 import type { PageNav } from '../NavBar';
 import CreditFuelBar from './CreditFuelBar';
 import NotificationBell from './NotificationBell';
@@ -15,6 +16,7 @@ export default function StudioTopBar({ onNavigate }: { onNavigate: PageNav }) {
         creditsTotalRemaining,
     } = useContext(AuthContext);
     const [menuOpen, setMenuOpen] = useState(false);
+    const [desktopUpdate, setDesktopUpdate] = useState<DesktopRelease | null>(null);
     const menuRef = useRef<HTMLDivElement | null>(null);
     const discordUrl = 'https://discord.gg/zMZxRRu7BS';
 
@@ -36,13 +38,43 @@ export default function StudioTopBar({ onNavigate }: { onNavigate: PageNav }) {
         return () => window.removeEventListener('mousedown', onPointerDown);
     }, []);
 
+    useEffect(() => {
+        let cancelled = false;
+        const checkForUpdate = async () => {
+            const release = await fetchDesktopRelease();
+            if (!cancelled) setDesktopUpdate(isDesktopUpdate(release) ? release : null);
+        };
+        void checkForUpdate();
+        const interval = window.setInterval(checkForUpdate, 30 * 60 * 1000);
+        const onFocus = () => { void checkForUpdate(); };
+        window.addEventListener('focus', onFocus);
+        return () => {
+            cancelled = true;
+            window.clearInterval(interval);
+            window.removeEventListener('focus', onFocus);
+        };
+    }, []);
+
     const goBilling = () => onNavigate('billing');
 
     return (
         <header className="sticky top-0 z-30 flex h-14 items-center justify-between gap-2 border-b border-white/[0.06] bg-[#09090b]/95 px-2 backdrop-blur-md sm:gap-3 sm:px-6">
-            <button type="button" onClick={() => onNavigate('dashboard')} className="flex shrink-0 items-center gap-2">
-                <Logo size={28} />
-            </button>
+            <div className="flex shrink-0 items-center gap-1.5">
+                <button type="button" onClick={() => onNavigate('dashboard')} className="flex items-center gap-2">
+                    <Logo size={28} />
+                </button>
+                {desktopUpdate && (
+                    <button
+                        type="button"
+                        onClick={() => window.location.assign(desktopUpdate.download_url)}
+                        title={`Download Studio ${desktopUpdate.version}`}
+                        aria-label={`Download Studio update ${desktopUpdate.version}`}
+                        className="grid h-8 w-8 place-items-center rounded-lg border border-cyan-400/25 bg-cyan-400/10 text-cyan-200 transition hover:border-cyan-300/50 hover:bg-cyan-400/20 hover:text-white"
+                    >
+                        <Download className="h-4 w-4" />
+                    </button>
+                )}
+            </div>
 
             <div className="flex flex-1 items-center justify-end gap-2 sm:gap-3">
                 <a

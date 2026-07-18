@@ -49,24 +49,37 @@ def _lookup_user_id_by_email(email: str) -> str:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Grant unified Studio credits by email")
     parser.add_argument("email", help="User email (must exist in Supabase auth)")
-    parser.add_argument("credits", type=int, help="Credits to add (e.g. 500)")
+    parser.add_argument("credits", type=int, nargs="?", default=0, help="Credits to add (e.g. 500)")
+    parser.add_argument(
+        "--target-balance",
+        type=int,
+        default=0,
+        help="Add only enough credits to reach this available balance",
+    )
     parser.add_argument("--reason", default="admin_grant", help="Ledger reason")
+    parser.add_argument("--idempotency-key", default="", help="Stable retry key for this grant")
     args = parser.parse_args()
-    if args.credits <= 0:
-        raise SystemExit("credits must be positive")
+    if args.credits <= 0 and args.target_balance <= 0:
+        raise SystemExit("credits or --target-balance must be positive")
 
     import unified_credits as uc
 
     user_id = _lookup_user_id_by_email(args.email)
+    current = uc.get_balance(user_id)
+    credits = max(0, args.target_balance - current) if args.target_balance > 0 else args.credits
+    if credits <= 0:
+        print(f"No grant needed for {args.email} (balance={current}, target={args.target_balance})")
+        return
     wallet = uc.add_credits(
         user_id,
-        args.credits,
+        credits,
         reason=args.reason,
         metadata={"email": args.email.strip().lower()},
+        idempotency_key=args.idempotency_key,
     )
     print(
-        f"Granted {args.credits} credits to {args.email} "
-        f"(user_id={user_id}, balance={wallet.get('balance')})"
+        f"Granted {credits} credits to {args.email} "
+        f"(balance={wallet.get('balance')})"
     )
 
 
