@@ -1,7 +1,7 @@
 import { useContext, useMemo, useRef, useState, useEffect } from 'react';
 import { ChevronDown, Download, LogOut, MessageSquarePlus, Settings, User } from 'lucide-react';
-import { AuthContext, Logo } from '../../shared';
-import { fetchDesktopRelease, isDesktopUpdate, type DesktopRelease } from '../../lib/desktopRelease';
+import { AuthContext, Logo, isTauriDesktopApp } from '../../shared';
+import { STUDIO_DESKTOP_DOWNLOAD_URL, fetchDesktopRelease, isDesktopUpdate, type DesktopRelease } from '../../lib/desktopRelease';
 import type { PageNav } from '../NavBar';
 import CreditFuelBar from './CreditFuelBar';
 import NotificationBell from './NotificationBell';
@@ -63,6 +63,16 @@ export default function StudioTopBar({ onNavigate }: { onNavigate: PageNav }) {
                 <button type="button" onClick={() => onNavigate('dashboard')} className="flex items-center gap-2">
                     <Logo size={28} />
                 </button>
+                {!isTauriDesktopApp && (
+                    <a
+                        href={STUDIO_DESKTOP_DOWNLOAD_URL}
+                        title="Download Studio for desktop"
+                        className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-cyan-400/25 bg-cyan-400/10 px-2 text-xs font-semibold text-cyan-100 transition hover:border-cyan-300/50 hover:bg-cyan-400/20 hover:text-white"
+                    >
+                        <Download className="h-4 w-4" />
+                        <span className="hidden sm:inline">Download Studio</span>
+                    </a>
+                )}
                 {desktopUpdate && (
                     <button
                         type="button"

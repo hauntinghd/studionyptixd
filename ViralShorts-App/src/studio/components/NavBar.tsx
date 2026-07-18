@@ -2,6 +2,7 @@ import { useContext, useEffect, useMemo, useRef, useState } from 'react';
 import {
     Bell,
     ChevronDown,
+    Download,
     LogOut,
     MessageSquarePlus,
     Settings,
@@ -10,7 +11,8 @@ import {
     UserCircle,
     WalletCards,
 } from 'lucide-react';
-import { AuthContext, BILLING_SITE_URL, Logo, STUDIO_SITE_URL, isBillingHost } from '../shared';
+import { AuthContext, BILLING_SITE_URL, Logo, STUDIO_SITE_URL, isBillingHost, isTauriDesktopApp } from '../shared';
+import { STUDIO_DESKTOP_DOWNLOAD_URL } from '../lib/desktopRelease';
 
 export type PageNav = (page: 'landing' | 'dashboard' | 'auth' | 'account' | 'settings' | 'billing' | 'subscription' | 'waitlist' | 'waitlist_confirmation') => void;
 
@@ -177,6 +179,15 @@ export default function NavBar({ onNavigate, active }: { onNavigate: PageNav; ac
                         <Logo size={24} />
                         <span className="truncate">NYPTID Studio</span>
                     </a>
+                    {!isTauriDesktopApp && (
+                        <a
+                            href={STUDIO_DESKTOP_DOWNLOAD_URL}
+                            className="inline-flex items-center gap-1.5 rounded-lg border border-cyan-400/25 bg-cyan-400/10 px-3 py-2 text-xs font-semibold text-cyan-100 transition hover:border-cyan-300/50 hover:bg-cyan-400/20 hover:text-white"
+                        >
+                            <Download className="h-4 w-4" />
+                            <span className="hidden sm:inline">Download Studio</span>
+                        </a>
+                    )}
                 </div>
 
                 {!session ? (
