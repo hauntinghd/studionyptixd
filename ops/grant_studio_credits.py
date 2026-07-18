@@ -58,13 +58,30 @@ def main() -> None:
     )
     parser.add_argument("--reason", default="admin_grant", help="Ledger reason")
     parser.add_argument("--idempotency-key", default="", help="Stable retry key for this grant")
+    parser.add_argument(
+        "--pending-if-missing",
+        action="store_true",
+        help="Persist the target grant for automatic claim on first login",
+    )
     args = parser.parse_args()
     if args.credits <= 0 and args.target_balance <= 0:
         raise SystemExit("credits or --target-balance must be positive")
 
     import unified_credits as uc
 
-    user_id = _lookup_user_id_by_email(args.email)
+    try:
+        user_id = _lookup_user_id_by_email(args.email)
+    except SystemExit:
+        if not args.pending_if_missing or args.target_balance <= 0 or not args.idempotency_key:
+            raise
+        row = uc.register_pending_grant(
+            args.email,
+            args.target_balance,
+            reason=args.reason,
+            idempotency_key=args.idempotency_key,
+        )
+        print(f"Pending grant registered for {row['email']} (target={row['target_balance']})")
+        return
     current = uc.get_balance(user_id)
     credits = max(0, args.target_balance - current) if args.target_balance > 0 else args.credits
     if credits <= 0:

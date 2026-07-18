@@ -18727,6 +18727,25 @@ _admin_youtube_quota = build_admin_youtube_quota_handler(
 )
 
 
+def _credit_state_with_pending_grant(
+    user: dict,
+    effective_plan: str,
+    billing_active: bool,
+    is_admin: bool = False,
+) -> dict:
+    if not is_admin:
+        try:
+            import unified_credits as uc
+
+            uc.claim_pending_grant(
+                str((user or {}).get("id", "") or ""),
+                str((user or {}).get("email", "") or ""),
+            )
+        except Exception as exc:
+            log.warning("Could not claim pending credit grant: %s", exc)
+    return _credit_state_for_user(user, effective_plan, billing_active, is_admin=is_admin)
+
+
 mount_router(
     app,
     build_core_router(
@@ -18749,7 +18768,7 @@ mount_router(
         paid_access_snapshot_for_user=_paid_access_snapshot_for_user,
         stripe_subscription_snapshot=lambda email: _stripe_subscription_snapshot(email),
         next_renewal_from_anchor=lambda anchor_unix, months: _next_renewal_from_anchor(anchor_unix, months),
-        credit_state_for_user=_credit_state_for_user,
+        credit_state_for_user=_credit_state_with_pending_grant,
         membership_plan_for_user=_membership_plan_for_user,
         plan_features_for=_plan_features_for,
         public_lane_access_for_user=_public_lane_access_for_user,

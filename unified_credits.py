@@ -35,6 +35,7 @@ from backend_settings import (
 
 WALLETS_PATH = Path(TEMP_DIR) / "unified_credit_wallets.json"
 LEDGER_PATH = Path(TEMP_DIR) / "unified_credit_ledger.jsonl"
+PENDING_GRANTS_PATH = Path(TEMP_DIR) / "pending_credit_grants.json"
 
 _lock = threading.RLock()
 _wallets: dict[str, dict[str, Any]] = {}
@@ -510,6 +511,70 @@ def add_credits(
             "ts": time.time(),
         })
         return dict(w)
+
+
+def register_pending_grant(
+    email: str,
+    target_balance: int,
+    *,
+    reason: str,
+    idempotency_key: str,
+) -> dict[str, Any]:
+    """Persist a first-login credit grant without creating an auth account."""
+    normalized = str(email or "").strip().lower()
+    target = max(0, int(target_balance or 0))
+    key = str(idempotency_key or "").strip()
+    if not normalized or "@" not in normalized or target <= 0 or not key:
+        raise ValueError("valid email, target balance, and idempotency key are required")
+    with _lock:
+        try:
+            payload = json.loads(PENDING_GRANTS_PATH.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        row = {
+            "email": normalized,
+            "target_balance": target,
+            "reason": str(reason or "pending_grant")[:120],
+            "idempotency_key": key,
+            "created_at": time.time(),
+        }
+        payload[normalized] = row
+        _atomic_write_json(PENDING_GRANTS_PATH, payload)
+        return row
+
+
+def claim_pending_grant(user_id: str, email: str) -> dict[str, Any] | None:
+    """Apply and remove an email grant exactly once after verified authentication."""
+    uid = str(user_id or "").strip()
+    normalized = str(email or "").strip().lower()
+    if not uid or not normalized:
+        return None
+    with _lock:
+        try:
+            payload = json.loads(PENDING_GRANTS_PATH.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            return None
+        if not isinstance(payload, dict) or not isinstance(payload.get(normalized), dict):
+            return None
+        row = dict(payload[normalized])
+        target = max(0, int(row.get("target_balance", 0) or 0))
+        current = get_balance(uid)
+        amount = max(0, target - current)
+        if amount > 0:
+            wallet = add_credits(
+                uid,
+                amount,
+                reason=str(row.get("reason") or "pending_grant"),
+                metadata={"email": normalized, "source": "first_login_pending_grant"},
+                idempotency_key=str(row.get("idempotency_key") or ""),
+            )
+        else:
+            wallet = get_state(uid)
+        payload.pop(normalized, None)
+        _atomic_write_json(PENDING_GRANTS_PATH, payload)
+        return {"credits_added": amount, "target_balance": target, "balance": wallet.get("balance", current)}
 
 
 def remove_topup_credits(
