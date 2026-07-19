@@ -76,7 +76,12 @@ DEFAULT_CAPS_USD = {
     "edit_production_scenes_still": 1.0,
     "regenerate_production_scene_still": 0.25,
     "regenerate_production_scene": 2.0,
-    "animate_production_scenes": 3.0,
+    # A review-approved short commonly has three 5-second clips.  Seedance's
+    # current live rate makes that roughly $4.54, so the former $3 default
+    # rejected an otherwise approved production action before a provider call.
+    # This remains a hard cap (and users still need credits); it is simply high
+    # enough for Studio's normal selected-model animation batch.
+    "animate_production_scenes": 12.0,
     "repair_production_scene_animation": 2.0,
     "audit_and_repair_production_scenes": 12.0,
     "finalize_production": 1.0,

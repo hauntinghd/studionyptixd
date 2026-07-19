@@ -123,6 +123,23 @@ def test_animate_scene_budget_uses_selected_scene_count_and_duration():
     assert "pricing_note" in estimate.breakdown
 
 
+def test_animate_default_cap_allows_normal_three_scene_seedance_batch():
+    """The default must cover a normal review-approved batch, not reject at $3."""
+    estimate = production_budget.enforce_budget(
+        "animate_production_scenes",
+        {
+            "scene_indices": [0, 1, 2],
+            "scene_durations": [5.0, 5.0, 5.0],
+            "video_model": "seedance",
+        },
+    )
+
+    assert estimate is not None
+    assert estimate.max_budget_usd == 12.0
+    assert estimate.estimated_usd == 4.536
+    assert estimate.estimated_usd <= estimate.max_budget_usd
+
+
 def test_finalize_production_budget_includes_narration_and_sound_design(tmp_path, monkeypatch):
     from studio_agent import jobs
 

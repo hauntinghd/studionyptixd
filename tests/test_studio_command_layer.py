@@ -514,6 +514,26 @@ def test_compact_state_scene_rows_override_lagging_current_scene_for_scene_six_t
     assert validation.resolved_action.arguments.scene_indices == [5]
 
 
+def test_plural_single_scene_selector_executes_without_reasking_scope():
+    """Regression for the live wording: 'Audit and repair Scenes 1 ...'."""
+    text = (
+        "Audit and repair Scenes 1 in this existing video. Preserve every passing scene and approved asset, "
+        "regenerate only what fails script, prompt, continuity, or artifact QA, then reanimate only the scenes "
+        "whose still changed."
+    )
+    state = _state(_snapshot(scene_count=3), repairable=True)
+    command = _plan(text, _tool_response(_proposal()), state=state)
+    validation = validate_studio_command(command, state, user_text=text)
+
+    assert command.action == "audit_and_repair_scenes"
+    assert command.repair is not None
+    assert command.repair.scene_numbers == [1]
+    assert validation.can_execute
+    assert validation.clarification is None
+    assert validation.resolved_action is not None
+    assert validation.resolved_action.arguments.scene_indices == [0]
+
+
 @pytest.mark.parametrize(
     "text",
     [

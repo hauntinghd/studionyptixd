@@ -287,7 +287,10 @@ def extract_scene_numbers_request(
             if 1 <= number <= total
         )
 
-    for match in re.finditer(r"\bscene\s+(\d{1,3})\b", low):
+    # A single selected scene is commonly dictated as either "Scene 1" or
+    # "Scenes 1".  The latter used to fall through to the scope clarification
+    # loop even though its target is fully explicit.
+    for match in re.finditer(r"\bscenes?\s+(\d{1,3})\b", low):
         number = int(match.group(1))
         if 1 <= number <= total:
             selected.add(number)
