@@ -4069,9 +4069,11 @@ def regenerate_production_scene_still(
             f".{sid}.route-{int(route.get('revision') or 1)}-{uuid.uuid4().hex[:10]}.candidate.png"
         )
         current_audit: dict[str, Any] = {}
+        current_still_qa: dict[str, Any] = {}
         res: dict[str, Any] = {}
         retry_count = 0
         route_changed = False
+        skeleton_mode = "skeleton" in str((spec or {}).get("render_style") or "").lower()
         while True:
             dispatch_route = _repair_route_snapshot(
                 session_id,
@@ -4115,7 +4117,29 @@ def regenerate_production_scene_still(
             if not _same_media_route(route, after_provider, stage="image"):
                 route_changed = True
                 break
-            if str(current_audit.get("method") or "").lower() != "regenerate" or retry_count >= 2:
+            # ``method=regenerate`` is a Catalyst *generation strategy*, not
+            # a failure verdict.  The old condition retried every candidate
+            # with that label and then rejected the final one even when visual
+            # QA passed, which stranded a repair with no animation path.
+            if skeleton_mode:
+                current_still_qa = visual_qa.audit_skeleton_still(
+                    candidate,
+                    reference=visual_qa._workspace_skeleton_reference(ws),
+                    locked_outfit=str((spec or {}).get("locked_outfit") or scene.get("outfit") or ""),
+                    cast_count=int(scene.get("cast_count") or (spec or {}).get("cast_count") or 1),
+                    force=True,
+                )
+            else:
+                current_still_qa = visual_qa.audit_generic_still(
+                    candidate,
+                    scene_contract=" ".join(
+                        str(scene.get(key) or "") for key in ("prompt", "scene_action", "narration")
+                    ),
+                    force=True,
+                )
+            if current_still_qa.get("status") == "pass" and current_still_qa.get("pass") is True:
+                break
+            if retry_count >= 2:
                 break
             rejected = _discard_still_candidate(
                 ws, candidate, scene_index=idx, label=f"qa-retry-{retry_count + 1}"
@@ -4135,27 +4159,9 @@ def regenerate_production_scene_still(
             route_switches.append({"from": route, "to": latest, "stage": "image"})
             continue
 
-        skeleton_mode = "skeleton" in str((spec or {}).get("render_style") or "").lower()
-        if skeleton_mode:
-            current_still_qa = visual_qa.audit_skeleton_still(
-                candidate,
-                reference=visual_qa._workspace_skeleton_reference(ws),
-                locked_outfit=str((spec or {}).get("locked_outfit") or scene.get("outfit") or ""),
-                cast_count=int(scene.get("cast_count") or (spec or {}).get("cast_count") or 1),
-                force=True,
-            )
-        else:
-            current_still_qa = visual_qa.audit_generic_still(
-                candidate,
-                scene_contract=" ".join(
-                    str(scene.get(key) or "") for key in ("prompt", "scene_action", "narration")
-                ),
-                force=True,
-            )
         passed = bool(
             current_still_qa.get("status") == "pass"
             and current_still_qa.get("pass") is True
-            and str(current_audit.get("method") or "").lower() != "regenerate"
         )
         learning = record_catalyst_still_artifact_learning(
             channel_key=str(current_audit.get("channel_key") or ""),

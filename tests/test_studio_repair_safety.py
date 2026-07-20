@@ -506,6 +506,73 @@ def test_failed_candidate_qa_retains_previous_still_and_clip(tmp_path, monkeypat
     assert result["quarantined_candidates"]
 
 
+def test_passing_candidate_commits_even_when_catalyst_strategy_is_regenerate(tmp_path, monkeypatch):
+    """A render strategy is not a failed QA verdict (live Scene 1 regression)."""
+    workspace = _workspace(tmp_path, existing_clip=True)
+    canonical = workspace / "stills" / "b00.png"
+    old_still = canonical.read_bytes()
+    monkeypatch.setattr(tools, "_shortform_workspace", lambda _job_id: workspace)
+    monkeypatch.setattr(
+        catalyst_still_audit,
+        "audit_scene_still",
+        lambda *_args, **_kwargs: {
+            "method": "regenerate",
+            "channel_key": "test",
+            "issue_labels": ["artifact cleanup"],
+        },
+    )
+    monkeypatch.setattr(
+        catalyst_still_audit,
+        "record_catalyst_still_artifact_learning",
+        lambda **_kwargs: {"recorded": True},
+    )
+
+    def fake_candidate(_workspace, _index, **kwargs):
+        candidate = Path(kwargs["candidate_path"])
+        candidate.write_bytes(b"qa-passing-candidate")
+        return {"index": 0, "candidate_path": str(candidate), "image_model_id": "seedream_edit"}
+
+    monkeypatch.setattr(styled_pipeline, "regenerate_scene_with_catalyst", fake_candidate)
+    monkeypatch.setattr(visual_qa, "audit_generic_still", _pass_still)
+
+    result = json.loads(tools.regenerate_production_scene_still(JOB_ID, 0, image_model_id="seedream_edit"))
+
+    assert result["ok"] is True
+    assert result["scene"]["committed"] is True
+    assert canonical.read_bytes() == b"qa-passing-candidate"
+    assert canonical.read_bytes() != old_still
+
+
+def test_candidate_retries_only_after_an_actual_visual_qa_failure(tmp_path, monkeypatch):
+    workspace = _workspace(tmp_path)
+    monkeypatch.setattr(tools, "_shortform_workspace", lambda _job_id: workspace)
+    monkeypatch.setattr(
+        catalyst_still_audit,
+        "audit_scene_still",
+        lambda *_args, **_kwargs: {"method": "regenerate", "channel_key": "test", "issue_labels": []},
+    )
+    monkeypatch.setattr(catalyst_still_audit, "record_catalyst_still_artifact_learning", lambda **_kwargs: {})
+    attempts: list[int] = []
+
+    def fake_candidate(_workspace, _index, **kwargs):
+        attempts.append(1)
+        Path(kwargs["candidate_path"]).write_bytes(f"candidate-{len(attempts)}".encode())
+        return {"index": 0, "image_model_id": "seedream_edit"}
+
+    qa = iter([
+        {"status": "fail", "pass": False, "summary": "human present", "issues": ["human_or_skin"]},
+        _pass_still(),
+    ])
+    monkeypatch.setattr(styled_pipeline, "regenerate_scene_with_catalyst", fake_candidate)
+    monkeypatch.setattr(visual_qa, "audit_generic_still", lambda *_args, **_kwargs: next(qa))
+
+    result = json.loads(tools.regenerate_production_scene_still(JOB_ID, 0, image_model_id="seedream_edit"))
+
+    assert result["ok"] is True
+    assert len(attempts) == 2
+    assert result["scene"]["catalyst_retry_count"] == 1
+
+
 def test_midflight_image_route_change_quarantines_old_result_and_restarts(tmp_path, monkeypatch):
     workspace = _workspace(tmp_path)
     canonical = workspace / "stills" / "b00.png"
