@@ -3289,6 +3289,42 @@ def _normalize_runs(session: dict[str, Any]) -> list[dict[str, Any]]:
     return runs
 
 
+def _run_command_id(run: dict[str, Any]) -> str:
+    """Return the typed command that a durable chat run was executing, if any."""
+
+    for event in reversed(list(run.get("events") or [])):
+        data = event.get("data") if isinstance(event, dict) else None
+        if not isinstance(data, dict):
+            continue
+        command = data.get("command")
+        if isinstance(command, dict) and str(command.get("command_id") or "").strip():
+            return str(command.get("command_id") or "").strip()
+        command_id = str(data.get("command_id") or "").strip()
+        if command_id:
+            return command_id
+    return ""
+
+
+def _terminal_run_owns_production_gate(session: dict[str, Any], command_id: str) -> bool:
+    """Whether a deploy-disconnected run left behind this exact gate lease.
+
+    A production gate is deliberately exclusive while a command is live.  A
+    Fly deploy, however, can terminate the worker after the command has
+    started and before its ``finally`` closes the gate.  The chat run is then
+    marked ``interrupted`` during reconciliation, so retaining the gate would
+    permanently reject every later retry in that session.
+    """
+
+    normalized = str(command_id or "").strip()
+    if not normalized:
+        return False
+    for run in reversed(_normalize_runs(session)):
+        if _run_command_id(run) != normalized:
+            continue
+        return str(run.get("status") or "running") not in ACTIVE_RUN_STATUSES
+    return False
+
+
 def reconcile_stale_runs(session: dict[str, Any]) -> dict[str, Any]:
     """Mark deploy-killed/disconnected chat runs terminal so UI does not spin forever."""
     now = _now()
@@ -3312,6 +3348,20 @@ def reconcile_stale_runs(session: dict[str, Any]) -> dict[str, Any]:
         })
         changed = True
     if changed:
+        active_command = str(session.get("active_command_id") or "").strip()
+        if session.get("production_gate_open") and _terminal_run_owns_production_gate(
+            session,
+            active_command,
+        ):
+            # The interrupted run cannot execute any more.  Closing only the
+            # matching lease preserves mutual exclusion for genuinely active
+            # commands while making a retry possible after deploy recovery.
+            session.update({
+                "interaction_state": "verification",
+                "production_gate_open": False,
+                "active_command_id": "",
+                "active_command_job_id": "",
+            })
         _save(session)
     return session
 
@@ -3720,7 +3770,18 @@ def claim_production_gate(
             raise KeyError(session_id)
         current_command = str(session.get("active_command_id") or "").strip()
         if session.get("production_gate_open") and current_command not in {"", normalized_command}:
-            return None
+            if _terminal_run_owns_production_gate(session, current_command):
+                # A terminal run (including an interrupted deploy) is not an
+                # active mutation. Reclaim its orphaned lease atomically here,
+                # where the next command is about to be admitted.
+                session.update({
+                    "interaction_state": "verification",
+                    "production_gate_open": False,
+                    "active_command_id": "",
+                    "active_command_job_id": "",
+                })
+            else:
+                return None
         session.update({
             "agent_mode": "studio",
             "interaction_state": "production",

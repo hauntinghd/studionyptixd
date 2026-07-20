@@ -103,6 +103,40 @@ def test_production_gate_is_atomic_and_only_its_owner_can_close_it(tmp_path, mon
     assert closed["active_command_id"] == ""
 
 
+def test_terminal_run_releases_orphaned_production_gate_for_retry(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(store, "SESSIONS_DIR", tmp_path)
+    session = store.create_session(user_id="gate-user", model="test-model")
+    session_id = session["session_id"]
+    assert store.claim_production_gate(
+        session_id,
+        command_id="deploy-interrupted-command",
+        job_id="job-one",
+    ) is not None
+
+    # This is the durable state left behind when a deploy kills a repair after
+    # tool_start but before the runner's finally block can close its gate.
+    store.update_session(
+        session_id,
+        runs=[{
+            "run_id": "run-interrupted",
+            "status": "interrupted",
+            "events": [{
+                "event": "studio_command",
+                "data": {"command": {"command_id": "deploy-interrupted-command"}},
+            }],
+        }],
+    )
+
+    retried = store.claim_production_gate(
+        session_id,
+        command_id="retry-command",
+        job_id="job-one",
+    )
+    assert retried is not None
+    assert retried["production_gate_open"] is True
+    assert retried["active_command_id"] == "retry-command"
+
+
 def test_scene_repair_is_registered_as_a_guarded_billable_mutation() -> None:
     # Repair is synchronous because typed postconditions verify immediately;
     # RunPod's accepted-then-sync bridge cannot safely satisfy that contract.
