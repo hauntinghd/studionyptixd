@@ -83,6 +83,41 @@ def test_persisted_legacy_routes_migrate_with_versioned_audit(tmp_path, monkeypa
     assert all(row["policy_version"] == provider_policy.POLICY_VERSION for row in audit)
 
 
+def test_session_list_migrates_legacy_routes_before_building_sidebar_summary(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(store, "SESSIONS_DIR", tmp_path)
+    session = store.create_session(
+        user_id="owner",
+        model=provider_policy.DEFAULT_RUNNER_MODEL,
+        image_model="ernie_image",
+        video_model="seedance",
+    )
+    path = tmp_path / f"{session['session_id']}.json"
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    raw.update({
+        "model": "grok-4.5",
+        "image_model": "grok_imagine_standard",
+        "video_model": "grok_imagine_video",
+        # Reproduce a partially migrated record: the version marker alone must
+        # never allow a denied persisted route to crash a read-only endpoint.
+        "provider_policy_version": provider_policy.POLICY_VERSION,
+    })
+    path.write_text(json.dumps(raw), encoding="utf-8")
+
+    response = TestClient(_test_app()).get("/api/studio-agent/sessions")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["count"] == 1
+    [summary] = payload["sessions"]
+    assert summary["session_id"] == session["session_id"]
+    assert summary["model"] == provider_policy.DEFAULT_RUNNER_MODEL
+    assert summary["image_model"] == provider_policy.DEFAULT_FAL_IMAGE_MODEL
+    assert summary["video_model"] == provider_policy.DEFAULT_FAL_VIDEO_MODEL
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [

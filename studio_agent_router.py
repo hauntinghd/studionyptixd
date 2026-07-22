@@ -2025,6 +2025,12 @@ def build_studio_agent_router(
 
 
 def _session_summary(session: dict[str, Any]) -> dict[str, Any]:
+    # History boot reads raw persisted snapshots for speed. Sanitize the root
+    # picker fields before strict serializers run so one pre-policy Grok,
+    # OpenAI, or Google selection cannot turn the entire sidebar request into a
+    # 500. New picker writes remain fail-closed; opening the session performs
+    # the full recursive, versioned migration and persists it under lock.
+    store.migrate_provider_policy_summary_state(session)
     return {
         "session_id": session.get("session_id"),
         "title": store.derive_title(session),

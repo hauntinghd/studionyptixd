@@ -124,7 +124,11 @@ def _policy_migration_entry(
     }
 
 
-def _migrate_session_provider_policy(session: dict[str, Any]) -> bool:
+def _migrate_session_provider_policy(
+    session: dict[str, Any],
+    *,
+    recursive: bool = True,
+) -> bool:
     """Migrate durable legacy routes once, with a versioned audit trail.
 
     Loading old state is intentionally different from accepting a new picker
@@ -245,7 +249,8 @@ def _migrate_session_provider_policy(session: dict[str, Any]) -> bool:
                         capability=provider_policy.SEMANTIC_QA_CAPABILITY,
                     )
                     current = value.get(key)
-            visit(current, field_path)
+            if recursive:
+                visit(current, field_path)
 
     root_model = str(session.get("model") or "").strip()
     root_provider = provider_policy.model_provider(root_model)
@@ -294,6 +299,20 @@ def migrate_provider_policy_state(state: dict[str, Any]) -> bool:
     if not isinstance(state, dict):
         return False
     return _migrate_session_provider_policy(state)
+
+
+def migrate_provider_policy_summary_state(state: dict[str, Any]) -> bool:
+    """Sanitize top-level persisted routes before building a list summary.
+
+    Session history boot intentionally avoids walking every nested message and
+    receipt in every chat. Full recursive migration still runs when a session
+    is opened or mutated; the summary path only needs the root runner and media
+    picker fields that its strict serializers expose.
+    """
+
+    if not isinstance(state, dict):
+        return False
+    return _migrate_session_provider_policy(state, recursive=False)
 
 
 def media_route_snapshot(session: dict[str, Any] | None) -> dict[str, Any]:
