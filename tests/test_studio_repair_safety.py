@@ -89,9 +89,14 @@ def test_narrative_correspondence_failure_restages_still(tmp_path, monkeypatch):
 
     def fake_regenerate(_job_id, scene_index, **_kwargs):
         restaged.append((scene_index, str(_kwargs.get("restage_direction") or "")))
+        scenes = styled_pipeline.load_scenes(workspace)
+        scenes[0]["qa_stale"] = False
+        scenes[0]["visual_qa"] = {"status": "pass", "pass": True}
+        styled_pipeline.save_scenes(workspace, scenes)
         return json.dumps({"ok": True, "scene_index": scene_index})
 
     monkeypatch.setattr(tools, "regenerate_production_scene", fake_regenerate)
+    monkeypatch.setattr(visual_qa, "scene_visual_qa_is_fresh", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(
         tools,
         "repair_production_scene_animation",
@@ -180,6 +185,37 @@ def test_animation_tool_reports_failed_replacement_even_when_old_clip_was_restor
     assert result["ok"] is False
     assert result["animated"] == []
     assert result["failed"] == [0]
+
+
+def test_scene_approval_preflights_existing_clip_qa_before_missing_clip_animation(tmp_path, monkeypatch):
+    workspace = tmp_path / JOB_ID
+    (workspace / "clips").mkdir(parents=True)
+    existing_clip = workspace / "clips" / "b00.mp4"
+    existing_clip.write_bytes(b"preserved-clip" * 200)
+    original_clip = existing_clip.read_bytes()
+    (workspace / "job_spec.json").write_text("{}", encoding="utf-8")
+    (workspace / "scenes.json").write_text(
+        json.dumps([
+            {"index": 0, "clip_rel": "clips/b00.mp4", "approved_for_video": False},
+            {"index": 1, "clip_rel": None, "approved_for_video": False},
+        ]),
+        encoding="utf-8",
+    )
+    qa_calls: list[tuple[int, bool | None]] = []
+
+    monkeypatch.setattr(tools, "_shortform_workspace", lambda _job_id: workspace)
+
+    def fresh_qa(_workspace, _scenes, scene_index, **kwargs):
+        qa_calls.append((scene_index, kwargs.get("require_clip")))
+        return {"status": "pass", "pass": True}
+
+    monkeypatch.setattr(tools, "_refresh_scene_visual_qa", fresh_qa)
+
+    result = json.loads(tools.set_production_scenes_animate(JOB_ID, True))
+
+    assert result["ok"] is True
+    assert qa_calls == [(0, True), (1, False)]
+    assert existing_clip.read_bytes() == original_clip
 
 
 def test_per_scene_animation_failures_accumulate_and_use_human_scene_numbers(tmp_path, monkeypatch):

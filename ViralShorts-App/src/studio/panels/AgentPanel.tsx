@@ -91,6 +91,8 @@ interface ChatMessage {
     role: 'user' | 'assistant' | 'system';
     content: string;
     jobDeliverable?: AgentJobSnapshot;
+    /** Frontend-only marker for the single movable status/card row per job. */
+    jobDeliverableNoticeJobId?: string;
     thumbnailReview?: ThumbnailReview;
     productionUpdate?: ProductionProgressUpdate;
 }
@@ -1016,10 +1018,38 @@ function isNewProductionRequest(text: string): boolean {
     ) {
         return false;
     }
+    if (isExistingBulkSceneShipRequest(low)) return false;
     if (/\b(?:next video|next short|next one|the next short|new video|new short|plan the next|make a new|lets make a|let's make a)\b/.test(low)) {
         return true;
     }
     return /\b(?:make|create|generate|render|produce|build)\b.+\b(?:short|video)\b/.test(low);
+}
+
+function isExistingBulkSceneShipRequest(text: string): boolean {
+    const low = String(text || '').toLowerCase().trim();
+    if (!low) return false;
+    if (
+        /\b(?:audit|fix|repair|correct|redo|regenerate|rerender|re-render|reanimate|re-animate|edit|revise|restage|re-stage)\b[\s\S]{0,220}\b(?:scenes?|stills?|clips?|animations?|shots?)\b/i.test(low)
+        || /\b(?:scenes?|stills?|clips?|animations?|shots?)\b[\s\S]{0,220}\b(?:fix|repair|correct|redo|regenerate|rerender|re-render|reanimate|re-animate|edit|revise|restage|re-stage)\b/i.test(low)
+    ) return false;
+    const hasExpansionScope = (
+        /\b(?:other|rest|remaining|more)\s+(?:\d+\s+)?scenes?\b/i.test(low)
+        || /\b(?:make|build|generate|render)\s+(?:the\s+)?(?:other|rest|remaining)\b/i.test(low)
+        || /\b(?:keep|approve|use)\s+scene\s*(?:1|one|first)\b/i.test(low)
+    );
+    const hasPluralAnimation = (
+        /\banimate\s+(?:all|every|each|them|the\s+scenes?)\b/i.test(low)
+        || /\banimation\s+for\s+(?:all|every|each|the\s+scenes?)\b/i.test(low)
+    );
+    const hasFinishedOutput = (
+        /\b(?:make|build|render|produce)\s+(?:the\s+)?(?:finished|final|complete)\s+(?:video|short|mp4)\b/i.test(low)
+        || /\b(?:finish|finalize|complete|export)\b.{0,40}\b(?:video|short|mp4|it)\b/i.test(low)
+        || /\b(?:finished|final|complete)\s+(?:video|short|mp4)\b/i.test(low)
+    );
+    if (hasPluralAnimation && hasFinishedOutput && !hasExpansionScope) return true;
+    const hasApproveAll = /\bapprove\s+(?:all|every|each|them|the\s+scenes?)\b/i.test(low);
+    const hasShip = /\b(?:animate|finish|finalize|export|complete|ship)\b/i.test(low);
+    return hasApproveAll && hasShip && !hasExpansionScope;
 }
 
 function priorProductionTitleFromMessages(
@@ -2007,6 +2037,7 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                 role: 'assistant' as const,
                 content: deliverableDisplayText(label, snap),
                 jobDeliverable: snap,
+                jobDeliverableNoticeJobId: snap.job_id,
             };
             let replaced = false;
             const withoutProgress = m.filter((row) => row.productionUpdate?.job_id !== snap.job_id);
@@ -2019,11 +2050,23 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                 snap.kind === 'shortform'
                 && snap.status === 'awaiting_approval'
             );
+            const withoutPriorNotices = withoutProgress.filter((row) => {
+                if (jobIdsMatch(row.jobDeliverableNoticeJobId, snap.job_id)) return false;
+                // Migrate status echoes created by older bundles, which did not
+                // mark synthetic rows. They are never durable assistant text.
+                if (
+                    pinReviewCard
+                    && row.role === 'assistant'
+                    && row.content === nextRow.content
+                    && (!row.jobDeliverable || jobMatches(row.jobDeliverable))
+                ) return false;
+                return true;
+            });
             // For in-progress competitor analysis, update the latest running bubble
             // in place so we don't stack "still running" clones every poll.
             // Shortform review cards are re-pinned to the end so Scene 1 stays
             // visible after later assistant text (audit / expand prompts).
-            const next = withoutProgress.map((row) => {
+            const next = withoutPriorNotices.map((row) => {
                 if (!jobMatches(row.jobDeliverable)) return row;
                 replaced = true;
                 if (pinReviewCard) {
@@ -3520,10 +3563,15 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
             const readableAttachments = buildOutboundAttachments();
             const visibleUserText = text.trim()
                 || (readableAttachments.length ? `Please analyze the attached image${readableAttachments.length === 1 ? '' : 's'}.` : '');
+            const existingBulkSceneShip = isExistingBulkSceneShipRequest(visibleUserText);
             let effectiveMode = modeOverride || agentMode;
             if (
                 effectiveMode === 'plan'
-                && (latestUserAllowsProductionPending(visibleUserText) || userAffirmsAssistantTopic(visibleUserText))
+                && (
+                    existingBulkSceneShip
+                    || latestUserAllowsProductionPending(visibleUserText)
+                    || userAffirmsAssistantTopic(visibleUserText)
+                )
             ) {
                 effectiveMode = 'studio';
                 setAgentMode('studio');
@@ -3535,11 +3583,14 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                 return next;
             });
             if (
-                effectiveMode === 'plan'
-                || isNewProductionRequest(visibleUserText)
-                || isResearchOnlyUserText(visibleUserText)
-                || latestUserAllowsProductionPending(visibleUserText)
-                || userAffirmsAssistantTopic(visibleUserText)
+                !existingBulkSceneShip
+                && (
+                    effectiveMode === 'plan'
+                    || isNewProductionRequest(visibleUserText)
+                    || isResearchOnlyUserText(visibleUserText)
+                    || latestUserAllowsProductionPending(visibleUserText)
+                    || userAffirmsAssistantTopic(visibleUserText)
+                )
             ) {
                 const optimisticBlocked = collectKnownProductionJobIds(
                     messagesRef.current,

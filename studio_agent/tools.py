@@ -5503,7 +5503,10 @@ def set_production_scenes_animate(job_id: str, animate: bool, scene_indices: lis
             ws,
             scenes,
             int(sc.get("index", -1)),
-            require_clip=False,
+            # Existing clips are part of the contract we are preserving. Gate
+            # them with clip-bound QA before any missing-scene i2v spend starts;
+            # scenes without clips still receive the required still-only gate.
+            require_clip=bool(sc.get("clip_rel")),
         )
         if aggregate.get("pass") is not True:
             failed_qa.append({
@@ -6307,8 +6310,8 @@ def _reconcile_audit_repair_state(
     reports: list[dict[str, Any]],
     repaired_stills: list[int],
     repaired_animations: list[int],
-) -> None:
-    """Replace stale production errors with the outcome of this repair run."""
+) -> list[int]:
+    """Replace stale production errors only after current asset QA proves the repair."""
 
     result_path = workspace / "result.json"
     try:
@@ -6324,6 +6327,58 @@ def _reconcile_audit_repair_state(
         scenes = []
     selected_set = set(selected)
     failed_set = set(failed)
+    selected_qa_failures: list[dict[str, Any]] = []
+    try:
+        from studio_agent.visual_qa import scene_visual_qa_is_fresh
+
+        for index in selected:
+            position = next(
+                (
+                    pos for pos, scene in enumerate(scenes)
+                    if isinstance(scene, dict) and int(scene.get("index", -1)) == int(index)
+                ),
+                -1,
+            )
+            scene = scenes[position] if position >= 0 else None
+            aggregate = (
+                scene.get("visual_qa")
+                if isinstance(scene, dict) and isinstance(scene.get("visual_qa"), dict)
+                else {}
+            )
+            fresh = bool(
+                isinstance(scene, dict)
+                and not bool(scene.get("qa_stale", True))
+                and scene_visual_qa_is_fresh(
+                    workspace,
+                    scene,
+                    previous_scene=scenes[position - 1] if position > 0 else None,
+                    next_scene=scenes[position + 1] if position >= 0 and position + 1 < len(scenes) else None,
+                )
+            )
+            if fresh and aggregate.get("pass") is True:
+                continue
+            failed_set.add(int(index))
+            selected_qa_failures.append({
+                "scene_index": int(index),
+                "scene_number": int(index) + 1,
+                "stage": "aggregate_qa",
+                "error": str(
+                    aggregate.get("summary")
+                    or (scene or {}).get("last_repair_error")
+                    or "Selected scene has no fresh passing aggregate QA receipt"
+                )[:500],
+            })
+    except Exception as exc:
+        # QA verification is a required postcondition. If it cannot be read,
+        # fail every selected scene rather than publishing an optimistic result.
+        for index in selected:
+            failed_set.add(int(index))
+            selected_qa_failures.append({
+                "scene_index": int(index),
+                "scene_number": int(index) + 1,
+                "stage": "aggregate_qa",
+                "error": f"Could not verify fresh aggregate QA: {str(exc)[:420]}",
+            })
     current_animation_failures = {
         int(row.get("scene_index"))
         for row in reports
@@ -6347,7 +6402,7 @@ def _reconcile_audit_repair_state(
         }
         for row in reports
         if row.get("status") == "failed"
-    ]
+    ] + selected_qa_failures
     if human_still and human_animation:
         error = (
             f"Scene repair/QA blocked scene(s): {human_still}; "
@@ -6375,6 +6430,18 @@ def _reconcile_audit_repair_state(
         "repair_status": "failed" if failed_set else "complete",
         "repaired_stills": sorted(set(repaired_stills)),
         "repaired_animations": sorted(set(repaired_animations)),
+        "approved_scene_count": sum(bool(scene.get("approved_for_video")) for scene in scenes),
+        "animation_pending_count": sum(
+            bool(scene.get("approved_for_animation")) and not bool(scene.get("clip_rel"))
+            for scene in scenes
+        ),
+        "qa_blocked": any(
+            bool(scene.get("qa_stale", True))
+            or not isinstance(scene.get("visual_qa"), dict)
+            or scene.get("visual_qa", {}).get("pass") is not True
+            for scene in scenes
+            if isinstance(scene, dict)
+        ),
     })
     if error:
         result["error"] = error
@@ -6389,6 +6456,7 @@ def _reconcile_audit_repair_state(
         }, indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
+    return sorted(failed_set)
 
 
 def audit_and_repair_production_scenes(
@@ -6659,7 +6727,7 @@ def audit_and_repair_production_scenes(
     failed = sorted(set(failed))
     repaired_stills = sorted(set(repaired_stills))
     repaired_animations = sorted(set(repaired_animations))
-    _reconcile_audit_repair_state(
+    failed = _reconcile_audit_repair_state(
         ws,
         job_id=job_id,
         selected=selected,

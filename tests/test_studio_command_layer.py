@@ -37,6 +37,8 @@ def _snapshot(*, stage: str = "awaiting_scene_review", scene_count: int = 1, cli
                 "approved_for_animation": clips,
                 "animate": clips,
                 "has_clip": clips,
+                "qa_stale": False,
+                "visual_qa": {"status": "pass", "pass": True},
                 "duration_sec": 5.0,
             }
             for index in range(scene_count)

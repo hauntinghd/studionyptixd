@@ -3914,16 +3914,127 @@ def _synthesize_turn_from_evidence(
     return "\n\n".join(section for section in sections if str(section).strip())
 
 
+_RECOVERABLE_SHORTFORM_STATES = frozenset({
+    "awaiting_scene_review",
+    "awaiting_approval",
+    "awaiting_animation_review",
+    "running",
+    "scenes_approved",
+    "animate",
+})
+
+
+def _shortform_job_matches_session(
+    session: dict[str, Any],
+    job_id: str,
+    *,
+    require_multiple_scenes: bool = False,
+    require_bound_session: bool = False,
+) -> bool:
+    """Verify durable ownership/session binding before recovering a job id."""
+
+    wanted_job = str(job_id or "").strip()
+    wanted_user = str(session.get("user_id") or "").strip()
+    wanted_session = str(session.get("session_id") or "").strip()
+    if not wanted_job or not wanted_user:
+        return False
+    if wanted_job in {
+        str(value).strip()
+        for value in (session.get("blocked_job_ids") or [])
+        if str(value).strip()
+    }:
+        return False
+    try:
+        from studio_agent.tools import _shortform_workspace
+
+        workspace = _shortform_workspace(wanted_job)
+        spec_path = workspace / "job_spec.json"
+        scenes_path = workspace / "scenes.json"
+        if not spec_path.is_file() or not scenes_path.is_file():
+            return False
+        spec = json.loads(spec_path.read_text(encoding="utf-8"))
+        scenes = json.loads(scenes_path.read_text(encoding="utf-8"))
+        if not isinstance(spec, dict) or not isinstance(scenes, list) or not scenes:
+            return False
+        if str(spec.get("user_id") or "").strip() != wanted_user:
+            return False
+        owner_session = str(spec.get("session_id") or spec.get("owner_session_id") or "").strip()
+        if require_bound_session and (not owner_session or not wanted_session):
+            return False
+        if owner_session and wanted_session and owner_session != wanted_session:
+            return False
+        if require_multiple_scenes and len(scenes) < 2:
+            return False
+        return True
+    except Exception:
+        return False
+
+
+def _recoverable_shortform_job(session: dict[str, Any], job_id: str) -> bool:
+    if not _shortform_job_matches_session(session, job_id):
+        return False
+    try:
+        snapshot = get_job_snapshot(job_id, "shortform")
+    except Exception:
+        return False
+    status = str(snapshot.get("status") or "").strip().lower()
+    stage = str(snapshot.get("stage") or snapshot.get("phase") or "").strip().lower()
+    return status in _RECOVERABLE_SHORTFORM_STATES or stage in _RECOVERABLE_SHORTFORM_STATES
+
+
 def _recover_shortform_job_from_session(session: dict[str, Any]) -> str | None:
-    """Recover a durable shortform job when active_jobs was cleared after scene review."""
+    """Recover the latest same-session shortform job after active_jobs was cleared."""
     if bool(session.get("skip_job_recovery")):
         return None
+
+    # Durable message cards are the strongest evidence of what this chat is
+    # showing. Check them before the owner-wide workspace scan so an older proof
+    # cannot outrank the six-scene production visible in the current session.
+    referenced: list[str] = []
+    messages = list(session.get("messages") or [])
+    for msg in reversed(messages[-120:]):
+        if not isinstance(msg, dict):
+            continue
+        deliverable = msg.get("jobDeliverable")
+        if isinstance(deliverable, dict):
+            referenced.append(str(deliverable.get("job_id") or ""))
+        text = str(msg.get("content") or "")
+        for match in re.finditer(r'"job_id"\s*:\s*"([A-Za-z0-9_-]{6,48})"', text):
+            referenced.append(str(match.group(1) or ""))
+
+    last_command = session.get("last_studio_command")
+    if isinstance(last_command, dict):
+        for receipt_key in ("receipt", "execution_receipt"):
+            receipt = last_command.get(receipt_key)
+            if isinstance(receipt, dict):
+                referenced.append(str(receipt.get("target_job_id") or ""))
+                result = receipt.get("result")
+                if isinstance(result, dict):
+                    referenced.append(str(result.get("job_id") or ""))
+        for validation_key in ("validation", "command_validation"):
+            validation = last_command.get(validation_key)
+            resolved = validation.get("resolved_action") if isinstance(validation, dict) else None
+            arguments = resolved.get("arguments") if isinstance(resolved, dict) else None
+            if isinstance(arguments, dict):
+                referenced.append(str(arguments.get("job_id") or ""))
+
+    last_production = session.get("last_production")
+    if isinstance(last_production, dict):
+        arguments = last_production.get("arguments")
+        if isinstance(arguments, dict):
+            referenced.append(str(arguments.get("job_id") or ""))
+
+    for candidate in dict.fromkeys(value.strip() for value in referenced if str(value).strip()):
+        if _recoverable_shortform_job(session, candidate):
+            return candidate
+
+    wanted_user = str(session.get("user_id") or "").strip()
+    wanted_session = str(session.get("session_id") or "").strip()
     blocked = {
         str(job_id).strip()
         for job_id in (session.get("blocked_job_ids") or [])
         if str(job_id).strip()
     }
-    wanted_user = str(session.get("user_id") or "").strip()
     try:
         from studio_agent.jobs import ROOT as _JOBS_ROOT, SKELETON_OUTPUT as _SKELETON_OUTPUT
 
@@ -3931,59 +4042,39 @@ def _recover_shortform_job_from_session(session: dict[str, Any]) -> str | None:
         if root.is_dir():
             candidates: list[tuple[float, str]] = []
             for spec_path in root.glob("*/job_spec.json"):
-                ws = spec_path.parent
+                workspace = spec_path.parent
                 try:
                     spec = json.loads(spec_path.read_text(encoding="utf-8"))
                 except Exception:
                     continue
                 if wanted_user and str(spec.get("user_id") or "").strip() != wanted_user:
                     continue
-                progress_path = ws / "progress.json"
-                progress = {}
+                owner_session = str(spec.get("session_id") or spec.get("owner_session_id") or "").strip()
+                if owner_session and wanted_session and owner_session != wanted_session:
+                    continue
+                progress_path = workspace / "progress.json"
+                progress: dict[str, Any] = {}
                 if progress_path.is_file():
                     try:
-                        progress = json.loads(progress_path.read_text(encoding="utf-8"))
+                        loaded = json.loads(progress_path.read_text(encoding="utf-8"))
+                        progress = loaded if isinstance(loaded, dict) else {}
                     except Exception:
                         progress = {}
                 stage = str(progress.get("stage") or "").strip().lower()
-                if stage not in {"awaiting_scene_review", "awaiting_approval", "scenes_approved", "animate"}:
+                if stage not in _RECOVERABLE_SHORTFORM_STATES:
+                    continue
+                if workspace.name in blocked:
                     continue
                 newest = max(
-                    (p.stat().st_mtime for p in [spec_path, progress_path, ws / "scenes.json"] if p.is_file()),
-                    default=ws.stat().st_mtime,
+                    (p.stat().st_mtime for p in [spec_path, progress_path, workspace / "scenes.json"] if p.is_file()),
+                    default=workspace.stat().st_mtime,
                 )
-                if ws.name in blocked:
-                    continue
-                candidates.append((newest, ws.name))
+                candidates.append((newest, workspace.name))
             if candidates:
                 candidates.sort(reverse=True)
                 return candidates[0][1]
     except Exception:
         pass
-
-    messages = list(session.get("messages") or [])
-    for msg in reversed(messages[-40:]):
-        text = str(msg.get("content") or "")
-        if '"job_id"' not in text and "job_id" not in text.lower():
-            continue
-        for match in re.finditer(r'"job_id"\s*:\s*"([A-Za-z0-9_-]{6,48})"', text):
-            job_id = str(match.group(1) or "").strip()
-            if not job_id:
-                continue
-            try:
-                snap = get_job_snapshot(job_id, "shortform")
-            except Exception:
-                continue
-            status = str(snap.get("status") or "").lower()
-            if status in {
-                "awaiting_scene_review",
-                "awaiting_approval",
-                "running",
-                "scenes_approved",
-                "animate",
-            }:
-                if job_id not in blocked:
-                    return job_id
     return None
 
 
@@ -4038,8 +4129,7 @@ def _wants_expand_visual_proof_short(user_text: str) -> bool:
         return False
     if re.search(
         r"\b(?:other|rest|remaining|more)\s+(?:\d+\s+)?scenes?\b|"
-        r"\bmake\s+(?:the\s+)?other\b|"
-        r"\banimate\s+them\b",
+        r"\bmake\s+(?:the\s+)?other\b",
         low,
     ) and re.search(r"\b(?:make|build|generate|finish|continue|go\s+ahead|animate)\b", low):
         return True
@@ -4317,24 +4407,148 @@ def _wants_animate_all_in_ship(user_text: str) -> bool:
     low = str(user_text or "").strip().lower()
     if any(term in low for term in ("no animation", "still only", "ken burns", "without animat", "animate false")):
         return False
+    if re.search(
+        r"\b(?:do\s+not|don['’]?t|dont|never|not\s+to)\s+(?:\w+\s+){0,3}(?:animate|animation)\b|"
+        r"\bnot\s+(?:animate|animated|animation)\b",
+        low,
+    ):
+        return False
     return any(
         term in low
         for term in ("animate", "animation", "i2v", "motion", "bring them to life", "animate them")
     )
 
 
+def _verified_bulk_ship_command_target(session: dict[str, Any], job_id: str) -> bool:
+    """Require an owned multi-scene review job before an approve/animate/export run."""
+
+    if not _shortform_job_matches_session(
+        session,
+        job_id,
+        require_multiple_scenes=True,
+        require_bound_session=True,
+    ):
+        return False
+    try:
+        snapshot = get_job_snapshot(job_id, "shortform")
+    except Exception:
+        return False
+    status = str(snapshot.get("status") or "").strip().lower()
+    stage = str(snapshot.get("stage") or snapshot.get("phase") or "").strip().lower()
+    terminal_states = {"running", "restarting", "starting", "complete", "failed", "error", "cancelled", "canceled"}
+    if status in terminal_states or stage in terminal_states:
+        return False
+    ready_states = {
+        "awaiting_scene_review",
+        "awaiting_approval",
+        "awaiting_animation_review",
+        "scenes_approved",
+        "animate",
+    }
+    return status in ready_states or stage in ready_states
+
+
+def _recover_bulk_ship_target(session: dict[str, Any]) -> tuple[str, str] | None:
+    """Resolve a plural ship command to same-session, multi-scene durable evidence."""
+
+    sid = str(session.get("session_id") or "")
+    fresh = store.get_session(sid) or session
+    candidates: list[str] = []
+    card_candidates: list[str] = []
+
+    # Prefer the latest persisted card in this chat. This is what the creator
+    # can actually see and intentionally refers to with "them".
+    for message in reversed(list(fresh.get("messages") or [])[-120:]):
+        if not isinstance(message, dict):
+            continue
+        deliverable = message.get("jobDeliverable")
+        if isinstance(deliverable, dict):
+            kind = str(deliverable.get("kind") or "shortform").strip().lower()
+            if kind == "shortform":
+                card_candidates.append(str(deliverable.get("job_id") or ""))
+
+    # A latest owned card is authoritative even when it is not shippable. Do
+    # not silently skip a one-scene/terminal card and mutate an older video.
+    for candidate in dict.fromkeys(value.strip() for value in card_candidates if str(value).strip()):
+        if not _shortform_job_matches_session(fresh, candidate):
+            continue
+        if _verified_bulk_ship_command_target(fresh, candidate):
+            return candidate, "shortform"
+        return None
+
+    last_command = fresh.get("last_studio_command")
+    if isinstance(last_command, dict):
+        for receipt_key in ("receipt", "execution_receipt"):
+            receipt = last_command.get(receipt_key)
+            if isinstance(receipt, dict):
+                candidates.append(str(receipt.get("target_job_id") or ""))
+                result = receipt.get("result")
+                if isinstance(result, dict):
+                    candidates.append(str(result.get("job_id") or ""))
+        for validation_key in ("validation", "command_validation"):
+            validation = last_command.get(validation_key)
+            resolved = validation.get("resolved_action") if isinstance(validation, dict) else None
+            arguments = resolved.get("arguments") if isinstance(resolved, dict) else None
+            if isinstance(arguments, dict):
+                candidates.append(str(arguments.get("job_id") or ""))
+
+    for job in reversed(list(fresh.get("active_jobs") or [])):
+        if isinstance(job, dict) and str(job.get("kind") or "shortform").strip().lower() == "shortform":
+            candidates.append(str(job.get("job_id") or ""))
+
+    last_production = fresh.get("last_production")
+    if isinstance(last_production, dict):
+        arguments = last_production.get("arguments")
+        if isinstance(arguments, dict):
+            candidates.append(str(arguments.get("job_id") or ""))
+
+    recovered = _recover_shortform_job_from_session(fresh)
+    if recovered:
+        candidates.append(recovered)
+
+    for candidate in dict.fromkeys(value.strip() for value in candidates if str(value).strip()):
+        if _verified_bulk_ship_command_target(fresh, candidate):
+            return candidate, "shortform"
+    return None
+
+
 def _shortform_bulk_ship_plan(snapshot: dict[str, Any], *, animate_all: bool) -> list[tuple[str, dict[str, Any]]]:
     status = str(snapshot.get("status") or snapshot.get("phase") or snapshot.get("stage") or "").strip().lower()
+    stage = str(snapshot.get("stage") or snapshot.get("phase") or "").strip().lower()
     job_id = str(snapshot.get("job_id") or "").strip()
-    if not job_id or status in {"running", "restarting", "starting", "complete", "failed", "error", "cancelled"}:
+    terminal_states = {"running", "restarting", "starting", "complete", "failed", "error", "cancelled", "canceled"}
+    if not job_id or status in terminal_states or stage in terminal_states:
         return []
-    if status not in {"awaiting_scene_review", "awaiting_approval", "scenes_approved"}:
+    ready_states = {"awaiting_scene_review", "awaiting_approval", "awaiting_animation_review", "scenes_approved"}
+    if status not in ready_states and stage not in ready_states:
         return []
+    # Always refresh/approve the complete still set first. Aggregate QA fails
+    # closed here, before any paid animation or finalization work can start.
     plan: list[tuple[str, dict[str, Any]]] = [
         ("set_production_scenes_animate", {"job_id": job_id, "animate": bool(animate_all)}),
     ]
     if animate_all:
-        plan.append(("animate_production_scenes", {"job_id": job_id}))
+        scenes = snapshot.get("scenes") if isinstance(snapshot.get("scenes"), list) else []
+        missing_clips = [
+            int(row.get("index"))
+            for row in scenes
+            if (
+                isinstance(row, dict)
+                and row.get("index") is not None
+                and str(row.get("index")).lstrip("-").isdigit()
+                and not bool(row.get("has_clip") or row.get("clip_rel"))
+            )
+        ]
+        # Preserve clips that already passed QA. If the snapshot cannot prove
+        # which clips exist, retain the conservative legacy all-scenes call.
+        animation_args: dict[str, Any] = {"job_id": job_id}
+        if scenes:
+            if missing_clips:
+                animation_args["scene_indices"] = missing_clips
+            else:
+                animation_args = {}
+        if animation_args:
+            plan.append(("animate_production_scenes", animation_args))
     plan.append(("finalize_production", {"job_id": job_id}))
     return plan
 
@@ -4349,7 +4563,7 @@ async def _apply_bulk_scene_ship(
     membership_plan: str,
     billing_profile: dict[str, Any] | None,
 ) -> dict[str, Any] | None:
-    target = _recover_poll_target(session)
+    target = _recover_bulk_ship_target(session)
     if not target:
         return None
     job_id, kind = target
@@ -6029,6 +6243,7 @@ async def _apply_model_agnostic_studio_command(
             "an expandable proof job owned by this Studio session. Reply directly to the Scene 1 card and try again."
         )
         messages.append({"role": "assistant", "content": assistant_text})
+        preserved_pending = list(fresh.get("pending_actions") or [])
         updated = store.update_session(
             sid,
             messages=messages,
@@ -6036,16 +6251,14 @@ async def _apply_model_agnostic_studio_command(
             interaction_state="clarification",
             production_gate_open=False,
             active_command_id="",
-            pending_actions=[],
-            last_production={},
             short_expansion_intake={},
             pending_scene_repair={},
         ) or fresh
-        await _fire_event(emit, "pending_actions", actions=[])
+        await _fire_event(emit, "pending_actions", actions=preserved_pending)
         return _turn_result(updated, {
             "session_id": sid,
             "assistant_message": assistant_text,
-            "pending_actions": [],
+            "pending_actions": preserved_pending,
             "active_jobs": list(updated.get("active_jobs") or []),
             "approval_mode": approval_mode,
             "reasoning_depth": reasoning_depth,
@@ -9738,6 +9951,9 @@ def _effective_agent_mode(agent_mode: str, user_text: str) -> str:
             # even though it is deliberately excluded from the brand-new
             # production commit classifier.
             or store.is_expand_short_request(user_text)
+            # Explicitly animating the existing scene set and finishing its
+            # MP4 is also an existing-production mutation.
+            or store.is_bulk_scene_ship_request(user_text)
         ):
             return "studio"
         return "plan"

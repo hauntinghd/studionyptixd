@@ -922,6 +922,28 @@ def is_bulk_scene_ship_request(text: str) -> bool:
             "the video",
         )
     )
+    # A creator who says "animate them and make the finished video" is
+    # authorizing the existing scene set, not asking Studio to create more
+    # scenes. Keep explicit proof-expansion language on the expansion path.
+    has_expansion_scope = bool(re.search(
+        r"\b(?:other|rest|remaining|more)\s+(?:\d+\s+)?scenes?\b|"
+        r"\b(?:make|build|generate|render)\s+(?:the\s+)?(?:other|rest|remaining)\b|"
+        r"\b(?:keep|approve|use)\s+scene\s*(?:1|one|first)\b",
+        low,
+    ))
+    has_plural_animation = bool(re.search(
+        r"\banimate\s+(?:all|every|each|them|the\s+scenes?)\b|"
+        r"\banimation\s+for\s+(?:all|every|each|the\s+scenes?)\b",
+        low,
+    ))
+    has_finished_output = bool(re.search(
+        r"\b(?:make|build|render|produce)\s+(?:the\s+)?(?:finished|final|complete)\s+(?:video|short|mp4)\b|"
+        r"\b(?:finish|finalize|complete|export)\b.{0,40}\b(?:video|short|mp4|it)\b|"
+        r"\b(?:finished|final|complete)\s+(?:video|short|mp4)\b",
+        low,
+    ))
+    if has_plural_animation and has_finished_output and not has_expansion_scope:
+        return True
     has_all = any(term in low for term in ("all", "every", "each", "rest of", "of the scenes"))
     if "approve all" in low and has_ship:
         return True
@@ -2379,7 +2401,7 @@ def is_new_production_request(
     if reply_to:
         return False
     low = strip_agent_mode_prefix(text).lower()
-    if is_expand_short_request(low):
+    if is_expand_short_request(low) or is_bulk_scene_ship_request(low):
         return False
     if _is_production_diagnostic_text(low):
         return False

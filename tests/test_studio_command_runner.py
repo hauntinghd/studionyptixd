@@ -30,6 +30,8 @@ def _snapshot():
                 "approved_for_animation": True,
                 "animate": True,
                 "has_clip": True,
+                "qa_stale": False,
+                "visual_qa": {"status": "pass", "pass": True},
                 "duration_sec": 5.0,
                 "narration": f"Narration beat {index + 1}",
                 "scene_action": f"Visual action {index + 1}",
@@ -55,6 +57,48 @@ def test_partial_scene_repair_message_reports_only_verified_successes():
     assert "Scene(s) 4, 5, 6 still failed" in message
     assert "not claiming those scenes are fixed" in message
     assert "rebuilt stills" not in message
+
+
+def test_repair_reconciliation_fails_closed_without_fresh_aggregate_qa(tmp_path):
+    workspace = tmp_path / "stale-repair"
+    workspace.mkdir()
+    (workspace / "scenes.json").write_text(
+        json.dumps([
+            {
+                "index": 0,
+                "status": "qa_blocked",
+                "qa_stale": True,
+                "approved_for_video": False,
+                "approved_for_animation": False,
+                "clip_rel": "clips/b00.mp4",
+                "still_rel": "stills/b00.png",
+                "still_qa": {"status": "pass", "pass": True},
+            }
+        ]),
+        encoding="utf-8",
+    )
+    (workspace / "result.json").write_text(
+        json.dumps({"status": "awaiting_animation_review", "approved_scene_count": 1}),
+        encoding="utf-8",
+    )
+
+    failed = tools._reconcile_audit_repair_state(
+        workspace,
+        job_id="stale-repair",
+        selected=[0],
+        failed=[],
+        reports=[{"scene_index": 0, "status": "repaired_correspondence"}],
+        repaired_stills=[0],
+        repaired_animations=[],
+    )
+
+    result = json.loads((workspace / "result.json").read_text(encoding="utf-8"))
+    assert failed == [0]
+    assert result["status"] == "failed"
+    assert result["repair_status"] == "failed"
+    assert result["approved_scene_count"] == 0
+    assert result["qa_blocked"] is True
+    assert result["repair_failure_details"][0]["stage"] == "aggregate_qa"
 
 
 def test_failed_owned_short_remains_repairable_from_durable_command(tmp_path, monkeypatch):

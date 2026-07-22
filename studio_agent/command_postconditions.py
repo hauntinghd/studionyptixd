@@ -259,6 +259,31 @@ def _verify_scene_repair(
             message="Selected scenes that were animated before repair must remain clip-ready.",
         )
     )
+    selected_qa = {
+        number: {
+            "qa_stale": bool(rows.get(number, {}).get("qa_stale", True)),
+            "visual_qa_pass": (
+                rows.get(number, {}).get("visual_qa", {}).get("pass")
+                if isinstance(rows.get(number, {}).get("visual_qa"), dict)
+                else None
+            ),
+        }
+        for number in expected.selected_scene_numbers
+    }
+    selected_qa_failed = [
+        number
+        for number, qa in selected_qa.items()
+        if qa["qa_stale"] or qa["visual_qa_pass"] is not True
+    ]
+    checks.append(
+        PostconditionCheck(
+            name="selected_scene_aggregate_qa",
+            status="failed" if selected_qa_failed else "passed",
+            expected={"qa_stale": False, "visual_qa_pass": True},
+            actual={"scenes": selected_qa, "failed": selected_qa_failed},
+            message="A repaired scene is complete only when current asset-bound aggregate QA passes.",
+        )
+    )
 
     if not expected.untouched_scene_numbers:
         checks.append(
