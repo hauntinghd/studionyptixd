@@ -59,7 +59,7 @@ import {
     type AgentToolActivitySummary,
 } from '../lib/streamAgentChat';
 import { useSpeechDictation } from '../hooks/useSpeechDictation';
-import { applyPendingStudioBundleReload, ensureStudioFresh } from '../lib/studioClientSync';
+import { ensureStudioFresh } from '../lib/studioClientSync';
 import { loadImageModelPref, saveImageModelPref } from '../lib/productionModelPrefs';
 import { AuthContext, resolveStudioBackendUrl } from '../shared';
 import { loadStudioHubState } from '../lib/studioHubState';
@@ -4187,10 +4187,7 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                             setActivitySteps([]);
                         }
                     }, 5000);
-                    if (completedCleanly) {
-                        setVerificationSteps([]);
-                        applyPendingStudioBundleReload();
-                    }
+                    if (completedCleanly) setVerificationSteps([]);
                 }
             }
         },

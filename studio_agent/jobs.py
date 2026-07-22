@@ -1293,7 +1293,15 @@ def _shortform_status(job_id: str) -> dict[str, Any]:
         ),
         "error": ("Cancelled by user" if cancelled else data.get("error")),
         "running": not complete and not terminal_fail and not awaiting_scene_review,
-        "title": str(data.get("topic") or data.get("category") or "Short-form"),
+        # Repair/finalization writes a compact result.json that may omit topic.
+        # The durable job spec remains authoritative; falling back straight to
+        # a generic label makes same-production reconciliation block this card.
+        "title": str(
+            data.get("topic")
+            or data.get("category")
+            or _shortform_job_title(workspace)
+            or "Short-form"
+        ),
     }
     if isinstance(data.get("cost"), dict):
         snap["cost"] = data.get("cost")

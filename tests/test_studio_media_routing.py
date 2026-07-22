@@ -1,10 +1,46 @@
 from __future__ import annotations
 
-from studio_agent import anti_hallucination, idempotent_mutations, production_budget, store
+import json
+
+from studio_agent import anti_hallucination, idempotent_mutations, jobs, production_budget, store
 from studio_agent.runpod_contract import RUNPOD_PRODUCTION_TOOL_ALLOWLIST
 
 
 REPAIR_TOOL = "audit_and_repair_production_scenes"
+
+
+def test_awaiting_review_snapshot_keeps_durable_production_title(tmp_path, monkeypatch) -> None:
+    job_id = "repair-review-job"
+    output_name = "shortform-output"
+    workspace = tmp_path / output_name / job_id
+    workspace.mkdir(parents=True)
+    title = 'Scene Blueprint: "Why Men Lose Interest After The Chase Ends" (30s)'
+    (workspace / "job_spec.json").write_text(
+        json.dumps({"topic": title, "scene_count": 1}),
+        encoding="utf-8",
+    )
+    (workspace / "result.json").write_text(
+        json.dumps({"status": "awaiting_animation_review"}),
+        encoding="utf-8",
+    )
+    (workspace / "scenes.json").write_text(
+        json.dumps([{
+            "index": 0,
+            "status": "clip_ready",
+            "approved_for_video": True,
+            "approved_for_animation": True,
+            "clip_rel": "clips/b00.mp4",
+        }]),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(jobs, "ROOT", tmp_path)
+    monkeypatch.setattr(jobs, "SKELETON_OUTPUT", output_name)
+
+    snapshot = jobs._shortform_status(job_id)
+
+    assert snapshot["status"] == "awaiting_approval"
+    assert snapshot["stage"] == "awaiting_animation_review"
+    assert snapshot["title"] == title
 
 
 def test_media_route_revision_changes_only_when_picker_changes(tmp_path, monkeypatch) -> None:

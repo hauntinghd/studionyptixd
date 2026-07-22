@@ -55,15 +55,10 @@ export async function ensureStudioFresh(accessToken?: string): Promise<void> {
         if (nextBundle && prevBundle && nextBundle !== prevBundle) {
             prefetchBundle(nextBundle);
             sessionStorage.setItem(PENDING_BUNDLE_KEY, nextBundle);
-            // Hard reload on deploy so users never stick on old Listening/WORKING chrome.
-            // Soft-prefetch alone left many sessions on a stale Vercel/CDN bundle.
-            const lastHard = Number(sessionStorage.getItem('nyptid_studio_hard_reload_at') || 0);
-            if (Date.now() - lastHard > 15_000) {
-                sessionStorage.setItem('nyptid_studio_hard_reload_at', String(Date.now()));
-                const url = new URL(window.location.href);
-                url.searchParams.set('_studio_v', nextBundle.slice(0, 24) || String(Date.now()));
-                window.location.replace(url.toString());
-            }
+            // This check runs immediately after Send. Never navigate here: a
+            // deploy discovered during a repair must not tear down the stream
+            // or make a successfully persisted scene card appear to vanish.
+            // Manual Sync/reopen remains the explicit bundle-update boundary.
         }
     } catch {
         /* best-effort */
