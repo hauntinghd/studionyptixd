@@ -48,15 +48,15 @@ def test_media_route_revision_changes_only_when_picker_changes(tmp_path, monkeyp
     session = store.create_session(
         user_id="route-user",
         model="test-model",
-        image_model="grok_imagine",
-        video_model="grok_imagine_video",
+        image_model="seedream_v4",
+        video_model="kling21_standard",
     )
     session_id = session["session_id"]
 
     assert store.media_route_snapshot(session) == {
         "revision": 1,
-        "image_model_id": "grok_imagine",
-        "video_model": "grok_imagine_video",
+        "image_model_id": "seedream_v4",
+        "video_model": "kling21_standard",
         "updated_at": session["media_route_updated_at"],
     }
 
@@ -80,8 +80,8 @@ def test_stale_session_writer_cannot_roll_back_a_newer_media_route(tmp_path, mon
     session = store.create_session(
         user_id="route-user",
         model="test-model",
-        image_model="grok_imagine",
-        video_model="grok_imagine_video",
+        image_model="seedream_v4",
+        video_model="kling21_standard",
     )
     stale = dict(session)
 

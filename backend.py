@@ -65,17 +65,9 @@ from backend_runtime import (
 )
 from backend_studio_utilities import build_studio_utility_handlers
 from audio import (
-    DEFAULT_ELEVENLABS_VOICES,
     _audio_track_exists,
     _build_atempo_filter_chain,
-    _cache_voice_catalog,
-    _default_elevenlabs_voice_priority,
-    _extract_word_timings,
-    _fallback_voice_catalog,
-    _fetch_voice_catalog,
     _generate_catalyst_bgm_track,
-    _generate_voiceover_with_edge_tts,
-    _is_retryable_elevenlabs_voice_error,
     _mix_ambience_tracks,
     _probe_audio_duration_seconds,
     _probe_video_duration_seconds,
@@ -88,11 +80,7 @@ from audio import (
     generate_ass_subtitles,
     generate_scene_sfx,
     generate_sfx_for_scene,
-    generate_voiceover,
     _sfx_enabled,
-    _resolve_edge_tts_voice,
-    _resolve_elevenlabs_voice_candidates,
-    _voice_provider_snapshot,
 )
 from auth import FALLBACK_SUPABASE_ANON_KEY, FALLBACK_SUPABASE_URL, build_auth_helpers
 from alt_history_private_router import build_alt_history_private_router
@@ -119,14 +107,11 @@ from thumblab_router import (
     build_thumblab_router,
     _apply_thumbnail_text_overlay,
     _enforce_thumbnail_1080,
-    _generate_thumbnail_image,
     _thumbnail_output_dir_for_user,
 )
 from zerotier_private_router import build_zerotier_private_router
 from backend_settings import (
-    XAI_API_KEY,
     ELEVENLABS_API_KEY,
-    PIKZELS_API_KEY,
     COMFYUI_URL,
     SUPABASE_URL,
     SUPABASE_ANON_KEY,
@@ -156,13 +141,6 @@ from backend_settings import (
     SITE_URL,
     FAL_AI_KEY,
     FAL_IMAGE_BACKUP_MODEL,
-    PIKZELS_THUMBNAIL_MODEL,
-    PIKZELS_RECREATE_MODEL,
-    PIKZELS_TITLE_MODEL,
-    RUNWAY_API_KEY,
-    RUNWAY_API_KEY_SOURCE,
-    RUNWAY_VIDEO_MODEL,
-    RUNWAY_API_VERSION,
     PLAN_PRICE_USD,
     APP_DATA_DIR,
     KLING21_STANDARD_I2V_5S_USD,
@@ -175,9 +153,6 @@ from backend_settings import (
     SKELETON_USE_SEEDREAM_EDIT,
     STORY_GLOBAL_REFERENCE_IMAGE_URL,
     MOTIVATION_GLOBAL_REFERENCE_IMAGE_URL,
-    USE_FAL_GROK_IMAGE,
-    IMAGE_PROVIDER_ORDER,
-    XAI_IMAGE_FALLBACK_ENABLED,
     HIDREAM_ENABLED,
     HIDREAM_MODEL,
     HIDREAM_EDIT_ENABLED,
@@ -259,6 +234,8 @@ from video_pipeline import (
     _normalize_creative_image_model_id,
     _normalize_scene_image_model_id,
     _normalize_creative_video_model_id,
+    _assert_creative_image_model_allowed,
+    _assert_creative_video_model_allowed,
     _creative_image_model_profile,
     _creative_video_model_profile,
     _creative_image_credit_cost,
@@ -655,13 +632,6 @@ from backend_models import (
     CatalystOutcomeIngestRequest,
     CatalystAutoOutcomeHarvestRequest,
     CatalystBackfillTickRequest,
-)
-from backend_demo import (
-    DEMO_DIR,
-    analyze_screen_recording,
-    generate_demo_script,
-    generate_talking_head,
-    composite_demo_video,
 )
 from backend_state import (
     _creative_sessions,
@@ -4689,102 +4659,227 @@ from backend_script_prompts import TEMPLATE_SYSTEM_PROMPTS
 # â"€â"€â"€ ElevenLabs TTS â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 
+def _anthropic_content_text(response: dict) -> str:
+    choices = response.get("choices") if isinstance(response, dict) else None
+    if isinstance(choices, list) and choices:
+        message = choices[0].get("message") if isinstance(choices[0], dict) else None
+        if isinstance(message, dict):
+            return str(message.get("content") or "").strip()
+    blocks = response.get("content") if isinstance(response, dict) else None
+    if isinstance(blocks, list):
+        return "\n".join(
+            str(block.get("text") or "")
+            for block in blocks
+            if isinstance(block, dict) and block.get("type") == "text"
+        ).strip()
+    return ""
+
+
+def _require_creative_request_model_policy(
+    *,
+    image_model_id: object = "",
+    video_model_id: object = "",
+) -> None:
+    """Reject a new denied/unknown legacy selection before any provider I/O."""
+    try:
+        if str(image_model_id or "").strip():
+            _assert_creative_image_model_allowed(str(image_model_id))
+        if str(video_model_id or "").strip():
+            _assert_creative_video_model_allowed(str(video_model_id))
+    except RuntimeError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+def _require_studio_provider_readiness(*, semantic: bool = False, media: bool = False) -> None:
+    """Fail closed before billing when an effective provider is unavailable."""
+    if semantic:
+        from studio_agent import openrouter as anthropic_client
+
+        if not anthropic_client.anthropic_api_key():
+            raise HTTPException(503, "ANTHROPIC_API_KEY is not configured for Studio")
+    if media and not FAL_AI_KEY:
+        raise HTTPException(503, "FAL_AI_KEY is not configured for Studio media")
+
+
+def _resolve_safe_fal_voice_id(*, explicit: str = "", skeleton: bool = False) -> str:
+    """Resolve only an advertised FAL voice, ignoring retired persisted/env IDs."""
+    from skeleton_ai import voice_fal
+
+    safe_voice_ids = {
+        str(profile.get("voice_id") or "").strip()
+        for profile in voice_fal.VOICE_PROFILES
+    }
+    requested = str(explicit or "").strip()
+    if requested in safe_voice_ids:
+        return requested
+    configured = voice_fal.resolve_voice_id(skeleton=skeleton)
+    if configured in safe_voice_ids:
+        return configured
+    return voice_fal.DEFAULT_VOICE
+
+
+async def _migrate_legacy_session_provider_state(session: dict | None) -> dict | None:
+    """Persist explicit safe FAL selections for an older Creative/Long Form record."""
+    if not isinstance(session, dict):
+        return session
+    from studio_agent import provider_policy as studio_provider_policy
+
+    template = str(session.get("template") or "").strip()
+    old_image = str(session.get("image_model_id") or "").strip()
+    old_video = str(session.get("video_model_id") or "").strip()
+    old_voice = str(session.get("voice_id") or "").strip()
+    new_image = _normalize_scene_image_model_id(old_image, template=template)
+    new_video = _normalize_creative_video_model_id(old_video)
+    new_voice = _resolve_safe_fal_voice_id(
+        explicit=old_voice,
+        skeleton=template.lower() == "skeleton",
+    )
+    changes = [
+        ("image_model_id", old_image, new_image, "image"),
+        ("video_model_id", old_video, new_video, "i2v"),
+        ("voice_id", old_voice, new_voice, "tts"),
+    ]
+    migrations = list(session.get("provider_policy_migrations") or [])
+    changed = False
+    for field, previous, current, capability in changes:
+        if previous == current:
+            continue
+        session[field] = current
+        migrations.append({
+            "field": field,
+            "capability": capability,
+            "from": previous,
+            "to": current,
+            "policy_version": studio_provider_policy.POLICY_VERSION,
+            "migrated_at": time.time(),
+        })
+        changed = True
+    session["provider_policy"] = studio_provider_policy.POLICY_VERSION
+    if changed:
+        session["provider_policy_migrations"] = migrations[-24:]
+        session["updated_at"] = time.time()
+        async with _creative_sessions_lock:
+            _save_creative_sessions_to_disk(
+                remote_session_id=str(session.get("session_id") or "").strip() or None,
+            )
+    return session
+
+
+async def _direct_anthropic_json_completion(
+    system_prompt: str,
+    user_prompt: str,
+    temperature: float = 0.7,
+    timeout_sec: int = 120,
+) -> dict:
+    """Return structured JSON through Studio's direct Anthropic adapter."""
+    from studio_agent import openrouter as anthropic_client
+    from studio_agent import provider_policy as studio_provider_policy
+
+    studio_provider_policy.assert_provider_allowed(
+        "anthropic",
+        studio_provider_policy.RUNNER_CAPABILITY,
+    )
+    response = await anthropic_client.chat_completion(
+        messages=[
+            {"role": "system", "content": str(system_prompt or "")},
+            {"role": "user", "content": str(user_prompt or "")},
+        ],
+        model=studio_provider_policy.DEFAULT_RUNNER_MODEL,
+        temperature=float(temperature),
+        reasoning_depth="balanced",
+        max_tokens=8192,
+    )
+    content = _anthropic_content_text(response)
+    if not content:
+        raise ValueError("Direct Anthropic returned empty content")
+    return _extract_json_object_from_text(content, "direct Anthropic response")
+
+
+async def _direct_anthropic_vision_json_completion(
+    system_prompt: str,
+    user_prompt: str,
+    image_paths: list[str] | None = None,
+    temperature: float = 0.35,
+    timeout_sec: int = 120,
+) -> dict:
+    """Return structured visual QA through the direct Anthropic Messages API."""
+    from studio_agent import openrouter as anthropic_client
+    from studio_agent import provider_policy as studio_provider_policy
+
+    studio_provider_policy.assert_provider_allowed(
+        "anthropic",
+        studio_provider_policy.SEMANTIC_QA_CAPABILITY,
+    )
+    key = anthropic_client.anthropic_api_key()
+    if not key:
+        raise RuntimeError("ANTHROPIC_API_KEY is not set")
+    content: list[dict] = [{"type": "text", "text": str(user_prompt or "")}]
+    for image_path in list(image_paths or [])[:24]:
+        data_url = _file_to_data_image_url(str(image_path), max_bytes=18 * 1024 * 1024)
+        if not data_url.startswith("data:") or ";base64," not in data_url:
+            continue
+        header, encoded = data_url.split(",", 1)
+        media_type = header[5:].split(";", 1)[0].strip().lower()
+        if media_type not in {"image/jpeg", "image/png", "image/gif", "image/webp"}:
+            continue
+        content.append({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": media_type,
+                "data": encoded,
+            },
+        })
+    payload = {
+        "model": studio_provider_policy.DEFAULT_RUNNER_MODEL,
+        "max_tokens": 8192,
+        "system": str(system_prompt or ""),
+        "messages": [{"role": "user", "content": content}],
+        "temperature": float(temperature),
+    }
+    payload = studio_provider_policy.sanitize_anthropic_payload(
+        studio_provider_policy.DEFAULT_RUNNER_MODEL,
+        payload,
+    )
+    headers = {
+        "x-api-key": key,
+        "anthropic-version": os.getenv("ANTHROPIC_VERSION", "2023-06-01"),
+        "content-type": "application/json",
+    }
+    async with httpx.AsyncClient(timeout=max(30, int(timeout_sec))) as client:
+        response = await client.post(
+            f"{anthropic_client.ANTHROPIC_BASE}/messages",
+            headers=headers,
+            json=payload,
+        )
+    if response.status_code >= 400:
+        raise RuntimeError(f"Anthropic {response.status_code}: {response.text[:2000]}")
+    content_text = _anthropic_content_text(response.json())
+    if not content_text:
+        raise ValueError("Direct Anthropic vision returned empty content")
+    return _extract_json_object_from_text(content_text, "direct Anthropic vision response")
+
+
 async def _fal_any_llm_json_completion(
     system_prompt: str,
     user_prompt: str,
     temperature: float = 0.7,
     timeout_sec: int = 120,
-    model: str = "anthropic/claude-sonnet-4.5",
+    model: str = "claude-sonnet-5",
 ) -> dict:
-    """Call an LLM via fal.ai's any-llm router and return a parsed JSON object.
-
-    This is the single LLM text-completion path for Studio. Everything in
-    Studio runs on fal now — no direct Anthropic / OpenAI / xAI API keys on
-    the hot path. The prior `_fal_openrouter_json_completion` pointed at
-    `fal.run/fal-ai/openrouter/router` which returns 404 ("Application
-    'openrouter' not found") — that's what was silently making script
-    generation fall through to the broken XAI fallback and hang at 5%.
-
-    Routed through fal_gate so concurrency + content-policy errors surface
-    as FalFailed (terminal — we do NOT silently retry content policy).
-    """
-    if not FAL_AI_KEY:
-        raise RuntimeError("FAL_AI_KEY not configured")
-    import fal_gate
-    body = {
-        "model": model,
-        "system_prompt": system_prompt,
-        "prompt": user_prompt,
-        "temperature": max(0.2, float(temperature)),
-    }
-    sys_len = len(system_prompt or "")
-    user_len = len(user_prompt or "")
-    log.info(
-        f"[fal_any_llm] START model={model} sys_chars={sys_len} user_chars={user_len} "
-        f"timeout={timeout_sec}s"
+    # Compatibility name only. The effective request is direct Anthropic;
+    # saved FAL/OpenRouter model labels cannot alter provider routing.
+    del model
+    return await _direct_anthropic_json_completion(
+        system_prompt,
+        user_prompt,
+        temperature=temperature,
+        timeout_sec=timeout_sec,
     )
-    t0 = time.time()
-    try:
-        data = await fal_gate.post_with_retry(
-            "https://fal.run/fal-ai/any-llm",
-            api_key=FAL_AI_KEY,
-            json_body=body,
-            timeout_sec=timeout_sec,
-            max_attempts=3,
-            source="any_llm_json_completion",
-        )
-    except fal_gate.FalFailed as exc:
-        dur = time.time() - t0
-        log.error(f"[fal_any_llm] FAILED after {dur:.1f}s model={model}: {str(exc)[:200]}")
-        _studio_alerts.send_exception(exc, source="_fal_any_llm_json_completion", context={"model": model})
-        raise
-    except fal_gate.FalBusy as exc:
-        dur = time.time() - t0
-        log.error(f"[fal_any_llm] BUSY after {dur:.1f}s model={model}: {str(exc)[:200]}")
-        _studio_alerts.send_exception(exc, source="_fal_any_llm_json_completion (busy)", context={"model": model})
-        raise
-    except Exception as exc:
-        dur = time.time() - t0
-        log.error(f"[fal_any_llm] UNEXPECTED {type(exc).__name__} after {dur:.1f}s model={model}: {str(exc)[:200]}")
-        raise
-    dur = time.time() - t0
-    if not isinstance(data, dict):
-        log.error(f"[fal_any_llm] bad-shape response after {dur:.1f}s model={model}")
-        raise ValueError("fal any-llm returned non-JSON response")
-    output_err = data.get("error")
-    if output_err:
-        log.error(f"[fal_any_llm] upstream-error after {dur:.1f}s model={model}: {str(output_err)[:200]}")
-        raise RuntimeError(f"fal any-llm upstream error: {output_err}")
-    content = str(data.get("output") or data.get("result") or "")
-    if not content:
-        # Accept legacy OpenAI-shaped payloads just in case fal changes format.
-        content = str(((data.get("choices") or [{}])[0] or {}).get("message", {}).get("content", "") or "")
-    if not content:
-        log.error(f"[fal_any_llm] empty-content after {dur:.1f}s model={model} data_keys={list(data.keys())}")
-        raise ValueError("fal any-llm returned empty content")
-    log.info(f"[fal_any_llm] OK after {dur:.1f}s model={model} content_chars={len(content)}")
-    # Claude via any-llm often wraps JSON in ```json fences; strip and find the
-    # outer object.
-    text = content.strip()
-    if text.startswith("```"):
-        text = re.sub(r"^```[a-zA-Z0-9_-]*\s*", "", text)
-        text = re.sub(r"\s*```$", "", text).strip()
-    start = text.find("{")
-    end = text.rfind("}") + 1
-    if start == -1 or end <= 0:
-        log.error(f"[fal_any_llm] no-json after {dur:.1f}s model={model} content_preview={content[:200]!r}")
-        raise ValueError("No JSON object found in fal any-llm response")
-    try:
-        return json.loads(text[start:end])
-    except json.JSONDecodeError as jde:
-        log.error(f"[fal_any_llm] json-parse-error after {dur:.1f}s model={model}: {jde} preview={text[start:min(start+300, end)]!r}")
-        raise
 
 
-# Legacy names kept for the runtime-hook wiring in video_pipeline /
-# catalyst. Both now route through fal.ai's any-llm — XAI direct calls
-# would hit a team-quota-exhausted wall anyway, and Casey's explicit
-# direction is "fal.ai for everything".
+# Historical helper names remain API-compatible, but both are hard-routed to
+# the direct Anthropic implementation above.
 async def _xai_json_completion(system_prompt: str, user_prompt: str, temperature: float = 0.7, timeout_sec: int = 90) -> dict:
     return await _fal_any_llm_json_completion(
         system_prompt,
@@ -4799,7 +4894,7 @@ async def _fal_openrouter_json_completion(
     user_prompt: str,
     temperature: float = 0.7,
     timeout_sec: int = 120,
-    model: str = "anthropic/claude-sonnet-4.5",
+    model: str = "claude-sonnet-5",
 ) -> dict:
     return await _fal_any_llm_json_completion(
         system_prompt,
@@ -4816,88 +4911,29 @@ async def _fal_any_llm_vision_json_completion(
     image_paths: list[str] | None = None,
     temperature: float = 0.35,
     timeout_sec: int = 120,
-    model: str = "anthropic/claude-sonnet-4.5",
+    model: str = "claude-sonnet-5",
 ) -> dict:
-    """Vision-capable LLM completion via fal.ai's `any-llm/vision` router.
-
-    Collects images as base64 data URLs, sends them via the `image_urls` field
-    (plural, schema confirmed 2026-04-19), and returns parsed JSON. This is the
-    multimodal counterpart to `_fal_any_llm_json_completion` -- single path, no
-    direct Anthropic / OpenAI / xAI hits.
-    """
-    if not FAL_AI_KEY:
-        raise RuntimeError("FAL_AI_KEY not configured")
-    import fal_gate
-    image_urls: list[str] = []
-    for image_path in list(image_paths or [])[:24]:
-        data_url = _file_to_data_image_url(str(image_path), max_bytes=18 * 1024 * 1024)
-        if data_url:
-            image_urls.append(data_url)
-    body = {
-        "model": model,
-        "system_prompt": system_prompt,
-        "prompt": user_prompt,
-        "image_urls": image_urls,
-        "temperature": max(0.2, float(temperature)),
-    }
-    log.info(
-        f"[fal_any_llm_vision] START model={model} images={len(image_urls)} "
-        f"sys_chars={len(system_prompt or '')} user_chars={len(user_prompt or '')}"
+    # Compatibility name only. Semantic vision is direct Anthropic and the
+    # legacy model argument cannot select a different provider.
+    del model
+    return await _direct_anthropic_vision_json_completion(
+        system_prompt,
+        user_prompt,
+        image_paths=image_paths,
+        temperature=temperature,
+        timeout_sec=timeout_sec,
     )
-    t0 = time.time()
-    try:
-        data = await fal_gate.post_with_retry(
-            "https://fal.run/fal-ai/any-llm/vision",
-            api_key=FAL_AI_KEY,
-            json_body=body,
-            timeout_sec=timeout_sec,
-            max_attempts=3,
-            source="any_llm_vision_json_completion",
-        )
-    except fal_gate.FalFailed as exc:
-        dur = time.time() - t0
-        log.error(f"[fal_any_llm_vision] FAILED after {dur:.1f}s model={model}: {str(exc)[:200]}")
-        _studio_alerts.send_exception(exc, source="_fal_any_llm_vision_json_completion", context={"model": model, "images": len(image_urls)})
-        raise
-    except Exception as exc:
-        dur = time.time() - t0
-        log.error(f"[fal_any_llm_vision] UNEXPECTED {type(exc).__name__} after {dur:.1f}s model={model}: {str(exc)[:200]}")
-        raise
-    dur = time.time() - t0
-    if not isinstance(data, dict):
-        log.error(f"[fal_any_llm_vision] bad-shape response after {dur:.1f}s model={model}")
-        raise ValueError("fal any-llm/vision returned non-JSON response")
-    output_err = data.get("error")
-    if output_err:
-        log.error(f"[fal_any_llm_vision] upstream-error after {dur:.1f}s: {str(output_err)[:200]}")
-        raise RuntimeError(f"fal any-llm/vision upstream error: {output_err}")
-    content = str(data.get("output") or data.get("result") or "")
-    if not content:
-        content = str(((data.get("choices") or [{}])[0] or {}).get("message", {}).get("content", "") or "")
-    if not content:
-        raise ValueError("fal any-llm/vision returned empty content")
-    log.info(f"[fal_any_llm_vision] OK after {dur:.1f}s model={model} content_chars={len(content)}")
-    text = content.strip()
-    if text.startswith("```"):
-        text = re.sub(r"^```[a-zA-Z0-9_-]*\s*", "", text)
-        text = re.sub(r"\s*```$", "", text).strip()
-    start = text.find("{")
-    end = text.rfind("}") + 1
-    if start == -1 or end <= 0:
-        raise ValueError("No JSON object found in fal any-llm/vision response")
-    return json.loads(text[start:end])
-
-
-# Backwards-compat wrapper: keeps existing call sites working after the fal-first migration.
-# `model` is accepted but ignored (Claude Sonnet 4.5 is the fal vision default).
+# Backwards-compatible name for old call sites. The model argument is ignored;
+# semantic vision is always direct Anthropic under the effective policy.
 async def _xai_json_completion_multimodal(
     system_prompt: str,
     user_prompt: str,
     image_paths: list[str] | None = None,
     temperature: float = 0.35,
     timeout_sec: int = 120,
-    model: str = "grok-4",
+    model: str = "claude-sonnet-5",
 ) -> dict:
+    del model
     return await _fal_any_llm_vision_json_completion(
         system_prompt=system_prompt,
         user_prompt=user_prompt,
@@ -5026,8 +5062,7 @@ configure_video_pipeline_runtime_hooks(
     longform_named_human_priority_lock=_longform_named_human_priority_lock,
     build_scene_prompt_with_reference=_build_scene_prompt_with_reference,
     longform_subject_lock=_longform_subject_lock,
-    xai_json_completion=_xai_json_completion,
-    fal_openrouter_json_completion=_fal_openrouter_json_completion,
+    anthropic_json_completion=_direct_anthropic_json_completion,
 )
 
 
@@ -5586,8 +5621,10 @@ def _normalize_image_provider_key(provider: str) -> str:
         return "wan22"
     if key in {"sdxl", "comfy", "comfyui", "local"}:
         return "sdxl"
-    if key in {"xai", "grok", "fal"}:
-        return "xai"
+    if key == "fal":
+        return "fal"
+    if key in {"xai", "grok"}:
+        return "denied"
     return key
 
 
@@ -6382,12 +6419,8 @@ def _build_fal_image_model_payload(model_id: str, prompt: str, resolution: str) 
         "prompt": prompt,
         "sync_mode": True,
     }
-    aspect_ratio = _fal_aspect_ratio_for_resolution(resolution)
     image_size = _fal_image_size_for_creative_model(resolution)
-    if model_id in {"imagen4_fast", "imagen4_ultra"}:
-        payload["aspect_ratio"] = aspect_ratio
-        payload["output_format"] = "png"
-    elif model_id == "flux_2_pro":
+    if model_id == "flux_2_pro":
         payload["image_size"] = image_size
         payload["output_format"] = "png"
     elif model_id == "seedream45":
@@ -6397,8 +6430,6 @@ def _build_fal_image_model_payload(model_id: str, prompt: str, resolution: str) 
         payload["image_size"] = image_size
     elif model_id in {"recraft_v4", "recraft_v4_pro"}:
         payload["style"] = "realistic_image"
-    elif model_id == "nano_banana_pro":
-        payload["output_format"] = "png"
     elif model_id == "flux_lora_skeleton":
         # fal-ai/flux-lora expects image_size + output_format, and the
         # caller attaches `loras` as a separate step (see
@@ -6452,7 +6483,7 @@ async def _generate_image_fal_selected_model(
         composed_prompt,
         resolution,
     )
-    if resolved_id == "grok_imagine" and reference_image_url:
+    if bool(profile.get("supports_reference_conditioning")) and reference_image_url:
         payload["image_url"] = reference_image_url
     # FLUX LoRA endpoint expects a `loras` array. Pull the trained weights
     # URL + scale from the profile. scale=1.0 was too weak on flux-schnell
@@ -6466,7 +6497,7 @@ async def _generate_image_fal_selected_model(
 
     # Route through fal_gate so the 20-concurrent-limit on fal is respected
     # across ALL call sites. Before this migration, raw httpx.post calls here
-    # could starve the gate'd ERNIE/openrouter calls under burst load.
+    # could starve the gated FAL image calls under burst load.
     import fal_gate as _fg_img
     try:
         data = await _fg_img.post_with_retry(
@@ -6503,19 +6534,12 @@ async def _generate_image_fal_selected_model(
     }
 
 
-GROK_IMAGINE_URL = "https://fal.run/xai/grok-imagine-image"
 FAL_FLUX_SCHNELL_URL = "https://fal.run/fal-ai/flux/schnell"
 
 
 def _normalize_fal_image_backup_model(value: str | None) -> str:
-    key = str(value or "").strip().lower()
-    if key in {"grok", "grok_imagine", "grok-imagine", "xai", "xai_grok"}:
-        return "grok_imagine"
-    if key in {"flux", "flux_schnell", "flux-schnell", "flux1_schnell", "flux.1-schnell"}:
-        return "flux_schnell"
-    if key in {"imagen4", "imagen4_fast", "imagen4-fast", "imagen4_preview", "imagen4-preview"}:
-        return "imagen4_fast"
-    return "imagen4_fast"
+    del value
+    return "flux_schnell"
 
 
 def _fal_image_size_for_resolution(resolution: str) -> str:
@@ -6580,7 +6604,7 @@ async def _generate_image_fal_flux_schnell(
 
 _pending_training: dict[str, dict] = {}
 
-async def _save_training_candidate(prompt: str, image_path: str, template: str = "", source: str = "grok", metadata: Optional[dict] = None) -> str:
+async def _save_training_candidate(prompt: str, image_path: str, template: str = "", source: str = "fal", metadata: Optional[dict] = None) -> str:
     """Stage a prompt+image pair as a training candidate. Returns generation_id.
     Image is saved immediately but only promoted to 'accepted' via feedback."""
     gen_id = f"gen_{int(time.time() * 1000)}_{id(image_path) % 9999:04d}"
@@ -6730,7 +6754,7 @@ async def _mark_training_feedback(gen_id: str, accepted: bool, user_id: str = ""
                         "prompt": entry["prompt"][:2000],
                         "image_filename": gen_id + ".png",
                         "template": entry.get("template", ""),
-                        "source": entry.get("source", "grok"),
+                        "source": entry.get("source", "fal"),
                         "status": "accepted",
                         "created_at": entry["created_at"],
                     },
@@ -6753,7 +6777,7 @@ async def _mark_training_feedback(gen_id: str, accepted: bool, user_id: str = ""
 
 
 def _file_to_data_image_url(image_path: str, max_bytes: int = 8 * 1024 * 1024) -> str:
-    """Encode a local image file as a data URL for xAI image reference conditioning."""
+    """Encode a local image file as a provider-safe data URL."""
     p = Path(image_path)
     if not p.exists() or p.stat().st_size == 0:
         return ""
@@ -6765,115 +6789,6 @@ def _file_to_data_image_url(image_path: str, max_bytes: int = 8 * 1024 * 1024) -
     mime = "image/png" if ext == ".png" else ("image/webp" if ext == ".webp" else "image/jpeg")
     b64 = base64.b64encode(p.read_bytes()).decode("ascii")
     return f"data:{mime};base64,{b64}"
-
-
-async def _generate_image_xai_direct(
-    prompt: str,
-    output_path: str,
-    resolution: str = "720p",
-    reference_image_url: str = "",
-    reference_lock_mode: str = "strict",
-) -> dict:
-    """Backwards-compat shim: delegates to fal `imagen4_fast` via `_generate_image_fal_selected_model`.
-    Kept under the legacy name so existing runtime-hook wiring + any external callers continue to work
-    after the 2026-04-19 fal-first migration.
-    """
-    return await _generate_image_fal_selected_model(
-        "imagen4_fast",
-        prompt,
-        output_path,
-        resolution=resolution,
-        reference_image_url=reference_image_url,
-    )
-
-
-async def generate_image_grok(
-    prompt: str,
-    output_path: str,
-    resolution: str = "720p",
-    reference_image_url: str = "",
-    reference_lock_mode: str = "strict",
-) -> dict:
-    """Generate an image using the configured remote fallback lane.
-    Returns {"local_path": str, "cdn_url": str} so animation backends can reuse the CDN URL directly.
-    """
-    fal_model = _normalize_fal_image_backup_model(FAL_IMAGE_BACKUP_MODEL)
-    if FAL_AI_KEY:
-        try:
-            if reference_image_url:
-                fal_model = "imagen4_fast"
-            if fal_model == "flux_schnell":
-                return await _generate_image_fal_flux_schnell(
-                    prompt,
-                    output_path,
-                    resolution=resolution,
-                )
-            aspect = "16:9" if str(resolution or "").strip().lower().endswith("_landscape") else "9:16"
-            headers = {
-                "Authorization": "Key " + FAL_AI_KEY,
-                "Content-Type": "application/json",
-            }
-            payload = {
-                "prompt": prompt,
-                "num_images": 1,
-                "aspect_ratio": aspect,
-                "output_format": "png",
-            }
-            if reference_image_url:
-                payload["image_url"] = reference_image_url
-                log.info(
-                    f"Fal Grok image conditioning enabled: "
-                    f"{'https_url' if reference_image_url.startswith('http') else 'inline_data_url'}"
-                )
-
-            import fal_gate as _fg_grok
-            try:
-                data = await _fg_grok.post_with_retry(
-                    GROK_IMAGINE_URL,
-                    api_key=FAL_AI_KEY,
-                    json_body=payload,
-                    timeout_sec=60,
-                    max_attempts=5,
-                    source="grok_imagine",
-                )
-            except _fg_grok.FalFailed as _fe:
-                raise RuntimeError(f"Grok Imagine via fal.ai failed: {_fe}") from _fe
-            except _fg_grok.FalBusy as _fb:
-                raise RuntimeError(f"Grok Imagine busy after retries: {_fb}") from _fb
-            if not isinstance(data, dict):
-                raise RuntimeError("Grok Imagine returned non-JSON response")
-
-            images = data.get("images", [])
-            if not images:
-                raise RuntimeError("Grok Imagine returned no images")
-
-            cdn_url = images[0].get("url", "")
-            async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
-                img_resp = await client.get(cdn_url)
-                if img_resp.status_code != 200:
-                    raise RuntimeError("Failed to download Grok image")
-                with open(output_path, "wb") as f:
-                    f.write(img_resp.content)
-
-            log.info(
-                f"Fal remote image saved via {fal_model}: {output_path} "
-                f"({Path(output_path).stat().st_size / 1024:.0f} KB)"
-            )
-            gen_id = await _save_training_candidate(prompt, output_path, source=f"fal_{fal_model}")
-            return {"local_path": output_path, "cdn_url": cdn_url, "generation_id": gen_id}
-        except Exception as e:
-            log.warning(f"Fal remote image path failed ({fal_model}): {e}; retrying via imagen4_fast")
-
-    # Secondary attempt through the fal-first shim (formerly routed to xAI; now imagen4_fast).
-    if not FAL_AI_KEY:
-        raise RuntimeError("FAL_AI_KEY required for remote image generation")
-    return await _generate_image_xai_direct(
-        prompt,
-        output_path,
-        resolution=resolution,
-        reference_image_url=reference_image_url,
-        reference_lock_mode=reference_lock_mode,
-    )
 
 
 SKELETON_LORA_CANDIDATES = [
@@ -7651,10 +7566,7 @@ async def generate_scene_image(
     prompt_passthrough: bool = False,
     selected_model_id: str = "",
 ) -> dict:
-    """Generate a scene image. Priority for skeleton template: LoRA > Grok Imagine > SDXL.
-    For other templates: Grok Imagine > SDXL.
-    Returns {"local_path": str, "cdn_url": str | None}.
-    """
+    """Generate a scene image through the selected FAL catalog model."""
     async def _enforce_1080_image(path: str) -> None:
         if resolution != "1080p":
             return
@@ -7692,8 +7604,10 @@ async def generate_scene_image(
 
     lock_mode = _normalize_reference_lock_mode(reference_lock_mode, default="strict")
     channel_context = dict(channel_context or {})
-    channel_blocks_fal_scene = _channel_blocks_fal_scene_generation(channel_context)
-    channel_prefers_fal_scene = _channel_prefers_fal_scene_generation(channel_context)
+    # Effective Studio policy is FAL-only for image execution. Historical
+    # channel preferences cannot disable the policy-selected provider.
+    channel_blocks_fal_scene = False
+    channel_prefers_fal_scene = True
     if (
         template == "skeleton"
         and SKELETON_USE_SEEDREAM_EDIT
@@ -7797,41 +7711,25 @@ async def generate_scene_image(
             + "Glass-shell visibility must be obvious (not faint): medium-opacity translucent shell around the skeleton form."
         ).strip()
 
-    explicit_image_model_requested = bool(str(selected_model_id or "").strip())
+    # Even an empty legacy selection resolves to an explicit FAL-native model;
+    # never fall through to local, xAI, Google, or marketplace provider chains.
+    explicit_image_model_requested = True
     explicit_image_model_id = _normalize_creative_image_model_id(selected_model_id, template=template)
-    if explicit_image_model_requested and channel_blocks_fal_scene:
-        explicit_profile = _creative_image_model_profile(explicit_image_model_id, template=template)
-        if str(explicit_profile.get("provider", "") or "").strip().lower() == "fal":
-            log.info(
-                "Channel policy disabled explicit fal scene model '%s'; using configured local/provider fallback lane instead",
-                explicit_image_model_id,
-            )
-            explicit_image_model_requested = False
-            explicit_image_model_id = DEFAULT_CREATIVE_IMAGE_MODEL_ID
     # Always honor an explicit user pick. Previously this branch skipped when the
     # explicit pick matched DEFAULT, which silently routed all default-picker users
     # through the Grok-first auto chain (poor image quality on non-Skeleton templates).
-    # With DEFAULT = ernie_image, we want "user picked ernie" to actually call ernie.
+    # With DEFAULT = ernie_image, an empty legacy selection still calls ERNIE.
     if explicit_image_model_requested:
         profile = _creative_image_model_profile(explicit_image_model_id, template=template)
         effective_prompt = _creative_model_prompt(prompt, negative_prompt=negative_prompt)
-        if explicit_image_model_id == "grok_imagine":
-            result = await generate_image_grok(
-                effective_prompt,
-                output_path,
-                resolution=resolution,
-                reference_image_url=reference_image_url,
-                reference_lock_mode=lock_mode,
-            )
-        else:
-            result = await _generate_image_fal_selected_model(
-                explicit_image_model_id,
-                prompt,
-                output_path,
-                resolution=resolution,
-                negative_prompt=negative_prompt,
-                reference_image_url=reference_image_url,
-            )
+        result = await _generate_image_fal_selected_model(
+            explicit_image_model_id,
+            prompt,
+            output_path,
+            resolution=resolution,
+            negative_prompt=negative_prompt,
+            reference_image_url=reference_image_url,
+        )
         await _enforce_1080_image(output_path)
         _ensure_generated_image_valid(output_path)
         qa = _score_generated_image_quality(output_path, prompt=effective_prompt, template=template)
@@ -7851,13 +7749,14 @@ async def generate_scene_image(
         if template == "skeleton" and not qa_gate_ok:
             try:
                 repair_prompt = _skeleton_repair_prompt(prompt)
-                repair_path = str(Path(output_path).with_name(Path(output_path).stem + "_grok_repair" + Path(output_path).suffix))
-                repair_result = await generate_image_grok(
+                repair_path = str(Path(output_path).with_name(Path(output_path).stem + "_fal_repair" + Path(output_path).suffix))
+                repair_result = await _generate_image_fal_selected_model(
+                    explicit_image_model_id,
                     repair_prompt,
                     repair_path,
                     resolution=resolution,
+                    negative_prompt=negative_prompt,
                     reference_image_url=reference_image_url,
-                    reference_lock_mode=lock_mode,
                 )
                 await _enforce_1080_image(repair_path)
                 _ensure_generated_image_valid(repair_path)
@@ -7881,9 +7780,9 @@ async def generate_scene_image(
                     result["qa_notes"] = list(repair_qa.get("notes", []) or [])
                 Path(repair_path).unlink(missing_ok=True)
             except Exception as repair_err:
-                log.warning(f"Skeleton Grok-only repair pass failed: {repair_err}")
+                log.warning(f"Skeleton FAL repair pass failed: {repair_err}")
         if template == "skeleton" and not bool(result.get("qa_ok", False)):
-            # Accept lower scores when using explicitly selected models (e.g. Imagen4 for short-form)
+            # Accept lower scores only for an explicitly selected safe FAL model.
             qa_score = float(result.get("qa_score", 0.0) or 0.0)
             if selected_model_id and qa_score >= 25.0:
                 log.info(f"Skeleton QA soft-accept for {selected_model_id}: score={qa_score}")
@@ -7900,958 +7799,6 @@ async def generate_scene_image(
                 f"(score={result.get('qa_score', 0.0)}, notes={result.get('qa_notes', [])})"
             )
         return result
-    if template == "skeleton" and interactive_fast and not has_reference and not named_human_support:
-        try:
-            lora_available = await check_skeleton_lora_available()
-            if lora_available:
-                fast_prompt = _build_skeleton_lora_fast_prompt(prompt)
-                fast_negative = _build_skeleton_lora_fast_negative(negative_prompt, prompt)
-                await generate_image_skeleton_lora(
-                    fast_prompt,
-                    output_path,
-                    resolution=resolution,
-                    negative_prompt=fast_negative,
-                )
-                await _enforce_1080_image(output_path)
-                _ensure_generated_image_valid(output_path)
-                qa = _score_generated_image_quality(output_path, prompt=fast_prompt, template=template)
-                qa_gate_ok, qa_gate_min = _image_quality_gate(
-                    qa,
-                    template=template,
-                    lock_mode=lock_mode,
-                    has_reference=False,
-                    prompt=fast_prompt,
-                )
-                base_result = {
-                    "local_path": output_path,
-                    "cdn_url": None,
-                    "provider": "skeleton_lora",
-                    "qa_score": qa.get("score", 0.0),
-                    "qa_ok": bool(qa_gate_ok),
-                    "qa_min_score": qa_gate_min,
-                    "qa_notes": list(qa.get("notes", []) or []),
-                    "attempt": 1,
-                }
-                if qa_gate_ok:
-                    log.info("Skeleton interactive fast path generated via Jerry LoRA")
-                    return base_result
-                notes = _interactive_soft_accept_notes(base_result["qa_notes"])
-                if not _skeleton_notes_are_severe(notes):
-                    base_result["qa_ok"] = False
-                    base_result["qa_notes"] = notes
-                    log.info(
-                        "Skeleton interactive fast path soft-accepted via Jerry LoRA "
-                        f"(score={float(base_result['qa_score'] or 0.0):.2f}, min={qa_gate_min:.2f})"
-                    )
-                    return base_result
-                log.warning(
-                    "Skeleton interactive fast path failed QA; falling back to configured providers "
-                    f"(score={float(base_result['qa_score'] or 0.0):.2f}, notes={base_result['qa_notes']})"
-                )
-        except Exception as e:
-            log.warning(f"Skeleton interactive fast path failed, falling back to configured providers: {e}")
-    if template == "skeleton" and SKELETON_SDXL_LORA_ENABLED and not named_human_support:
-        if reference_image_url and lock_mode == "strict":
-            log.info("Skipping Skeleton LoRA for strict reference lock; using conditioned generator")
-        else:
-            try:
-                lora_available = await check_skeleton_lora_available()
-                if lora_available:
-                    await generate_image_skeleton_lora(prompt, output_path, resolution=resolution)
-                    await _enforce_1080_image(output_path)
-                    log.info("Skeleton image generated via LoRA (zero API cost)")
-                    return {"local_path": output_path, "cdn_url": None}
-            except Exception as e:
-                log.warning(f"Skeleton LoRA generation failed, falling back to Grok Imagine: {e}")
-
-    provider_order = _configured_image_provider_order()
-    if channel_blocks_fal_scene:
-        provider_order = [
-            provider
-            for provider in provider_order
-            if _normalize_image_provider_key(provider) not in {"fal", "xai", "grok"}
-        ]
-        if not provider_order:
-            provider_order = [
-                provider
-                for provider in _configured_image_provider_order()
-                if _normalize_image_provider_key(provider) not in {"fal", "xai", "grok"}
-            ]
-        if not provider_order:
-            provider_order = ["wan22", "sdxl"] if template == "skeleton" else ["sdxl"]
-        log.info("Channel policy: fal scene lane disabled for this request")
-    elif channel_prefers_fal_scene and bool(FAL_AI_KEY or XAI_API_KEY):
-        reordered = ["fal"]
-        for provider in provider_order:
-            if _normalize_image_provider_key(provider) in {"fal", "xai", "grok"}:
-                continue
-            reordered.append(provider)
-        provider_order = reordered
-    skeleton_wan_lock = template == "skeleton" and bool(SKELETON_REQUIRE_WAN22) and not named_human_support
-    if interactive_fast and template == "skeleton":
-        if named_human_support:
-            preferred_order: list[str] = []
-            if bool(FAL_AI_KEY or XAI_API_KEY) and not channel_blocks_fal_scene:
-                preferred_order.append("fal")
-            configured = _configured_image_provider_order()
-            for provider_key in configured:
-                normalized = _normalize_image_provider_key(provider_key)
-                if normalized in {"fal", "xai", "grok"} and "fal" in preferred_order:
-                    continue
-                preferred_order.append(provider_key)
-            provider_order = preferred_order or _configured_image_provider_order()
-        elif skeleton_wan_lock:
-            # Strict skeleton mode must stay WAN-only.
-            provider_order = ["wan22"]
-        else:
-            compact = _configured_local_image_provider_order()
-            if compact:
-                provider_order = compact
-    if not provider_order:
-        provider_order = ["wan22"] if skeleton_wan_lock else _configured_image_provider_order()
-    precooled = [p for p in provider_order if not _provider_is_available(p)]
-    if precooled:
-        provider_order = [p for p in provider_order if _provider_is_available(p)]
-        if not provider_order:
-            if skeleton_wan_lock:
-                provider_order = ["wan22"]
-            elif (not channel_blocks_fal_scene) and XAI_IMAGE_FALLBACK_ENABLED and bool(FAL_AI_KEY or XAI_API_KEY):
-                provider_order = ["fal"]
-            else:
-                provider_order = ["sdxl"]
-        for p in precooled:
-            rem = int(round(_provider_cooldown_remaining(p)))
-            log.warning(f"Image provider '{_normalize_image_provider_key(p)}' is cooling down ({rem}s left); skipping early")
-    xai_aliases = {"xai", "grok", "fal"}
-    hidream_requested = any(_normalize_image_provider_key(p) == "hidream" for p in provider_order)
-    hidream_ready: Optional[bool] = None
-    hidream_edit_ready: Optional[bool] = None
-    if hidream_requested:
-        hidream_ready = await check_hidream_available()
-        if has_reference:
-            hidream_edit_ready = await check_hidream_edit_available()
-    if hidream_requested and not hidream_ready:
-        provider_order = [p for p in provider_order if _normalize_image_provider_key(p) != "hidream"]
-        if not provider_order:
-            raise RuntimeError("HiDream is the only configured image provider, but HiDream assets are unavailable.")
-        _provider_mark_failure("hidream", "hidream_unavailable", cooldown_sec=max(120, IMAGE_PROVIDER_FAILURE_COOLDOWN_SEC))
-        log.warning("HiDream unavailable; skipping HiDream provider in this request")
-    if hidream_requested and has_reference and hidream_ready and hidream_edit_ready is False:
-        log.warning("HiDream E1.1 edit assets unavailable; reference edits will fall back to I1 img2img behavior")
-    wan_requested = any(_normalize_image_provider_key(p) == "wan22" for p in provider_order)
-    wan_t2i_ready: Optional[bool] = None
-    if wan_requested:
-        wan_t2i_ready = await check_wan22_t2i_available()
-        if template == "skeleton" and bool(SKELETON_REQUIRE_WAN22) and not wan_t2i_ready:
-            raise RuntimeError(
-                "Skeleton generation blocked: WAN2.2 text-to-image is unavailable and fallback is disabled."
-            )
-    if IMAGE_PROVIDER_WAN_SKIP_IF_UNAVAILABLE and wan_requested:
-        if wan_t2i_ready is None:
-            wan_t2i_ready = await check_wan22_t2i_available()
-        if not wan_t2i_ready:
-            provider_order = [p for p in provider_order if _normalize_image_provider_key(p) != "wan22"]
-            if not provider_order:
-                provider_order = ["sdxl"]
-            _provider_mark_failure("wan22", "wan22_t2i_unavailable", cooldown_sec=max(120, IMAGE_PROVIDER_FAILURE_COOLDOWN_SEC))
-            log.warning("WAN22 T2I unavailable; skipping WAN provider in this request")
-    cooled = [p for p in provider_order if not _provider_is_available(p)]
-    if cooled:
-        provider_order = [p for p in provider_order if _provider_is_available(p)]
-        if not provider_order:
-            if skeleton_wan_lock:
-                provider_order = ["wan22"]
-            elif (not channel_blocks_fal_scene) and XAI_IMAGE_FALLBACK_ENABLED and bool(FAL_AI_KEY or XAI_API_KEY):
-                provider_order = ["fal"]
-            else:
-                provider_order = ["sdxl"]
-        for p in cooled:
-            rem = int(round(_provider_cooldown_remaining(p)))
-            log.warning(f"Image provider '{_normalize_image_provider_key(p)}' is cooling down ({rem}s left); skipping")
-
-    async def _local_provider_result(provider: str) -> dict | None:
-        provider_key = str(provider or "").strip().lower()
-        attempts = max(1, int(IMAGE_LOCAL_PROVIDER_RETRIES))
-        if provider_key not in {"hidream", "hidream-i1", "hidream_i1", "wan", "wan22", "wan2.2", "sdxl", "comfy", "comfyui", "local"}:
-            return None
-        hidream_runtime_assets: dict | None = None
-        wan_runtime_assets: dict | None = None
-        wan_runtime_mode = ""
-        compact_skeleton_prompt = _compact_skeleton_local_prompt(prompt) if template == "skeleton" else prompt
-        skeleton_source_prompt = prompt if (template == "skeleton" and prompt_passthrough) else compact_skeleton_prompt
-        compact_skeleton_negative = (
-            str(negative_prompt or "").strip()
-            if prompt_passthrough
-            else _compact_skeleton_negative_prompt(negative_prompt, skeleton_source_prompt)
-            if template == "skeleton"
-            else negative_prompt
-        )
-        compact_prop_first_prompt = (
-            _compact_skeleton_prop_first_prompt(prompt)
-            if template == "skeleton"
-            else prompt
-        )
-        if interactive_fast:
-            if provider_key in {"hidream", "hidream-i1", "hidream_i1"}:
-                provider_wait_sec = HIDREAM_INTERACTIVE_MAX_WAIT_SEC
-            else:
-                provider_wait_sec = WAN22_INTERACTIVE_MAX_WAIT_SEC if provider_key in {"wan", "wan22", "wan2.2"} else 12
-        else:
-            provider_wait_sec = 900
-        if template == "skeleton":
-            # Keep retries bounded in interactive mode while still giving local providers a fair chance.
-            if interactive_fast:
-                if provider_key in {"hidream", "hidream-i1", "hidream_i1"}:
-                    attempts = HIDREAM_INTERACTIVE_ATTEMPTS
-                    provider_wait_sec = HIDREAM_INTERACTIVE_MAX_WAIT_SEC
-                    if has_reference:
-                        # Public interactive requests route through a tunnel with a hard timeout budget.
-                        # Reference-conditioned HiDream passes take materially longer than plain txt2img,
-                        # so keep them to a single pass and soft-accept the first usable frame.
-                        attempts = 1
-                    try:
-                        hidream_runtime_assets = await (
-                            _resolve_hidream_edit_runtime_assets()
-                            if has_reference
-                            else _resolve_hidream_runtime_assets()
-                        )
-                    except Exception:
-                        hidream_runtime_assets = None
-                elif provider_key in {"wan", "wan22", "wan2.2"}:
-                    try:
-                        wan_runtime_assets = await _resolve_wan22_t2i_runtime_assets()
-                        wan_runtime_mode = str((wan_runtime_assets or {}).get("mode", "") or "")
-                    except Exception:
-                        wan_runtime_assets = None
-                        wan_runtime_mode = ""
-                    if wan_runtime_mode == "latent":
-                        # Missing WAN T2I checkpoint: latent fallback can work but needs a longer single pass.
-                        attempts = WAN22_INTERACTIVE_LATENT_ATTEMPTS
-                        provider_wait_sec = WAN22_INTERACTIVE_LATENT_MAX_WAIT_SEC
-                    else:
-                        attempts = WAN22_INTERACTIVE_ATTEMPTS
-                        provider_wait_sec = WAN22_INTERACTIVE_MAX_WAIT_SEC
-                    prompt_lc = skeleton_source_prompt.lower()
-                    has_table_scene = bool(re.search(r"\b(table|desk|countertop)\b", prompt_lc))
-                    has_brain = "brain" in prompt_lc
-                    has_money = bool(re.search(r"\b(money|cash|banknotes?|dollars?|currency)\b", prompt_lc))
-                    if has_table_scene and has_brain and has_money:
-                        # Complex two-prop scenes need a wider candidate pool to avoid weak compositions.
-                        attempts = max(attempts, 8)
-                else:
-                    attempts = 2
-            else:
-                attempts = max(attempts, 2)
-        best_soft_result: dict | None = None
-        best_soft_path = Path(output_path).with_name(
-            Path(output_path).stem + f"_{provider_key}_best_soft" + (Path(output_path).suffix or ".png")
-        )
-        last_err: Exception | None = None
-        for attempt in range(1, attempts + 1):
-            try:
-                attempt_prompt = prompt
-                attempt_negative = negative_prompt
-                if template == "skeleton":
-                    if prompt_passthrough:
-                        attempt_prompt = skeleton_source_prompt
-                        attempt_negative = compact_skeleton_negative
-                    elif interactive_fast:
-                        if attempt == 1:
-                            attempt_prompt = skeleton_source_prompt
-                        elif attempt == 2:
-                            attempt_prompt = compact_prop_first_prompt
-                        elif attempt == 3:
-                            attempt_prompt = (
-                                compact_prop_first_prompt
-                                + " strict prop framing: full tabletop visible. left side brain with clear folds. right side pile of cash banknotes."
-                            ).strip()
-                        elif attempt == 4:
-                            attempt_prompt = (
-                                compact_prop_first_prompt
-                                + " frontal medium shot. full ribcage and skull visible. both props in foreground on tabletop."
-                            ).strip()
-                        elif attempt == 5:
-                            attempt_prompt = (
-                                compact_prop_first_prompt
-                                + " camera closer to tabletop so both brain and money are large and obvious."
-                            ).strip()
-                        else:
-                            attempt_prompt = (
-                                compact_prop_first_prompt
-                                + " no human head statue, no bust sculpture, only full anatomical skeleton seated at table."
-                            ).strip()
-                        attempt_negative = _compact_skeleton_negative_prompt(negative_prompt, attempt_prompt)
-                    else:
-                        attempt_prompt = skeleton_source_prompt
-                        attempt_negative = compact_skeleton_negative
-                if provider_key in {"hidream", "hidream-i1", "hidream_i1", "wan", "wan22", "wan2.2"} and template == "skeleton":
-                    if prompt_passthrough:
-                        # Creative prompt passthrough means use the scene text exactly.
-                        attempt_prompt = skeleton_source_prompt
-                    else:
-                        attempt_prompt = _skeleton_repair_prompt(skeleton_source_prompt)
-                        if attempt > 1:
-                            attempt_prompt = (
-                                attempt_prompt
-                                + " HARD READABILITY LOCK: skeleton stays dominant and ultra-sharp in frame with crisp eyes and props, while preserving readable environment depth. No haze, no motion blur."
-                            ).strip()
-                        if attempt >= 3:
-                            attempt_prompt = (
-                                attempt_prompt
-                                + " STRICT PROP LOCK: all requested objects must be clearly visible and recognizable in-frame."
-                            ).strip()
-                if provider_key in {"hidream", "hidream-i1", "hidream_i1"}:
-                    if has_reference:
-                        await generate_image_hidream_reference_locked(
-                            attempt_prompt,
-                            output_path,
-                            resolution=resolution,
-                            negative_prompt=attempt_negative,
-                            template=template,
-                            reference_image_url=reference_image_url,
-                            reference_lock_mode=lock_mode,
-                            allow_default_negative=not prompt_passthrough,
-                            max_wait_sec=provider_wait_sec,
-                            runtime_assets=hidream_runtime_assets,
-                        )
-                    else:
-                        await generate_image_hidream_t2i(
-                            attempt_prompt,
-                            output_path,
-                            resolution=resolution,
-                            negative_prompt=attempt_negative,
-                            allow_default_negative=not prompt_passthrough,
-                            max_wait_sec=provider_wait_sec,
-                            runtime_assets=hidream_runtime_assets,
-                        )
-                if provider_key in {"wan", "wan22", "wan2.2"}:
-                    await generate_image_wan22_t2i(
-                        attempt_prompt,
-                        output_path,
-                        resolution=resolution,
-                        negative_prompt=attempt_negative,
-                        allow_default_negative=not prompt_passthrough,
-                        max_wait_sec=provider_wait_sec,
-                        runtime_assets=wan_runtime_assets,
-                    )
-                elif provider_key in {"sdxl", "comfy", "comfyui", "local"}:
-                    await generate_image_comfyui(
-                        attempt_prompt,
-                        output_path,
-                        resolution=resolution,
-                        negative_prompt=attempt_negative,
-                        allow_default_negative=not prompt_passthrough,
-                        template=template,
-                        adapter_route=template_adapter_route,
-                        max_wait_sec=provider_wait_sec,
-                    )
-                if template == "skeleton" and provider_key in {"hidream", "hidream-i1", "hidream_i1", "wan", "wan22", "wan2.2"}:
-                    try:
-                        lora_available = await check_skeleton_lora_available()
-                    except Exception:
-                        lora_available = False
-                    if lora_available:
-                        refine_prompt_l = str(attempt_prompt or "").lower()
-                        wants_glass_refine = (
-                            has_reference
-                            or "glass" in refine_prompt_l
-                            or "translucent" in refine_prompt_l
-                            or "shell" in refine_prompt_l
-                            or "table" in refine_prompt_l
-                            or "brain" in refine_prompt_l
-                            or bool(re.search(r"\b(money|cash|banknotes?)\b", refine_prompt_l))
-                        )
-                        if wants_glass_refine:
-                            refine_path = str(Path(output_path).with_name(Path(output_path).stem + "_glass_refine.png"))
-                            refine_denoise = 0.24 if has_reference else 0.30
-                            try:
-                                await generate_image_skeleton_lora(
-                                    attempt_prompt,
-                                    refine_path,
-                                    resolution=resolution,
-                                    source_image_path=output_path,
-                                    denoise=refine_denoise,
-                                    negative_prompt=attempt_negative,
-                                )
-                                shutil.move(refine_path, output_path)
-                                log.info(f"Applied Jerry glass-shell LoRA refinement via SDXL ({provider_key} -> skeleton refine)")
-                            except Exception as refine_err:
-                                Path(refine_path).unlink(missing_ok=True)
-                                log.warning(f"Jerry glass-shell LoRA refinement skipped: {refine_err}")
-                await _enforce_1080_image(output_path)
-                _postprocess_generated_image(output_path, provider=provider_key, template=template)
-                _ensure_generated_image_valid(output_path)
-                qa_prompt = skeleton_source_prompt if template == "skeleton" else prompt
-                qa = _score_generated_image_quality(output_path, prompt=qa_prompt, template=template)
-                qa_gate_ok, qa_gate_min = _image_quality_gate(
-                    qa,
-                    template=template,
-                    lock_mode=lock_mode,
-                    has_reference=has_reference,
-                    prompt=qa_prompt,
-                )
-                if template == "skeleton" and interactive_fast:
-                    current_score = float(qa.get("score", 0.0) or 0.0)
-                    best_score = float((best_soft_result or {}).get("qa_score", -1.0))
-                    if best_soft_result is None or current_score > best_score:
-                        try:
-                            shutil.copyfile(output_path, str(best_soft_path))
-                        except Exception:
-                            pass
-                        best_soft_result = {
-                            "local_path": output_path,
-                            "cdn_url": None,
-                            "provider": provider_key,
-                            "qa_score": current_score,
-                            "qa_ok": bool(qa_gate_ok),
-                            "qa_min_score": qa_gate_min,
-                            "qa_notes": list(qa.get("notes", [])),
-                            "attempt": attempt,
-                        }
-                if template == "skeleton" and not qa_gate_ok and attempt < attempts:
-                    log.warning(
-                        f"Skeleton image below QA gate via '{provider_key}' (attempt {attempt}/{attempts}, score={qa.get('score', 0.0):.2f}, "
-                        f"min={qa_gate_min:.2f}); retrying."
-                    )
-                    continue
-                if template == "skeleton" and not qa_gate_ok and attempt >= attempts:
-                    if interactive_fast and has_reference and provider_key in {"hidream", "hidream-i1", "hidream_i1"}:
-                        notes = _interactive_soft_accept_notes(qa.get("notes", []) or [])
-                        if not _skeleton_notes_are_severe(notes):
-                            _provider_mark_success(provider_key)
-                            return {
-                                "local_path": output_path,
-                                "cdn_url": None,
-                                "provider": provider_key,
-                                "qa_score": qa.get("score", 0.0),
-                                "qa_ok": False,
-                                "qa_min_score": qa_gate_min,
-                                "qa_notes": notes,
-                                "attempt": attempt,
-                            }
-                    if interactive_fast and best_soft_result is not None:
-                        best_notes = list(best_soft_result.get("qa_notes", []) or [])
-                        severe = _skeleton_notes_are_severe(best_notes)
-                        if not severe:
-                            if best_soft_path.exists():
-                                try:
-                                    shutil.copyfile(str(best_soft_path), output_path)
-                                except Exception:
-                                    pass
-                            notes = _interactive_soft_accept_notes(best_soft_result.get("qa_notes", []) or [])
-                            best_soft_result["qa_notes"] = notes
-                            best_soft_result["qa_ok"] = False
-                            _provider_mark_success(provider_key)
-                            best_soft_path.unlink(missing_ok=True)
-                            log.warning(
-                                f"Interactive fast-mode soft-accepted skeleton image via '{provider_key}' "
-                                f"(score={best_soft_result.get('qa_score', 0.0):.2f}, notes={best_soft_result.get('qa_notes', [])})"
-                            )
-                            return best_soft_result
-                    raise RuntimeError(
-                        f"Skeleton QA gate failed for provider '{provider_key}' after {attempts} attempts "
-                        f"(score={qa.get('score', 0.0):.2f}, min={qa_gate_min:.2f}, notes={qa.get('notes', [])})"
-                    )
-                _provider_mark_success(provider_key)
-                best_soft_path.unlink(missing_ok=True)
-                return {
-                    "local_path": output_path,
-                    "cdn_url": None,
-                    "provider": provider_key,
-                    "qa_score": qa.get("score", 0.0),
-                    "qa_ok": bool(qa_gate_ok),
-                    "qa_min_score": qa_gate_min,
-                    "qa_notes": qa.get("notes", []),
-                    "attempt": attempt,
-                }
-            except Exception as err:
-                last_err = err
-                err_l = str(err or "").lower()
-                # Avoid stacking timed-out WAN jobs (they can still be running in ComfyUI and consume VRAM).
-                if (
-                    interactive_fast
-                    and provider_key in {"hidream", "hidream-i1", "hidream_i1", "wan", "wan22", "wan2.2"}
-                    and ("timed out" in err_l or "timeout" in err_l)
-                ):
-                    break
-                if attempt < attempts:
-                    await asyncio.sleep(min(5, attempt))
-        if interactive_fast and template == "skeleton" and best_soft_result is not None:
-            best_notes = list(best_soft_result.get("qa_notes", []) or [])
-            severe = _skeleton_notes_are_severe(best_notes)
-            if not severe:
-                if best_soft_path.exists():
-                    try:
-                        shutil.copyfile(str(best_soft_path), output_path)
-                    except Exception:
-                        pass
-                notes = _interactive_soft_accept_notes(best_soft_result.get("qa_notes", []) or [])
-                best_soft_result["qa_notes"] = notes
-                best_soft_result["qa_ok"] = False
-                _provider_mark_success(provider_key)
-                best_soft_path.unlink(missing_ok=True)
-                log.warning(
-                    f"Interactive fast-mode returning best available skeleton image via '{provider_key}' "
-                    f"(score={best_soft_result.get('qa_score', 0.0):.2f}, notes={best_soft_result.get('qa_notes', [])})"
-                )
-                return best_soft_result
-        best_soft_path.unlink(missing_ok=True)
-        _provider_mark_failure(provider_key, reason=str(last_err or "unknown_error"))
-        mode_suffix = f" (mode={wan_runtime_mode})" if wan_runtime_mode else ""
-        raise RuntimeError(f"provider '{provider_key}' failed after {attempts} attempts{mode_suffix}: {last_err}")
-
-    last_local_provider_err: Exception | None = None
-    best_soft_local_result: dict | None = None
-    xai_index = next((i for i, p in enumerate(provider_order) if p in xai_aliases), len(provider_order))
-    local_providers = list(provider_order[:xai_index])
-    for idx, provider in enumerate(local_providers):
-        provider_norm = _normalize_image_provider_key(provider)
-        next_provider = local_providers[idx + 1] if (idx + 1) < len(local_providers) else ""
-        try:
-            local_result = await _local_provider_result(provider)
-            if local_result:
-                if (
-                    template == "skeleton"
-                    and interactive_fast
-                    and provider_norm in {"hidream", "wan22"}
-                    and not bool(local_result.get("qa_ok", False))
-                    and bool(next_provider)
-                    and not skeleton_wan_lock
-                ):
-                    score = float(local_result.get("qa_score", 0.0) or 0.0)
-                    best_score = float((best_soft_local_result or {}).get("qa_score", -1.0) or -1.0)
-                    if best_soft_local_result is None or score > best_score:
-                        best_soft_local_result = dict(local_result)
-                    _record_provider_fallback(provider, next_provider)
-                    log.warning(
-                        f"Skeleton interactive: '{provider_norm}' soft result score={score:.2f}; trying next local provider '{_normalize_image_provider_key(next_provider)}'"
-                    )
-                    continue
-                if (
-                    template == "skeleton"
-                    and interactive_fast
-                    and best_soft_local_result is not None
-                    and not bool(local_result.get("qa_ok", False))
-                ):
-                    current = float(local_result.get("qa_score", 0.0) or 0.0)
-                    best = float(best_soft_local_result.get("qa_score", 0.0) or 0.0)
-                    if current >= best:
-                        return local_result
-                    return best_soft_local_result
-                return local_result
-        except Exception as local_err:
-            last_local_provider_err = local_err
-            _record_provider_fallback(provider, "next")
-            log.warning(f"Local image provider '{provider}' failed, trying next: {local_err}")
-    if best_soft_local_result is not None:
-        return best_soft_local_result
-
-    xai_enabled = (
-        not channel_blocks_fal_scene
-        and
-        XAI_IMAGE_FALLBACK_ENABLED
-        and any(p in xai_aliases for p in provider_order)
-        and bool(FAL_AI_KEY or XAI_API_KEY)
-    )
-    if xai_enabled:
-        try:
-            if best_of_enabled and IMAGE_QUALITY_BESTOF_ENABLED and IMAGE_QUALITY_BESTOF_COUNT > 1:
-                best_count = max(2, int(IMAGE_QUALITY_BESTOF_COUNT))
-                if template in {"skeleton", "story", "motivation"}:
-                    best_count = max(best_count, 4)
-                if lock_mode == "strict" and reference_image_url and template in {"skeleton", "story"}:
-                    best_count = max(best_count, 5)
-                if template == "skeleton":
-                    best_count = max(best_count, 5)
-                    if lock_mode == "strict" and has_reference:
-                        best_count = max(best_count, 6)
-                cand_root = Path(output_path)
-                candidates = []
-                for idx in range(best_count):
-                    cand_path = str(cand_root.with_name(f"{cand_root.stem}_cand_{idx}{cand_root.suffix or '.png'}"))
-                    try:
-                        cand_result = await generate_image_grok(
-                            prompt,
-                            cand_path,
-                            resolution=resolution,
-                            reference_image_url=reference_image_url,
-                            reference_lock_mode=lock_mode,
-                        )
-                        await _enforce_1080_image(cand_path)
-                        qa = _score_generated_image_quality(cand_path, prompt=prompt, template=template)
-                        gate_ok, gate_min = _image_quality_gate(
-                            qa,
-                            template=template,
-                            lock_mode=lock_mode,
-                            has_reference=has_reference,
-                            prompt=prompt,
-                        )
-                        qa["gate_ok"] = gate_ok
-                        qa["gate_min_score"] = gate_min
-                        candidates.append({"path": cand_path, "result": cand_result, "qa": qa, "idx": idx})
-                        log.info(
-                            f"Best-of candidate {idx+1}/{best_count} score={qa.get('score', 0.0)} "
-                            f"gate_ok={qa.get('gate_ok', False)} min={qa.get('gate_min_score', 0.0)} "
-                            f"notes={','.join(qa.get('notes', []))}"
-                        )
-                    except Exception as cand_err:
-                        log.warning(f"Best-of candidate {idx+1}/{best_count} failed: {cand_err}")
-                if not candidates:
-                    raise RuntimeError("all best-of image candidates failed")
-
-                acceptable = [c for c in candidates if bool(c.get("qa", {}).get("gate_ok", False))]
-                winner = max((acceptable or candidates), key=lambda c: float(c.get("qa", {}).get("score", 0.0)))
-                winner_path = str(winner["path"])
-                winner_result = dict(winner["result"])
-                winner_qa = dict(winner.get("qa", {}))
-                if Path(winner_path).resolve() != Path(output_path).resolve():
-                    shutil.copyfile(winner_path, output_path)
-                winner_result["local_path"] = output_path
-                winner_result["qa_score"] = winner_qa.get("score", 0.0)
-                winner_result["qa_ok"] = bool(winner_qa.get("gate_ok", False))
-                winner_result["qa_min_score"] = winner_qa.get("gate_min_score", _image_quality_min_score(template=template, lock_mode=lock_mode, has_reference=has_reference))
-                winner_result["qa_notes"] = winner_qa.get("notes", [])
-                # Story salvage pass: if winner is still below threshold, do one extra high-realism attempt.
-                if salvage_enabled and template == "story" and not winner_result["qa_ok"]:
-                    try:
-                        salvage_prompt = f"{prompt} {_story_salvage_refinement_for_scene(prompt)}"
-                        salvage_path = str(cand_root.with_name(f"{cand_root.stem}_salvage{cand_root.suffix or '.png'}"))
-                        salvage_result = await generate_image_grok(
-                            salvage_prompt,
-                            salvage_path,
-                            resolution=resolution,
-                            reference_image_url=reference_image_url,
-                            reference_lock_mode=lock_mode,
-                        )
-                        await _enforce_1080_image(salvage_path)
-                        salvage_qa = _score_generated_image_quality(salvage_path, prompt=salvage_prompt, template=template)
-                        salvage_gate_ok, salvage_gate_min = _image_quality_gate(
-                            salvage_qa,
-                            template=template,
-                            lock_mode=lock_mode,
-                            has_reference=has_reference,
-                            prompt=salvage_prompt,
-                        )
-                        salvage_qa["gate_ok"] = salvage_gate_ok
-                        salvage_qa["gate_min_score"] = salvage_gate_min
-                        if float(salvage_qa.get("score", 0.0)) > float(winner_result.get("qa_score", 0.0)):
-                            shutil.copyfile(salvage_path, output_path)
-                            winner_result = dict(salvage_result)
-                            winner_result["local_path"] = output_path
-                            winner_result["qa_score"] = salvage_qa.get("score", 0.0)
-                            winner_result["qa_ok"] = bool(salvage_qa.get("gate_ok", False))
-                            winner_result["qa_min_score"] = salvage_qa.get("gate_min_score", winner_result.get("qa_min_score", 0.0))
-                            winner_result["qa_notes"] = salvage_qa.get("notes", [])
-                            log.info(f"Story salvage image replaced winner, score={winner_result['qa_score']}")
-                        Path(salvage_path).unlink(missing_ok=True)
-                    except Exception as salvage_err:
-                        log.warning(f"Story salvage pass failed: {salvage_err}")
-                if salvage_enabled and template == "skeleton" and not winner_result["qa_ok"]:
-                    for salvage_idx in range(1):
-                        try:
-                            salvage_prompt = _skeleton_repair_prompt(prompt)
-                            salvage_path = str(cand_root.with_name(f"{cand_root.stem}_skeleton_repair_{salvage_idx}{cand_root.suffix or '.png'}"))
-                            salvage_result = await generate_image_grok(
-                                salvage_prompt,
-                                salvage_path,
-                                resolution=resolution,
-                                reference_image_url=reference_image_url,
-                                reference_lock_mode=lock_mode,
-                            )
-                            await _enforce_1080_image(salvage_path)
-                            salvage_qa = _score_generated_image_quality(salvage_path, prompt=salvage_prompt, template=template)
-                            salvage_gate_ok, salvage_gate_min = _image_quality_gate(
-                                salvage_qa,
-                                template=template,
-                                lock_mode=lock_mode,
-                                has_reference=has_reference,
-                                prompt=salvage_prompt,
-                            )
-                            salvage_qa["gate_ok"] = salvage_gate_ok
-                            salvage_qa["gate_min_score"] = salvage_gate_min
-                            if (
-                                salvage_gate_ok
-                                or float(salvage_qa.get("score", 0.0)) > float(winner_result.get("qa_score", 0.0))
-                            ):
-                                shutil.copyfile(salvage_path, output_path)
-                                winner_result = dict(salvage_result)
-                                winner_result["local_path"] = output_path
-                                winner_result["qa_score"] = salvage_qa.get("score", 0.0)
-                                winner_result["qa_ok"] = bool(salvage_qa.get("gate_ok", False))
-                                winner_result["qa_min_score"] = salvage_qa.get("gate_min_score", winner_result.get("qa_min_score", 0.0))
-                                winner_result["qa_notes"] = salvage_qa.get("notes", [])
-                                log.info(
-                                    f"Skeleton repair pass {salvage_idx + 1}/1 score={winner_result['qa_score']} "
-                                    f"ok={winner_result['qa_ok']}"
-                                )
-                            Path(salvage_path).unlink(missing_ok=True)
-                            if winner_result["qa_ok"]:
-                                break
-                        except Exception as salvage_err:
-                            log.warning(f"Skeleton repair pass {salvage_idx + 1}/1 failed: {salvage_err}")
-                if not winner_result["qa_ok"]:
-                    if template == "skeleton":
-                        notes = _interactive_soft_accept_notes(winner_result.get("qa_notes", []) or [])
-                        if not _skeleton_notes_are_severe(notes):
-                            winner_result["qa_notes"] = notes
-                            winner_result["qa_ok"] = False
-                            log.warning(
-                                "Skeleton hosted best-of soft-accepted "
-                                f"(score={winner_result.get('qa_score', 0.0):.2f}, notes={winner_result.get('qa_notes', [])})"
-                            )
-                            for cand in candidates:
-                                p = Path(str(cand.get("path", "") or ""))
-                                if p.exists() and p.resolve() != Path(output_path).resolve():
-                                    p.unlink(missing_ok=True)
-                            return winner_result
-                        raise RuntimeError(
-                            "Skeleton best-of candidates failed QA gate "
-                            f"(score={winner_result.get('qa_score', 0.0)}, notes={winner_result.get('qa_notes', [])})"
-                        )
-                    log.warning(
-                        f"Best-of winner below threshold {winner_result.get('qa_min_score', IMAGE_QUALITY_MIN_SCORE)}: "
-                        f"score={winner_result['qa_score']} path={Path(output_path).name}"
-                    )
-                else:
-                    log.info(
-                        f"Best-of winner selected score={winner_result['qa_score']} "
-                        f"candidate={winner.get('idx', -1)+1}/{best_count}"
-                    )
-
-                for cand in candidates:
-                    p = Path(str(cand.get("path", "") or ""))
-                    if p.exists() and p.resolve() != Path(output_path).resolve():
-                        p.unlink(missing_ok=True)
-                return winner_result
-
-            result = await generate_image_grok(
-                prompt,
-                output_path,
-                resolution=resolution,
-                reference_image_url=reference_image_url,
-                reference_lock_mode=lock_mode,
-            )
-            await _enforce_1080_image(output_path)
-            qa = _score_generated_image_quality(output_path, prompt=prompt, template=template)
-            qa_gate_ok, qa_gate_min = _image_quality_gate(
-                qa,
-                template=template,
-                lock_mode=lock_mode,
-                has_reference=has_reference,
-                prompt=prompt,
-            )
-            result["qa_score"] = qa.get("score", 0.0)
-            result["qa_ok"] = bool(qa_gate_ok)
-            result["qa_min_score"] = qa_gate_min
-            result["qa_notes"] = qa.get("notes", [])
-            if salvage_enabled and template == "story" and not result["qa_ok"]:
-                try:
-                    salvage_prompt = f"{prompt} {_story_salvage_refinement_for_scene(prompt)}"
-                    salvage_path = str(Path(output_path).with_name(Path(output_path).stem + "_salvage" + Path(output_path).suffix))
-                    salvage_result = await generate_image_grok(
-                        salvage_prompt,
-                        salvage_path,
-                        resolution=resolution,
-                        reference_image_url=reference_image_url,
-                    )
-                    await _enforce_1080_image(salvage_path)
-                    salvage_qa = _score_generated_image_quality(salvage_path, prompt=salvage_prompt, template=template)
-                    salvage_gate_ok, salvage_gate_min = _image_quality_gate(
-                        salvage_qa,
-                        template=template,
-                        lock_mode=lock_mode,
-                        has_reference=has_reference,
-                        prompt=salvage_prompt,
-                    )
-                    if float(salvage_qa.get("score", 0.0)) > float(result.get("qa_score", 0.0)):
-                        shutil.copyfile(salvage_path, output_path)
-                        result = dict(salvage_result)
-                        result["local_path"] = output_path
-                        result["qa_score"] = salvage_qa.get("score", 0.0)
-                        result["qa_ok"] = bool(salvage_gate_ok)
-                        result["qa_min_score"] = salvage_gate_min
-                        result["qa_notes"] = salvage_qa.get("notes", [])
-                        log.info(f"Story single-pass salvage improved image score={result['qa_score']}")
-                    Path(salvage_path).unlink(missing_ok=True)
-                except Exception as salvage_err:
-                    log.warning(f"Story single-pass salvage failed: {salvage_err}")
-            if salvage_enabled and template == "skeleton" and not result["qa_ok"]:
-                for salvage_idx in range(1):
-                    try:
-                        salvage_prompt = _skeleton_repair_prompt(prompt)
-                        salvage_path = str(Path(output_path).with_name(Path(output_path).stem + f"_skeleton_repair_{salvage_idx}" + Path(output_path).suffix))
-                        salvage_result = await generate_image_grok(
-                            salvage_prompt,
-                            salvage_path,
-                            resolution=resolution,
-                            reference_image_url=reference_image_url,
-                            reference_lock_mode=lock_mode,
-                        )
-                        await _enforce_1080_image(salvage_path)
-                        salvage_qa = _score_generated_image_quality(salvage_path, prompt=salvage_prompt, template=template)
-                        salvage_gate_ok, salvage_gate_min = _image_quality_gate(
-                            salvage_qa,
-                            template=template,
-                            lock_mode=lock_mode,
-                            has_reference=has_reference,
-                            prompt=salvage_prompt,
-                        )
-                        if salvage_gate_ok or float(salvage_qa.get("score", 0.0)) > float(result.get("qa_score", 0.0)):
-                            shutil.copyfile(salvage_path, output_path)
-                            result = dict(salvage_result)
-                            result["local_path"] = output_path
-                            result["qa_score"] = salvage_qa.get("score", 0.0)
-                            result["qa_ok"] = bool(salvage_gate_ok)
-                            result["qa_min_score"] = salvage_gate_min
-                            result["qa_notes"] = salvage_qa.get("notes", [])
-                            log.info(f"Skeleton single-pass repair {salvage_idx + 1}/1 score={result['qa_score']} ok={result['qa_ok']}")
-                        Path(salvage_path).unlink(missing_ok=True)
-                        if result["qa_ok"]:
-                            break
-                    except Exception as salvage_err:
-                        log.warning(f"Skeleton single-pass repair {salvage_idx + 1}/1 failed: {salvage_err}")
-            if template == "skeleton" and not bool(result.get("qa_ok", False)):
-                notes = _interactive_soft_accept_notes(result.get("qa_notes", []) or [])
-                if not _skeleton_notes_are_severe(notes):
-                    result["qa_notes"] = notes
-                    result["qa_ok"] = False
-                    return result
-                raise RuntimeError(
-                    "Skeleton single-pass generation failed QA gate "
-                    f"(score={result.get('qa_score', 0.0)}, notes={result.get('qa_notes', [])})"
-                )
-            return result
-        except Exception as e:
-            log.warning(f"Grok image generation failed (fal.ai + xAI direct), falling back to SDXL: {e}")
-
-    async def _hosted_fal_backup_result() -> dict | None:
-        if not FAL_AI_KEY:
-            return None
-        fallback_candidates: list[str] = []
-        primary_backup = _normalize_fal_image_backup_model(FAL_IMAGE_BACKUP_MODEL)
-        if primary_backup and primary_backup != "grok_imagine":
-            fallback_candidates.append(primary_backup)
-        if template == "skeleton":
-            fallback_candidates.extend(["ernie_image", "imagen4_fast", "seedream45", "recraft_v4", "flux_2_pro"])
-        else:
-            fallback_candidates.extend(["ernie_image", "imagen4_fast", "recraft_v4", "seedream45", "flux_2_pro"])
-        seen_candidates: set[str] = set()
-        for candidate in fallback_candidates:
-            candidate_id = _normalize_creative_image_model_id(candidate, template=template)
-            if not candidate_id or candidate_id == "grok_imagine" or candidate_id in seen_candidates:
-                continue
-            seen_candidates.add(candidate_id)
-            try:
-                backup_result = await _generate_image_fal_selected_model(
-                    candidate_id,
-                    prompt,
-                    output_path,
-                    resolution=resolution,
-                    negative_prompt=negative_prompt,
-                    reference_image_url=reference_image_url,
-                )
-                await _enforce_1080_image(output_path)
-                _ensure_generated_image_valid(output_path)
-                qa = _score_generated_image_quality(output_path, prompt=prompt, template=template)
-                qa_gate_ok, qa_gate_min = _image_quality_gate(
-                    qa,
-                    template=template,
-                    lock_mode=lock_mode,
-                    has_reference=has_reference,
-                    prompt=prompt,
-                )
-                if template == "skeleton" and not qa_gate_ok:
-                    notes = _interactive_soft_accept_notes(qa.get("notes", []) or [])
-                    if _skeleton_notes_are_severe(notes):
-                        raise RuntimeError(
-                            f"Hosted fallback '{candidate_id}' failed skeleton QA gate "
-                            f"(score={qa.get('score', 0.0)}, notes={qa.get('notes', [])})"
-                        )
-                    backup_result["qa_notes"] = notes
-                backup_result["provider"] = candidate_id
-                backup_result["qa_score"] = qa.get("score", 0.0)
-                backup_result["qa_ok"] = bool(qa_gate_ok)
-                backup_result["qa_min_score"] = qa_gate_min
-                backup_result["qa_notes"] = backup_result.get("qa_notes", qa.get("notes", []))
-                log.info(f"Hosted fal backup image succeeded via {candidate_id}")
-                return backup_result
-            except Exception as backup_err:
-                log.warning(f"Hosted fal backup '{candidate_id}' failed: {backup_err}")
-        return None
-
-    hosted_backup_result = await _hosted_fal_backup_result()
-    if hosted_backup_result:
-        return hosted_backup_result
-
-    for provider in provider_order[xai_index + 1:]:
-        try:
-            local_result = await _local_provider_result(provider)
-            if local_result:
-                return local_result
-        except Exception as local_err:
-            last_local_provider_err = local_err
-            _record_provider_fallback(provider, "next")
-            log.warning(f"Post-xAI local provider '{provider}' failed: {local_err}")
-
-    if template == "skeleton" and interactive_fast:
-        if last_local_provider_err is not None:
-            raise RuntimeError(str(last_local_provider_err))
-        raise RuntimeError("Skeleton interactive generation exhausted WAN2.2 attempt budget")
-
-    if not _configured_local_image_provider_order():
-        if last_local_provider_err is not None:
-            raise RuntimeError(f"Remote image generation failed and no local providers are configured: {last_local_provider_err}")
-        raise RuntimeError("Remote image generation failed and no local providers are configured")
-
-    safe_route = dict(template_adapter_route or {})
-    safe_route["enabled"] = False
-    safe_route["loras"] = []
-    await generate_image_comfyui(
-        prompt,
-        output_path,
-        resolution=resolution,
-        negative_prompt=negative_prompt,
-        allow_default_negative=not prompt_passthrough,
-        template=template,
-        adapter_route=safe_route,
-        max_wait_sec=(16 if interactive_fast else 900),
-    )
-    await _enforce_1080_image(output_path)
-    _ensure_generated_image_valid(output_path)
-    qa = _score_generated_image_quality(output_path, prompt=prompt, template=template)
-    qa_gate_ok, qa_gate_min = _image_quality_gate(
-        qa,
-        template=template,
-        lock_mode=lock_mode,
-        has_reference=has_reference,
-        prompt=prompt,
-    )
-    if template == "skeleton" and not qa_gate_ok:
-        if interactive_fast:
-            notes = _interactive_soft_accept_notes(qa.get("notes", []) or [])
-            if not _skeleton_notes_are_severe(notes):
-                return {
-                    "local_path": output_path,
-                    "cdn_url": None,
-                    "qa_score": qa.get("score", 0.0),
-                    "qa_ok": False,
-                    "qa_min_score": qa_gate_min,
-                    "qa_notes": notes,
-                }
-        raise RuntimeError(
-            "Skeleton fallback generation failed QA gate "
-            f"(score={qa.get('score', 0.0)}, notes={qa.get('notes', [])})"
-        )
-    return {
-        "local_path": output_path,
-        "cdn_url": None,
-        "qa_score": qa.get("score", 0.0),
-        "qa_ok": bool(qa_gate_ok),
-        "qa_min_score": qa_gate_min,
-        "qa_notes": qa.get("notes", []),
-    }
-
-
 async def generate_image_comfyui(
     prompt: str,
     output_path: str,
@@ -9038,8 +7985,6 @@ def _build_fal_video_payload(
         payload["duration"] = str(10 if float(duration_sec) >= 7.5 else 5)
         payload["negative_prompt"] = "blur, distort, low quality, watermark, text overlay, UI elements"
         payload["cfg_scale"] = 0.5
-    elif model_id == "veo3_fast":
-        payload["generate_audio"] = False
     return payload
 
 
@@ -9171,7 +8116,7 @@ async def _upload_image_to_fal(image_path: str) -> str:
 
 async def animate_image_kling(image_path: str, prompt: str, output_clip_path: str, duration: str = "5", aspect_ratio: str = "9:16", image_cdn_url: str = None) -> str:
     """Use fal.ai Kling 2.1 Standard I2V to animate an image into a video clip.
-    If image_cdn_url is provided (from Grok Imagine), skip the upload step.
+    If image_cdn_url is provided by the FAL image lane, skip the upload step.
     Returns the local path to the downloaded MP4 clip.
     """
     if not FAL_AI_KEY:
@@ -9179,7 +8124,7 @@ async def animate_image_kling(image_path: str, prompt: str, output_clip_path: st
 
     if image_cdn_url:
         image_url = image_cdn_url
-        log.info("Kling I2V: using existing CDN URL (from Grok Imagine)")
+        log.info("Kling I2V: using existing FAL image CDN URL")
     else:
         image_url = await _upload_image_to_fal(image_path)
 
@@ -9342,81 +8287,8 @@ async def _download_url_to_file(url: str, output_path: str):
                         f.write(chunk)
 
 
-# animate_image_grok_video removed 2026-04-19 (fal-first migration).
-# Was dead code -- the xAI video endpoint had no active call sites, only a
-# status-endpoint readout of `grok_video_enabled`. fal pixverse/v6 + Kling 2.1
-# cover all live animation lanes.
-
-
-def _aspect_ratio_to_runway_ratio(aspect_ratio: str) -> str:
-    if aspect_ratio == "9:16":
-        return "720:1280"
-    if aspect_ratio == "16:9":
-        return "1280:720"
-    allowed = {"1280:720", "720:1280", "1104:832", "960:960", "832:1104", "1584:672"}
-    return aspect_ratio if aspect_ratio in allowed else "720:1280"
-
-
-async def animate_image_runway_video(image_path: str, prompt: str, output_clip_path: str, duration_sec: float = 5, aspect_ratio: str = "9:16", image_cdn_url: str = None) -> str:
-    """Animate an image via Runway image-to-video and download resulting MP4."""
-    if not RUNWAY_API_KEY:
-        raise RuntimeError("RUNWAY_API_KEY not configured")
-    headers = {
-        "Authorization": f"Bearer {RUNWAY_API_KEY}",
-        "Content-Type": "application/json",
-        "X-Runway-Version": RUNWAY_API_VERSION,
-    }
-    duration = max(2, min(int(round(float(duration_sec))), 10))
-    image_url = image_cdn_url or _file_to_data_image_url(image_path, max_bytes=3_700_000)
-    if not image_url:
-        raise RuntimeError("No source image URL for Runway video (image too large for inline data URI; provide CDN URL)")
-
-    payload = {
-        "model": RUNWAY_VIDEO_MODEL,
-        "promptText": prompt,
-        "promptImage": image_url,
-        "ratio": _aspect_ratio_to_runway_ratio(aspect_ratio),
-        "duration": duration,
-    }
-    async with httpx.AsyncClient(timeout=60) as client:
-        submit = await client.post("https://api.dev.runwayml.com/v1/image_to_video", headers=headers, json=payload)
-        if submit.status_code not in (200, 201):
-            raise RuntimeError(f"Runway submit failed ({submit.status_code}): {submit.text[:300]}")
-        submit_data = submit.json()
-    task_id = submit_data.get("id")
-    if not task_id:
-        raise RuntimeError("Runway submit returned no task id")
-
-    poll_url = f"https://api.dev.runwayml.com/v1/tasks/{task_id}"
-    max_wait = 900
-    elapsed = 0
-    while elapsed < max_wait:
-        await asyncio.sleep(5)
-        elapsed += 5
-        async with httpx.AsyncClient(timeout=30) as client:
-            status_resp = await client.get(poll_url, headers=headers)
-            if status_resp.status_code != 200:
-                continue
-            status_data = status_resp.json()
-        status = str(status_data.get("status", "")).upper()
-        if status == "SUCCEEDED":
-            output = status_data.get("output")
-            video_url = None
-            if isinstance(output, list) and output:
-                first = output[0]
-                if isinstance(first, str):
-                    video_url = first
-                elif isinstance(first, dict):
-                    video_url = first.get("url") or first.get("uri")
-            elif isinstance(output, dict):
-                video_url = output.get("url") or output.get("uri") or output.get("video")
-            if not video_url:
-                raise RuntimeError("Runway done status missing output URL")
-            await _download_url_to_file(video_url, output_clip_path)
-            return output_clip_path
-        if status in ("FAILED", "CANCELLED"):
-            raise RuntimeError("Runway task failed: " + json.dumps(status_data)[:300])
-    raise TimeoutError("Runway video timed out")
+# Historical non-FAL video executors are removed; the catalog-backed FAL
+# dispatcher above covers every live Studio animation lane.
 
 
 async def animate_scene(
@@ -9431,104 +8303,49 @@ async def animate_scene(
     prefer_wan: bool = False,
     video_model_id: str = "",
 ) -> dict:
-    """Animate a scene image, preferring local Wan 2.2 for skeleton flows when requested."""
-    provider_errors = []
+    """Animate a scene through the effective FAL-only Studio video policy."""
+    del num_frames, prefer_wan
+    if not FAL_AI_KEY:
+        raise RuntimeError("FAL_AI_KEY not configured for Studio image-to-video")
+    normalized_video_model_id = _normalize_creative_video_model_id(video_model_id)
+    profile = _creative_video_model_profile(normalized_video_model_id)
+    endpoint_id = str(profile.get("fal_endpoint_id", "") or "").strip()
+    if not endpoint_id:
+        raise RuntimeError(f"No FAL endpoint configured for video model {normalized_video_model_id}")
     try:
         requested_duration = float(duration_sec)
     except Exception:
         requested_duration = 5.0
-    # FalAI Kling I2V accepts only 5s or 10s durations.
-    kling_duration = 10 if requested_duration >= 7.5 else 5
-
-    explicit_video_model_requested = bool(str(video_model_id or "").strip())
-    normalized_video_model_id = _normalize_creative_video_model_id(video_model_id)
-    if explicit_video_model_requested:
-        profile = _creative_video_model_profile(normalized_video_model_id)
-        endpoint_id = str(profile.get("fal_endpoint_id", "") or "").strip()
-        if endpoint_id:
-            explicit_clip_path = str(Path(output_dir_path) / (normalized_video_model_id + "_scene_" + str(scene_idx) + "_" + job_ts + ".mp4"))
-            try:
-                if normalized_video_model_id == "kling21_standard":
-                    await animate_image_kling(
-                        image_path,
-                        prompt,
-                        explicit_clip_path,
-                        duration=str(kling_duration),
-                        aspect_ratio="9:16",
-                        image_cdn_url=image_cdn_url,
-                    )
-                else:
-                    await animate_image_fal_queue_model(
-                        endpoint_id,
-                        image_path,
-                        prompt,
-                        explicit_clip_path,
-                        duration_sec=requested_duration,
-                        aspect_ratio="9:16",
-                        image_cdn_url=image_cdn_url,
-                        profile=profile,
-                    )
-                return {"type": "fal_clip", "path": explicit_clip_path, "provider_label": str(profile.get("label", normalized_video_model_id) or normalized_video_model_id)}
-            except Exception as e:
-                provider_errors.append(normalized_video_model_id + ": " + str(e))
-                raise RuntimeError("Selected video model failed: " + str(e)) from e
-
-    if prefer_wan:
-        try:
-            wan_ready = await check_wan22_available()
-        except Exception:
-            wan_ready = False
-        if wan_ready:
-            wan_clip_path = str(Path(output_dir_path) / ("wan_scene_" + str(scene_idx) + "_" + job_ts + ".mp4"))
-            try:
-                # 5s @ ~16fps is ~80 frames, keep slightly above for smoothness.
-                target_frames = max(49, int(round(max(3.0, requested_duration) * 16)))
-                await animate_image_wan22(
-                    image_path=image_path,
-                    prompt=prompt,
-                    output_clip_path=wan_clip_path,
-                    num_frames=target_frames,
-                )
-                return {"type": "wan_clip", "path": wan_clip_path}
-            except Exception as e:
-                provider_errors.append("wan22: " + str(e))
-                log.warning(f"Wan 2.2 scene animation failed, trying fallback providers: {e}")
-
-    if RUNWAY_API_KEY:
-        runway_clip_path = str(Path(output_dir_path) / ("runway_scene_" + str(scene_idx) + "_" + job_ts + ".mp4"))
-        try:
-            await animate_image_runway_video(
-                image_path=image_path,
-                prompt=prompt,
-                output_clip_path=runway_clip_path,
-                duration_sec=requested_duration,
-                image_cdn_url=image_cdn_url,
-            )
-            return {"type": "runway_clip", "path": runway_clip_path}
-        except Exception as e:
-            provider_errors.append("runway: " + str(e))
-            log.warning(f"Runway scene animation failed, trying FalAI Kling fallback: {e}")
-
-    if FAL_AI_KEY:
-        kling_clip_path = str(Path(output_dir_path) / ("kling_scene_" + str(scene_idx) + "_" + job_ts + ".mp4"))
-        try:
-            await animate_image_kling(
-                image_path,
-                prompt,
-                kling_clip_path,
-                duration=str(kling_duration),
-                aspect_ratio="9:16",
-                image_cdn_url=image_cdn_url,
-            )
-            return {"type": "kling_clip", "path": kling_clip_path}
-        except Exception as e:
-            provider_errors.append("fal_kling: " + str(e))
-            log.warning(f"FalAI Kling scene animation failed: {e}")
-
-    if not provider_errors:
-        raise RuntimeError("No video engine configured (set RUNWAY_API_KEY or FAL_AI_KEY)")
-    raise RuntimeError("All video providers failed: " + " | ".join(provider_errors))
-
+    clip_path = str(
+        Path(output_dir_path)
+        / (normalized_video_model_id + "_scene_" + str(scene_idx) + "_" + job_ts + ".mp4")
+    )
+    if normalized_video_model_id == "kling21_standard":
+        kling_duration = 10 if requested_duration >= 7.5 else 5
+        await animate_image_kling(
+            image_path,
+            prompt,
+            clip_path,
+            duration=str(kling_duration),
+            aspect_ratio="9:16",
+            image_cdn_url=image_cdn_url,
+        )
+    else:
+        await animate_image_fal_queue_model(
+            endpoint_id,
+            image_path,
+            prompt,
+            clip_path,
+            duration_sec=requested_duration,
+            aspect_ratio="9:16",
+            image_cdn_url=image_cdn_url,
+            profile=profile,
+        )
+    return {
+        "type": "fal_clip",
+        "path": clip_path,
+        "provider_label": str(profile.get("label", normalized_video_model_id) or normalized_video_model_id),
+    }
 
 async def _upload_image_to_comfyui(image_path: str) -> str:
     """Upload an image to ComfyUI's input directory via HTTP API."""
@@ -10020,6 +8837,43 @@ async def _generate_silent_audio_track(duration_sec: float, output_path: str) ->
     return output_path
 
 
+async def _generate_fal_voiceover(
+    text: str,
+    output_path: str,
+    *,
+    template: str,
+    override_voice_id: str = "",
+    override_speed: float | None = None,
+) -> dict:
+    """Generate Studio narration only through FAL MiniMax."""
+    from skeleton_ai import voice_fal
+    from studio_agent import provider_policy as studio_provider_policy
+
+    studio_provider_policy.assert_provider_allowed("fal", studio_provider_policy.TTS_CAPABILITY)
+    requested_voice = str(override_voice_id or "").strip()
+    resolved_voice = _resolve_safe_fal_voice_id(
+        explicit=requested_voice,
+        skeleton=str(template or "").strip().lower() == "skeleton",
+    )
+    speed = _normalize_voice_speed(override_speed, default=1.0)
+    audio_file = await asyncio.to_thread(
+        voice_fal.synthesize,
+        text=str(text or ""),
+        out_path=Path(output_path),
+        voice_id=resolved_voice,
+        speed=speed,
+    )
+    result = {
+        "audio_path": str(audio_file),
+        "word_timings": [],
+        "voice_id": resolved_voice,
+        "provider": "fal",
+    }
+    if requested_voice and requested_voice != resolved_voice:
+        result["voice_migrated_from"] = requested_voice
+    return result
+
+
 async def _prepare_short_audio_assets(
     scenes: list,
     *,
@@ -10047,11 +8901,10 @@ async def _prepare_short_audio_assets(
 
     if full_narration:
         try:
-            vo_result = await generate_voiceover(
+            vo_result = await _generate_fal_voiceover(
                 full_narration,
                 audio_path,
                 template=template,
-                language=language,
                 override_voice_id=override_voice_id,
                 override_speed=override_speed,
             )
@@ -11036,16 +9889,7 @@ def _story_scene_prefers_psychology_documentary_visuals_text(text: str) -> bool:
 
 
 def _configured_image_provider_order() -> list[str]:
-    provider_order = [
-        str(p or "").strip().lower()
-        for p in str(IMAGE_PROVIDER_ORDER or "").split(",")
-        if str(p or "").strip()
-    ]
-    if provider_order:
-        return provider_order
-    if XAI_IMAGE_FALLBACK_ENABLED and bool(FAL_AI_KEY or XAI_API_KEY):
-        return ["fal"]
-    return ["hidream", "wan22", "sdxl"] if HIDREAM_ENABLED else ["wan22", "sdxl"]
+    return ["fal"] if FAL_AI_KEY else []
 
 
 def _configured_local_image_provider_order() -> list[str]:
@@ -12132,14 +10976,14 @@ async def run_generation_pipeline(
                 if isinstance(e, asyncio.TimeoutError):
                     msg = (
                         f"Script generation timed out after 150s for template '{template}'. "
-                        "This usually means the LLM provider (fal any-llm / Claude) is rate-limited "
+                        "This usually means direct Anthropic is rate-limited "
                         "or overloaded. Try again in a minute, or switch to the 'skeleton' template "
                         "which has a local fallback."
                     )
                 else:
                     msg = (
                         f"Script generation failed for template '{template}': {cause}. "
-                        "Check fal.ai status + API key, then retry. Switch to 'skeleton' template "
+                        "Check Anthropic status and ANTHROPIC_API_KEY, then retry. Switch to 'skeleton' template "
                         "if you need a guaranteed-render fallback."
                     )
                 log.error(f"[{job_id}] {msg}")
@@ -12178,18 +11022,15 @@ async def run_generation_pipeline(
             raise ValueError("Script generation returned no scenes")
 
         fal_video_enabled = bool(FAL_AI_KEY)
-        runway_video_enabled = bool(RUNWAY_API_KEY)
-        use_video_engine = fal_video_enabled or runway_video_enabled
+        use_video_engine = fal_video_enabled
         animation_enabled = _bool_from_any(job_state.get("animation_enabled"), _bool_from_any(job_state.get("story_animation_enabled"), True))
         use_video = bool(use_video_engine and animation_enabled)
         if template == "reddit":
             use_video = False
         if template != "reddit" and animation_enabled and not use_video_engine:
-            raise RuntimeError("Video is required but no engine is configured (set RUNWAY_API_KEY or FAL_AI_KEY)")
+            raise RuntimeError("Video is required but FAL_AI_KEY is not configured")
         if not animation_enabled or template == "reddit":
             mode_label = "static image"
-        elif runway_video_enabled:
-            mode_label = "Runway (primary)"
         elif fal_video_enabled:
             mode_label = "FalAI Kling 2.1"
         else:
@@ -12337,7 +11178,7 @@ async def run_generation_pipeline(
             if template == "skeleton" and not skeleton_reference_image_url and i == 0:
                 skeleton_reference_image_url = _file_to_data_image_url(img_path)
             cdn_url = img_result.get("cdn_url")
-            engine_name = "Skeleton LoRA" if (template == "skeleton" and not cdn_url) else ("Grok Imagine" if cdn_url else "SDXL")
+            engine_name = str((img_result or {}).get("provider_label") or "FAL image")
             log.info(f"[{job_id}] Scene {i+1}/{len(scenes)} image generated ({engine_name})")
             _job_record_scene_event(job_id, i, len(scenes), "image_ready", engine_name)
             if resolution == "720p":
@@ -12387,16 +11228,9 @@ async def run_generation_pipeline(
                     log.warning(f"[{job_id}] Scene {i+1}/{len(scenes)} animation failed, using static image: {anim_err}")
                     _job_record_scene_event(job_id, i, len(scenes), "animation_failed", str(anim_err))
                     anim_result = {"type": "static"}
-                if anim_result["type"] in ("kling_clip", "wan_clip", "grok_clip", "runway_clip"):
+                if anim_result["type"] == "fal_clip":
                     asset["kling_clip"] = anim_result["path"]
-                    if anim_result["type"] == "runway_clip":
-                        engine = "Runway"
-                    elif anim_result["type"] == "grok_clip":
-                        engine = "Grok Imagine Video"
-                    elif anim_result["type"] == "kling_clip":
-                        engine = "Kling 2.1"
-                    else:
-                        engine = "Wan 2.2"
+                    engine = str(anim_result.get("provider_label", "FAL video") or "FAL video")
                     log.info(f"[{job_id}] Scene {i+1}/{len(scenes)} animated by {engine}")
                     _job_record_scene_event(job_id, i, len(scenes), "animation_ready", engine)
                 else:
@@ -13591,7 +12425,7 @@ def _coerce_lexi_manhwa_longform_channel_memory(
         220,
     )
     updated["archetype_sound_rule"] = _clip_text(
-        "Brian-style ElevenLabs voice, calm-then-intense. Subtle ambient + cinematic stings on reveals.",
+        "FAL narration voice, calm-then-intense. Subtle ambient plus cinematic stings on reveals.",
         220,
     )
     updated["archetype_packaging_rule"] = _clip_text(
@@ -13599,7 +12433,7 @@ def _coerce_lexi_manhwa_longform_channel_memory(
         220,
     )
     updated["summary"] = _clip_text(
-        "Lexi Manhwa runs as cinematic-rewrite manhwa recap. ~7,400 chars per remake fits free ElevenLabs tier.",
+        "Lexi Manhwa runs as a cinematic-rewrite manhwa recap with concise narration sized for the configured FAL voice lane.",
         320,
     )
     updated["rewrite_pressure"] = _catalyst_rewrite_pressure_profile(updated)
@@ -13700,19 +12534,18 @@ def _longform_hosted_image_model_candidates(
     *,
     reference_image_url: str = "",
 ) -> list[str]:
-    if _longform_prefers_3d_documentary_visuals(template, format_preset):
-        # Empire / long-form documentary scenes are locked to Grok.
-        # Seedream stays thumbnail-only and Imagen/Recraft do not replace the
-        # Fern-conditioned documentary scene lane.
-        candidates = ["grok_imagine"]
-    else:
-        candidates = ["grok_imagine"]
+    del reference_image_url
+    candidates = (
+        ["ernie_image", "seedream45", "recraft_v4", "flux_2_pro"]
+        if _longform_prefers_3d_documentary_visuals(template, format_preset)
+        else [DEFAULT_CREATIVE_IMAGE_MODEL_ID, "seedream45", "recraft_v4"]
+    )
     deduped: list[str] = []
     for candidate in candidates:
         normalized = _normalize_creative_image_model_id(candidate, template=template)
         if normalized and normalized not in deduped:
             deduped.append(normalized)
-    return deduped or ["grok_imagine"]
+    return deduped or [DEFAULT_CREATIVE_IMAGE_MODEL_ID]
 
 
 async def _longform_generate_scene_image(
@@ -13730,32 +12563,7 @@ async def _longform_generate_scene_image(
 ) -> dict:
     errors: list[str] = []
     channel_context = dict(channel_context or {})
-    channel_blocks_fal_scene = _channel_blocks_fal_scene_generation(channel_context)
     documentary_prefers_hosted = _longform_prefers_3d_documentary_visuals(template, format_preset)
-    documentary_passthrough = documentary_prefers_hosted and not channel_blocks_fal_scene
-    if documentary_prefers_hosted and channel_blocks_fal_scene:
-        log.info("Channel policy: documentary hosted scene lane disabled; using non-fal scene providers")
-    if documentary_passthrough:
-        grok_profile = dict(CREATIVE_IMAGE_MODEL_MAP.get("grok_imagine") or {})
-        if not bool(grok_profile.get("enabled", False)):
-            raise RuntimeError("Long-form documentary scenes require Grok Imagine, but the Grok lane is not enabled.")
-        try:
-            return await generate_scene_image(
-                prompt,
-                output_path,
-                resolution=resolution,
-                negative_prompt=negative_prompt,
-                template=template,
-                channel_context=channel_context,
-                reference_image_url=reference_image_url,
-                reference_lock_mode=reference_lock_mode,
-                best_of_enabled=best_of_enabled,
-                salvage_enabled=salvage_enabled,
-                prompt_passthrough=True,
-                selected_model_id="grok_imagine",
-            )
-        except Exception as e:
-            raise RuntimeError(f"Long-form documentary scene generation requires Grok Imagine and it failed: {e}")
     for model_id in _longform_hosted_image_model_candidates(
         template,
         format_preset,
@@ -13774,7 +12582,7 @@ async def _longform_generate_scene_image(
                     reference_lock_mode=reference_lock_mode,
                     best_of_enabled=best_of_enabled,
                     salvage_enabled=salvage_enabled,
-                    prompt_passthrough=documentary_passthrough,
+                    prompt_passthrough=documentary_prefers_hosted,
                     selected_model_id=model_id,
                 )
             except Exception as e:
@@ -13787,11 +12595,11 @@ async def _longform_generate_scene_image(
 
 def _longform_thumbnail_model_candidates(format_preset: str = "", channel_context: dict | None = None) -> list[str]:
     if _is_empire_magnates_channel(channel_context):
-        ordered = ["ernie_image", "seedream45", "imagen4_fast", "recraft_v4_pro", "recraft_v4", "grok_imagine"]
+        ordered = ["ernie_image", "seedream45", "recraft_v4_pro", "recraft_v4", "flux_2_pro"]
     elif str(format_preset or "").strip().lower() == "documentary":
-        ordered = ["ernie_image", "seedream45", "imagen4_fast", "recraft_v4", "grok_imagine"]
+        ordered = ["ernie_image", "seedream45", "recraft_v4", "flux_2_pro"]
     else:
-        ordered = ["ernie_image", "seedream45", "imagen4_fast", "recraft_v4", "grok_imagine"]
+        ordered = ["ernie_image", "seedream45", "recraft_v4", "flux_2_pro"]
     deduped: list[str] = []
     for candidate in ordered:
         normalized = _normalize_creative_image_model_id(candidate)
@@ -13842,25 +12650,6 @@ async def _generate_longform_package_thumbnail(
             }
         except Exception as e:
             errors.append(f"{model_id}: {e}")
-    if PIKZELS_API_KEY:
-        pikzels_result = await _generate_thumbnail_image(
-            prompt=base_prompt,
-            negative_prompt=negative_prompt,
-            output_path=output_path,
-            user=None,
-            mode="describe",
-        )
-        await _enforce_thumbnail_1080(output_path)
-        title_words = str(selected_title or "").strip().split()[:4]
-        overlay_text = " ".join(title_words).upper()
-        if overlay_text:
-            _apply_thumbnail_text_overlay(output_path, overlay_text)
-        return {
-            "local_path": output_path,
-            "provider": "pikzels",
-            "provider_label": "Pikzels",
-            "request_id": str(pikzels_result.get("request_id", "") or ""),
-        }
     detail = " | ".join(errors[-3:]) if errors else "no long-form thumbnail model was available"
     raise RuntimeError(f"Long-form package thumbnail generation failed: {detail}")
 
@@ -14769,11 +13558,10 @@ async def _run_longform_pipeline(job_id: str, session_id: str):
         _job_set_stage(job_id, "generating_voice", 70)
         full_narration = " ".join(str((s or {}).get("narration", "") or "") for s in scenes)
         audio_path = str(TEMP_DIR / f"{job_id}_lf_voice.mp3")
-        vo_result = await generate_voiceover(
+        vo_result = await _generate_fal_voiceover(
             full_narration,
             audio_path,
             template=template,
-            language=language,
             override_speed=float(sound_mix_profile.get("voice_speed", 1.0) or 1.0),
         )
         audio_path = vo_result["audio_path"]
@@ -15355,6 +14143,7 @@ async def _create_longform_session(req: LongFormSessionCreateRequest, request: R
         raise HTTPException(401, "Auth required")
     if not _longform_owner_beta_enabled(user):
         raise HTTPException(403, "Legacy long-form workspace is owner-only")
+    _require_studio_provider_readiness(semantic=True, media=True)
     busy_session_id = await _active_longform_capacity_session_id(str(user.get("id", "") or ""))
     if busy_session_id:
         raise HTTPException(
@@ -15873,6 +14662,16 @@ async def _create_longform_session_bootstrap(
                 Path(prior_path).unlink(missing_ok=True)
             raise
         saved_image_paths.append(str(saved_path))
+
+    # Validate bounded user input before provider readiness so malformed or
+    # oversized uploads receive their precise 4xx response. Readiness still
+    # runs before session persistence, billing, or background provider work.
+    try:
+        _require_studio_provider_readiness(semantic=True, media=True)
+    except Exception:
+        for prior_path in saved_image_paths:
+            Path(prior_path).unlink(missing_ok=True)
+        raise
 
     placeholder_session = _create_longform_bootstrap_placeholder_session(
         user=user,
@@ -17014,6 +15813,11 @@ async def _creative_generate_script(req: GenerateRequest, request: Request = Non
     if not _user_has_paid_access(user):
         raise HTTPException(402, "Active subscription required. Please choose a plan.")
     _ensure_template_allowed(req.template, user)
+    _require_creative_request_model_policy(
+        image_model_id=getattr(req, "image_model_id", ""),
+        video_model_id=getattr(req, "video_model_id", ""),
+    )
+    _require_studio_provider_readiness(semantic=True)
     quality_mode = _normalize_skeleton_quality_mode(req.quality_mode, template=req.template)
     mint_mode = _normalize_mint_mode(req.mint_mode, template=req.template)
     art_style = _normalize_art_style(req.art_style, template=req.template)
@@ -17276,6 +16080,10 @@ async def _creative_create_session(body: dict, request: Request = None):
         raise HTTPException(401, "Auth required")
     if not _user_has_paid_access(user):
         raise HTTPException(402, "Active subscription required. Please choose a plan.")
+    _require_creative_request_model_policy(
+        image_model_id=body.get("image_model_id"),
+        video_model_id=body.get("video_model_id"),
+    )
     template = body.get("template", "skeleton")
     quality_mode = _normalize_skeleton_quality_mode(body.get("quality_mode"), template=template)
     mint_mode = _normalize_mint_mode(body.get("mint_mode"), template=template)
@@ -17543,6 +16351,7 @@ async def _creative_session_status(session_id: str, request: Request = None):
         raise HTTPException(404, "Creative session not found")
     if session["user_id"] != user["id"]:
         raise HTTPException(403, "Not your session")
+    session = await _migrate_legacy_session_provider_state(session) or session
     return {
         "session_id": session_id,
         "has_reference_image": bool(
@@ -17619,6 +16428,11 @@ async def _creative_scene_image(req: SceneImageRequest, request: Request = None)
         raise HTTPException(404, "Creative session not found")
     if session["user_id"] != user["id"]:
         raise HTTPException(403, "Not your session")
+    session = await _migrate_legacy_session_provider_state(session) or session
+    _require_creative_request_model_policy(
+        image_model_id=getattr(req, "image_model_id", ""),
+    )
+    _require_studio_provider_readiness(media=True)
 
     if "scene_images" not in session:
         session["scene_images"] = {}
@@ -18035,6 +16849,12 @@ async def _creative_finalize(req: FinalizeRequest, background_tasks: BackgroundT
     session = await _get_creative_session(req.session_id)
     if not session or session["user_id"] != user["id"]:
         raise HTTPException(404, "Session not found")
+    session = await _migrate_legacy_session_provider_state(session) or session
+    _require_creative_request_model_policy(
+        image_model_id=getattr(req, "image_model_id", ""),
+        video_model_id=getattr(req, "video_model_id", ""),
+    )
+    _require_studio_provider_readiness(media=True)
     _ensure_template_allowed(session.get("template", req.template), user)
     _ensure_reference_public_url(req.session_id, session)
 
@@ -18102,15 +16922,10 @@ async def _creative_finalize(req: FinalizeRequest, background_tasks: BackgroundT
     total_duration = sum(float(s.get("duration_sec", 5) or 5) for s in session.get("scenes", []))
     if total_duration > float(plan_limits.get("max_duration_sec", 60)):
         raise HTTPException(400, f"Creative project exceeds plan duration limit ({int(plan_limits.get('max_duration_sec', 60))}s).")
-    # The 12-scene cap was for legacy WAN-heavy skeleton renders.
-    # With Runway as primary, allow longer skeleton projects.
-    if (not RUNWAY_API_KEY) and session.get("template") == "skeleton" and len(session.get("scenes", [])) > 12:
-        raise HTTPException(400, "Skeleton Creative projects are limited to 12 scenes when Runway is unavailable.")
-
     usage_kind = "animated" if animation_enabled else "non_animated"
     # Phase 1.4 BUG #1 fix: include image model cost in the finalize debit.
     # Previously, users picking a premium image model (e.g. recraft_v4_pro @ 5 AC
-    # or nano_banana_pro @ 5 AC) paid only the video clip AC — the image cost was
+    # or another premium FAL image lane) paid only the video clip AC — the image cost was
     # silently absorbed. In auto-mode (no per-scene preview), that meant free
     # premium images. Now: charge (scenes × video_multiplier) + (unpaid_scenes ×
     # image_cost_per_scene), where unpaid_scenes = total - count of previews
@@ -18298,13 +17113,12 @@ async def _run_creative_pipeline(
             channel_context = {"channel_id": str(session.get("youtube_channel_id", "") or "").strip()}
 
         fal_video_enabled = bool(FAL_AI_KEY)
-        runway_video_enabled = bool(RUNWAY_API_KEY)
-        use_video_engine = fal_video_enabled or runway_video_enabled
+        use_video_engine = fal_video_enabled
         animation_enabled = _bool_from_any(session.get("animation_enabled"), _bool_from_any(session.get("story_animation_enabled"), True))
         story_animation_enabled = _bool_from_any(session.get("story_animation_enabled"), animation_enabled)
         use_video = bool(use_video_engine and animation_enabled)
-        if use_video and not use_video_engine:
-            raise RuntimeError("Video is required but no engine is configured (set RUNWAY_API_KEY or FAL_AI_KEY)")
+        if animation_enabled and not use_video_engine:
+            raise RuntimeError("Video is required but FAL_AI_KEY is not configured")
         jobs[job_id]["animation_enabled"] = bool(animation_enabled)
         jobs[job_id]["story_animation_enabled"] = bool(story_animation_enabled)
         gen_ts = str(int(time.time() * 1000))
@@ -18404,18 +17218,9 @@ async def _run_creative_pipeline(
                     log.warning(f"[{job_id}] Scene {i+1}/{len(scenes)} animation failed, using static image: {anim_err}")
                     _job_record_scene_event(job_id, i, len(scenes), "animation_failed", str(anim_err))
                     anim_result = {"type": "static"}
-                if anim_result["type"] in ("kling_clip", "wan_clip", "grok_clip", "runway_clip", "fal_clip"):
+                if anim_result["type"] == "fal_clip":
                     asset["kling_clip"] = anim_result["path"]
-                    if anim_result["type"] == "fal_clip":
-                        engine = str(anim_result.get("provider_label", "Fal Video") or "Fal Video")
-                    elif anim_result["type"] == "runway_clip":
-                        engine = "Runway"
-                    elif anim_result["type"] == "grok_clip":
-                        engine = "Grok Imagine Video"
-                    elif anim_result["type"] == "kling_clip":
-                        engine = "Kling 2.1"
-                    else:
-                        engine = "Wan 2.2"
+                    engine = str(anim_result.get("provider_label", "FAL video") or "FAL video")
                     log.info(f"[{job_id}] Scene {i+1}/{len(scenes)} animated by {engine}")
                     _job_record_scene_event(job_id, i, len(scenes), "animation_ready", engine)
                 else:
@@ -18721,6 +17526,22 @@ _training_stats_payload = build_training_stats_payload(
     pending_training_ref=_pending_training,
 )
 
+
+async def _fal_voice_provider_snapshot(force_refresh: bool = False) -> dict:
+    """Return provider-free diagnostics for the effective FAL TTS catalog."""
+    del force_refresh
+    from skeleton_ai import voice_fal
+
+    voices = list(voice_fal.list_voices())
+    configured = bool(voice_fal.configured())
+    return {
+        "source": "fal_minimax",
+        "provider_ok": configured,
+        "count": len(voices),
+        "warning": "" if configured else "FAL voice provider is not configured.",
+        "age_sec": 0.0,
+    }
+
 _admin_analytics_payload = build_admin_analytics_payload(
     admin_emails=ADMIN_EMAILS,
     jobs_ref=jobs,
@@ -18734,7 +17555,7 @@ _admin_analytics_payload = build_admin_analytics_payload(
     get_queue_depth=get_queue_depth,
     get_queue_workers=get_queue_workers,
     get_queue_max_depth=get_queue_max_depth,
-    voice_provider_snapshot=_voice_provider_snapshot,
+    voice_provider_snapshot=_fal_voice_provider_snapshot,
     maintenance_snapshot=lambda: (_maintenance_banner_enabled, _maintenance_banner_message),
     log=log,
 )
@@ -18928,7 +17749,6 @@ mount_router(
         list_connected_youtube_channels_for_user=_list_connected_youtube_channels_for_user,
         save_training_candidate=_save_training_candidate,
         fal_ai_key=FAL_AI_KEY,
-        pikzels_api_key=PIKZELS_API_KEY,
     ),
 )
 
@@ -19250,19 +18070,19 @@ async def _generate_short(
     request: Request = None,
     user: dict = Depends(require_auth),
 ):
-    # All hot-path LLM + image generation runs through fal.ai now. Gate on the
-    # actual credential we need. XAI_API_KEY is still in env because Catalyst
-    # admin analysis hits `_xai_json_completion_multimodal` direct — non-hot,
-    # not required for this endpoint.
-    if not FAL_AI_KEY:
-        raise HTTPException(500, "FAL_AI_KEY not configured")
-
+    # Authenticate and enforce the effective provider policy before any
+    # provider readiness check, credit reservation, or network request.
     if not isinstance(user, dict) or not str(user.get("id", "") or "").strip():
         raise HTTPException(401, "Authentication required. Please sign in.")
     _assert_not_waitlist_only_for_non_owner(user)
     if not _user_has_paid_access(user):
         raise HTTPException(402, "Active subscription required. Please choose a plan.")
     _ensure_template_allowed(req.template, user)
+    _require_creative_request_model_policy(
+        image_model_id=getattr(req, "image_model_id", ""),
+        video_model_id=getattr(req, "video_model_id", ""),
+    )
+    _require_studio_provider_readiness(semantic=True, media=True)
     quality_mode = _normalize_skeleton_quality_mode(req.quality_mode, template=req.template)
     mint_mode = _normalize_mint_mode(req.mint_mode, template=req.template)
     art_style = _normalize_art_style(req.art_style, template=req.template)
@@ -19775,6 +18595,45 @@ async def transcribe_audio_with_grok(audio_path: str) -> str:
     return f"Sampled audio transcript excerpt: {transcript}"
 
 
+async def _transcribe_clone_audio_fal(audio_path: str) -> str:
+    """Transcribe an uploaded clone reference through the FAL-only STT adapter."""
+    source_path = str(audio_path or "").strip()
+    if not source_path or not Path(source_path).exists():
+        return ""
+    from studio_agent.reference_providers import transcribe_fal_segments
+
+    result = await asyncio.to_thread(transcribe_fal_segments, source_path)
+    transcript = _clip_text(
+        str((result or {}).get("text", "") or "").strip(),
+        CATALYST_REFERENCE_TRANSCRIPT_MAX_CHARS,
+    )
+    if not transcript:
+        error = str((result or {}).get("error", "") or "").strip()
+        if error:
+            log.warning("FAL clone audio transcription returned no transcript: %s", error)
+        return ""
+    return f"Sampled audio transcript excerpt: {transcript}"
+
+
+async def _generate_clone_voiceover_fal(text: str, output_path: str, *, template: str) -> dict:
+    """Generate clone narration through the canonical FAL MiniMax TTS adapter."""
+    from skeleton_ai.voice_fal import resolve_voice_id, synthesize
+
+    voice_id = resolve_voice_id(skeleton=(str(template or "").strip().lower() == "skeleton"))
+    rendered = await asyncio.to_thread(
+        synthesize,
+        text=text,
+        out_path=Path(output_path),
+        voice_id=voice_id,
+    )
+    return {
+        "audio_path": str(rendered),
+        "word_timings": [],
+        "voice_id": voice_id,
+        "provider": "fal_minimax",
+    }
+
+
 configure_catalyst_runtime_hooks(
     catalyst_hub_short_workspaces=CATALYST_HUB_SHORT_WORKSPACES,
     catalyst_hub_longform_workspaces=CATALYST_HUB_LONGFORM_WORKSPACES,
@@ -19884,7 +18743,7 @@ configure_catalyst_runtime_hooks(
 
 
 configure_clone_analysis_hooks(
-    xai_api_key=XAI_API_KEY,
+    json_completion=_xai_json_completion,
     clone_analysis_prompt=CLONE_ANALYSIS_PROMPT,
     template_system_prompts=TEMPLATE_SYSTEM_PROMPTS,
     heuristic_clone_analysis_fn=_heuristic_clone_analysis,
@@ -19963,7 +18822,7 @@ async def run_clone_pipeline(
                 video_context = f"{video_context}\n{upload_context}".strip()
             audio_path = await extract_audio_from_video(video_path)
             if audio_path:
-                transcript_hint = await transcribe_audio_with_grok(audio_path) or transcript_hint
+                transcript_hint = await _transcribe_clone_audio_fal(audio_path) or transcript_hint
                 Path(audio_path).unlink(missing_ok=True)
         if not effective_topic:
             effective_topic = _same_arena_follow_up_topic(source_bundle or {"title": ""}, format_preset="documentary") or "A sharper documentary topic"
@@ -20003,17 +18862,14 @@ async def run_clone_pipeline(
             raise ValueError("Clone script generation returned no scenes")
 
         fal_video_enabled = bool(FAL_AI_KEY)
-        runway_video_enabled = bool(RUNWAY_API_KEY)
-        use_video_engine = fal_video_enabled or runway_video_enabled
+        use_video_engine = fal_video_enabled
         use_video = use_video_engine
         if detected_template == "reddit":
             use_video = False
         if detected_template != "reddit" and not use_video_engine:
-            raise RuntimeError("Video is required but no engine is configured (set RUNWAY_API_KEY or FAL_AI_KEY)")
-        if runway_video_enabled:
-            mode_label = "Runway (primary)"
-        elif fal_video_enabled:
-            mode_label = "FalAI Kling 2.1"
+            raise RuntimeError("Video is required but FAL is not configured (set FAL_AI_KEY)")
+        if fal_video_enabled:
+            mode_label = "FAL Kling 2.1"
         else:
             mode_label = "static image"
         jobs[job_id]["generation_mode"] = "video" if use_video_engine else "image"
@@ -20057,11 +18913,12 @@ async def run_clone_pipeline(
                 template=detected_template,
                 reference_image_url=clone_skeleton_reference_image_url if detected_template == "skeleton" else "",
                 reference_lock_mode="strict",
+                selected_model_id=DEFAULT_CREATIVE_IMAGE_MODEL_ID,
             )
             if detected_template == "skeleton" and not clone_skeleton_reference_image_url and i == 0:
                 clone_skeleton_reference_image_url = _file_to_data_image_url(img_path)
             cdn_url = img_result.get("cdn_url")
-            engine_name = "Skeleton LoRA" if (detected_template == "skeleton" and not cdn_url) else ("Grok Imagine" if cdn_url else "SDXL")
+            engine_name = str(img_result.get("provider_label", "") or DEFAULT_CREATIVE_IMAGE_MODEL_ID)
             log.info(f"[{job_id}] Scene {i+1}/{len(scenes)} image generated ({engine_name})")
             _job_record_scene_event(job_id, i, len(scenes), "image_ready", engine_name)
 
@@ -20082,23 +18939,17 @@ async def run_clone_pipeline(
                         str(TEMP_DIR), i, gen_ts,
                         duration_sec=scene.get("duration_sec", 5),
                         image_cdn_url=cdn_url,
-                        prefer_wan=(detected_template == "skeleton"),
+                        prefer_wan=False,
+                        video_model_id=DEFAULT_CREATIVE_VIDEO_MODEL_ID,
                     )
                 except Exception as anim_err:
                     jobs[job_id]["animation_warnings"] = int(jobs[job_id].get("animation_warnings", 0)) + 1
                     log.warning(f"[{job_id}] Scene {i+1}/{len(scenes)} animation failed, using static image: {anim_err}")
                     _job_record_scene_event(job_id, i, len(scenes), "animation_failed", str(anim_err))
                     anim_result = {"type": "static"}
-                if anim_result["type"] in ("kling_clip", "wan_clip", "grok_clip", "runway_clip"):
+                if anim_result["type"] in ("fal_clip", "kling_clip"):
                     asset["kling_clip"] = anim_result["path"]
-                    if anim_result["type"] == "runway_clip":
-                        engine = "Runway"
-                    elif anim_result["type"] == "grok_clip":
-                        engine = "Grok Imagine Video"
-                    elif anim_result["type"] == "kling_clip":
-                        engine = "Kling 2.1"
-                    else:
-                        engine = "Wan 2.2"
+                    engine = str(anim_result.get("provider_label", "") or "FAL Kling 2.1")
                     log.info(f"[{job_id}] Scene {i+1}/{len(scenes)} animated by {engine}")
                     _job_record_scene_event(job_id, i, len(scenes), "animation_ready", engine)
                 else:
@@ -20112,7 +18963,11 @@ async def run_clone_pipeline(
 
         full_narration = " ".join(s.get("narration", "") for s in scenes)
         audio_path = str(TEMP_DIR / (job_id + "_voice.mp3"))
-        vo_result = await generate_voiceover(full_narration, audio_path, template=detected_template)
+        vo_result = await _generate_clone_voiceover_fal(
+            full_narration,
+            audio_path,
+            template=detected_template,
+        )
         audio_path = vo_result["audio_path"]
         word_timings = vo_result.get("word_timings", [])
 
@@ -20121,6 +18976,19 @@ async def run_clone_pipeline(
             subtitle_path = str(TEMP_DIR / (job_id + "_captions.ass"))
             generate_ass_subtitles(word_timings, subtitle_path, resolution=resolution, template=detected_template)
             log.info(f"[{job_id}] Word-synced captions generated: {len(word_timings)} words")
+        else:
+            subtitle_path = str(TEMP_DIR / (job_id + "_captions.ass"))
+            try:
+                generate_ass_scene_subtitles(
+                    scenes,
+                    subtitle_path,
+                    resolution=resolution,
+                    template=detected_template,
+                )
+                log.info(f"[{job_id}] Scene-timed captions generated for FAL narration")
+            except Exception as ass_exc:
+                log.warning("Clone scene-level caption fallback failed: %s", str(ass_exc)[:200])
+                subtitle_path = None
 
         _job_set_stage(job_id, "compositing", 85)
         log.info(f"[{job_id}] Compositing final video at {resolution}...")
@@ -20176,8 +19044,6 @@ async def run_clone_pipeline(
 
 
 _clone_video = build_clone_video_handler(
-    xai_api_key=XAI_API_KEY,
-    elevenlabs_api_key=ELEVENLABS_API_KEY,
     get_current_user_from_request=get_current_user_from_request,
     user_has_paid_access=_user_has_paid_access,
     normalize_output_resolution=_normalize_output_resolution,
@@ -20193,6 +19059,10 @@ _clone_video = build_clone_video_handler(
     is_admin_user=_is_admin_user,
     reserve_generation_credit=_reserve_generation_credit,
     refund_generation_credit=_refund_generation_credit,
+    clone_providers_ready=lambda: bool(
+        str(os.getenv("ANTHROPIC_API_KEY", "") or "").strip()
+        and str(FAL_AI_KEY or "").strip()
+    ),
     clone_credit_cost=estimate_auto_short_credits(
         scene_count=10,
         video_per_scene=_creative_video_credit_multiplier(DEFAULT_CREATIVE_VIDEO_MODEL_ID),
@@ -20574,7 +19444,7 @@ async def _create_stripe_membership_checkout(user: dict, plan: str, price_usd: f
         line_item = {"price": stripe_price_id, "quantity": 1}
     else:
         description = (
-            f"{monthly_credits:,} unified credits per month — Studio Agent, OpenRouter, fal, ElevenLabs."
+            f"{monthly_credits:,} unified credits per month — Studio Agent, direct Anthropic, and FAL media."
             if monthly_credits > 0
             else f"NYPTID Studio {normalized_plan.title()} membership"
         )

@@ -88,14 +88,23 @@ def test_expand_budget_prices_only_incremental_stills_and_selected_new_animation
     assert estimate.breakdown["additional_scene_count"] == 5
     assert estimate.breakdown["animate_scene_indices"] == [1, 2, 3, 4, 5]
     assert estimate.breakdown["animated_new_scene_seconds"] == 25.0
-    assert estimate.breakdown["stills_usd"] == 0.5
-    # The provider rate can change independently of this incremental-scene
-    # contract. Verify that only the 25 new seconds are priced using the
-    # currently resolved model rate instead of pinning a stale dollar amount.
+    assert estimate.breakdown["image_retry_envelope"]["max_attempts"] == 2
+    assert estimate.breakdown["stills_usd"] == pytest.approx(
+        estimate.breakdown["still_usd_per_image"] * 5,
+        abs=0.0001,
+    )
+    # Provider rates can change independently of this incremental-scene
+    # contract. Verify that only the five new stills and 25 new seconds are
+    # priced using the currently resolved rates instead of stale dollar pins.
     assert estimate.breakdown["video_usd"] == pytest.approx(
         estimate.breakdown["video_usd_per_second"] * 25.0,
         abs=0.0001,
     )
+    with pytest.raises(production_budget.BudgetExceededError):
+        production_budget.enforce_budget(
+            "expand_visual_proof_shortform",
+            _expand_args(max_budget_usd=max(0.01, estimate.estimated_usd - 0.01)),
+        )
 
 
 def test_expand_budget_honors_explicit_no_animation_contract():
@@ -292,7 +301,7 @@ def test_expand_claim_lock_serializes_separate_processes(tmp_path):
     assert second_acquired >= first_released - 0.02
 
 
-def test_conflicting_expand_releases_credit_reservation_without_charge(monkeypatch):
+def test_conflicting_expand_releases_credit_reservation_without_charge_and_raises(monkeypatch):
     import unified_credits as uc
 
     estimate = production_budget.BudgetEstimate(
@@ -335,7 +344,10 @@ def test_conflicting_expand_releases_credit_reservation_without_charge(monkeypat
     )
     monkeypatch.setattr(tools.telemetry, "record_tool_call", lambda *_args, **_kwargs: None)
 
-    result = json.loads(
+    with pytest.raises(
+        RuntimeError,
+        match="did not reach a verified durable postcondition: different expansion already in progress",
+    ):
         tools.execute_tool_logged(
             "expand_visual_proof_shortform",
             {"job_id": "proof-job", "scene_count": 8, "existing_scene_count": 1},
@@ -343,12 +355,6 @@ def test_conflicting_expand_releases_credit_reservation_without_charge(monkeypat
             content_format="short",
             session_id="sa-conflict",
         )
-    )
-
-    assert result["ok"] is False
-    assert result["status"] == "conflict"
-    assert result["credits"]["charged"] == 0
-    assert result["credits"]["reservation_released"] is True
     assert released == [
         (
             "user-1",

@@ -8,9 +8,9 @@ Wires into backend.py via:
 Routes:
   GET  /api/skeleton-ai/categories         List built-in + user custom categories
   POST /api/skeleton-ai/categories         Create a custom category (auth)
-  GET  /api/skeleton-ai/voices              List ElevenLabs voices for picker
+  GET  /api/skeleton-ai/voices              List configured FAL MiniMax voices
   GET  /api/skeleton-ai/pricing             Tier table for pricing UI
-  POST /api/skeleton-ai/script              Generate script with Grok (streamable)
+  POST /api/skeleton-ai/script              Generate script with direct Anthropic (streamable)
   POST /api/skeleton-ai/generate            Run full pipeline → mp4
   GET  /api/skeleton-ai/jobs/{id}           Poll a generation job
 """
@@ -33,25 +33,26 @@ from skeleton_ai.prompts.category_registry import (
 )
 from skeleton_ai.prompts.base_style import assemble_scene_prompt, NEG_STILL
 from skeleton_ai.scripting_grok import GrokClient, GrokAuthError, build_script_prompt
-from skeleton_ai.voice_elevenlabs import ElevenLabsClient, ElevenLabsAuthError
+from skeleton_ai.voice_fal import configured as fal_voice_configured
+from skeleton_ai.voice_fal import list_voices as list_fal_voices
 from skeleton_ai.pipeline import (
     run as run_pipeline,
     analyze_script,
     derive_beat_visuals,
     split_script_into_beats,
 )
-from skeleton_ai.canonical_edit import build_scene_edit_prompt, generate_still_edit
-from skeleton_ai.stills_engine import (
-    generate as gen_still_for_model,
-    MODEL_ENDPOINTS,
-    StillsError,
+from skeleton_ai.canonical_edit import (
+    CanonicalEditError,
+    build_scene_edit_prompt,
+    generate_still_edit,
 )
-from skeleton_ai.i2v_engine import AC_COST_STANDARD, AC_COST_PREMIUM
-from studio_agent.image_model_catalog import (
-    is_seedream_model,
-    normalize_seedream_model_id,
-    seedream_endpoint,
+from skeleton_ai.i2v_engine import (
+    AC_COST_STANDARD,
+    AC_COST_PREMIUM,
+    normalize_fal_video_model_id,
 )
+from skeleton_ai.styled_stills import normalize_fal_image_model_id
+from studio_agent.image_model_catalog import seedream_endpoint
 
 # Reference videos thread into the Grok system prompt so generated scripts
 # mimic the patterns Casey saved as 'winning' inspiration. Best-effort —
@@ -226,7 +227,7 @@ class RegenerateSceneRequest(BaseModel):
     beat_index: int = Field(ge=0)
     outfit: str | None = None
     scene_action: str | None = None
-    motion_prompt: str | None = None
+    motion_prompt: str | None = Field(default=None, max_length=300)
     reference_image: str | None = None
     image_model: str | None = None
 
@@ -387,26 +388,23 @@ def build_skeleton_ai_router(
 
     @router.get("/voices")
     async def voices(_user: dict = auth_dep):
-        try:
-            el = ElevenLabsClient()
-            vs = el.list_voices()
-        except ElevenLabsAuthError as e:
-            raise HTTPException(503, f"elevenlabs_auth_failed: {e}")
+        vs = list_fal_voices()
         return {
+            "provider": "fal_minimax",
+            "configured": fal_voice_configured(),
             "voices": [
                 {
                     "voice_id": v["voice_id"],
                     "name": v["name"],
                     "category": v.get("category"),
-                    "preview_url": v.get("preview_url"),
-                    "labels": v.get("labels", {}),
+                    "provider": v.get("provider", "fal_minimax"),
                 }
                 for v in vs
             ]
         }
 
     # ──────────────────────────────────────────────────────────────────────
-    # Script generation (Grok 4.1 Fast Reasoning)
+    # Script generation (direct Anthropic; compatibility class name retained)
     # ──────────────────────────────────────────────────────────────────────
 
     @router.post("/script")
@@ -510,12 +508,7 @@ def build_skeleton_ai_router(
             except ValueError as e:
                 raise HTTPException(400, str(e))
         # Stills always use canonical Seedream edit; image_model is kept for API compat.
-        selected_image_model = normalize_seedream_model_id(body.image_model or "seedream_edit")
-        if not is_seedream_model(selected_image_model):
-            raise HTTPException(
-                400,
-                f"unknown canonical image_model {body.image_model!r}"
-            )
+        selected_image_model = normalize_fal_image_model_id(body.image_model)
         try:
             grok = GrokClient()
         except GrokAuthError as e:
@@ -575,6 +568,7 @@ def build_skeleton_ai_router(
                         outfit, action, motion = derive_beat_visuals(
                             grok, narration, cat_label, plan=plan
                         )
+                        motion = str(motion or "")[:300]
                         out_file = stills_dir / f"{sid}.png"
                         edit_prompt = build_scene_edit_prompt(
                             topic=body.topic or cat_label,
@@ -588,7 +582,7 @@ def build_skeleton_ai_router(
                             seed=420042 + i,
                             image_model_id=selected_image_model,
                         )
-                    except StillsError as e:
+                    except CanonicalEditError as e:
                         yield sse("error", {"beat_index": i, "message": str(e)})
                         continue
                     except Exception as e:  # pragma: no cover — defensive
@@ -655,7 +649,9 @@ def build_skeleton_ai_router(
             raise HTTPException(404, "scene_not_found")
         outfit = str(body.outfit if body.outfit is not None else scene.get("outfit") or "")
         action = str(body.scene_action if body.scene_action is not None else scene.get("scene_action") or "")
-        motion = str(body.motion_prompt if body.motion_prompt is not None else scene.get("motion_prompt") or "")
+        motion = str(
+            body.motion_prompt if body.motion_prompt is not None else scene.get("motion_prompt") or ""
+        )[:300]
         sid = f"b{int(body.beat_index):02d}"
         stills_dir = workspace / "stills"
         stills_dir.mkdir(parents=True, exist_ok=True)
@@ -665,11 +661,9 @@ def build_skeleton_ai_router(
             visual_description=action,
             outfit=outfit,
         )
-        selected_image_model = normalize_seedream_model_id(
+        selected_image_model = normalize_fal_image_model_id(
             body.image_model or scene.get("image_model_id") or "seedream_edit"
         )
-        if not is_seedream_model(selected_image_model):
-            raise HTTPException(400, f"unknown canonical image_model {selected_image_model!r}")
         generate_still_edit(
             edit_prompt,
             out_file,
@@ -721,9 +715,9 @@ def build_skeleton_ai_router(
                     "script": script_text,
                     "scene_count": 1,
                     "render_style": "skeleton_host",
-                    "video_model": str(body.video_model or "seedance"),
+                    "video_model": normalize_fal_video_model_id(body.video_model, tier=body.tier),
                     "tier": body.tier,
-                    "image_model_id": str(body.image_model or "seedream_edit"),
+                    "image_model_id": normalize_fal_image_model_id(body.image_model),
                     "reference_image": str(body.reference_image or "").strip(),
                     "visual_proof_only": True,
                     "animate": False,
@@ -794,21 +788,17 @@ def build_skeleton_ai_router(
                 topic=body.topic,
                 workspace=workspace,
                 tier=body.tier,
-                video_model=body.video_model,
+                video_model=normalize_fal_video_model_id(body.video_model, tier=body.tier),
                 voice_id=body.voice_id,
                 script_override=script_text,
                 user_id=uid,
                 master_reference_url=master_ref,
-                image_model_id=(
-                    normalize_seedream_model_id(body.image_model or "seedream_edit")
-                    if is_seedream_model(body.image_model or "seedream_edit")
-                    else "seedream_edit"
-                ),
+                image_model_id=normalize_fal_image_model_id(body.image_model),
             )
         except ValueError as e:
             await _maybe_refund(refund_credit, user, credit_source, ac_required)
             raise HTTPException(400, str(e))
-        except (GrokAuthError, ElevenLabsAuthError) as e:
+        except GrokAuthError as e:
             await _maybe_refund(refund_credit, user, credit_source, ac_required)
             raise HTTPException(503, f"upstream_auth: {e}")
         except Exception as e:

@@ -27,12 +27,7 @@ from fastapi.responses import FileResponse
 from PIL import Image, ImageDraw, ImageFont, ImageOps, UnidentifiedImageError
 
 from backend_models import ThumbnailGenerateRequest
-from backend_settings import (
-    FAL_AI_KEY,
-    PIKZELS_API_KEY,
-    PIKZELS_THUMBNAIL_MODEL,
-    THUMBNAIL_DIR,
-)
+from backend_settings import FAL_AI_KEY, THUMBNAIL_DIR
 from studio_agent.command_execution import ExecutionReceipt, FileExecutionLedger
 from studio_agent.product_reference import ProductReferenceError, _fetch_public_resource
 from upload_limits import MAX_REFERENCE_IMAGE_BYTES, MAX_THUMBNAIL_VIDEO_BYTES, UploadTooLargeError, write_upload_limited
@@ -44,15 +39,33 @@ log = logging.getLogger("nyptid-studio")
 THUMBNAIL_MODEL_CREDITS: dict[str, int] = {
     "ernie_image": 3,
     "seedream45": 5,
-    "imagen4_fast": 4,
     "recraft_v4": 5,
-    "grok_imagine": 6,
+    "flux_2_pro": 5,
+    "recraft_v4_pro": 5,
+    "flux_lora_skeleton": 5,
 }
 THUMBNAIL_DEFAULT_CREDITS = 5
 THUMBNAIL_MAX_REFERENCE_URLS = 4
 THUMBNAIL_MAX_IMAGE_PIXELS = 40_000_000
 THUMBNAIL_ALLOWED_VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".m4v", ".avi"}
-THUMBNAIL_MODEL_ORDER = ("ernie_image", "seedream45", "imagen4_fast", "recraft_v4", "grok_imagine")
+THUMBNAIL_MODEL_ORDER = (
+    "ernie_image",
+    "seedream45",
+    "recraft_v4",
+    "flux_2_pro",
+    "recraft_v4_pro",
+    "flux_lora_skeleton",
+)
+THUMBNAIL_ALLOWED_FAL_MODELS = frozenset(THUMBNAIL_MODEL_ORDER)
+THUMBNAIL_BANNED_MODEL_MARKERS = (
+    "grok",
+    "xai",
+    "imagen",
+    "google",
+    "gemini",
+    "nano_banana",
+    "nano-banana",
+)
 SEEDREAM_THUMB_EDIT_URL = "https://fal.run/fal-ai/bytedance/seedream/v4.5/edit"
 _UPLOAD_ID_RE = re.compile(r"^vid_[0-9a-f]{32}$")
 _THUMBLAB_OUTPUT_FILE_RE = re.compile(r"^thumb_[0-9a-f]{32}\.png$")
@@ -86,8 +99,6 @@ class ThumbLabRuntime:
     ledger: FileExecutionLedger
     storage_root: Path
     fal_ai_key: str
-    pikzels_api_key: str
-    pikzels_thumbnail_model: str
     max_video_bytes: int
     probe_video_duration: Callable[..., Any]
     extract_frame_image: Callable[..., Any]
@@ -179,12 +190,42 @@ def _thumbnail_credit_cost(image_model: str = "") -> int:
     return int(THUMBNAIL_MODEL_CREDITS.get(normalized, THUMBNAIL_DEFAULT_CREDITS))
 
 
+def _normalize_thumbnail_model_id(image_model: str = "") -> str:
+    return str(image_model or "seedream45").strip().lower().replace("seedream_45", "seedream45")
+
+
+def _thumbnail_model_is_banned(image_model: str = "") -> bool:
+    normalized = _normalize_thumbnail_model_id(image_model)
+    return any(marker in normalized for marker in THUMBNAIL_BANNED_MODEL_MARKERS)
+
+
+def _fal_native_thumbnail_profile(model_id: str, profile: dict[str, Any]) -> bool:
+    """Fail closed if the shared catalog ever reroutes an allowed ID."""
+
+    normalized = _normalize_thumbnail_model_id(model_id)
+    endpoint = str(profile.get("fal_endpoint_id") or "").strip().lower()
+    provider = str(profile.get("provider") or "").strip().lower()
+    policy_blob = " ".join(
+        (
+            normalized,
+            str(profile.get("label") or "").strip().lower(),
+            endpoint,
+        )
+    )
+    return bool(
+        normalized in THUMBNAIL_ALLOWED_FAL_MODELS
+        and provider == "fal"
+        and endpoint.startswith("fal-ai/")
+        and not any(marker in policy_blob for marker in THUMBNAIL_BANNED_MODEL_MARKERS)
+    )
+
+
 def _thumbnail_model_catalog(runtime: ThumbLabRuntime) -> list[dict[str, Any]]:
     models: list[dict[str, Any]] = []
     if runtime.fal_ai_key:
         for model_id in THUMBNAIL_MODEL_ORDER:
             profile = dict(CREATIVE_IMAGE_MODEL_MAP.get(model_id) or {})
-            if not str(profile.get("fal_endpoint_id") or "").strip():
+            if not _fal_native_thumbnail_profile(model_id, profile):
                 continue
             models.append(
                 {
@@ -193,9 +234,7 @@ def _thumbnail_model_catalog(runtime: ThumbLabRuntime) -> list[dict[str, Any]]:
                     "credits": _thumbnail_credit_cost(model_id),
                 }
             )
-    elif runtime.pikzels_api_key:
-        models.append({"id": "seedream45", "label": "Pikzels Thumbnail", "credits": 5})
-    return models or [{"id": "seedream45", "label": "Seedream 4.5", "credits": 5}]
+    return models
 
 
 def _strict_youtube_channel_ref(raw: str) -> tuple[str, str]:
@@ -631,40 +670,6 @@ async def _write_seedream_edit(
     }
 
 
-async def _write_pikzels_thumbnail(
-    runtime: ThumbLabRuntime,
-    *,
-    prompt: str,
-    output_path: Path,
-) -> dict[str, Any]:
-    if not runtime.pikzels_api_key:
-        raise RuntimeError("Pikzels is not configured")
-    async with httpx.AsyncClient(timeout=120, follow_redirects=False) as client:
-        response = await client.post(
-            "https://api.pikzels.com/v1/thumbnail",
-            headers={"X-Api-Key": runtime.pikzels_api_key, "Content-Type": "application/json"},
-            json={"prompt": str(prompt or "")[:4000], "model": runtime.pikzels_thumbnail_model, "format": "16:9"},
-        )
-    try:
-        payload = response.json()
-    except Exception:
-        payload = {}
-    if response.status_code not in {200, 201}:
-        raise RuntimeError(f"Pikzels thumbnail request failed ({response.status_code})")
-    output_url = str((payload or {}).get("output") or "").strip()
-    if not output_url:
-        raise RuntimeError("Pikzels returned no output image")
-    await _download_public_image(output_url, output_path)
-    return {
-        "path": str(output_path),
-        "output_url": output_url,
-        "request_id": str((payload or {}).get("request_id") or ""),
-        "provider": "pikzels",
-        "provider_label": "Pikzels",
-        "provider_mode": "pikzels_thumbnail",
-    }
-
-
 async def _render_thumbnail_image(
     runtime: ThumbLabRuntime,
     prompt: str,
@@ -680,7 +685,9 @@ async def _render_thumbnail_image(
     del mode, style_ref_path
     destination = Path(output_path)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    preferred = str(image_model or "seedream45").strip().lower().replace("seedream_45", "seedream45")
+    preferred = _normalize_thumbnail_model_id(image_model)
+    if _thumbnail_model_is_banned(preferred):
+        raise RuntimeError("Thumbnail model is disabled by provider policy")
     catalog_ids = {row["id"] for row in _thumbnail_model_catalog(runtime)}
     if preferred not in catalog_ids:
         raise RuntimeError("Unsupported thumbnail model")
@@ -727,11 +734,6 @@ async def _render_thumbnail_image(
         except Exception as exc:
             errors.append(f"{model_id}: {str(exc)[:180]}")
             destination.unlink(missing_ok=True)
-    if runtime.pikzels_api_key and preferred == "seedream45":
-        try:
-            return await _write_pikzels_thumbnail(runtime, prompt=prompt, output_path=destination)
-        except Exception as exc:
-            errors.append(f"pikzels: {str(exc)[:180]}")
     raise RuntimeError("Thumbnail generation failed: " + " | ".join(errors[-3:]))
 
 
@@ -1093,8 +1095,6 @@ def build_thumblab_router(
     storage_root: str | Path = THUMBNAIL_DIR,
     idempotency_ledger: FileExecutionLedger | None = None,
     fal_ai_key: str = FAL_AI_KEY,
-    pikzels_api_key: str = PIKZELS_API_KEY,
-    pikzels_thumbnail_model: str = PIKZELS_THUMBNAIL_MODEL,
     max_video_bytes: int = MAX_THUMBNAIL_VIDEO_BYTES,
     probe_video_duration: Callable[..., Any] = _probe_video_duration_default,
     extract_frame_image: Callable[..., Any] = _extract_frame_image_default,
@@ -1121,8 +1121,6 @@ def build_thumblab_router(
         ledger=idempotency_ledger or FileExecutionLedger(root / "idempotency"),
         storage_root=root,
         fal_ai_key=str(fal_ai_key or "").strip(),
-        pikzels_api_key=str(pikzels_api_key or "").strip(),
-        pikzels_thumbnail_model=str(pikzels_thumbnail_model or "pkz-3").strip(),
         max_video_bytes=max(1, int(max_video_bytes or MAX_THUMBNAIL_VIDEO_BYTES)),
         probe_video_duration=probe_video_duration,
         extract_frame_image=extract_frame_image,
@@ -1303,8 +1301,8 @@ def build_thumblab_router(
         user: dict = Depends(require_auth),
     ):
         user_id = _require_user_id(user)
-        if not runtime.fal_ai_key and not runtime.pikzels_api_key:
-            raise HTTPException(503, "Thumbnail image provider is not configured")
+        if not runtime.fal_ai_key:
+            raise HTTPException(503, "FAL thumbnail image provider is not configured")
         command_id = str(request.headers.get("x-idempotency-key") or "").strip()
         if not command_id:
             raise HTTPException(400, "X-Idempotency-Key is required for thumbnail generation")
@@ -1316,7 +1314,9 @@ def build_thumblab_router(
         raw_refs = [str(value or "").strip() for value in list(req.reference_thumbnail_urls or []) if str(value or "").strip()]
         if len(raw_refs) > THUMBNAIL_MAX_REFERENCE_URLS:
             raise HTTPException(400, f"At most {THUMBNAIL_MAX_REFERENCE_URLS} reference thumbnails are allowed")
-        model_id = str(req.image_model or "seedream45").strip().lower().replace("seedream_45", "seedream45")
+        model_id = _normalize_thumbnail_model_id(req.image_model)
+        if _thumbnail_model_is_banned(model_id):
+            raise HTTPException(400, "Thumbnail model is disabled by provider policy")
         if model_id not in {row["id"] for row in _thumbnail_model_catalog(runtime)}:
             raise HTTPException(400, "Unsupported thumbnail model")
         req = req.model_copy(update={"image_model": model_id, "reference_thumbnail_urls": raw_refs})

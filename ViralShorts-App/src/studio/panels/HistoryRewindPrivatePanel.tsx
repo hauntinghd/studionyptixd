@@ -23,13 +23,13 @@
  *     are tuned to the channel's actual top-velocity uploads.
  *   - Topic generator that lists competitor whitespace empires (Khmer,
  *     Phoenicians, Inca, Mughal, Persian, Hittite — zero hits in the
- *     264-vid corpus) and feeds them as preferred picks to Grok.
+ *     264-vid corpus) and feeds them as preferred picks to Claude.
  *   - Admin gating — keeps this from non-admin users while testing.
  *
  * Backend reuse:
  *   GET  /api/catalyst/hub?channel_id=...               → snapshot
  *   POST /api/catalyst/hub/refresh                      → re-sync
- *   POST /api/history-rewind-private/generate-topics    → Grok topic gen
+ *   POST /api/history-rewind-private/generate-topics    → direct Anthropic topic gen
  */
 import { useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import {
@@ -527,7 +527,7 @@ export default function HistoryRewindPrivatePanel({ onLongformHandoff }: History
                     className="rounded-md bg-amber-500 hover:bg-amber-600 disabled:bg-zinc-800 disabled:text-zinc-500 px-4 py-2.5 text-sm font-semibold text-white flex items-center justify-center gap-2"
                 >
                     {genLoading ? (
-                        <><Loader2 className="h-4 w-4 animate-spin" /> Grok generating 8 topics…</>
+                        <><Loader2 className="h-4 w-4 animate-spin" /> Claude generating 8 topics…</>
                     ) : (
                         <><Sparkles className="h-4 w-4" /> Generate 8 topic ideas (channel-tuned)</>
                     )}
@@ -588,7 +588,7 @@ export default function HistoryRewindPrivatePanel({ onLongformHandoff }: History
             <div className="rounded-md bg-zinc-900/50 border border-zinc-800 px-4 py-3 text-xs text-zinc-400">
                 <strong className="text-zinc-300">Build path:</strong> clicking "Build with this topic" hands the
                 topic off to the existing Long-Form panel (pre-fills topic + History Rewind channel via
-                sessionStorage), which uses the existing sleep_doc render pipeline (Grok outline → ernie
+                sessionStorage), which uses the existing sleep_doc render pipeline (Claude outline → FAL ERNIE
                 stills → fal MiniMax 9hr narration → ffmpeg compose). Same render flow as the public
                 Long-Form tab — this panel is just the channel-aware topic discovery on top.
             </div>

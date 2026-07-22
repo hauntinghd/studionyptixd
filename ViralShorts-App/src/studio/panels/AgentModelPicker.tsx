@@ -89,7 +89,7 @@ function formatPricingSource(m: AgentModelOption) {
     if (!source) return null;
     if (m.pricing_live || source === 'fal_api') return 'Live provider rate';
     if (source.includes('disk_cache')) return 'Last-known provider rate';
-    if (source === 'xai_published') return 'Published xAI rate';
+    if (source === 'xai_published') return 'Retired legacy rate';
     if (source === 'fallback') return 'Fallback estimate';
     return null;
 }

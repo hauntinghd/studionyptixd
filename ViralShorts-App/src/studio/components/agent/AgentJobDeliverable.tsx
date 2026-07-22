@@ -22,6 +22,18 @@ import {
 
 export type SceneReplyPreset = 'edit' | 'regenerate';
 
+function qaReportPassed(report: unknown): boolean {
+    if (!report || typeof report !== 'object') return false;
+    const row = report as { status?: unknown; pass?: unknown };
+    return String(row.status || '').trim().toLowerCase() === 'pass' && row.pass === true;
+}
+
+function sceneQaPassed(scene: AgentSceneSnapshot): boolean {
+    return scene.qa_stale === false
+        && scene.qa_blocked !== true
+        && qaReportPassed(scene.visual_qa);
+}
+
 function SceneClipPlayer({
     jobId,
     idx,
@@ -315,6 +327,10 @@ function StillInspectionModal({
     title,
     hasClip = false,
     clipCacheKey = '',
+    qaBlocked = false,
+    qaPending = false,
+    qaReason = '',
+    laneLabel = '',
     onClose,
     onEdit,
     onRegenerate,
@@ -326,6 +342,10 @@ function StillInspectionModal({
     title: string;
     hasClip?: boolean;
     clipCacheKey?: string;
+    qaBlocked?: boolean;
+    qaPending?: boolean;
+    qaReason?: string;
+    laneLabel?: string;
     onClose: () => void;
     onEdit?: () => void;
     onRegenerate?: () => void;
@@ -462,6 +482,23 @@ function StillInspectionModal({
                         </button>
                     </div>
                 </div>
+                {(qaBlocked || qaPending || laneLabel) && (
+                    <div className={`border-b px-4 py-2 text-[11px] ${
+                        qaBlocked
+                            ? 'border-red-400/20 bg-red-500/10 text-red-100'
+                            : qaPending
+                            ? 'border-amber-400/20 bg-amber-500/10 text-amber-100'
+                            : 'border-cyan-400/15 bg-cyan-500/[0.06] text-cyan-100/80'
+                    }`}>
+                        {qaBlocked && (
+                            <p><span className="font-semibold">QA blocked:</span> {qaReason || 'The current asset is not approved.'}</p>
+                        )}
+                        {qaPending && (
+                            <p><span className="font-semibold">QA refresh needed:</span> {qaReason}</p>
+                        )}
+                        {laneLabel && <p className={qaBlocked || qaPending ? 'mt-1 opacity-65' : ''}>{laneLabel}</p>}
+                    </div>
+                )}
                 {hasClip ? (
                     <div className="relative flex min-h-0 flex-1 items-center justify-center bg-black p-4">
                         <div className="w-full max-w-md overflow-hidden rounded-xl border border-white/10">
@@ -686,9 +723,52 @@ function AgentJobDeliverable({
     const approvedSceneCount = sceneCards.filter(
         (scene) => scene.approved_for_video || scene.approved_for_animation,
     ).length;
+    const qaBlockedSceneCount = sceneCards.filter((scene) => !sceneQaPassed(scene)).length;
+    const hasQaBlockedScenes = qaBlockedSceneCount > 0;
     const allScenesApproved = sceneCards.length > 0 && approvedSceneCount === sceneCards.length;
     const isShortform = snapshot.kind === 'shortform';
     const isLongform = snapshot.kind === 'longform';
+    const isFinalProduction = (isShortform || isLongform)
+        && !snapshot.thumbnail_only
+        && !snapshot.visual_proof_only;
+    const finalQaReport = snapshot.final_qa || snapshot.render_qa || snapshot.qa_state?.render;
+    const finalQaPassed = qaReportPassed(finalQaReport);
+    const aggregateQaPassed = (
+        String(snapshot.qa_state?.status || '').trim().toLowerCase() === 'pass'
+        && snapshot.qa_state?.ready_to_post === true
+    );
+    const sceneAggregateQaPassed = !(isShortform || isLongform) || (
+        sceneCards.length > 0
+        && sceneCards.every(sceneQaPassed)
+    );
+    const visualQaPassed = !isShortform || (
+        qaReportPassed(snapshot.visual_qa)
+        && snapshot.visual_qa?.ready_to_publish === true
+    );
+    const finalDeliverableReady = Boolean(
+        isFinalProduction
+        && complete
+        && snapshot.ready_to_post === true
+        && aggregateQaPassed
+        && finalQaPassed
+        && sceneAggregateQaPassed
+        && visualQaPassed,
+    );
+    const finalQaBlocked = Boolean(
+        isFinalProduction
+        && !finalDeliverableReady
+        && (
+            complete
+            || ['final_qa_blocked', 'render_qa_failed', 'visual_qa_failed', 'qa_blocked']
+                .includes(String(snapshot.status || '').trim().toLowerCase())
+        ),
+    );
+    const finalQaReason = snapshot.qa_state?.reasons?.find(Boolean)
+        || finalQaReport?.summary
+        || snapshot.visual_qa_summary
+        || snapshot.visual_qa?.summary
+        || snapshot.stage_detail
+        || 'The final asset remains staged until every mandatory QA check passes.';
     // A failed short still owns useful, editable scene artifacts. Collapse to
     // the generic failure tile only when there is no scene review to recover.
     const failedWithReviewableScenes = failed && isShortform && sceneCards.length > 0;
@@ -746,16 +826,16 @@ function AgentJobDeliverable({
     }, [isAnalysis, isClipLab, session?.access_token, snapshot.job_id, snapshot.kind]);
 
     useEffect(() => {
-        if (!enableVideoPreview) {
+        if (!enableVideoPreview || !finalDeliverableReady) {
             setVideoSrc((prev) => {
                 if (prev) URL.revokeObjectURL(prev);
                 return '';
             });
+            setVideoLoadFailed(false);
             return;
         }
-        if (complete && snapshot.mp4_url) void loadVideo();
-        else if (awaiting && snapshot.mp4_url) void loadVideo();
-    }, [complete, awaiting, enableVideoPreview, snapshot.mp4_url, loadVideo]);
+        if (snapshot.mp4_url) void loadVideo();
+    }, [enableVideoPreview, finalDeliverableReady, snapshot.mp4_url, loadVideo]);
 
     useEffect(() => () => {
         if (videoSrc) URL.revokeObjectURL(videoSrc);
@@ -895,17 +975,31 @@ function AgentJobDeliverable({
         setSceneActionBusy(busyKey);
         setSceneActionError('');
         try {
-            const res = await fetch(agentJobSceneRegenerateUrl(snapshot.job_id, sceneIndex), {
-                method: 'POST',
-                headers: {
-                    Authorization: `Bearer ${tok}`,
-                    'X-Idempotency-Key': idempotencyKey,
+            const res = await fetch(
+                agentJobSceneRegenerateUrl(snapshot.job_id, sceneIndex, sessionId),
+                {
+                    method: 'POST',
+                    headers: {
+                        Authorization: `Bearer ${tok}`,
+                        'X-Idempotency-Key': idempotencyKey,
+                    },
                 },
-            });
+            );
             const data = await res.json().catch(() => ({}));
             if (!res.ok) throw new Error(String((data as { detail?: string }).detail || res.statusText));
             const next = (data as { snapshot?: AgentJobSnapshot }).snapshot;
             if (next) onSnapshotUpdate?.({ ...next, client_updated_at: Date.now() });
+            const payload = data as {
+                ok?: boolean;
+                tool_result?: { ok?: boolean; error?: string; note?: string };
+            };
+            if (payload.ok === false || payload.tool_result?.ok === false) {
+                throw new Error(
+                    payload.tool_result?.error
+                    || payload.tool_result?.note
+                    || `Scene ${sceneIndex + 1} replacement did not pass QA.`,
+                );
+            }
         } catch (e) {
             setSceneActionError((e as Error).message);
         } finally {
@@ -917,15 +1011,25 @@ function AgentJobDeliverable({
         const tok = session?.access_token;
         if (!tok || !snapshot.job_id) return;
         const current = String(scene.prompt || scene.scene_action || '').trim();
-        const next = window.prompt(`Exact provider prompt for Scene ${sceneIndex + 1} (max 759 characters)`, current);
+        const next = window.prompt(`Exact provider prompt for Scene ${sceneIndex + 1} (max 300 characters)`, current);
         if (next === null || next.trim() === current) return;
+        const nextPrompt = next.trim();
+        if (nextPrompt.length > 300) {
+            setSceneActionError(`Scene prompt is ${nextPrompt.length} characters; the provider limit is 300.`);
+            return;
+        }
+        const idempotencyKey = crypto.randomUUID();
         setSceneActionBusy(`${sceneIndex}:prompt`);
         setSceneActionError('');
         try {
             const res = await fetch(agentJobScenePromptUrl(snapshot.job_id, sceneIndex), {
                 method: 'PUT',
-                headers: { Authorization: `Bearer ${tok}`, 'Content-Type': 'application/json' },
-                body: JSON.stringify({ prompt: next.trim() }),
+                headers: {
+                    Authorization: `Bearer ${tok}`,
+                    'Content-Type': 'application/json',
+                    'X-Idempotency-Key': idempotencyKey,
+                },
+                body: JSON.stringify({ prompt: nextPrompt }),
             });
             const data = await res.json().catch(() => ({}));
             if (!res.ok) throw new Error(String(data.detail || `Prompt update failed (${res.status})`));
@@ -1009,6 +1113,31 @@ function AgentJobDeliverable({
         && (isShortform || isLongform)
         && (awaiting || (isShortform && (running || failedWithReviewableScenes)))
     );
+    const inspectedScene = inspectSceneIdx == null
+        ? undefined
+        : sceneCards.find((scene) => Number(scene.index) === inspectSceneIdx);
+    const inspectedQaStale = Boolean(inspectedScene?.qa_stale || !inspectedScene?.visual_qa);
+    const inspectedQaBlocked = Boolean(inspectedScene && !sceneQaPassed(inspectedScene));
+    const inspectedQaReason = inspectedQaStale
+        ? 'QA needs a current fingerprint. Approving this scene will run the current checks first.'
+        : inspectedScene?.qa_reason
+        || inspectedScene?.visual_qa?.summary
+        || inspectedScene?.scene_correspondence_qa?.summary
+        || inspectedScene?.i2v_qa?.summary
+        || inspectedScene?.still_qa?.summary
+        || '';
+    const inspectedActualProvider = inspectedScene?.has_clip
+        ? inspectedScene?.video_provider
+        : inspectedScene?.image_provider;
+    const inspectedActualModel = inspectedScene?.has_clip
+        ? (inspectedScene?.video_endpoint || inspectedScene?.video_model)
+        : inspectedScene?.image_model_id;
+    const inspectedFallback = inspectedScene?.has_clip
+        ? inspectedScene?.video_fallback_from
+        : inspectedScene?.fallback_from;
+    const inspectedLaneLabel = inspectedActualProvider || inspectedActualModel
+        ? `${inspectedFallback ? `Fallback: ${inspectedFallback} → ` : 'Actual lane: '}${[inspectedActualProvider, inspectedActualModel].filter(Boolean).join(' · ')}`
+        : '';
 
     return (
         <div className="mt-3 overflow-hidden rounded-2xl border border-white/[0.08] bg-[#0b0b11]/95 shadow-inner">
@@ -1064,9 +1193,19 @@ function AgentJobDeliverable({
                                 : 'Awaiting your review'}
                         </div>
                     )}
-                    {complete && (
+                    {finalDeliverableReady && (
                         <div className="flex items-center gap-1 rounded-full bg-emerald-500/10 px-2.5 py-0.5 text-[10px] font-medium text-emerald-300">
                             <CheckCircle2 className="h-3 w-3" /> Ready
+                        </div>
+                    )}
+                    {finalQaBlocked && (
+                        <div className="flex items-center gap-1 rounded-full bg-amber-500/10 px-2.5 py-0.5 text-[10px] font-medium text-amber-200">
+                            <AlertTriangle className="h-3 w-3" /> QA blocked
+                        </div>
+                    )}
+                    {complete && !isFinalProduction && (
+                        <div className="flex items-center gap-1 rounded-full bg-emerald-500/10 px-2.5 py-0.5 text-[10px] font-medium text-emerald-300">
+                            <CheckCircle2 className="h-3 w-3" /> Complete
                         </div>
                     )}
                     {complete && onReply && (
@@ -1095,6 +1234,22 @@ function AgentJobDeliverable({
 
             {/* Live content area */}
             <div className="p-3">
+                {finalQaBlocked && (
+                    <div className="mb-3 rounded-xl border border-amber-400/25 bg-amber-500/[0.07] p-3 text-amber-100">
+                        <div className="flex items-start gap-2">
+                            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-300" />
+                            <div>
+                                <p className="text-xs font-semibold">Final export withheld by QA</p>
+                                <p className="mt-1 text-[11px] leading-relaxed text-amber-100/75">
+                                    {finalQaReason}
+                                </p>
+                                <p className="mt-1 text-[10px] text-amber-100/55">
+                                    Preview and download unlock only after aggregate and final QA both pass.
+                                </p>
+                            </div>
+                        </div>
+                    </div>
+                )}
                 {failedWithReviewableScenes && (
                     <div className="mb-3 rounded-xl border border-red-500/30 bg-red-500/10 p-3 text-red-100">
                         <p className="text-xs font-semibold">Production partially failed — scene assets are preserved below.</p>
@@ -1176,7 +1331,8 @@ function AgentJobDeliverable({
                             <div className="flex flex-wrap items-center justify-end gap-1.5">
                                 <button
                                     type="button"
-                                    disabled={Boolean(sceneActionBusy)}
+                                    disabled={Boolean(sceneActionBusy) || hasQaBlockedScenes}
+                                    title={hasQaBlockedScenes ? 'Repair QA-blocked scenes before approving the full batch' : undefined}
                                     onClick={() => void approveAllScenes(false)}
                                     className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-400/20 bg-emerald-500/10 px-2.5 py-1 text-[10px] font-semibold text-emerald-100 hover:bg-emerald-500/15 disabled:opacity-50"
                                 >
@@ -1185,7 +1341,8 @@ function AgentJobDeliverable({
                                 </button>
                                 <button
                                     type="button"
-                                    disabled={Boolean(sceneActionBusy)}
+                                    disabled={Boolean(sceneActionBusy) || hasQaBlockedScenes}
+                                    title={hasQaBlockedScenes ? 'Repair QA-blocked scenes before approving the full batch' : undefined}
                                     onClick={() => void approveAllScenes(true)}
                                     className="inline-flex items-center gap-1.5 rounded-lg border border-violet-400/20 bg-violet-500/10 px-2.5 py-1 text-[10px] font-semibold text-violet-100 hover:bg-violet-500/15 disabled:opacity-50"
                                 >
@@ -1205,7 +1362,7 @@ function AgentJobDeliverable({
                                 </p>
                                 <button
                                     type="button"
-                                    disabled={animating}
+                                    disabled={animating || hasQaBlockedScenes}
                                     onClick={() => void runAnimateApproved()}
                                     className="mt-2 inline-flex w-full items-center justify-center gap-2 rounded-lg bg-violet-600 px-3 py-2 text-xs font-semibold text-white transition active:scale-[0.985] disabled:opacity-60"
                                 >
@@ -1218,14 +1375,36 @@ function AgentJobDeliverable({
                         <div className={`grid gap-2 ${isVisualProof && sceneCards.length === 1 ? 'grid-cols-1' : 'grid-cols-2 lg:grid-cols-3'}`}>
                             {sceneCards.map((scene, rawIdx) => {
                                 const idx = Number.isFinite(scene.index) ? scene.index : rawIdx;
-                                const stillQaFailed = Boolean(
-                                    scene.still_qa
-                                    && (scene.still_qa.status === 'fail' || scene.still_qa.pass === false),
+                                const qaStale = Boolean(scene.qa_stale || !scene.visual_qa);
+                                const qaBlocked = Boolean(
+                                    !sceneQaPassed(scene)
+                                    || (scene.still_qa
+                                        && (scene.still_qa.status !== 'pass' || scene.still_qa.pass !== true))
                                 );
+                                const qaReason = qaStale
+                                    ? 'QA needs a current fingerprint. Approving runs the current checks before acceptance.'
+                                    : scene.qa_reason
+                                    || scene.visual_qa?.summary
+                                    || scene.scene_correspondence_qa?.summary
+                                    || scene.i2v_qa?.summary
+                                    || scene.still_qa?.summary
+                                    || 'Studio has not proven this current asset.';
+                                const actualProvider = scene.has_clip ? scene.video_provider : scene.image_provider;
+                                const actualModel = scene.has_clip
+                                    ? (scene.video_endpoint || scene.video_model)
+                                    : scene.image_model_id;
+                                const fallbackFrom = scene.has_clip
+                                    ? scene.video_fallback_from
+                                    : scene.fallback_from;
+                                const laneLabel = actualProvider || actualModel
+                                    ? `${fallbackFrom ? `Fallback: ${fallbackFrom} → ` : 'Actual lane: '}${[actualProvider, actualModel].filter(Boolean).join(' · ')}`
+                                    : '';
                                 const approvedForAnimation = Boolean(scene.approved_for_animation || scene.animate);
                                 const approvedForVideo = Boolean(scene.approved_for_video || approvedForAnimation);
-                                const statusLabel = stillQaFailed
+                                const statusLabel = qaBlocked
                                     ? 'QA blocked'
+                                    : qaStale
+                                    ? 'QA refresh needed'
                                     : approvedForAnimation
                                     ? 'Animate approved'
                                     : approvedForVideo
@@ -1238,8 +1417,10 @@ function AgentJobDeliverable({
                                     <div
                                         key={`${snapshot.job_id}-scene-${idx}`}
                                         className={`overflow-hidden rounded-2xl border bg-black/25 ${
-                                            stillQaFailed
+                                            qaBlocked
                                                 ? 'border-red-400/35'
+                                                : qaStale
+                                                ? 'border-amber-400/30'
                                                 : approvedForAnimation
                                                 ? 'border-violet-400/30'
                                                 : approvedForVideo
@@ -1281,8 +1462,10 @@ function AgentJobDeliverable({
                                                     </p>
                                                 </div>
                                                 <span className={`shrink-0 rounded-full px-2 py-0.5 text-[9px] font-semibold ${
-                                                    stillQaFailed
+                                                    qaBlocked
                                                         ? 'bg-red-500/15 text-red-200'
+                                                        : qaStale
+                                                        ? 'bg-amber-500/15 text-amber-200'
                                                         : approvedForAnimation
                                                         ? 'bg-violet-500/15 text-violet-200'
                                                         : approvedForVideo
@@ -1292,9 +1475,19 @@ function AgentJobDeliverable({
                                                     {statusLabel}
                                                 </span>
                                             </div>
-                                            {stillQaFailed && (
+                                            {qaBlocked && (
                                                 <p className="rounded-lg border border-red-400/20 bg-red-500/10 px-2 py-1.5 text-[10px] leading-relaxed text-red-200">
-                                                    {scene.still_qa?.summary || 'Visual QA could not prove canonical skeleton identity.'}
+                                                    {qaReason}
+                                                </p>
+                                            )}
+                                            {qaStale && (
+                                                <p className="rounded-lg border border-amber-400/20 bg-amber-500/10 px-2 py-1.5 text-[10px] leading-relaxed text-amber-100/80">
+                                                    {qaReason}
+                                                </p>
+                                            )}
+                                            {laneLabel && (
+                                                <p className="rounded-lg border border-cyan-400/10 bg-cyan-500/[0.05] px-2 py-1 text-[9px] text-cyan-100/65">
+                                                    {laneLabel}
                                                 </p>
                                             )}
                                             {(scene.narration || scene.scene_action) && (
@@ -1342,7 +1535,7 @@ function AgentJobDeliverable({
                                                 </button>
                                                 <button
                                                     type="button"
-                                                    disabled={Boolean(sceneActionBusy) || stillQaFailed}
+                                                    disabled={Boolean(sceneActionBusy) || qaBlocked}
                                                     onClick={() => void approveScene(idx, false)}
                                                     className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-emerald-400/20 bg-emerald-500/10 px-2 py-1.5 text-[10px] font-semibold text-emerald-100 hover:bg-emerald-500/15 disabled:opacity-50"
                                                 >
@@ -1351,7 +1544,7 @@ function AgentJobDeliverable({
                                                 </button>
                                                 <button
                                                     type="button"
-                                                    disabled={Boolean(sceneActionBusy) || stillQaFailed}
+                                                    disabled={Boolean(sceneActionBusy) || qaBlocked}
                                                     onClick={() => void approveScene(idx, true)}
                                                     className="col-span-2 inline-flex items-center justify-center gap-1.5 rounded-lg border border-violet-400/20 bg-violet-500/10 px-2 py-1.5 text-[10px] font-semibold text-violet-100 hover:bg-violet-500/15 disabled:opacity-50"
                                                 >
@@ -1537,7 +1730,7 @@ function AgentJobDeliverable({
                         {allScenesApproved && Boolean(snapshot.animation_pending_count) && (
                             <button
                                 type="button"
-                                disabled={animating}
+                                disabled={animating || hasQaBlockedScenes}
                                 onClick={() => void runAnimateApproved()}
                                 className="mt-3 flex w-full items-center justify-center gap-2 rounded-xl bg-violet-600 py-2.5 text-sm font-semibold text-white transition active:scale-[0.985] disabled:opacity-60"
                             >
@@ -1548,7 +1741,7 @@ function AgentJobDeliverable({
                         {allScenesApproved && !snapshot.animation_pending_count && (
                             <button
                                 type="button"
-                                disabled={finalizing}
+                                disabled={finalizing || hasQaBlockedScenes}
                                 onClick={() => void runFinalize()}
                                 className="mt-3 flex w-full items-center justify-center gap-2 rounded-xl border border-emerald-400/25 bg-emerald-500/10 py-2.5 text-sm font-semibold text-emerald-100 transition active:scale-[0.985] disabled:opacity-60"
                             >
@@ -1634,7 +1827,7 @@ function AgentJobDeliverable({
                                                             }}
                                                             className="shrink-0 rounded-lg border border-emerald-400/20 bg-emerald-500/10 px-2 py-1 text-[10px] font-semibold text-emerald-100 hover:bg-emerald-500/15"
                                                         >
-                                                            {assetDownloadBusy === `clip-${idx}` ? 'Savingâ€¦' : 'Download'}
+                                                            {assetDownloadBusy === `clip-${idx}` ? 'Saving…' : 'Download'}
                                                         </button>
                                                     )}
                                                 </div>
@@ -1697,7 +1890,7 @@ function AgentJobDeliverable({
                 )}
 
                 {/* Final video (the payoff, right in the chat) */}
-                {complete && !isAnalysis && !isClipLab && (snapshot.mp4_url || snapshot.download_url || videoSrc) && (
+                {finalDeliverableReady && (snapshot.mp4_url || snapshot.download_url || videoSrc) && (
                     <div className="mt-1 flex justify-center">
                         <div
                             className={`w-full ${
@@ -1789,7 +1982,7 @@ function AgentJobDeliverable({
             </div>
 
             {/* Bottom actions */}
-                {complete && !isAnalysis && !isClipLab && (
+                {finalDeliverableReady && (
                 <div className="border-t border-white/[0.06] bg-black/20 px-3 py-2">
                     {(() => {
                         const tok = session?.access_token || '';
@@ -1816,7 +2009,7 @@ function AgentJobDeliverable({
                                     }}
                                     className="flex items-center justify-center gap-2 rounded-xl bg-emerald-600 py-2 text-sm font-semibold text-white transition hover:bg-emerald-500"
                                 >
-                                    <Download className="h-4 w-4" /> {assetDownloadBusy === 'video' ? 'Savingâ€¦' : 'Download MP4'}
+                                    <Download className="h-4 w-4" /> {assetDownloadBusy === 'video' ? 'Saving…' : 'Download MP4'}
                                 </button>
                                 {packagePath && (
                                     <button
@@ -1836,7 +2029,7 @@ function AgentJobDeliverable({
                                         }}
                                         className="mt-2 flex items-center justify-center gap-2 rounded-xl border border-cyan-400/20 bg-cyan-500/10 py-2 text-sm font-semibold text-cyan-100 transition hover:bg-cyan-500/15"
                                     >
-                                        <FileText className="h-4 w-4" /> {assetDownloadBusy === 'package' ? 'Savingâ€¦' : 'Upload package'}
+                                        <FileText className="h-4 w-4" /> {assetDownloadBusy === 'package' ? 'Saving…' : 'Upload package'}
                                     </button>
                                 )}
                                 {assetDownloadError ? <p className="mt-2 text-xs text-red-300">{assetDownloadError}</p> : null}
@@ -1914,12 +2107,16 @@ function AgentJobDeliverable({
                     jobId={snapshot.job_id}
                     idx={inspectSceneIdx}
                     title={`${title} - Scene ${inspectSceneIdx + 1}`}
-                    hasClip={Boolean(sceneCards.find((scene) => Number(scene.index) === inspectSceneIdx)?.has_clip)}
+                    hasClip={Boolean(inspectedScene?.has_clip)}
                     clipCacheKey={String(
-                        sceneCards.find((scene) => Number(scene.index) === inspectSceneIdx)?.clip_preview_url
+                        inspectedScene?.clip_preview_url
                         || snapshot.client_updated_at
                         || ''
                     )}
+                    qaBlocked={inspectedQaBlocked}
+                    qaPending={inspectedQaStale}
+                    qaReason={inspectedQaReason}
+                    laneLabel={inspectedLaneLabel}
                     onClose={() => setInspectSceneIdx(null)}
                     onEdit={onReply ? () => {
                         onReply(snapshot, inspectSceneIdx, 'edit');
@@ -1929,8 +2126,8 @@ function AgentJobDeliverable({
                         void regenerateScene(inspectSceneIdx);
                         setInspectSceneIdx(null);
                     }}
-                    onApproveStill={() => void approveScene(inspectSceneIdx, false)}
-                    onApproveAnimate={() => void approveScene(inspectSceneIdx, true)}
+                    onApproveStill={inspectedQaBlocked ? undefined : () => void approveScene(inspectSceneIdx, false)}
+                    onApproveAnimate={inspectedQaBlocked ? undefined : () => void approveScene(inspectSceneIdx, true)}
                 />
             )}
         </div>

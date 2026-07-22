@@ -18,8 +18,6 @@ CLONE_VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".m4v"}
 
 def build_clone_video_handler(
     *,
-    xai_api_key: str,
-    elevenlabs_api_key: str,
     get_current_user_from_request,
     user_has_paid_access,
     normalize_output_resolution,
@@ -36,6 +34,8 @@ def build_clone_video_handler(
     reserve_generation_credit,
     refund_generation_credit,
     clone_credit_cost: int,
+    clone_providers_ready=None,
+    **_legacy_provider_config,
 ):
     async def clone_video(
         topic: str = "",
@@ -46,14 +46,13 @@ def build_clone_video_handler(
         background_tasks=None,
         request=None,
     ):
-        if not xai_api_key or not elevenlabs_api_key:
-            raise HTTPException(500, "API keys not configured")
-
         user = await get_current_user_from_request(request) if request else None
         if not user:
             raise HTTPException(401, "Auth required")
         if not user_has_paid_access(user):
             raise HTTPException(402, "Active subscription required. Please choose a plan.")
+        if callable(clone_providers_ready) and not bool(clone_providers_ready()):
+            raise HTTPException(503, "Clone requires configured Anthropic and FAL providers.")
 
         res = normalize_output_resolution(resolution, priority_allowed=False)
         normalized_source_url = normalize_external_source_url(source_url)
@@ -131,6 +130,13 @@ def build_clone_video_handler(
             "credit_month_key": str(credit_state.get("month_key", "") or ""),
             "credit_refunded": False,
             "billing_source": "owner_override" if is_admin else credit_source,
+            "provider_policy": {
+                "semantic": "anthropic_direct",
+                "image": "fal",
+                "video": "fal",
+                "tts": "fal",
+                "stt": "fal",
+            },
             "user_id": str(user.get("id", "") or ""),
             "created_at": time.time(),
         }

@@ -14,11 +14,9 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from studio_agent import production_costs
+from studio_agent import production_budget, production_costs
 from studio_agent.image_model_catalog import (
-    MODAL_SEEDREAM_MODEL_ID,
-    is_seedream_model,
-    normalize_seedream_model_id,
+    seedream_endpoint,
     seedream_provider,
 )
 from studio_agent.production_slots import production_slot
@@ -31,12 +29,18 @@ from .i2v_engine import (
     I2VRouteChanged,
     ac_cost_for_video_model,
     generate as gen_clip,
+    normalize_fal_video_model_id,
     resolve_video_model_chain,
 )
 from .pipeline import Beat, _write_progress, apply_wardrobe_motion_lock, check_cancelled, split_script_into_beats
 from .prompts.category_registry import get_category
 from .scripting_grok import GrokClient, build_script_prompt
-from .styled_stills import StyledStillError, build_styled_scene_prompt, generate_still_t2i, generate_still_xai_edit
+from .styled_stills import (
+    StyledStillError,
+    build_styled_scene_prompt,
+    generate_still_t2i,
+    normalize_fal_image_model_id,
+)
 from .voice_auto import AutoVoiceClient
 
 
@@ -64,16 +68,6 @@ def _local_topic_label(topic: str | None, category_label: str = "") -> str:
     return text.strip(" .") or "the topic"
 
 
-_FAL_SKELETON_IMAGE_MODELS = frozenset({
-    "seedream45",
-    "seedream_edit",
-    "seedream_v4",
-    "seedream_v5_lite",
-    MODAL_SEEDREAM_MODEL_ID,
-    "flux_lora_skeleton",
-})
-
-
 def _read_job_spec(workspace: Path) -> dict[str, Any]:
     try:
         loaded = json.loads((Path(workspace) / "job_spec.json").read_text(encoding="utf-8"))
@@ -85,11 +79,11 @@ def _read_job_spec(workspace: Path) -> dict[str, Any]:
 def _skeleton_image_model(sc: dict[str, Any] | None, workspace: Path) -> str:
     model = str((sc or {}).get("image_model_id") or "").strip().lower()
     if model:
-        return model
+        return normalize_fal_image_model_id(model)
     model = str(_read_job_spec(workspace).get("image_model_id") or "").strip().lower()
     if model:
-        return model
-    return "seedream_edit"
+        return normalize_fal_image_model_id(model)
+    return normalize_fal_image_model_id("")
 
 
 def _resolve_skeleton_master_reference(
@@ -197,58 +191,35 @@ def _persist_skeleton_reference(workspace: Path, reference_image: str) -> str:
     return source
 
 
-def _skeleton_prefers_xai(image_model_id: str) -> bool:
-    model = str(image_model_id or "grok_imagine").strip().lower()
-    return not (is_seedream_model(model) or model == "flux_lora_skeleton")
+def _enforce_image_attempt_budget(
+    workspace: Path | None,
+    model_id: str,
+    *,
+    edit: bool,
+    operation: str,
+) -> None:
+    if workspace is None:
+        return
+    model = normalize_fal_image_model_id(model_id)
+    amount, _note, _key = production_costs.price_fal_image(edit=edit, model_id=model)
+    provider = "fal"
+    production_budget.enforce_incremental_spend(
+        Path(workspace),
+        amount,
+        operation=operation,
+        provider=provider,
+        model=model,
+    )
 
 
-def _is_xai_availability_or_credit_error(exc: Exception) -> bool:
-    """Allow paid-lane failover without hiding invalid credentials or bad prompts."""
-
-    text = str(exc or "").strip().lower()
-    provider = str(getattr(exc, "provider", "") or "").strip().lower()
-    if provider != "xai" and not any(token in text for token in ("xai", "grok-imagine", "grok imagine")):
-        return False
-    credit_signal = any(
-        phrase in text
-        for phrase in (
-            "used all available credits",
-            "reached its monthly spending limit",
-            "monthly spending limit",
-            "credit balance",
-            "insufficient credits",
-            "insufficient balance",
-            "billing limit",
-            "spending limit",
-        )
-    )
-    availability_signal = any(
-        phrase in text
-        for phrase in (
-            " 429",
-            " 500",
-            " 502",
-            " 503",
-            " 504",
-            "temporarily unavailable",
-            "service unavailable",
-            "provider unavailable",
-            "upstream timeout",
-            "timed out",
-            "connection reset",
-        )
-    )
-    return bool(
-        (credit_signal and any(token in text for token in ("403", "permission-denied", "credit", "billing", "spending")))
-        or availability_signal
-    )
+def _image_api_endpoint(model_id: str, *, edit: bool) -> str:
+    model = normalize_fal_image_model_id(model_id)
+    return str(seedream_endpoint(model, edit=edit) or model)
 
 
 def _fal_image_fallback_model(value: str | None) -> str:
-    """Return a concrete funded image lane; xAI aliases can never recurse."""
-
-    model = normalize_seedream_model_id(str(value or "").strip().lower())
-    return model if model and is_seedream_model(model) else "seedream_edit"
+    """Return a concrete funded FAL image lane."""
+    return normalize_fal_image_model_id(value)
 
 
 class MediaRouteChangedError(RuntimeError):
@@ -279,11 +250,11 @@ def _require_current_image_fallback_route(
 def _skeleton_video_model(sc: dict[str, Any] | None, workspace: Path) -> str:
     model = str((sc or {}).get("video_model") or "").strip().lower()
     if model:
-        return model
+        return normalize_fal_video_model_id(model)
     model = str(_read_job_spec(workspace).get("video_model") or "").strip().lower()
     if model:
-        return model
-    return "grok_imagine_video"
+        return normalize_fal_video_model_id(model)
+    return normalize_fal_video_model_id(None)
 
 
 def _generate_skeleton_still_from_master(
@@ -294,14 +265,13 @@ def _generate_skeleton_still_from_master(
     seed: int | None = None,
     master_url: str = "",
     cast_count: int = 1,
+    budget_workspace: Path | None = None,
 ) -> tuple[str, float, str, str, str]:
     """Render one skeleton still. Defaults to Seedream v4.5 edit from a locked reference."""
     from .canonical_edit import generate_still_edit, resolve_master_reference_local
 
-    guarded_prompt = _xai_skeleton_artifact_guard(prompt)
-    model = str(image_model_id or "seedream_edit").strip().lower()
-    if is_seedream_model(model):
-        model = normalize_seedream_model_id(model)
+    guarded_prompt = _skeleton_artifact_guard(prompt)
+    model = normalize_fal_image_model_id(image_model_id)
     resolved_master = str(master_url or "").strip()
     if not resolved_master:
         local_master = resolve_master_reference_local()
@@ -311,24 +281,12 @@ def _generate_skeleton_still_from_master(
                 "SKELETON_GLOBAL_REFERENCE_IMAGE_URL before rendering"
             )
         resolved_master = str(local_master)
-    if _skeleton_prefers_xai(model):
-        from .canonical_edit import _reference_url_to_local
-
-        ref = _reference_url_to_local(resolved_master) or Path(resolved_master)
-        if not (isinstance(ref, Path) and ref.is_file()):
-            ref = resolve_master_reference_local(resolved_master)
-        if not ref:
-            raise RuntimeError("skeleton reference image is missing; cannot render safely")
-        amount, note, key = production_costs.price_xai_image(model, edit=True)
-        result = generate_still_xai_edit(
-            guarded_prompt,
-            out_path,
-            reference_path=Path(ref),
-            image_model_id=model,
-        )
-        if result.get("cost_usd") is not None:
-            amount = production_costs._usd(result.get("cost_usd"))
-        return guarded_prompt, amount, note, key, "xai"
+    _enforce_image_attempt_budget(
+        budget_workspace,
+        model,
+        edit=True,
+        operation="skeleton_master_regenerate",
+    )
     generate_still_edit(
         guarded_prompt,
         out_path,
@@ -368,23 +326,10 @@ def _generate_skeleton_still_edit(
     reference_path: Path,
     image_model_id: str,
 ) -> tuple[float, str, str, str]:
-    """Edit an existing skeleton still. Defaults to xAI Grok Imagine image edit."""
+    """Edit an existing skeleton still through FAL Seedream."""
     from .canonical_edit import generate_still_edit
 
-    model = str(image_model_id or "grok_imagine").strip().lower()
-    if _skeleton_prefers_xai(model):
-        amount, note, key = production_costs.price_xai_image(model, edit=True)
-        result = generate_still_xai_edit(
-            prompt,
-            out_path,
-            reference_path=reference_path,
-            image_model_id=model,
-        )
-        if result.get("cost_usd") is not None:
-            amount = production_costs._usd(result.get("cost_usd"))
-        return amount, note, key, "xai"
-    if is_seedream_model(model):
-        model = normalize_seedream_model_id(model)
+    model = normalize_fal_image_model_id(image_model_id)
     amount, note, key = production_costs.price_fal_image(edit=True, model_id=model)
     generate_still_edit(
         prompt,
@@ -503,7 +448,7 @@ def _metered_provider_values(provider: str, amount: float, note: str) -> tuple[s
     return provider, float(amount or 0.0), note
 
 
-def _xai_moderation_retry_prompt(prompt: str) -> str:
+def _moderation_retry_prompt(prompt: str) -> str:
     text = str(prompt or "")
     softeners = (
         ("self-sabotage", "emotional conflict"),
@@ -526,7 +471,7 @@ def _xai_moderation_retry_prompt(prompt: str) -> str:
     return (text + guard)[:759]
 
 
-def _xai_skeleton_artifact_guard(prompt: str) -> str:
+def _skeleton_artifact_guard(prompt: str) -> str:
     """Keep the scene-first prompt intact at the final provider boundary.
 
     The old implementation prepended ~2k characters and then truncated the
@@ -827,6 +772,7 @@ def _still_to_clip(
 
 
 SCENES_FILE = "scenes.json"
+MAX_MEDIA_PROMPT_CHARS = 300
 
 
 def _scenes_path(workspace: Path) -> Path:
@@ -850,10 +796,122 @@ def save_scenes(workspace: Path, scenes: list[dict[str, Any]]) -> None:
     )
 
 
-def _write_result(workspace: Path, payload: dict[str, Any]) -> None:
-    (Path(workspace) / "result.json").write_text(
-        json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8"
+def _bounded_motion_prompt(value: Any) -> str:
+    """Return the exact provider-safe motion contract persisted by Studio."""
+    return re.sub(r"\s+", " ", str(value or "")).strip()[:MAX_MEDIA_PROMPT_CHARS]
+
+
+def _new_still_candidate(workspace: Path, sid: str, *, attempt: int = 1) -> Path:
+    directory = Path(workspace) / "candidate_stills"
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory / f"{sid}.attempt{int(attempt)}.{secrets.token_hex(8)}.png"
+
+
+def _quarantine_still_candidate(
+    workspace: Path,
+    candidate: Path,
+    *,
+    sid: str,
+    reason: str,
+) -> str:
+    """Move a rejected non-canonical still into a non-preview quarantine."""
+    candidate = Path(candidate)
+    if not candidate.is_file():
+        return ""
+    directory = Path(workspace) / "rejected_stills"
+    directory.mkdir(parents=True, exist_ok=True)
+    safe_reason = re.sub(r"[^a-z0-9_-]+", "_", str(reason or "qa").lower()).strip("_")[:40]
+    target = directory / f"{sid}.{safe_reason or 'qa'}.{secrets.token_hex(6)}.png"
+    target.unlink(missing_ok=True)
+    candidate.replace(target)
+    try:
+        return str(target.relative_to(workspace)).replace("\\", "/")
+    except Exception:
+        return str(target)
+
+
+def _scene_candidate_or_accepted_path(workspace: Path, scene: dict[str, Any] | None) -> Path | None:
+    if not scene:
+        return None
+    for key in ("still_candidate_rel", "still_rel"):
+        rel = str(scene.get(key) or "").strip()
+        if rel:
+            path = Path(workspace) / rel
+            if path.is_file():
+                return path
+    return None
+
+
+def _prior_still_is_accepted(
+    workspace: Path,
+    previous: dict[str, Any],
+    canonical: Path,
+) -> bool:
+    del workspace
+    if not canonical.is_file() or canonical.stat().st_size <= 0 or not previous:
+        return False
+    rel = str(previous.get("still_rel") or "").replace("\\", "/").strip()
+    if rel and rel != f"stills/{canonical.name}":
+        return False
+    visual = previous.get("visual_qa") if isinstance(previous.get("visual_qa"), dict) else {}
+    still = previous.get("still_qa") if isinstance(previous.get("still_qa"), dict) else {}
+    return bool(
+        visual.get("pass") is True
+        or still.get("pass") is True
+        or str(previous.get("status") or "") in {"still_ready", "clip_ready", "complete"}
     )
+
+
+def _combine_still_qa_reports(**reports: dict[str, Any]) -> dict[str, Any]:
+    present = {name: dict(report or {}) for name, report in reports.items() if report}
+    passed = bool(present) and all(
+        report.get("status") == "pass" and report.get("pass") is True
+        for report in present.values()
+    )
+    summaries = [
+        str(report.get("summary") or "").strip()
+        for report in present.values()
+        if str(report.get("summary") or "").strip()
+    ]
+    issues: list[str] = []
+    for name, report in present.items():
+        if report.get("pass") is not True:
+            issues.append(f"{name}_qa_failed")
+        issues.extend(str(value) for value in (report.get("issues") or []) if str(value))
+    return {
+        "status": "pass" if passed else "fail",
+        "pass": passed,
+        "summary": "; ".join(summaries)[:700] or "Still quality was not proven",
+        "issues": list(dict.fromkeys(issues)),
+        **present,
+    }
+
+
+def _write_result(
+    workspace: Path,
+    payload: dict[str, Any],
+    *,
+    replace: bool = False,
+) -> None:
+    """Merge recoverable stage state instead of erasing prior job facts."""
+
+    target = Path(workspace) / "result.json"
+    merged: dict[str, Any] = {}
+    if not replace and target.is_file():
+        try:
+            prior = json.loads(target.read_text(encoding="utf-8"))
+            if isinstance(prior, dict):
+                merged.update(prior)
+        except Exception:
+            pass
+    merged.update(dict(payload or {}))
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temp = target.with_suffix(target.suffix + ".tmp")
+    temp.write_text(
+        json.dumps(merged, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    temp.replace(target)
 
 
 def _read_result(workspace: Path) -> dict[str, Any]:
@@ -992,18 +1050,14 @@ def plan_scenes(
         raise RuntimeError("Grok returned empty script")
 
     _, resolved_default_vm = resolve_video_model_chain(video_model=video_model, tier=tier)
-    selected_image_model = str(image_model_id or "").strip().lower()
-    if is_skeleton and not selected_image_model:
-        selected_image_model = "seedream_edit"
+    selected_image_model = normalize_fal_image_model_id(image_model_id)
     skeleton_master_ref = ""
     if is_skeleton:
         if reference_images:
             skeleton_master_ref = _persist_skeleton_reference(workspace, str(reference_images[0] or ""))
         else:
             skeleton_master_ref = _resolve_skeleton_master_reference(workspace, reference_images)
-    resolved_video_model = str(video_model or "").strip().lower()
-    if is_skeleton and not resolved_video_model:
-        resolved_video_model = "grok_imagine_video"
+    resolved_video_model = normalize_fal_video_model_id(video_model, tier=tier)
     existing = {s.get("index"): s for s in load_scenes(workspace)}
     replan_spec = _read_job_spec(workspace)
     raw_preserve_indices = replan_spec.get("preserve_scene_indices")
@@ -1179,7 +1233,19 @@ def plan_scenes(
                 cast_count=hosts,
             )
         still_target = stills_dir / f"{sid}.png"
-        if str(visual_treatment.get("kind") or "") == "motion_graphic" and not still_target.exists():
+        prior_accepted = _prior_still_is_accepted(workspace, prev, still_target)
+        candidate_target: Path | None = None
+        if not prior_accepted:
+            if still_target.is_file():
+                _quarantine_still_candidate(
+                    workspace,
+                    still_target,
+                    sid=sid,
+                    reason="legacy_unaccepted_canonical",
+                )
+            candidate_target = _new_still_candidate(workspace, sid)
+        render_target = candidate_target or still_target
+        if str(visual_treatment.get("kind") or "") == "motion_graphic" and not prior_accepted:
             from studio_agent.visual_treatment import render_motion_graphic_clip
             preview = workspace / "motion_graphics" / f"preview_{sid}.mp4"
             render_motion_graphic_clip(
@@ -1187,75 +1253,90 @@ def plan_scenes(
                 width=1080, height=1920,
             )
             extracted = subprocess.run(
-                ["ffmpeg", "-hide_banner", "-loglevel", "warning", "-y", "-ss", "2.0", "-i", str(preview), "-frames:v", "1", str(still_target)],
+                ["ffmpeg", "-hide_banner", "-loglevel", "warning", "-y", "-ss", "2.0", "-i", str(preview), "-frames:v", "1", str(render_target)],
                 capture_output=True, text=True,
             )
             if extracted.returncode != 0:
                 raise RuntimeError(f"motion-graphic preview extraction failed: {extracted.stderr[-300:]}")
-        if not (still_target.exists() and still_target.stat().st_size > 0):
+        if not prior_accepted and not (render_target.exists() and render_target.stat().st_size > 0):
             provider_name = "fal"
             with production_slot(
                 "stills",
                 on_wait=_slot_wait_progress(workspace, "stills_queue", f"Scene {i + 1} still"),
             ):
                 if is_skeleton:
-                    provider_name = (
-                        seedream_provider(selected_image_model) or "fal"
-                        if not _skeleton_prefers_xai(selected_image_model)
-                        else "xai"
-                    )
+                    provider_name = "fal"
                     try:
                         prompt, amount, note, key, provider_name = _generate_skeleton_still_from_master(
                             prompt,
-                            still_target,
+                            render_target,
                             image_model_id=selected_image_model,
                             seed=420042 + i,
                             master_url=skeleton_master_ref,
                             cast_count=hosts,
+                            budget_workspace=workspace,
                         )
                     except StyledStillError as exc:
                         charged = exc.cost_usd if exc.cost_usd is not None else 0.0
                         if charged:
                             err_provider, err_amount, err_note = _metered_provider_values(
-                                "xai",
+                                "fal",
                                 charged,
-                                "xai skeleton still: failed request",
+                                "FAL skeleton still: failed request",
                             )
                             production_costs.record_event(
                                 workspace,
                                 stage="stills",
                                 provider=err_provider,
-                                operation="grok_imagine_edit",
+                                operation="seedream_edit",
                                 usd=err_amount,
                                 quantity=1,
                                 unit="image",
+                                endpoint=_image_api_endpoint(selected_image_model, edit=True),
                                 scene_index=i,
                                 metadata={"pricing_note": err_note, "cached": False, "failed": True},
                             )
-                        if "content moderation" not in str(exc).lower():
+                        if "content moderation" in str(exc).lower():
+                            retry_prompt = _moderation_retry_prompt(_skeleton_artifact_guard(prompt))
+                            render_target.unlink(missing_ok=True)
+                            _enforce_image_attempt_budget(
+                                workspace,
+                                selected_image_model,
+                                edit=False,
+                                operation="skeleton_still_moderation_retry",
+                            )
+                            still_result = generate_still_t2i(
+                                retry_prompt,
+                                render_target,
+                                negative_prompt=(
+                                    "human skin, muscle tissue, nudity, gore, blood, injury, self-harm, "
+                                    "violence, deformed anatomy, extra limbs, text, watermark"
+                                ),
+                                seed=520042 + i,
+                                image_model_id=selected_image_model,
+                            )
+                            prompt = retry_prompt
+                            amount, note, key = production_costs.price_fal_image(
+                                edit=False,
+                                model_id=selected_image_model,
+                            )
+                            if still_result.get("cost_usd") is not None:
+                                amount = production_costs._usd(still_result.get("cost_usd"))
+                        else:
                             raise
-                        retry_prompt = _xai_moderation_retry_prompt(_xai_skeleton_artifact_guard(prompt))
-                        still_result = generate_still_t2i(
-                            retry_prompt,
-                            still_target,
-                            negative_prompt=(
-                                "human skin, muscle tissue, nudity, gore, blood, injury, self-harm, "
-                                "violence, deformed anatomy, extra limbs, text, watermark"
-                            ),
-                            seed=520042 + i,
-                            image_model_id=selected_image_model,
-                        )
-                        prompt = retry_prompt
-                        amount, note, key = production_costs.price_xai_image(selected_image_model)
-                        if still_result.get("cost_usd") is not None:
-                            amount = production_costs._usd(still_result.get("cost_usd"))
                 else:
                     if reference_images:
                         from .styled_stills import generate_still_reference_edit
 
+                        _enforce_image_attempt_budget(
+                            workspace,
+                            selected_image_model,
+                            edit=True,
+                            operation="reference_still",
+                        )
                         generate_still_reference_edit(
                             prompt,
-                            still_target,
+                            render_target,
                             reference_paths=reference_images,
                             negative_prompt=style.negative_prompt,
                             seed=420042 + i,
@@ -1265,29 +1346,31 @@ def plan_scenes(
                             model_id=selected_image_model,
                         )
                     else:
-                        if selected_image_model in {"grok_imagine", "grok_imagine_standard"}:
-                            provider_name = "xai"
-                            amount, note, key = production_costs.price_xai_image(selected_image_model)
-                        else:
-                            amount, note, key = production_costs.price_fal_image(
-                                edit=False,
-                                model_id=selected_image_model,
-                            )
+                        amount, note, key = production_costs.price_fal_image(
+                            edit=False,
+                            model_id=selected_image_model,
+                        )
                         try:
+                            _enforce_image_attempt_budget(
+                                workspace,
+                                selected_image_model,
+                                edit=False,
+                                operation="scene_still",
+                            )
                             still_result = generate_still_t2i(
                                 prompt,
-                                still_target,
+                                render_target,
                                 negative_prompt=style.negative_prompt,
                                 seed=420042 + i,
                                 image_model_id=selected_image_model,
                             )
-                            if provider_name == "xai" and still_result.get("cost_usd") is not None:
+                            if still_result.get("cost_usd") is not None:
                                 amount = production_costs._usd(still_result.get("cost_usd"))
                         except StyledStillError as exc:
                             charged = exc.cost_usd if exc.cost_usd is not None else 0.0
-                            if provider_name == "xai" and charged:
+                            if charged:
                                 err_provider, err_amount, err_note = _metered_provider_values(
-                                    "xai",
+                                    "fal",
                                     charged,
                                     f"{note}: failed request",
                                 )
@@ -1299,22 +1382,31 @@ def plan_scenes(
                                     usd=err_amount,
                                     quantity=1,
                                     unit="image",
+                                    endpoint=_image_api_endpoint(selected_image_model, edit=False),
                                     scene_index=i,
                                     metadata={"pricing_note": err_note, "cached": False, "failed": True},
                                 )
-                            if provider_name != "xai" or "content moderation" not in str(exc).lower():
+                            if "content moderation" in str(exc).lower():
+                                retry_prompt = _moderation_retry_prompt(prompt)
+                                render_target.unlink(missing_ok=True)
+                                _enforce_image_attempt_budget(
+                                    workspace,
+                                    selected_image_model,
+                                    edit=False,
+                                    operation="scene_still_moderation_retry",
+                                )
+                                still_result = generate_still_t2i(
+                                    retry_prompt,
+                                    render_target,
+                                    negative_prompt=style.negative_prompt,
+                                    seed=520042 + i,
+                                    image_model_id=selected_image_model,
+                                )
+                                prompt = retry_prompt
+                                if still_result.get("cost_usd") is not None:
+                                    amount = production_costs._usd(still_result.get("cost_usd"))
+                            else:
                                 raise
-                            retry_prompt = _xai_moderation_retry_prompt(prompt)
-                            still_result = generate_still_t2i(
-                                retry_prompt,
-                                still_target,
-                                negative_prompt=style.negative_prompt,
-                                seed=520042 + i,
-                                image_model_id=selected_image_model,
-                            )
-                            prompt = retry_prompt
-                            if still_result.get("cost_usd") is not None:
-                                amount = production_costs._usd(still_result.get("cost_usd"))
             provider, amount, note = _metered_provider_values(provider_name, amount, note)
             production_costs.record_event(
                 workspace,
@@ -1324,33 +1416,62 @@ def plan_scenes(
                 usd=amount,
                 quantity=1,
                 unit="image",
+                endpoint=_image_api_endpoint(selected_image_model, edit=is_skeleton or bool(reference_images)),
                 scene_index=i,
                 metadata={"pricing_note": note, "cached": False},
             )
+        qa_target = candidate_target or still_target
         still_qa: dict[str, Any] | None = None
-        if is_skeleton and still_target.is_file() and str(visual_treatment.get("kind") or "") != "motion_graphic":
-            still_qa = _audit_skeleton_still_for_generation(
+        if is_skeleton and qa_target.is_file() and str(visual_treatment.get("kind") or "") != "motion_graphic":
+            identity_qa = _audit_skeleton_still_for_generation(
                 workspace,
-                still_target,
+                qa_target,
                 outfit=str(outfit or ""),
                 cast_count=hosts,
             ) or {"status": "fail", "pass": False, "issues": ["qa_unavailable"], "summary": "Still QA returned no report"}
-            if still_qa.get("status") != "pass" and "qa_unavailable" not in list(still_qa.get("issues") or []):
-                # One bounded recovery: quarantine the rejected frame, then retry
-                # through the creator-selected identity-preserving model.
-                rejected_dir = workspace / "rejected_stills"
-                rejected_dir.mkdir(parents=True, exist_ok=True)
-                rejected = rejected_dir / f"{sid}_attempt1.png"
-                rejected.unlink(missing_ok=True)
-                still_target.replace(rejected)
+            if (
+                candidate_target is not None
+                and identity_qa.get("status") != "pass"
+                and "qa_unavailable" not in list(identity_qa.get("issues") or [])
+            ):
+                # One bounded recovery: preserve the scene's narrative beat but
+                # change the short staging variant and seed. Never prepend the
+                # failed QA prose or legacy Catalyst repair sludge.
+                from studio_agent.visual_fix_contract import artifact_fix_plan
+
+                retry_plan = artifact_fix_plan(
+                    topic=str(topic or cat["label"] or ""),
+                    visual_brief=str(visual_brief or ""),
+                    narration=str(narration or ""),
+                    scene_action=str(action or ""),
+                    user_feedback=str(identity_qa.get("summary") or ""),
+                    job_cast=replan_spec.get("cast_count"),
+                    scene_cast=hosts,
+                    outfit=str(outfit or "no clothing"),
+                    aspect_ratio="9:16",
+                    attempt=1,
+                )
+                hosts = int(retry_plan["cast_count"])
+                action = str(retry_plan["scene_action"])
+                prompt = str(retry_plan["still_prompt"])
+                motion = str(retry_plan["motion_prompt"])
+                rejected_rel = _quarantine_still_candidate(
+                    workspace,
+                    qa_target,
+                    sid=sid,
+                    reason="identity_attempt1",
+                )
+                candidate_target = _new_still_candidate(workspace, sid, attempt=2)
+                qa_target = candidate_target
                 retry_prompt, retry_amount, retry_note, retry_key, retry_provider = (
                     _generate_skeleton_still_from_master(
                         prompt,
-                        still_target,
+                        qa_target,
                         image_model_id=selected_image_model or "seedream_edit",
                         seed=720042 + i,
                         master_url=skeleton_master_ref,
                         cast_count=hosts,
+                        budget_workspace=workspace,
                     )
                 )
                 prompt = retry_prompt
@@ -1365,38 +1486,83 @@ def plan_scenes(
                     usd=retry_amount,
                     quantity=1,
                     unit="image",
+                    endpoint=_image_api_endpoint(selected_image_model or "seedream_edit", edit=True),
                     scene_index=i,
                     metadata={
                         "pricing_note": retry_note,
                         "cached": False,
                         "semantic_qa_retry": True,
-                        "rejected_still": str(rejected.relative_to(workspace)),
+                        "rejected_still": rejected_rel,
                     },
                 )
-                still_qa = _audit_skeleton_still_for_generation(
+                identity_qa = _audit_skeleton_still_for_generation(
                     workspace,
-                    still_target,
+                    qa_target,
                     outfit=str(outfit or ""),
                     force=True,
                     cast_count=hosts,
                 )
-        elif still_target.is_file() and str(visual_treatment.get("kind") or "") != "motion_graphic":
             from studio_agent.visual_qa import audit_generic_still
-            still_qa = audit_generic_still(
-                still_target,
+
+            style_qa = audit_generic_still(
+                qa_target,
                 scene_contract=" ".join(str(value or "") for value in (prompt, action, narration)),
+                force=True,
+                render_style=style.key,
             )
+            still_qa = _combine_still_qa_reports(identity=identity_qa, style=style_qa)
+        elif qa_target.is_file() and str(visual_treatment.get("kind") or "") != "motion_graphic":
+            if reference_images:
+                from studio_agent.visual_qa import audit_generic_still, audit_product_still
+
+                product_manifest = (
+                    replan_spec.get("product_reference")
+                    if isinstance(replan_spec.get("product_reference"), dict)
+                    else {}
+                )
+                product_qa = audit_product_still(
+                    qa_target,
+                    references=[Path(path) for path in reference_images],
+                    product_name=str(product_manifest.get("product_name") or ""),
+                )
+                style_qa = audit_generic_still(
+                    qa_target,
+                    scene_contract=" ".join(str(value or "") for value in (prompt, action, narration)),
+                    force=True,
+                    render_style=style.key,
+                )
+                still_qa = _combine_still_qa_reports(product=product_qa, style=style_qa)
+            else:
+                from studio_agent.visual_qa import audit_generic_still
+
+                still_qa = audit_generic_still(
+                    qa_target,
+                    scene_contract=" ".join(str(value or "") for value in (prompt, action, narration)),
+                    force=True,
+                    render_style=style.key,
+                )
         still_qa_passed = (
             str(visual_treatment.get("kind") or "") == "motion_graphic"
             or bool(still_qa and still_qa.get("status") == "pass" and still_qa.get("pass") is True)
+        )
+        accepted_still_rel = f"stills/{sid}.png" if prior_accepted else None
+        candidate_still_rel = (
+            str(candidate_target.relative_to(workspace)).replace("\\", "/")
+            if candidate_target is not None and candidate_target.is_file()
+            else None
+        )
+        persisted_motion = _bounded_motion_prompt(
+            apply_wardrobe_motion_lock(motion, outfit) if is_skeleton else motion
         )
         scenes.append({
             "index": i, "sid": sid, "narration": narration, "prompt": prompt,
             "outfit": outfit, "scene_action": action,
             "cast_count": hosts if is_skeleton else 1,
-            "motion_prompt": apply_wardrobe_motion_lock(motion, outfit) if is_skeleton else motion,
+            "motion_prompt": persisted_motion,
             "sfx_direction": sfx_direction,
-            "still_rel": f"stills/{sid}.png", "clip_rel": None,
+            "still_rel": accepted_still_rel,
+            "still_candidate_rel": candidate_still_rel,
+            "clip_rel": prev.get("clip_rel") if prior_accepted else None,
             "animate": bool(prev.get("animate", default_animate)) if still_qa_passed else False,
             "approved_for_video": bool(prev.get("approved_for_video", False)) if still_qa_passed else False,
             "approved_for_animation": bool(prev.get("approved_for_animation", False)) if still_qa_passed else False,
@@ -1404,10 +1570,124 @@ def plan_scenes(
             "image_model_id": selected_image_model or prev.get("image_model_id") or "seedream_edit",
             "still_qa": still_qa,
             "visual_treatment": visual_treatment,
-            "status": "still_ready" if still_qa_passed else "qa_blocked",
+            "status": (
+                "candidate_ready"
+                if still_qa_passed and candidate_still_rel
+                else "still_ready"
+                if still_qa_passed and prior_accepted
+                else "qa_blocked"
+            ),
             "duration_sec": float(prev.get("duration_sec", 5.0)),
         })
         save_scenes(workspace, scenes)
+    from studio_agent import visual_qa
+
+    for position, scene in enumerate(scenes):
+        current_still = _scene_candidate_or_accepted_path(workspace, scene)
+        still_report = (
+            scene.get("still_qa")
+            if isinstance(scene.get("still_qa"), dict)
+            else {}
+        )
+        deterministic_graphic = str(
+            (scene.get("visual_treatment") or {}).get("kind") or ""
+        ) == "motion_graphic"
+        if deterministic_graphic:
+            still_report = {
+                "status": "pass",
+                "pass": True,
+                "summary": "Deterministic motion-graphic frame generated from the locked treatment",
+                "kind": "deterministic_motion_graphic",
+            }
+            correspondence = {
+                "status": "pass",
+                "pass": True,
+                "summary": "Deterministic graphic is bound to this scene treatment",
+                "kind": "deterministic_motion_graphic",
+            }
+        elif still_report.get("status") == "pass" and still_report.get("pass") is True:
+            previous = scenes[position - 1] if position > 0 else None
+            following = scenes[position + 1] if position + 1 < len(scenes) else None
+            correspondence = visual_qa.audit_scene_correspondence(
+                current_still or Path("__missing_still__"),
+                scene_contract=visual_qa._scene_contract_text(scene),
+                previous_still=_scene_candidate_or_accepted_path(workspace, previous),
+                previous_contract=visual_qa._scene_contract_text(previous) if previous else "",
+                next_still=_scene_candidate_or_accepted_path(workspace, following),
+                next_contract=visual_qa._scene_contract_text(following) if following else "",
+            )
+        else:
+            correspondence = {
+                "status": "fail",
+                "pass": False,
+                "summary": "Correspondence QA skipped because still identity/artifact QA failed",
+                "issues": ["still_qa_failed"],
+            }
+        scene["still_qa"] = still_report
+        scene["scene_correspondence_qa"] = correspondence
+        qa_scene = dict(scene)
+        if current_still is not None:
+            qa_scene["still_rel"] = str(current_still.relative_to(workspace)).replace("\\", "/")
+        aggregate = visual_qa.build_scene_visual_qa(
+            workspace,
+            qa_scene,
+            previous_scene=scenes[position - 1] if position > 0 else None,
+            next_scene=scenes[position + 1] if position + 1 < len(scenes) else None,
+            still_qa=still_report,
+            correspondence_qa=correspondence,
+            require_clip=False,
+        )
+        scene["visual_qa"] = aggregate
+        scene["qa_stale"] = False
+        if aggregate.get("pass") is not True:
+            candidate_rel = str(scene.get("still_candidate_rel") or "").strip()
+            if candidate_rel:
+                quarantined = _quarantine_still_candidate(
+                    workspace,
+                    workspace / candidate_rel,
+                    sid=str(scene.get("sid") or f"b{position:02d}"),
+                    reason="visual_qa",
+                )
+                scene["rejected_candidate_rel"] = quarantined or None
+                scene["still_candidate_rel"] = None
+            scene["status"] = "qa_blocked"
+            scene["approved_for_video"] = False
+            scene["approved_for_animation"] = False
+            scene["animate"] = False
+        else:
+            candidate_rel = str(scene.get("still_candidate_rel") or "").strip()
+            if candidate_rel:
+                candidate = workspace / candidate_rel
+                canonical = workspace / "stills" / f"{scene['sid']}.png"
+                if not candidate.is_file() or candidate.stat().st_size <= 0:
+                    scene["status"] = "qa_blocked"
+                    scene["approved_for_video"] = False
+                    scene["approved_for_animation"] = False
+                    scene["animate"] = False
+                    scene["still_candidate_rel"] = None
+                    continue
+                canonical.parent.mkdir(parents=True, exist_ok=True)
+                candidate.replace(canonical)
+                scene["still_rel"] = f"stills/{scene['sid']}.png"
+                scene["still_candidate_rel"] = None
+                scene["candidate_promoted"] = True
+            scene["status"] = "still_ready"
+    for position, scene in enumerate(scenes):
+        if (scene.get("visual_qa") or {}).get("pass") is not True:
+            continue
+        scene["visual_qa"] = visual_qa.build_scene_visual_qa(
+            workspace,
+            scene,
+            previous_scene=scenes[position - 1] if position > 0 else None,
+            next_scene=scenes[position + 1] if position + 1 < len(scenes) else None,
+            still_qa=scene.get("still_qa") if isinstance(scene.get("still_qa"), dict) else {},
+            correspondence_qa=(
+                scene.get("scene_correspondence_qa")
+                if isinstance(scene.get("scene_correspondence_qa"), dict)
+                else {}
+            ),
+            require_clip=False,
+        )
     save_scenes(workspace, scenes)
 
     _write_progress(workspace, stage="awaiting_scene_review", progress=80, detail="Review scenes")
@@ -1418,6 +1698,10 @@ def plan_scenes(
         "image_model_id": selected_image_model or "",
         "category": category_key, "topic": topic, "tier": tier,
         "scene_count": len(scenes),
+        "qa_blocked": any(
+            (scene.get("visual_qa") or {}).get("pass") is not True
+            for scene in scenes
+        ),
         "visual_proof_only": len(scenes) == 1,
         "product_reference_count": len(reference_images or []),
         "skeleton_reference_image": (
@@ -1498,25 +1782,27 @@ def _rebuild_skeleton_scene_prompt(workspace: Path, sc: dict[str, Any]) -> str:
         cast_count=hosts,
     )
     alow = action.lower()
-    if (
-        len(action) < 40
-        or "basketball" in alow
-        or "dumbbell" in alow
-        or "eyes in" in alow
-        or "internal chest" in alow
-        or "black void" in alow
-    ):
+    toxic_action = any(
+        term in alow
+        for term in (
+            "basketball", "dumbbell", "eyes in", "internal chest", "black void",
+            "chest orb", "chest glow", "open ribcage", "hand on rib", "hand pressed",
+            "glowing brain", "brain graphic", "self-emitting", "embedded light",
+        )
+    )
+    if len(action) < 40 or toxic_action:
         action = (
             (
                 "Moody apartment hallway at dusk with visible walls and floor. "
-                f"{dual_host_staging_brief()} Clean ivory ribcages (no eyes in chest), detailed environment — never a black void."
+                f"{dual_host_staging_brief()} Clean ivory ribs under thin glass only "
+                "(no chest lights), empty hands at sides — never a black void."
             )
             if hosts >= 2
             else (
-                "Modern dark psychology studio with soft spotlight and visible room detail "
+                "Modern dark psychology studio with soft external spotlight and visible room detail "
                 "(walls, floor, practical light). Exactly one skeleton host, medium-wide 9:16, "
-                "empty hands in a clear presenter gesture, clean ivory ribcage (no eyes in chest), "
-                "detailed environment — never a black void"
+                "empty hands away from torso in a clear presenter gesture, clean closed ribcage "
+                "under thin glass with no interior glow — never a black void"
             )
         )
         action, _ = sanitize_skeleton_scene_action(
@@ -1535,7 +1821,7 @@ def _rebuild_skeleton_scene_prompt(workspace: Path, sc: dict[str, Any]) -> str:
     try:
         from skeleton_ai.prompt_compose import compose_skeleton_motion_prompt
 
-        sc["motion_prompt"] = compose_skeleton_motion_prompt(
+        sc["motion_prompt"] = _bounded_motion_prompt(compose_skeleton_motion_prompt(
             motion=str(
                 sc.get("scene_action")
                 or sc.get("motion_prompt")
@@ -1545,7 +1831,7 @@ def _rebuild_skeleton_scene_prompt(workspace: Path, sc: dict[str, Any]) -> str:
             locked_outfit=outfit,
             effect_direction=str((sc.get("visual_treatment") or {}).get("motion_effect") or ""),
             cast_count=hosts,
-        )
+        ))
     except Exception:
         pass
 
@@ -1581,6 +1867,7 @@ def regenerate_scene(
     candidate_path: Path | None = None,
     defer_commit: bool = False,
     fallback_guard: Callable[[], bool] | None = None,
+    provider_route_revision: int = 0,
 ) -> dict[str, Any]:
     """Re-render one scene into an isolated candidate before replacing its still."""
     workspace = Path(workspace)
@@ -1602,7 +1889,7 @@ def regenerate_scene(
         raise ValueError("regeneration candidate must not be the canonical still")
     output_target.parent.mkdir(parents=True, exist_ok=True)
     output_target.unlink(missing_ok=True)
-    image_model_id = str(
+    requested_image_model = str(
         image_model_id
         or (
             _skeleton_image_model(sc, workspace)
@@ -1611,9 +1898,14 @@ def regenerate_scene(
         )
         or "seedream_edit"
     ).strip().lower()
+    image_model_id = normalize_fal_image_model_id(requested_image_model)
+    model_migrated_from = (
+        requested_image_model if requested_image_model != image_model_id else ""
+    )
     provider_name = ""
     fallback_from = ""
     fallback_reason = ""
+    provider_error: dict[str, Any] | None = None
     if style.pipeline == "skeleton_host":
         # Always rebuild — old scenes.json prompts still describe basketball/gym/glow-eye props.
         rebuilt = str(sc.get("prompt") or "").strip() if sc.get("prompt_user_override") else _rebuild_skeleton_scene_prompt(workspace, sc)
@@ -1623,32 +1915,15 @@ def regenerate_scene(
         # Grok T2I/edit free-form invents glowing eyes, circuits, and multi-cast costumes.
         render_model = image_model_id or "seedream_edit"
         hosts = int(sc.get("cast_count") or _read_job_spec(workspace).get("cast_count") or 1)
-        try:
-            guarded_prompt, amount, note, key, provider_name = _generate_skeleton_still_from_master(
-                rebuilt,
-                output_target,
-                image_model_id=render_model,
-                seed=fresh_seed,
-                master_url=master_ref,
-                cast_count=hosts,
-            )
-        except StyledStillError as exc:
-            if not _is_xai_availability_or_credit_error(exc):
-                output_target.unlink(missing_ok=True)
-                raise
-            fallback_from = render_model
-            fallback_reason = str(exc)[:300]
-            render_model = _fal_image_fallback_model(fallback_image_model_id)
-            output_target.unlink(missing_ok=True)
-            _require_current_image_fallback_route(fallback_guard)
-            guarded_prompt, amount, note, key, provider_name = _generate_skeleton_still_from_master(
-                rebuilt,
-                output_target,
-                image_model_id=render_model,
-                seed=fresh_seed,
-                master_url=master_ref,
-                cast_count=hosts,
-            )
+        guarded_prompt, amount, note, key, provider_name = _generate_skeleton_still_from_master(
+            rebuilt,
+            output_target,
+            image_model_id=render_model,
+            seed=fresh_seed,
+            master_url=master_ref,
+            cast_count=hosts,
+            budget_workspace=workspace,
+        )
         image_model_id = render_model
         sc["prompt"] = guarded_prompt
         sc["image_model_id"] = render_model
@@ -1661,6 +1936,7 @@ def regenerate_scene(
             usd=amount,
             quantity=1,
             unit="image",
+            endpoint=_image_api_endpoint(render_model, edit=True),
             scene_index=index,
             metadata={
                 "pricing_note": note,
@@ -1669,71 +1945,14 @@ def regenerate_scene(
                 "fallback_from": fallback_from or None,
             },
         )
-    elif image_model_id in {"grok_imagine", "grok_imagine_standard"}:
-        amount, note, key = production_costs.price_xai_image(image_model_id, edit=False)
-        try:
-            guarded_prompt = sc["prompt"]
-            result = generate_still_t2i(
-                guarded_prompt,
-                output_target,
-                negative_prompt=style.negative_prompt,
-                seed=fresh_seed,
-                image_model_id=image_model_id,
-            )
-            sc["prompt"] = guarded_prompt
-            if result.get("cost_usd") is not None:
-                amount = production_costs._usd(result.get("cost_usd"))
-        except StyledStillError as exc:
-            charged = exc.cost_usd if exc.cost_usd is not None else 0.0
-            if charged:
-                provider, failed_amount, failed_note = _metered_provider_values("xai", charged, f"{note}: failed regenerate")
-                production_costs.record_event(
-                    workspace,
-                    stage="regenerate",
-                    provider=provider,
-                    operation=key,
-                    usd=failed_amount,
-                    quantity=1,
-                    unit="image",
-                    scene_index=index,
-                    metadata={"pricing_note": failed_note, "failed": True},
-                )
-            if not _is_xai_availability_or_credit_error(exc):
-                output_target.unlink(missing_ok=True)
-                raise
-            fallback_from = image_model_id
-            fallback_reason = str(exc)[:300]
-            image_model_id = _fal_image_fallback_model(fallback_image_model_id)
-            output_target.unlink(missing_ok=True)
-            _require_current_image_fallback_route(fallback_guard)
-            generate_still_t2i(
-                sc["prompt"],
-                output_target,
-                negative_prompt=style.negative_prompt,
-                seed=fresh_seed,
-                image_model_id=image_model_id,
-            )
-            amount, note, key = production_costs.price_fal_image(
-                edit=False,
-                model_id=image_model_id,
-            )
-            provider_name = seedream_provider(image_model_id) or "fal"
-        else:
-            provider_name = "xai"
-        provider, amount, note = _metered_provider_values(provider_name, amount, note)
-        production_costs.record_event(
-            workspace,
-            stage="regenerate",
-            provider=provider,
-            operation=key,
-            usd=amount,
-            quantity=1,
-            unit="image",
-            scene_index=index,
-            metadata={"pricing_note": note, "fallback_from": fallback_from or None},
-        )
     else:
         image_model_id = _fal_image_fallback_model(image_model_id)
+        _enforce_image_attempt_budget(
+            workspace,
+            image_model_id,
+            edit=False,
+            operation="scene_regenerate",
+        )
         generate_still_t2i(
             sc["prompt"], output_target, negative_prompt=style.negative_prompt,
             seed=fresh_seed,
@@ -1756,6 +1975,7 @@ def regenerate_scene(
             usd=amount,
             quantity=1,
             unit="image",
+            endpoint=_image_api_endpoint(image_model_id, edit=False),
             scene_index=index,
             metadata={"pricing_note": note},
         )
@@ -1771,8 +1991,10 @@ def regenerate_scene(
         "candidate_path": str(output_target),
         "image_model_id": image_model_id,
         "image_provider": provider_name,
+        "model_migrated_from": model_migrated_from or None,
         "fallback_from": fallback_from or None,
         "fallback_reason": fallback_reason or None,
+        "provider_error": provider_error,
     }
     if defer_commit:
         return result
@@ -1780,13 +2002,26 @@ def regenerate_scene(
     # has produced a complete local candidate.
     output_target.replace(still_target)
     # New still invalidates any existing animation for this scene.
-    (workspace / "clips" / f"{sc['sid']}.mp4").unlink(missing_ok=True)
+    clip = workspace / "clips" / f"{sc['sid']}.mp4"
+    clip.unlink(missing_ok=True)
+    clip.with_suffix(clip.suffix + ".fal.json").unlink(missing_ok=True)
+    clip.with_suffix(clip.suffix + ".visualqa.json").unlink(missing_ok=True)
+    still_target.with_suffix(still_target.suffix + ".stillqa.json").unlink(missing_ok=True)
+    still_target.with_suffix(still_target.suffix + ".productqa.json").unlink(missing_ok=True)
     sc["clip_rel"] = None
     sc["status"] = "still_ready"
     sc["approved_for_video"] = False
     sc["approved_for_animation"] = False
     sc["regenerate_seed"] = fresh_seed
     sc["image_model_id"] = image_model_id
+    sc["image_provider"] = provider_name
+    sc["model_migrated_from"] = model_migrated_from or None
+    sc["fallback_from"] = fallback_from or None
+    sc["fallback_reason"] = fallback_reason or None
+    sc["provider_error"] = provider_error
+    from studio_agent.visual_qa import invalidate_scene_visual_qa
+
+    invalidate_scene_visual_qa(sc, still_changed=True)
     save_scenes(workspace, scenes)
     result["candidate_path"] = None
     return result
@@ -1811,6 +2046,9 @@ def set_scene_prompt_override(workspace: Path, index: int, prompt: str) -> dict[
     scene["approved_for_video"] = False
     scene["approved_for_animation"] = False
     scene["animate"] = False
+    from studio_agent.visual_qa import invalidate_scene_visual_qa
+
+    invalidate_scene_visual_qa(scene, contract_changed=True)
     save_scenes(Path(workspace), scenes)
     return {"index": int(index), "prompt": clean, "prompt_user_override": True}
 
@@ -1826,8 +2064,10 @@ def regenerate_scene_with_catalyst(
     candidate_path: Path | None = None,
     defer_commit: bool = False,
     fallback_guard: Callable[[], bool] | None = None,
+    fix_plan: dict[str, Any] | None = None,
+    provider_route_revision: int = 0,
 ) -> dict[str, Any]:
-    """Catalyst-guided regenerate: audit artifacts, preserve style, fix limbs/layout."""
+    """Regenerate through the canonical short contract or legacy Catalyst edit."""
     workspace = Path(workspace)
     from studio_agent.catalyst_health import ensure_catalyst_skeleton_learning_ready
 
@@ -1843,15 +2083,57 @@ def regenerate_scene_with_catalyst(
         raise RuntimeError(f"scene {index} not found")
 
     style = _style_for(workspace)
-    if style.pipeline == "skeleton_host":
+    contract_plan = dict(fix_plan or {})
+    if style.pipeline == "skeleton_host" and contract_plan:
+        still_prompt = str(contract_plan.get("still_prompt") or "").strip()
+        motion_prompt = str(contract_plan.get("motion_prompt") or "").strip()
+        if str(contract_plan.get("method") or "") != "master_regenerate":
+            raise ValueError("visual fix plan must use master_regenerate")
+        if not still_prompt or len(still_prompt) > 300 or len(motion_prompt) > 300:
+            raise ValueError("visual fix plan violates the 300-character prompt contract")
+        sc["cast_count"] = int(contract_plan.get("cast_count") or sc.get("cast_count") or 1)
+        sc["scene_action"] = str(contract_plan.get("scene_action") or sc.get("scene_action") or "")
+        sc["prompt"] = still_prompt
+        sc["motion_prompt"] = _bounded_motion_prompt(motion_prompt)
+        sc["prompt_user_override"] = True
+        sc["visual_fix_contract"] = {
+            "method": "master_regenerate",
+            "attempt": int(contract_plan.get("attempt") or 0),
+            "variant_id": int(contract_plan.get("variant_id") or 0),
+            "narrative_anchor": str(contract_plan.get("narrative_anchor") or ""),
+            "prompt_budget": int(contract_plan.get("prompt_budget") or 300),
+            "rules": list(contract_plan.get("rules") or []),
+        }
+        audit = dict(audit or {})
+        audit["method"] = "regenerate"
+        audit["fix_instruction"] = ""
+        audit["visual_fix_contract"] = dict(sc["visual_fix_contract"])
+    elif style.pipeline == "skeleton_host":
         # A semantic failure must change the next candidate, not merely roll a
         # new seed with the identical weak instruction.  Keep this compact so
         # the provider prompt remains below its hard limit.
-        repair_note = str((audit or {}).get("fix_instruction") or "").lower()
-        if repair_note and any(
-            term in repair_note
-            for term in ("orb", "chest", "sphere", "symbolic_clutter", "bubble", "fused", "merge", "capsule")
-        ):
+        repair_blob = " ".join(
+            str((audit or {}).get(key) or "")
+            for key in ("fix_instruction", "user_reason", "summary", "details", "issues")
+        ).lower()
+        if isinstance((audit or {}).get("issues"), list):
+            repair_blob += " " + " ".join(str(x) for x in (audit or {}).get("issues") or [])
+        # Also read last still QA summary when Catalyst issues were empty.
+        try:
+            qa = sc.get("still_qa") if isinstance(sc.get("still_qa"), dict) else {}
+            repair_blob += " " + str(qa.get("summary") or "").lower()
+            repair_blob += " " + " ".join(str(x) for x in (qa.get("issues") or []))
+        except Exception:
+            pass
+        chest_orb_repair = any(
+            term in repair_blob
+            for term in (
+                "orb", "chest", "sphere", "symbolic_clutter", "bubble", "fused",
+                "merge", "capsule", "ribcage", "self-emitting", "internal light",
+                "embedded light", "chest glow", "sternum",
+            )
+        )
+        if chest_orb_repair:
             from skeleton_ai.prompt_compose import dual_host_staging_brief, resolve_cast_count
 
             hosts = resolve_cast_count(
@@ -1861,18 +2143,25 @@ def regenerate_scene_with_catalyst(
                 scene_action=str(sc.get("scene_action") or ""),
                 narration=str(sc.get("narration") or ""),
             )
-            # Never prepend "STRICT REPAIR" sludge — it bloats the prompt and worsens stills.
+            # Never say "open ribcage" — models invent interior chest lights.
+            # Hands stay away from the torso; only external room light.
             if hosts >= 2:
                 sc["scene_action"] = (
-                    "Apartment hallway at dusk, medium-wide. "
-                    f"{dual_host_staging_brief()}"
+                    "Apartment hallway at dusk, medium-wide, visible walls and floor. "
+                    f"{dual_host_staging_brief()} "
+                    "Clean ivory ribs under thin glass only; hands empty at sides; "
+                    "no interior chest light, no orb, no hand on ribs."
                 )[:280]
             else:
                 sc["scene_action"] = (
-                    "Physical interior, medium-wide; one ivory skeleton, open ribcage, "
-                    "thin body-hugging glass shell only; empty hands; no chest orb/glow."
+                    "Dim psychology studio with soft external spotlight and visible walls. "
+                    "Medium-wide 9:16; one ivory skeleton in thin body-hugging glass skin; "
+                    "clean closed ribcage (no interior glow); empty hands away from torso; "
+                    "no chest orb, no LED, no self-emitting light inside the body."
                 )[:280]
             sc["cast_count"] = hosts
+            sc["prompt_user_override"] = False
+            sc.pop("prompt", None)
         sc["prompt"] = _rebuild_skeleton_scene_prompt(workspace, sc)
     else:
         from .canonical_edit import sanitize_skeleton_scene_action
@@ -1883,7 +2172,11 @@ def regenerate_scene_with_catalyst(
 
     still_rel = str(sc.get("still_rel") or f"stills/{sc['sid']}.png")
     still_path = workspace / still_rel
-    method = str(audit.get("method") or "edit").lower()
+    method = (
+        "regenerate"
+        if contract_plan
+        else str(audit.get("method") or "edit").lower()
+    )
     fix_instruction = str(audit.get("fix_instruction") or "").strip()
     # Long Catalyst edit instructions made artifacted stills worse. Artifact
     # cleanup always master-regenerates with the short cast-aware scene brief.
@@ -1928,10 +2221,13 @@ def regenerate_scene_with_catalyst(
         candidate_path=candidate_path,
         defer_commit=defer_commit,
         fallback_guard=fallback_guard,
+        provider_route_revision=provider_route_revision,
     )
     if isinstance(result, dict):
         result["catalyst_audit"] = audit
         result["regenerate_method"] = "catalyst_master_regenerate"
+        if contract_plan:
+            result["visual_fix_contract"] = dict(sc.get("visual_fix_contract") or {})
     return result
 
 
@@ -2096,7 +2392,7 @@ def apply_motion_direction(workspace: Path, index: int, feedback: str) -> dict[s
     scene["scene_action"] = scene_action[:280]
     scene["effect_direction"] = effect[:120]
     scene["sfx_direction"] = effect[:120]
-    scene["motion_prompt"] = motion
+    scene["motion_prompt"] = _bounded_motion_prompt(motion)
     scene["last_motion_feedback"] = note[:1200]
     scene["motion_revision"] = {
         "reason": note[:500],
@@ -2269,14 +2565,18 @@ def redesign_scene_from_narration(workspace: Path, index: int) -> dict[str, Any]
             "single skeleton. Make its emotion unmistakable through head angle, eye focus, shoulders, "
             "posture and skeletal hand gesture. Choose a meaningful real location, camera shot and "
             "lighting. Do not use a generic presenter pose, empty stage, theater, plain studio, text, "
-            "diagrams, glowing anatomy, literal brain graphics, extra people, or props that are not "
-            "essential. Return strict JSON only: {\"scene_action\":\"...\",\"motion_prompt\":\"...\"}. "
+            "diagrams, glowing anatomy, literal brain graphics, chest orbs, hand-on-ribcage poses, "
+            "interior body lights, extra people, or props that are not essential. Never describe an "
+            "open/glowing ribcage or light inside the chest. Return strict JSON only: "
+            "{\"scene_action\":\"...\",\"motion_prompt\":\"...\"}. "
             "scene_action must be 45-90 words and physical/filmable. motion_prompt must describe one "
             "subtle stable 5-second emotional performance with no anatomy morphing."
         )
     user = (
         f"Topic: {topic}\nScene {beat} narration: {narration}\n"
-        f"Reject and improve this previous direction: {previous[:500]}"
+        f"Reject and improve this previous direction: {previous[:500]}\n"
+        "If narration mentions brain, dopamine, chemistry, or internal feelings, show that as "
+        "external posture/setting only — never a glowing brain, chest light, or hand on ribs."
     )
     data: dict[str, Any] = {}
     try:
@@ -2328,7 +2628,7 @@ def redesign_scene_from_narration(workspace: Path, index: int) -> dict[str, Any]
         )
 
     scene["scene_action"] = action
-    scene["motion_prompt"] = motion[:420]
+    scene["motion_prompt"] = _bounded_motion_prompt(motion)
     scene["prompt"] = ""
     scene["prompt_user_override"] = False
     scene["creative_redesign"] = {
@@ -2341,7 +2641,7 @@ def redesign_scene_from_narration(workspace: Path, index: int) -> dict[str, Any]
     scene["approved_for_animation"] = False
     scene["animate"] = False
     save_scenes(workspace, scenes)
-    return {"changed": True, "scene_action": action, "motion_prompt": motion[:420], "reason": "narration-driven creative redesign", "cast_count": hosts}
+    return {"changed": True, "scene_action": action, "motion_prompt": _bounded_motion_prompt(motion), "reason": "narration-driven creative redesign", "cast_count": hosts}
 
 
 def _scoped_edit_prompt(scene_prompt: str, instruction: str, scope: str) -> tuple[str, str]:
@@ -2462,7 +2762,7 @@ def edit_scene(
     out_tmp.parent.mkdir(parents=True, exist_ok=True)
     out_tmp.unlink(missing_ok=True)
     style = _style_for(workspace)
-    image_model_id = str(
+    requested_image_model = str(
         image_model_id
         or (
             _skeleton_image_model(sc, workspace)
@@ -2471,68 +2771,13 @@ def edit_scene(
         )
         or "seedream_edit"
     ).strip().lower()
+    image_model_id = normalize_fal_image_model_id(requested_image_model)
+    model_migrated_from = (
+        requested_image_model if requested_image_model != image_model_id else ""
+    )
     fallback_from = ""
     fallback_reason = ""
-    if style.pipeline == "skeleton_host" and image_model_id in {"grok_imagine", "grok_imagine_standard"}:
-        xai_edit_prompt = (
-            _xai_skeleton_artifact_guard(edit_prompt)
-            if style.pipeline == "skeleton_host"
-            else edit_prompt
-        )
-        try:
-            amount, note, key, provider_name = _generate_skeleton_still_edit(
-                xai_edit_prompt,
-                out_tmp,
-                reference_path=still_target,
-                image_model_id=image_model_id or "grok_imagine",
-            )
-        except StyledStillError as exc:
-            charged = exc.cost_usd if exc.cost_usd is not None else 0.0
-            if charged:
-                provider, failed_amount, failed_note = _metered_provider_values("xai", charged, "xai edit: failed")
-                production_costs.record_event(
-                    workspace,
-                    stage="edit",
-                    provider=provider,
-                    operation="grok_imagine_edit",
-                    usd=failed_amount,
-                    quantity=1,
-                    unit="image",
-                    scene_index=index,
-                    metadata={"pricing_note": failed_note, "failed": True, "edit_scope": normalized_scope},
-                )
-            if not _is_xai_availability_or_credit_error(exc):
-                out_tmp.unlink(missing_ok=True)
-                raise
-            fallback_from = image_model_id
-            fallback_reason = str(exc)[:300]
-            image_model_id = _fal_image_fallback_model(fallback_image_model_id)
-            out_tmp.unlink(missing_ok=True)
-            _require_current_image_fallback_route(fallback_guard)
-            amount, note, key, provider_name = _generate_skeleton_still_edit(
-                edit_prompt,
-                out_tmp,
-                reference_path=still_target,
-                image_model_id=image_model_id,
-            )
-        provider, amount, note = _metered_provider_values(provider_name, amount, note)
-        production_costs.record_event(
-            workspace,
-            stage="edit",
-            provider=provider,
-            operation=f"{key}_edit" if provider_name == "xai" else key,
-            usd=amount,
-            quantity=1,
-            unit="image",
-            scene_index=index,
-            metadata={
-                "pricing_note": note,
-                "edit_scope": normalized_scope,
-                "fallback_from": fallback_from or None,
-            },
-        )
-        sc["image_model_id"] = image_model_id or "seedream_edit"
-    elif style.pipeline == "skeleton_host":
+    if style.pipeline == "skeleton_host":
         master_ref = _resolve_skeleton_master_reference(workspace, None)
         from .canonical_edit import generate_still_edit
 
@@ -2608,7 +2853,8 @@ def edit_scene(
         "last_edit_scope": normalized_scope,
         "candidate_path": str(out_tmp),
         "image_model_id": image_model_id,
-        "image_provider": seedream_provider(image_model_id) or ("xai" if image_model_id.startswith("grok") else "fal"),
+        "image_provider": "fal",
+        "model_migrated_from": model_migrated_from or None,
         "fallback_from": fallback_from or None,
         "fallback_reason": fallback_reason or None,
     }
@@ -2616,13 +2862,26 @@ def edit_scene(
         return result
     # Promote atomically only after a complete candidate exists.
     out_tmp.replace(still_target)
-    (workspace / "clips" / f"{sc['sid']}.mp4").unlink(missing_ok=True)
+    clip = workspace / "clips" / f"{sc['sid']}.mp4"
+    clip.unlink(missing_ok=True)
+    clip.with_suffix(clip.suffix + ".fal.json").unlink(missing_ok=True)
+    clip.with_suffix(clip.suffix + ".visualqa.json").unlink(missing_ok=True)
+    still_target.with_suffix(still_target.suffix + ".stillqa.json").unlink(missing_ok=True)
+    still_target.with_suffix(still_target.suffix + ".productqa.json").unlink(missing_ok=True)
     sc["clip_rel"] = None
     sc["status"] = "still_ready"
     sc["approved_for_video"] = False
     sc["approved_for_animation"] = False
     sc["last_edit"] = instruction.strip()[:300]
     sc["last_edit_scope"] = normalized_scope
+    sc["image_model_id"] = image_model_id
+    sc["image_provider"] = result["image_provider"]
+    sc["model_migrated_from"] = model_migrated_from or None
+    sc["fallback_from"] = fallback_from or None
+    sc["fallback_reason"] = fallback_reason or None
+    from studio_agent.visual_qa import invalidate_scene_visual_qa
+
+    invalidate_scene_visual_qa(sc, still_changed=True)
     save_scenes(workspace, scenes)
     result["candidate_path"] = None
     return result
@@ -2638,7 +2897,7 @@ def set_scene_settings(
     if animate is not None:
         sc["animate"] = bool(animate)
     if video_model:
-        sc["video_model"] = video_model
+        sc["video_model"] = normalize_fal_video_model_id(video_model)
     save_scenes(Path(workspace), scenes)
     return sc
 
@@ -2664,18 +2923,8 @@ def _record_animation_attempt_cost(
 ) -> None:
     endpoint = str(clip_meta.get("endpoint") or "")
     duration = float(clip_meta.get("duration_sec") or sc.get("duration_sec") or 5.0)
-    if endpoint.startswith("xai:"):
-        amount, note, key = production_costs.price_xai_video(
-            str(clip_meta.get("video_model") or endpoint),
-            seconds=duration,
-            resolution=str(clip_meta.get("xai_resolution") or ""),
-        )
-        if clip_meta.get("xai_cost_usd") is not None:
-            amount = production_costs._usd(clip_meta.get("xai_cost_usd"))
-        provider, amount, note = _metered_provider_values("xai", amount, note)
-    else:
-        amount, note, key = production_costs.price_fal_video(endpoint, seconds=duration)
-        provider, amount, note = _metered_provider_values("fal", amount, note)
+    amount, note, key = production_costs.price_fal_video(endpoint, seconds=duration)
+    provider, amount, note = _metered_provider_values("fal", amount, note)
     production_costs.record_event(
         workspace,
         stage="animation",
@@ -2784,6 +3033,147 @@ def _commit_clip_replacement(staged: list[tuple[Path, Path]]) -> None:
         backup.unlink(missing_ok=True)
 
 
+def _new_clip_candidate(workspace: Path, sid: str) -> Path:
+    directory = Path(workspace) / "candidate_clips"
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory / f"{sid}.{secrets.token_hex(8)}.mp4"
+
+
+def _promote_clip_candidate(candidate: Path, canonical: Path) -> None:
+    """Atomically expose a fully accepted clip while retaining the prior asset on error."""
+    candidate = Path(candidate)
+    canonical = Path(canonical)
+    if not candidate.is_file() or candidate.stat().st_size <= 0:
+        raise RuntimeError("accepted clip candidate is missing")
+    staged = _stage_clip_replacement(canonical)
+    try:
+        canonical.parent.mkdir(parents=True, exist_ok=True)
+        for candidate_artifact, canonical_artifact in zip(
+            _clip_replacement_artifacts(candidate),
+            _clip_replacement_artifacts(canonical),
+        ):
+            if candidate_artifact.is_file():
+                candidate_artifact.replace(canonical_artifact)
+        if not canonical.is_file() or canonical.stat().st_size <= 0:
+            raise RuntimeError("clip promotion produced no canonical asset")
+    except Exception:
+        _restore_clip_replacement(canonical, staged)
+        raise
+    _commit_clip_replacement(staged)
+
+
+def _audit_clip_candidate(
+    workspace: Path,
+    candidate: Path,
+    *,
+    still: Path,
+    scene: dict[str, Any],
+    job_spec: dict[str, Any],
+    is_skeleton: bool,
+    is_product: bool,
+    product_references: list[Path],
+    product_name: str,
+    motion_prompt: str,
+) -> dict[str, Any]:
+    """Run provider-free simulation checks or full semantic clip gates."""
+    if render_simulation.enabled():
+        from studio_agent.visual_qa import _audio_silence_report
+
+        audio = _audio_silence_report(candidate)
+        duration = float(probe_duration(candidate) or 0.0)
+        motion = _bounded_motion_prompt(motion_prompt)
+        passed = bool(
+            candidate.is_file()
+            and candidate.stat().st_size > 1024
+            and duration > 0.0
+            and motion
+            and len(motion) <= MAX_MEDIA_PROMPT_CHARS
+            and audio.get("status") == "pass"
+            and audio.get("pass") is True
+        )
+        return {
+            "status": "pass" if passed else "fail",
+            "pass": passed,
+            "confidence": 1.0 if passed else 0.0,
+            "summary": (
+                "Simulation clip is playable, silent, and bound to a bounded motion contract"
+                if passed
+                else "Simulation clip did not pass local playable/silence/motion checks"
+            ),
+            "provider": "simulation_local",
+            "audio_silence": audio,
+            "duration_sec": duration,
+            "motion_brief": motion,
+        }
+
+    from studio_agent.visual_qa import audit_generic_clip
+
+    scene_contract = " ".join(
+        str(value or "")
+        for value in (scene.get("prompt"), scene.get("scene_action"), scene.get("narration"))
+    )
+    style_qa = audit_generic_clip(
+        candidate,
+        scene_contract=scene_contract,
+        motion_brief=motion_prompt,
+        render_style=str(job_spec.get("render_style") or ""),
+        force=True,
+    )
+    if is_skeleton:
+        from studio_agent.visual_qa import audit_skeleton_clip
+
+        identity_qa = audit_skeleton_clip(
+            candidate,
+            still=still,
+            locked_outfit=str(scene.get("outfit") or ""),
+            force=True,
+            cast_count=int(scene.get("cast_count") or _read_job_spec(workspace).get("cast_count") or 1),
+        )
+        return _combine_still_qa_reports(identity=identity_qa, style=style_qa)
+    if is_product:
+        from studio_agent.visual_qa import audit_product_clip
+
+        identity_qa = audit_product_clip(
+            candidate,
+            still=still,
+            references=product_references,
+            product_name=product_name,
+            force=True,
+        )
+        return _combine_still_qa_reports(identity=identity_qa, style=style_qa)
+    return style_qa
+
+
+def _bind_clip_qa_to_current_scene(
+    workspace: Path,
+    scenes: list[dict[str, Any]],
+    scene: dict[str, Any],
+    clip_qa: dict[str, Any],
+) -> None:
+    from studio_agent import visual_qa
+
+    try:
+        position = scenes.index(scene)
+    except ValueError:
+        position = max(0, int(scene.get("index") or 0))
+    scene["i2v_qa"] = dict(clip_qa or {})
+    scene["visual_qa"] = visual_qa.build_scene_visual_qa(
+        Path(workspace),
+        scene,
+        previous_scene=scenes[position - 1] if position > 0 else None,
+        next_scene=scenes[position + 1] if position + 1 < len(scenes) else None,
+        still_qa=scene.get("still_qa") if isinstance(scene.get("still_qa"), dict) else {},
+        correspondence_qa=(
+            scene.get("scene_correspondence_qa")
+            if isinstance(scene.get("scene_correspondence_qa"), dict)
+            else {}
+        ),
+        clip_qa=clip_qa,
+        require_clip=True,
+    )
+    scene["qa_stale"] = False
+
+
 def animate_scenes_stage(
     workspace: Path,
     *,
@@ -2830,11 +3220,10 @@ def animate_scenes_stage(
         sc["animate"] = True
         still = workspace / sc["still_rel"]
         clip = clips_dir / f"{sc['sid']}.mp4"
+        candidate_clip = _new_clip_candidate(workspace, str(sc["sid"]))
         previous_clip_rel = sc.get("clip_rel")
         previous_status = str(sc.get("status") or "")
-        staged_clip: list[tuple[Path, Path]] = []
         try:
-            staged_clip = _stage_clip_replacement(clip)
             motion_prompt = sc.get("motion_prompt") or sc["narration"]
             skeleton_scene_text = " ".join(
                 str(sc.get(key) or "") for key in ("render_style", "outfit", "prompt", "scene_action")
@@ -2871,7 +3260,7 @@ def animate_scenes_stage(
                     budget=300,
                     cast_count=int(sc.get("cast_count") or _read_job_spec(workspace).get("cast_count") or 1),
                 )
-                sc["motion_prompt"] = motion_prompt
+                sc["motion_prompt"] = _bounded_motion_prompt(motion_prompt)
             video_model = (
                 _skeleton_video_model(sc, workspace)
                 if is_skeleton
@@ -2882,6 +3271,7 @@ def animate_scenes_stage(
                 if str(resolved_route.get("video_model") or "").strip():
                     video_model = str(resolved_route["video_model"]).strip()
                 final_route = resolved_route
+            video_model = normalize_fal_video_model_id(video_model, tier=tier)
             sc["video_model"] = video_model or sc.get("video_model")
             lane = "i2v_premium" if "kling" in str(video_model).lower() or "premium" in str(video_model).lower() else "i2v"
             duration = float(sc.get("duration_sec") or 5.0)
@@ -2892,31 +3282,65 @@ def animate_scenes_stage(
                 # unreadable; render the approved script fact directly.
                 from studio_agent.visual_treatment import render_motion_graphic_clip
                 render_motion_graphic_clip(
-                    treatment, clip, duration_sec=duration, fps=24,
+                    treatment, candidate_clip, duration_sec=duration, fps=24,
                     width=1080, height=1920,
                 )
+                # Deterministic generation is not a QA exemption: keep the
+                # graphic quarantined until its full timeline proves silence,
+                # scene correspondence, motion, and the current render style.
+                motion_prompt = _bounded_motion_prompt(
+                    sc.get("motion_prompt") or sc.get("scene_action") or sc.get("narration")
+                )
+                sc["motion_prompt"] = motion_prompt
+                motion_graphic_qa = _audit_clip_candidate(
+                    workspace,
+                    candidate_clip,
+                    still=still,
+                    scene=sc,
+                    job_spec=job_spec,
+                    is_skeleton=False,
+                    is_product=False,
+                    product_references=product_references,
+                    product_name=product_name,
+                    motion_prompt=motion_prompt,
+                )
+                if (
+                    motion_graphic_qa.get("status") != "pass"
+                    or motion_graphic_qa.get("pass") is not True
+                ):
+                    raise RuntimeError(
+                        str(
+                            motion_graphic_qa.get("summary")
+                            or "Motion graphic candidate did not pass clip QA"
+                        )[:300]
+                    )
+                _promote_clip_candidate(candidate_clip, clip)
                 sc["clip_rel"] = f"clips/{sc['sid']}.mp4"
                 sc["status"] = "clip_ready"
-                sc["i2v_qa"] = {"status": "pass", "pass": True, "kind": "deterministic_motion_graphic"}
+                motion_graphic_qa["kind"] = "deterministic_motion_graphic"
+                _bind_clip_qa_to_current_scene(workspace, scenes, sc, motion_graphic_qa)
                 animated.append(int(sc["index"]))
-                _commit_clip_replacement(staged_clip)
                 save_scenes(workspace, scenes)
                 continue
+            motion_prompt = _bounded_motion_prompt(motion_prompt)
+            sc["motion_prompt"] = motion_prompt
             max_attempts = max(1, min(2, int(os.getenv("STUDIO_I2V_QA_MAX_ATTEMPTS", "2") or "2")))
             rejected_reports: list[dict[str, Any]] = []
             semantic_passed = False
-            current_motion = str(motion_prompt or "")
+            current_motion = _bounded_motion_prompt(motion_prompt)
             qa_attempt = 0
             final_route_restarts = 0
             while qa_attempt < max_attempts:
                 attempt = qa_attempt + 1
-                clip.unlink(missing_ok=True)
-                clip.with_suffix(clip.suffix + ".fal.json").unlink(missing_ok=True)
-                clip.with_suffix(clip.suffix + ".visualqa.json").unlink(missing_ok=True)
+                for artifact in _clip_replacement_artifacts(candidate_clip):
+                    artifact.unlink(missing_ok=True)
                 route_restart = 0
                 while True:
                     dispatch_route = dict(route_resolver() or {}) if route_resolver is not None else {}
-                    dispatch_model = str(dispatch_route.get("video_model") or sc.get("video_model") or "").strip()
+                    dispatch_model = normalize_fal_video_model_id(
+                        str(dispatch_route.get("video_model") or sc.get("video_model") or "").strip(),
+                        tier=tier,
+                    )
                     if dispatch_model:
                         sc["video_model"] = dispatch_model
                     lane = (
@@ -2951,7 +3375,7 @@ def animate_scenes_stage(
                             gen_clip(
                                 still,
                                 current_motion,
-                                clip,
+                                candidate_clip,
                                 tier=tier,
                                 video_model=sc.get("video_model"),
                                 duration_sec=int(duration),
@@ -2960,10 +3384,11 @@ def animate_scenes_stage(
                                     if route_resolver is not None
                                     else None
                                 ),
+                                budget_workspace=workspace,
                             )
                     except I2VRouteChanged:
                         after_provider = dict(route_resolver() or {}) if route_resolver is not None else dispatch_route
-                        for artifact in _clip_replacement_artifacts(clip):
+                        for artifact in _clip_replacement_artifacts(candidate_clip):
                             artifact.unlink(missing_ok=True)
                         route_switches.append({
                             "scene_index": int(sc["index"]),
@@ -2979,7 +3404,7 @@ def animate_scenes_stage(
                                 "Media route changed repeatedly before video fallback dispatch"
                             )
                         continue
-                    clip_meta = _load_clip_meta(clip)
+                    clip_meta = _load_clip_meta(candidate_clip)
                     after_provider = dict(route_resolver() or {}) if route_resolver is not None else dispatch_route
                     after_token = (
                         int(after_provider.get("revision") or 1),
@@ -2995,7 +3420,7 @@ def animate_scenes_stage(
                     )
                     stale_path = _quarantine_i2v_attempt(
                         workspace,
-                        clip,
+                        candidate_clip,
                         sid=str(sc["sid"]),
                         attempt=attempt * 100 + route_restart + 1,
                     )
@@ -3010,20 +3435,18 @@ def animate_scenes_stage(
                     if route_restart >= 4:
                         raise RuntimeError("Media route changed repeatedly before a safe animation commit")
                 try:
-                    if is_skeleton:
-                        from studio_agent.visual_qa import audit_skeleton_clip
-                        semantic = audit_skeleton_clip(
-                            clip, still=still,
-                            locked_outfit=str(sc.get("outfit") or ""), force=True,
-                            cast_count=int(sc.get("cast_count") or _read_job_spec(workspace).get("cast_count") or 1),
-                        )
-                    else:
-                        if is_product:
-                            from studio_agent.visual_qa import audit_product_clip
-                            semantic = audit_product_clip(clip, still=still, references=product_references, product_name=product_name, force=True)
-                        else:
-                            from studio_agent.visual_qa import audit_generic_clip
-                            semantic = audit_generic_clip(clip, scene_contract=" ".join(str(value or "") for value in (sc.get("prompt"), sc.get("scene_action"), sc.get("narration"))))
+                    semantic = _audit_clip_candidate(
+                        workspace,
+                        candidate_clip,
+                        still=still,
+                        scene=sc,
+                        job_spec=job_spec,
+                        is_skeleton=is_skeleton,
+                        is_product=is_product,
+                        product_references=product_references,
+                        product_name=product_name,
+                        motion_prompt=current_motion,
+                    )
                 except Exception as qa_exc:
                     semantic = {
                         "status": "fail",
@@ -3051,7 +3474,7 @@ def animate_scenes_stage(
                 if route_resolver is not None and dispatch_token != commit_token:
                     stale_path = _quarantine_i2v_attempt(
                         workspace,
-                        clip,
+                        candidate_clip,
                         sid=str(sc["sid"]),
                         attempt=attempt * 100 + 50 + final_route_restarts,
                     )
@@ -3072,10 +3495,19 @@ def animate_scenes_stage(
                 qa_attempt += 1
                 sc["i2v_qa"] = semantic
                 if semantic_passed:
+                    sc["video_provider"] = str(clip_meta.get("provider") or "")
+                    sc["video_endpoint"] = str(clip_meta.get("endpoint") or "")
+                    sc["video_fallback_from"] = str(clip_meta.get("fallback_from") or "")
+                    sc["video_requested_model"] = str(
+                        clip_meta.get("requested_video_model") or sc.get("video_model") or ""
+                    )
+                    sc["video_provider_failures"] = list(
+                        clip_meta.get("provider_failures") or []
+                    )
                     break
 
                 rejected_path = _quarantine_i2v_attempt(
-                    workspace, clip, sid=str(sc["sid"]), attempt=attempt
+                    workspace, candidate_clip, sid=str(sc["sid"]), attempt=attempt
                 )
                 rejected_reports.append({
                     "attempt": attempt,
@@ -3090,7 +3522,7 @@ def animate_scenes_stage(
                     semantic.get("confidence") or 0.0
                 ) <= 0.0:
                     break
-                current_motion = (
+                current_motion = _bounded_motion_prompt(
                     "Keep the SAME ivory skeleton and thin glass shell identity exactly. "
                     "SILENT visual-only: no talking, no jaw/mouth motion, no lip-sync, no dialogue. "
                     "Increase readable body performance (not freeze-frame): clear weight shift, "
@@ -3100,29 +3532,16 @@ def animate_scenes_stage(
                     "interior. No human skin/flesh/hair, no morph, no text/graphics, no "
                     "chest orbs/brain/circuits. "
                     + str(motion_prompt or "")
-                )[:1800]
+                )
 
             if not semantic_passed:
-                _identity_safe_motion_fallback(
-                    still,
-                    clip,
-                    duration_sec=duration,
-                    rejected_reports=rejected_reports,
+                summary = str(
+                    (sc.get("i2v_qa") or {}).get("summary")
+                    or "Generated clip did not pass semantic visual QA"
                 )
-                sc["i2v_qa"] = {
-                    "status": "pass",
-                    "pass": True,
-                    "confidence": 1.0,
-                    "provider": "deterministic_local",
-                    "summary": "Provider I2V was rejected; used identity-safe motion from the approved still",
-                    "rejected_attempts": rejected_reports,
-                }
-                sc["motion_fallback"] = "identity_safe_motion"
-                fallback_scenes.append(int(sc["index"]))
-            sc["clip_rel"] = f"clips/{sc['sid']}.mp4"
-            sc["status"] = "clip_ready"
-            sc.pop("error", None)
-            sc.pop("last_repair_error", None)
+                raise RuntimeError(
+                    f"{summary[:240]}; replacement clip rejected and prior asset retained"
+                )
             if route_resolver is not None:
                 commit_route = dict(route_resolver() or {})
                 final_token = (
@@ -3136,7 +3555,7 @@ def animate_scenes_stage(
                 if final_token != commit_token:
                     stale_path = _quarantine_i2v_attempt(
                         workspace,
-                        clip,
+                        candidate_clip,
                         sid=str(sc["sid"]),
                         attempt=999,
                     )
@@ -3148,12 +3567,23 @@ def animate_scenes_stage(
                         "quarantined": stale_path,
                     })
                     raise RuntimeError("Media route changed at animation commit; stale clip quarantined")
+            _promote_clip_candidate(candidate_clip, clip)
+            sc["clip_rel"] = f"clips/{sc['sid']}.mp4"
+            sc["status"] = "clip_ready"
+            sc.pop("error", None)
+            sc.pop("last_repair_error", None)
+            _bind_clip_qa_to_current_scene(workspace, scenes, sc, semantic)
             animated.append(int(sc["index"]))
-            _commit_clip_replacement(staged_clip)
         except Exception as exc:  # noqa: BLE001 — surface per-scene, keep others
             repair_error = str(exc)[:300]
-            had_previous_clip = any(original == clip for original, _backup in staged_clip)
-            _restore_clip_replacement(clip, staged_clip)
+            if candidate_clip.is_file():
+                _quarantine_i2v_attempt(
+                    workspace,
+                    candidate_clip,
+                    sid=str(sc["sid"]),
+                    attempt=9999,
+                )
+            had_previous_clip = bool(previous_clip_rel) and clip.is_file()
             if had_previous_clip and clip.is_file():
                 sc["clip_rel"] = previous_clip_rel or f"clips/{sc['sid']}.mp4"
                 sc["status"] = (
@@ -3317,6 +3747,70 @@ Subscribe for more from {watermark_text}.
 """
 
 
+def _promote_final_artifacts(
+    candidate_video: Path,
+    candidate_package: Path,
+    canonical_video: Path,
+    canonical_package: Path,
+) -> None:
+    """Promote final video and package together, restoring prior files on error."""
+    pairs = (
+        (Path(candidate_video), Path(canonical_video)),
+        (Path(candidate_package), Path(canonical_package)),
+    )
+    for candidate, _canonical in pairs:
+        if not candidate.is_file() or candidate.stat().st_size <= 0:
+            raise RuntimeError(f"final candidate is missing: {candidate.name}")
+    token = secrets.token_hex(8)
+    backups: list[tuple[Path, Path]] = []
+    try:
+        for _candidate, canonical in pairs:
+            if canonical.is_file():
+                backup = canonical.with_name(f".{canonical.name}.{token}.accepted")
+                backup.unlink(missing_ok=True)
+                canonical.replace(backup)
+                backups.append((canonical, backup))
+        for candidate, canonical in pairs:
+            candidate.replace(canonical)
+    except Exception:
+        for _candidate, canonical in pairs:
+            canonical.unlink(missing_ok=True)
+        for canonical, backup in backups:
+            if backup.is_file():
+                backup.replace(canonical)
+        raise
+    for _canonical, backup in backups:
+        backup.unlink(missing_ok=True)
+
+
+def _quarantine_final_artifacts(
+    workspace: Path,
+    candidate_video: Path,
+    candidate_package: Path,
+) -> dict[str, str]:
+    directory = Path(workspace) / "rejected_final" / secrets.token_hex(8)
+    directory.mkdir(parents=True, exist_ok=True)
+    quarantined: dict[str, str] = {}
+    for key, candidate, name in (
+        ("video", Path(candidate_video), "styled_short.mp4"),
+        ("package", Path(candidate_package), "package.txt"),
+    ):
+        if not candidate.is_file():
+            continue
+        target = directory / name
+        candidate.replace(target)
+        quarantined[key] = str(target.relative_to(workspace)).replace("\\", "/")
+    return quarantined
+
+
+def _failed_render_qa_ids(report: dict[str, Any]) -> set[str]:
+    return {
+        str(check.get("id") or "")
+        for check in list(report.get("checks") or [])
+        if isinstance(check, dict) and str(check.get("status") or "") == "fail"
+    }
+
+
 def finalize_stage(
     workspace: Path, *, tier: str = "standard", voice_id: str | None = None, el: Any = None,
     reedit_instruction: str | None = None,
@@ -3337,6 +3831,17 @@ def finalize_stage(
     workspace = Path(workspace)
     _stills, clips_dir, trimmed_dir, work_dir = _setup_dirs(workspace)
     job_spec = _read_job_spec(workspace)
+    product_manifest = (
+        job_spec.get("product_reference")
+        if isinstance(job_spec.get("product_reference"), dict)
+        else {}
+    )
+    product_references = [
+        Path(str(image.get("path") or ""))
+        for image in list(product_manifest.get("images") or [])
+        if isinstance(image, dict) and str(image.get("path") or "").strip()
+    ]
+    product_name = str(product_manifest.get("product_name") or "")
     voice_pref = str(
         job_spec.get("voice_provider")
         or os.getenv("STUDIO_TTS_PROVIDER")
@@ -3406,8 +3911,50 @@ def finalize_stage(
         still = workspace / sc["still_rel"]
         clip = clips_dir / f"{sc['sid']}.mp4"
         if not (clip.exists() and clip.stat().st_size > 0):
-            _still_to_clip(still, clip, duration_sec=float(sc.get("duration_sec", 5.0)))
+            candidate_clip = _new_clip_candidate(workspace, str(sc["sid"]))
+            _still_to_clip(
+                still,
+                candidate_clip,
+                duration_sec=float(sc.get("duration_sec", 5.0)),
+            )
+            scene_text = " ".join(
+                str(sc.get(key) or "")
+                for key in ("render_style", "outfit", "prompt", "scene_action")
+            ).lower()
+            is_skeleton = bool(
+                "skeleton" in scene_text
+                or "skeleton" in str(job_spec.get("render_style") or "").lower()
+            )
+            clip_qa = _audit_clip_candidate(
+                workspace,
+                candidate_clip,
+                still=still,
+                scene=sc,
+                job_spec=job_spec,
+                is_skeleton=is_skeleton,
+                is_product=bool(product_references) and not is_skeleton,
+                product_references=product_references,
+                product_name=product_name,
+                motion_prompt=_bounded_motion_prompt(
+                    sc.get("motion_prompt") or sc.get("scene_action") or sc.get("narration")
+                ),
+            )
+            if clip_qa.get("status") != "pass" or clip_qa.get("pass") is not True:
+                rejected_path = _quarantine_i2v_attempt(
+                    workspace,
+                    candidate_clip,
+                    sid=str(sc["sid"]),
+                    attempt=1,
+                )
+                sc["i2v_qa"] = clip_qa
+                sc["rejected_clip_candidate"] = rejected_path or None
+                save_scenes(workspace, scenes)
+                raise RuntimeError(
+                    str(clip_qa.get("summary") or "Local clip candidate failed QA")[:300]
+                )
+            _promote_clip_candidate(candidate_clip, clip)
             sc["clip_rel"] = f"clips/{sc['sid']}.mp4"
+            _bind_clip_qa_to_current_scene(workspace, scenes, sc, clip_qa)
         # Per-scene narration audio for PERFECT sync (visual + 3-word captions timed to voice chunk)
         sc["narration"] = _normalize_tts_text(sc["narration"])
         na_path = work_dir / f"nar_{sc['sid']}.mp3"
@@ -3641,17 +4188,6 @@ def finalize_stage(
         )
         if timing_source != "verified_word":
             raise RuntimeError("word caption alignment lost verified timing provenance")
-    with production_slot(
-        "compose",
-        on_wait=_slot_wait_progress(workspace, "compose_queue", "Final MP4"),
-    ):
-        silent = concat_demuxer(trimmed_paths, workspace / "silent.mp4", work_dir)
-        final = mux_narration(
-            silent,
-            final_audio_clock,
-            workspace / "styled_short.mp4",
-            caption_phrases=global_word_phrases,
-        )
 
     requested_caption_mode = "word" if wants_word_captions else "phrase"
     if not captions_enabled:
@@ -3687,29 +4223,12 @@ def finalize_stage(
         }, indent=2),
         encoding="utf-8",
     )
-
     animated = [s["index"] for s in scenes if s.get("animate")]
     meta = _read_result(workspace)
     ac_cost = sum(
         ac_cost_for_video_model(video_model=s.get("video_model"), tier=tier)
         for s in scenes if s.get("animate")
     )
-    result = {
-        **{k: meta.get(k) for k in ("render_style", "render_style_label", "stills_model", "category", "topic")},
-        "status": "complete", "job_id": workspace.name,
-        "video_path": str(final), "script_path": str(workspace / "script.txt"),
-        "narration_path": str(narration_audio),
-        "final_audio_path": str(final_audio_clock),
-        "sound_design": sound_result,
-        "captions_enabled": captions_enabled,
-        "caption_mode": requested_caption_mode if captions_enabled else "off",
-        "caption_timing_source": final_timing_source,
-        "scene_count": len(scenes), "animated_scenes": animated,
-        "tier": tier, "ac_charged": ac_cost,
-        "cost": production_costs.load_summary(workspace),
-    }
-    _write_result(workspace, result)
-
     topic = str(meta.get("topic") or "Untitled Short").strip()
     category_key = str(meta.get("category") or "short").strip()
     render_style = str(meta.get("render_style") or "cinematic").strip()
@@ -3723,7 +4242,133 @@ def finalize_stage(
         captions_enabled=bool(captions_enabled),
         script_text=script_for_pkg,
     )
-    (workspace / "package.txt").write_text(pkg, encoding="utf-8")
+    job_spec["captions_enabled"] = bool(captions_enabled)
+    job_spec["caption_mode"] = requested_caption_mode if captions_enabled else "off"
+    (workspace / "job_spec.json").write_text(
+        json.dumps(job_spec, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    final_token = secrets.token_hex(8)
+    candidate_video = workspace / f".styled_short.{final_token}.candidate.mp4"
+    candidate_package = workspace / f".package.{final_token}.candidate.txt"
+    candidate_video.unlink(missing_ok=True)
+    candidate_package.write_text(pkg, encoding="utf-8")
+
+    def _mux_final_candidate(paths: list[Path], *, suffix: str = "") -> Path:
+        silent_path = work_dir / f"silent_final_{final_token}{suffix}.mp4"
+        silent_path.unlink(missing_ok=True)
+        candidate_video.unlink(missing_ok=True)
+        with production_slot(
+            "compose",
+            on_wait=_slot_wait_progress(workspace, "compose_queue", "Final MP4"),
+        ):
+            silent = concat_demuxer(paths, silent_path, work_dir)
+            return mux_narration(
+                silent,
+                final_audio_clock,
+                candidate_video,
+                caption_phrases=global_word_phrases,
+            )
+
+    _mux_final_candidate(trimmed_paths)
+    from studio_agent import render_qa
+
+    final_qa = render_qa.analyze_render(
+        job_id=workspace.name,
+        kind="shortform",
+        video_path=candidate_video,
+        package_path=candidate_package,
+    )
+    failed_ids = _failed_render_qa_ids(final_qa)
+    corrective_retry = False
+    if failed_ids and failed_ids.issubset({"captions", "package"}):
+        corrective_retry = True
+        if "captions" in failed_ids:
+            retry_trimmed: list[Path] = []
+            for sc, narration_path in zip(scenes, narration_audios):
+                source_clip = clips_dir / f"{sc['sid']}.mp4"
+                narration_duration = probe_duration(narration_path) or float(sc.get("duration_sec", 5.0))
+                retry_trimmed.append(
+                    trim_with_captions(
+                        source_clip,
+                        trimmed_dir / f"{sc['sid']}.mp4",
+                        duration_sec=narration_duration,
+                        narration_text=sc["narration"],
+                        watermark_text=watermark_text,
+                        caption_mode="phrase",
+                        captions_enabled=captions_enabled and not wants_word_captions,
+                        preserve_source_audio=True,
+                        force=True,
+                    )
+                )
+            trimmed_paths = retry_trimmed
+        candidate_package.write_text(pkg, encoding="utf-8")
+        (workspace / "render_qa.json").unlink(missing_ok=True)
+        _mux_final_candidate(trimmed_paths, suffix="_retry")
+        final_qa = render_qa.analyze_render(
+            job_id=workspace.name,
+            kind="shortform",
+            video_path=candidate_video,
+            package_path=candidate_package,
+        )
+
+    common_result = {
+        **{
+            key: meta.get(key)
+            for key in ("render_style", "render_style_label", "stills_model", "category", "topic")
+        },
+        "job_id": workspace.name,
+        "script_path": str(workspace / "script.txt"),
+        "narration_path": str(narration_audio),
+        "final_audio_path": str(final_audio_clock),
+        "sound_design": sound_result,
+        "captions_enabled": captions_enabled,
+        "caption_mode": requested_caption_mode if captions_enabled else "off",
+        "caption_timing_source": final_timing_source,
+        "scene_count": len(scenes),
+        "animated_scenes": animated,
+        "tier": tier,
+        "ac_charged": ac_cost,
+        "cost": production_costs.load_summary(workspace),
+        "final_qa": final_qa,
+        "final_qa_corrective_retry": corrective_retry,
+    }
+    if str(final_qa.get("status") or "") != "pass":
+        quarantined = _quarantine_final_artifacts(
+            workspace,
+            candidate_video,
+            candidate_package,
+        )
+        result = {
+            **common_result,
+            "status": "final_qa_blocked",
+            "video_path": None,
+            "package_path": None,
+            "ready_to_post": False,
+            "final_qa_blocked": True,
+            "final_candidate_quarantine": quarantined,
+        }
+        _write_result(workspace, result)
+        return result
+
+    canonical_video = workspace / "styled_short.mp4"
+    canonical_package = workspace / "package.txt"
+    _promote_final_artifacts(
+        candidate_video,
+        candidate_package,
+        canonical_video,
+        canonical_package,
+    )
+    result = {
+        **common_result,
+        "status": "complete",
+        "video_path": str(canonical_video),
+        "package_path": str(canonical_package),
+        "ready_to_post": True,
+        "final_qa_blocked": False,
+    }
+    _write_result(workspace, result)
     return result
 
 

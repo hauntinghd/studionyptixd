@@ -1,4 +1,4 @@
-"""Reference-analysis provider chain: Anthropic Haiku vision/story, xAI + FAL STT."""
+"""Studio reference analysis: direct Anthropic semantics and FAL-only STT."""
 from __future__ import annotations
 
 import base64
@@ -9,6 +9,7 @@ from typing import Any, Callable
 
 import httpx
 
+from studio_agent import provider_policy
 from studio_agent.stt_utils import httpx_json_dict
 
 
@@ -21,11 +22,11 @@ def _fal_key() -> str:
 
 
 def _openrouter_key() -> str:
-    return str(os.getenv("OPENROUTER_API_KEY") or "").strip()
+    return ""
 
 
 def _xai_key() -> str:
-    return str(os.getenv("XAI_API_KEY", "") or "").strip()
+    return ""
 
 
 def _anthropic_key() -> str:
@@ -35,7 +36,7 @@ def _anthropic_key() -> str:
 
 
 def _anthropic_base() -> str:
-    return str(os.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com/v1")).rstrip("/")
+    return "https://api.anthropic.com/v1"
 
 
 def reference_vision_model() -> str:
@@ -61,38 +62,35 @@ def reference_analysis_model() -> str:
 
 
 def reference_fal_vision_model() -> str:
-    return str(
-        os.getenv("STUDIO_AGENT_VISION_MODEL_FAL", "anthropic/claude-haiku-4.5")
-    ).strip()
+    provider_policy.assert_provider_allowed("fal", provider_policy.SEMANTIC_QA_CAPABILITY)
+    raise AssertionError("unreachable")
 
 
 def reference_fal_analysis_model() -> str:
-    return str(
-        os.getenv("STUDIO_AGENT_ANALYSIS_MODEL_FAL", "anthropic/claude-haiku-4.5")
-    ).strip()
+    provider_policy.assert_provider_allowed("fal", provider_policy.SEMANTIC_QA_CAPABILITY)
+    raise AssertionError("unreachable")
 
 
 def reference_openrouter_vision_model() -> str:
-    return str(os.getenv("STUDIO_AGENT_VISION_MODEL", "google/gemini-2.5-flash")).strip()
+    provider_policy.assert_provider_allowed("openrouter", provider_policy.SEMANTIC_QA_CAPABILITY)
+    raise AssertionError("unreachable")
 
 
 def reference_openrouter_analysis_model() -> str:
-    return str(os.getenv("STUDIO_AGENT_ANALYSIS_MODEL", "anthropic/claude-haiku-4.5")).strip()
+    provider_policy.assert_provider_allowed("openrouter", provider_policy.SEMANTIC_QA_CAPABILITY)
+    raise AssertionError("unreachable")
 
 
 def vision_provider_order() -> list[str]:
-    raw = str(os.getenv("STUDIO_REFERENCE_VISION_PROVIDER_ORDER", "anthropic,fal,openrouter")).strip()
-    return [item.strip().lower() for item in raw.split(",") if item.strip()]
+    return ["anthropic"]
 
 
 def analysis_provider_order() -> list[str]:
-    raw = str(os.getenv("STUDIO_REFERENCE_ANALYSIS_PROVIDER_ORDER", "anthropic,fal,openrouter")).strip()
-    return [item.strip().lower() for item in raw.split(",") if item.strip()]
+    return ["anthropic"]
 
 
 def stt_provider_order() -> list[str]:
-    raw = str(os.getenv("STUDIO_REFERENCE_STT_PROVIDER_ORDER", "xai,fal")).strip()
-    return [item.strip().lower() for item in raw.split(",") if item.strip()]
+    return ["fal"]
 
 
 def _provider_available(name: str) -> bool:
@@ -100,10 +98,6 @@ def _provider_available(name: str) -> bool:
         return bool(_anthropic_key())
     if name == "fal":
         return bool(_fal_key())
-    if name == "xai":
-        return bool(_xai_key())
-    if name == "openrouter":
-        return bool(_openrouter_key())
     return False
 
 
@@ -127,6 +121,8 @@ def anthropic_messages_completion(
     temperature: float = 0.2,
     image_paths: list[str] | None = None,
 ) -> dict[str, Any]:
+    provider_policy.assert_provider_allowed("anthropic", provider_policy.SEMANTIC_QA_CAPABILITY)
+    model = provider_policy.assert_runner_model_allowed(model)
     api_key = _anthropic_key()
     if not api_key:
         return {"error": "anthropic_not_configured", "text": ""}
@@ -154,12 +150,12 @@ def anthropic_messages_completion(
                     "anthropic-version": os.getenv("ANTHROPIC_VERSION", "2023-06-01"),
                     "content-type": "application/json",
                 },
-                json={
+                json=provider_policy.sanitize_anthropic_payload(model, {
                     "model": model,
                     "max_tokens": max_tokens,
                     "temperature": temperature,
                     "messages": [{"role": "user", "content": content}],
-                },
+                }),
             )
         if resp.status_code >= 400:
             return {"error": f"anthropic_failed:{resp.status_code}:{resp.text[:180]}", "text": ""}
@@ -182,7 +178,20 @@ def run_provider_chain(
 ) -> dict[str, Any]:
     """Try providers in order; return first result with success_key populated."""
     last: dict[str, Any] = {"error": "no_reference_providers_configured"}
+    # The fixed FAL-only order is the STT chain. Every other reference chain is
+    # semantic QA and therefore direct Anthropic only.
+    normalized_order = [str(item).strip().lower() for item in order]
+    capability = (
+        provider_policy.STT_CAPABILITY
+        if normalized_order == stt_provider_order()
+        else provider_policy.SEMANTIC_QA_CAPABILITY
+    )
     for name in order:
+        try:
+            provider_policy.assert_provider_allowed(name, capability)
+        except provider_policy.ProviderPolicyDenied as exc:
+            last = {"error": str(exc)}
+            continue
         runner = runners.get(name)
         if not runner:
             continue
@@ -200,6 +209,7 @@ def run_provider_chain(
 
 
 def transcribe_fal_segments(audio_path: str) -> dict[str, Any]:
+    provider_policy.assert_provider_allowed("fal", provider_policy.STT_CAPABILITY)
     fal_key = _fal_key()
     path = Path(str(audio_path or ""))
     if not path.is_file():

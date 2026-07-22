@@ -163,7 +163,7 @@ export default function AccountPage({ onNavigate }: { onNavigate: PageNav }) {
                         <div className="flex items-start justify-between gap-4">
                             <div>
                                 <h2 className="text-lg font-bold text-white">Wallet & plan</h2>
-                                <p className="mt-1 text-sm text-gray-500">One balance across OpenRouter, fal, ElevenLabs, and Studio Agent runs.</p>
+                                <p className="mt-1 text-sm text-gray-500">One balance across direct Anthropic, fal.ai media, and Studio production runs.</p>
                             </div>
                             <WalletCards className="h-5 w-5 text-cyan-300" />
                         </div>

@@ -216,7 +216,10 @@ def test_enabled_longform_start_uses_logged_contract_once(monkeypatch) -> None:
     assert context == {"user_id": "user-1", "content_format": "long"}
 
 
-def test_flag_off_longform_mutations_still_use_logged_credit_contract(monkeypatch) -> None:
+def test_flag_off_longform_mutations_still_use_logged_credit_contract(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
     calls: list[tuple[str, dict]] = []
     _mock_owned_longform_job(monkeypatch)
     monkeypatch.setattr(tools, "_runpod_production_enabled", lambda: False)
@@ -227,10 +230,31 @@ def test_flag_off_longform_mutations_still_use_logged_credit_contract(monkeypatc
     monkeypatch.setattr(longform_pipeline, "start_render", forbidden)
     monkeypatch.setattr(longform_pipeline, "regenerate_still", forbidden)
     monkeypatch.setattr(longform_pipeline, "start_finalize", forbidden)
+    regenerated_still = tmp_path / "scene_0001.png"
+    regenerated_still.write_bytes(b"verified regenerated still")
+    monkeypatch.setattr(
+        longform_pipeline,
+        "job_still_path",
+        lambda _job_id, _scene_idx: regenerated_still,
+    )
 
     def execute(name, arguments, **_context):
         calls.append((name, dict(arguments)))
-        return json.dumps({"ok": True, "job_id": arguments.get("job_id") or "lf_local"})
+        job_id = arguments.get("job_id") or "lf_local"
+        if name == "regenerate_longform_still":
+            return json.dumps({
+                "ok": True,
+                "job_id": job_id,
+                "postcondition_verified": True,
+            })
+        if name == "finalize_longform_render":
+            return json.dumps({
+                "status": "running",
+                "accepted": True,
+                "complete": False,
+                "job_id": job_id,
+            })
+        return json.dumps({"ok": True, "job_id": job_id})
 
     monkeypatch.setattr(tools, "execute_tool_logged", execute)
     client = _client()

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -35,12 +36,46 @@ def auth(token: str) -> dict[str, str]:
 
 @pytest.fixture()
 def long_form_media_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
-    mp4 = tmp_path / "final.mp4"
+    job_dir = tmp_path / "job_abc"
+    job_dir.mkdir()
+    mp4 = job_dir / "final.mp4"
+    package = job_dir / "package.txt"
     thumbnail = tmp_path / "thumbnail.png"
     still = tmp_path / "still.png"
     mp4.write_bytes(b"video")
+    package.write_text("verified package", encoding="utf-8")
+    os.utime(mp4, (100, 100))
+    os.utime(package, (100, 100))
     thumbnail.write_bytes(b"thumbnail")
     still.write_bytes(b"still")
+    monkeypatch.setattr(long_form_pipeline, "LF_OUTPUT_ROOT", tmp_path)
+    monkeypatch.setattr(
+        long_form_pipeline,
+        "load_state",
+        lambda _job_id: {
+            "job_id": "job_abc",
+            "phase": "done",
+            "ready_to_post": True,
+            "mp4_path": "job_abc/final.mp4",
+            "final_qa": {
+                "status": "pass",
+                "pass": True,
+                "created_at": 200.0,
+                "render": {
+                    "status": "pass",
+                    "fingerprint": "current-final",
+                    "created_at": 200.0,
+                    "checks": [{"id": "video_probe", "status": "pass"}],
+                },
+                "package": {
+                    "status": "pass",
+                    "pass": True,
+                    "path": str(package),
+                },
+                "current_assets": {"status": "pass", "pass": True},
+            },
+        },
+    )
     monkeypatch.setattr(long_form_pipeline, "job_mp4_path", lambda _job_id: mp4)
     monkeypatch.setattr(long_form_pipeline, "job_thumbnail_path", lambda _job_id, _idx: thumbnail)
     monkeypatch.setattr(long_form_pipeline, "job_still_path", lambda _job_id, _idx: still)

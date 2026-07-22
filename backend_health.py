@@ -14,12 +14,6 @@ from backend_settings import (
     IMAGE_PROVIDER_WAN_SKIP_IF_UNAVAILABLE,
     REDIS_QUEUE_ENABLED,
     REDIS_URL,
-    RUNWAY_API_KEY,
-    RUNWAY_VIDEO_MODEL,
-    SKELETON_REQUIRE_WAN22,
-    TEMPLATE_ADAPTER_ROUTING,
-    TEMPLATE_ADAPTER_ROUTING_ENABLED,
-    XAI_IMAGE_FALLBACK_ENABLED,
 )
 
 
@@ -91,14 +85,19 @@ def build_health_payload(
         return value
 
     async def health_payload():
-        skeleton_lora = await cached_probe("skeleton_lora", check_skeleton_lora_available)
-        provider_order = configured_image_provider_order()
-        hidream_configured = any(normalize_image_provider_key(p) == "hidream" for p in provider_order)
-        wan_configured = any(normalize_image_provider_key(p) == "wan22" for p in provider_order)
-        hidream_ready = await cached_probe("hidream", check_hidream_available) if hidream_configured else False
-        hidream_edit_ready = await cached_probe("hidream_edit", check_hidream_edit_available) if hidream_configured else False
-        wan_ready = await cached_probe("wan22", check_wan22_available) if wan_configured else False
-        wan_t2i_ready = await cached_probe("wan22_t2i", check_wan22_t2i_available) if wan_configured else False
+        # Health reports the effective Studio provider policy, not dormant
+        # local adapters or secrets that happen to remain in the environment.
+        # Avoid probing retired media planes from this public endpoint.
+        provider_order = [
+            str(provider).strip().lower()
+            for provider in configured_image_provider_order()
+            if str(provider).strip().lower() == "fal"
+        ]
+        skeleton_lora = False
+        hidream_ready = False
+        hidream_edit_ready = False
+        wan_ready = False
+        wan_t2i_ready = False
         now_ts = time.time()
         hidream_checked_ts = float(hidream_availability_cache.get("checked_ts", 0.0) or 0.0)
         hidream_last_ok_ts = float(hidream_availability_cache.get("last_ok_ts", 0.0) or 0.0)
@@ -143,17 +142,10 @@ def build_health_payload(
             # is intentionally disabled or only partially configured.
             pass
         fal_video_enabled = bool(FAL_AI_KEY)
-        runway_video_enabled = bool(RUNWAY_API_KEY)
-        if runway_video_enabled and fal_video_enabled:
-            video_engine = "Runway (primary) + FalAI Kling fallback"
-        elif fal_video_enabled:
+        if fal_video_enabled:
             video_engine = "FalAI Kling 2.1"
-        elif runway_video_enabled:
-            video_engine = "Runway Image-to-Video"
-        elif wan_ready:
-            video_engine = "Wan 2.2 (RunPod)"
         else:
-            video_engine = "Static"
+            video_engine = "Unavailable (FAL required)"
         return {
             "status": "online" if queue_consumer_ready else "degraded",
             "engine": "NYPTID Studio Engine v3.0",
@@ -178,26 +170,26 @@ def build_health_payload(
             "wan22_t2i_last_ok_ago_sec": int(max(0.0, now_ts - wan_t2i_last_ok_ts)) if wan_t2i_last_ok_ts else -1,
             "wan22_t2i_last_error": wan_t2i_last_error,
             "video_engine": video_engine,
-            "runway_key_configured": runway_video_enabled,
-            "runway_key_source": "configured" if runway_video_enabled else "",
-            "runway_video_model": RUNWAY_VIDEO_MODEL if runway_video_enabled else "",
-            "comfyui_configured": bool(str(comfyui_url() or "").strip()),
+            "runway_key_configured": False,
+            "runway_key_source": "",
+            "runway_video_model": "",
+            "comfyui_configured": False,
             "skeleton_lora": skeleton_lora,
-            "image_engine_skeleton": ("Skeleton LoRA (local) > " + provider_label) if skeleton_lora else provider_label,
+            "image_engine_skeleton": provider_label,
             "image_provider_order": provider_order,
-            "xai_image_fallback_enabled": bool(XAI_IMAGE_FALLBACK_ENABLED),
+            "xai_image_fallback_enabled": False,
             "fal_image_backup_model": normalize_fal_image_backup_model(FAL_IMAGE_BACKUP_MODEL) if FAL_AI_KEY else "",
             "image_local_provider_retries": int(IMAGE_LOCAL_PROVIDER_RETRIES),
             "image_provider_failure_cooldown_sec": int(IMAGE_PROVIDER_FAILURE_COOLDOWN_SEC),
             "image_provider_wan_skip_if_unavailable": bool(IMAGE_PROVIDER_WAN_SKIP_IF_UNAVAILABLE),
-            "skeleton_require_wan22": bool(SKELETON_REQUIRE_WAN22),
+            "skeleton_require_wan22": False,
             "image_provider_fail_counts": dict(image_provider_fail_counts),
             "image_provider_success_counts": dict(image_provider_success_counts),
             "image_provider_cooldowns_sec": provider_cooldown_snapshot(),
             "image_fallback_events_total": int(image_provider_fallback_total()),
             "image_fallback_events_pairs": dict(image_provider_fallback_pairs),
-            "template_adapter_routing_enabled": bool(TEMPLATE_ADAPTER_ROUTING_ENABLED),
-            "template_adapter_routes": sorted(k for k in (TEMPLATE_ADAPTER_ROUTING or {}).keys()),
+            "template_adapter_routing_enabled": False,
+            "template_adapter_routes": [],
             "backend_commit": backend_commit,
             "frontend_bundle": frontend_bundle,
             "queue_mode": "redis" if (REDIS_QUEUE_ENABLED and bool(REDIS_URL)) else "inprocess",

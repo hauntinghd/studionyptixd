@@ -255,7 +255,7 @@ export default function SettingsPage({ onNavigate }: { onNavigate: PageNav }) {
                         icon={SlidersHorizontal}
                         iconClass="text-violet-300"
                         title="Creation defaults"
-                        description="720p launch profile · ElevenLabs voice · Generate-first quick run."
+                        description="720p launch profile · FAL MiniMax voice · Generate-first quick run."
                     />
                 </div>
 

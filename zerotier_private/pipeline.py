@@ -1,7 +1,7 @@
 """
 ZeroTier (Private) render pipeline.
 
-Takes the Grok-generated 8-beat script JSON and renders the final MP4 using
+Takes Studio's generated scene JSON and renders the final MP4 using
 the validated canonical pipeline:
 
   - seedream v4.5 cel-shaded comic stills (one per scene)
@@ -34,7 +34,6 @@ import fal_client
 
 
 SEEDREAM_URL = "https://fal.run/fal-ai/bytedance/seedream/v4.5/text-to-image"
-TTS_ENDPOINT = "fal-ai/minimax/speech-02-hd"
 
 # Visual style block — matches build_short14.py exactly so renders are
 # visually consistent with Casey's already-uploaded shorts.
@@ -665,32 +664,18 @@ def _gen_vo(scenes: list[dict], vo_dir: Path) -> Path:
     out = vo_dir / "narration.mp3"
     if out.exists() and out.stat().st_size > 1024:
         return out
+    from skeleton_ai import voice_fal
+
     full_text = " ".join(s["narration"] for s in scenes).strip()
-    result = fal_client.subscribe(
-        TTS_ENDPOINT,
-        arguments={
-            "text": full_text,
-            "voice_setting": {
-                "voice_id": "English_Trustworthy_Man",
-                "speed": 0.95,
-                "emotion": "neutral",
-            },
-            "audio_setting": {
-                "sample_rate": 32000,
-                "bitrate": 128000,
-                "format": "mp3",
-            },
-        },
-    )
-    audio_url = (
-        result.get("audio", {}).get("url")
-        if isinstance(result.get("audio"), dict)
-        else result.get("audio_url")
-    )
-    if not audio_url:
-        raise ZTRenderError(f"minimax returned no audio url; response keys={list(result.keys())}; raw={str(result)[:240]}")
-    _save_url(audio_url, out, source="minimax narration")
-    return out
+    try:
+        return voice_fal.synthesize(
+            text=full_text,
+            out_path=out,
+            voice_id=voice_fal.DEFAULT_VOICE,
+            speed=0.95,
+        )
+    except Exception as exc:
+        raise ZTRenderError(f"FAL MiniMax narration failed: {exc}") from exc
 
 
 def _compose(scenes: list[dict], clips: list[Path], vo: Path,
@@ -1044,14 +1029,15 @@ def render_comic_panel_short(
     script_json: Any,
     workspace: Path,
     final_filename: str = "ZeroTier_short.mp4",
-    vo_provider: str = "minimax",
+    vo_provider: str = "fal_minimax",
 ) -> dict:
     """Tier P: real comic panel scans + Ken Burns + VO only (~$0.10 fal).
 
     No Seedream, Pixverse, or mmaudio. User supplies panel JPEG/PNG per scene
     in workspace/panels/ (see panel_image in script JSON).
 
-    vo_provider: 'minimax' (fal, default) or 'elevenlabs' (no fal for VO).
+    ``vo_provider`` remains a compatibility input. Every value is normalized
+    onto the sole supported narration capability, FAL MiniMax.
     """
     from zerotier_private.pope_doctrine import validate_pope_script
 
@@ -1099,13 +1085,15 @@ def render_comic_panel_short(
         for fut in as_completed(futs):
             clips[futs[fut]] = fut.result()
 
-    if vo_provider == "elevenlabs":
-        vo = _gen_vo_elevenlabs(scenes, vo_dir)
-        fal_cost_est = 0.0
-    else:
-        _ensure_fal()
-        vo = _gen_vo(scenes, vo_dir)
-        fal_cost_est = 0.10
+    requested_voice_provider = str(vo_provider or "").strip().lower()
+    voice_provider_migrated = requested_voice_provider not in {
+        "",
+        "fal",
+        "fal_minimax",
+        "minimax",
+    }
+    vo = _gen_vo(scenes, vo_dir)
+    fal_cost_est = 0.10
 
     final_mp4 = workspace / final_filename
     _compose(scenes, clips, vo, workspace, final_mp4)
@@ -1130,35 +1118,12 @@ def render_comic_panel_short(
         "scene_count": len(scenes),
         "duration_total_sec": round(actual_total, 1),
         "fal_cost_estimate_usd": fal_cost_est,
+        "voice_provider": "fal_minimax",
+        "voice_provider_migrated": voice_provider_migrated,
         "render_tier": "P_panels",
         "comic_credits": credits,
         "scenes": [{"id": s["id"], "caption": s["caption"], "duration": s["duration"]} for s in scenes],
     }
-
-
-def _gen_vo_elevenlabs(scenes: list[dict], vo_dir: Path) -> Path:
-    """ElevenLabs VO — zero fal spend for Tier P."""
-    out = vo_dir / "narration.mp3"
-    if out.exists() and out.stat().st_size > 1024:
-        return out
-    from skeleton_ai.voice_elevenlabs import ElevenLabsClient
-
-    key = os.environ.get("ELEVENLABS_STUDIO_API_KEY") or os.environ.get("ELEVENLABS_API_KEY")
-    if not key:
-        raise ZTRenderError("ELEVENLABS_API_KEY missing for vo_provider=elevenlabs")
-    el = ElevenLabsClient(api_key=key)
-    full_text = " ".join(s["narration"] for s in scenes).strip()
-    if out.exists():
-        out.unlink()
-    el.synthesize(
-        full_text, out,
-        voice_id="onwK4e9ZLuTAKqWW03F9",
-        model_id="eleven_multilingual_v2",
-        speed=0.95,
-        stability=0.58,
-        similarity_boost=0.82,
-    )
-    return out
 
 
 def render_zerotier_short(

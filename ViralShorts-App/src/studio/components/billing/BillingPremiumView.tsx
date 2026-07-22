@@ -237,9 +237,9 @@ export default function BillingPremiumView({
                 <div className="flex items-start gap-3">
                     <Sparkles className="mt-0.5 h-5 w-5 text-violet-400" />
                     <div className="space-y-2 text-sm text-gray-400">
-                        <p><strong className="text-gray-200">Studio Agent</strong> - OpenRouter models debited per token at live rates.</p>
+                        <p><strong className="text-gray-200">Studio Agent</strong> - direct Anthropic usage debited per token at live rates.</p>
                         <p><strong className="text-gray-200">fal</strong> - image, video, SFX, and motion graphics charged per render.</p>
-                        <p><strong className="text-gray-200">ElevenLabs</strong> - TTS and voice cloning charged per character.</p>
+                        <p><strong className="text-gray-200">fal.ai</strong> - image, video, speech, and transcription usage charged at the effective route rate.</p>
                         <p><strong className="text-gray-200">Protection</strong> - paid jobs reserve credits before starting; failed starts are refunded automatically.</p>
                     </div>
                 </div>

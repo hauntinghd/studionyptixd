@@ -386,6 +386,57 @@ def _longform_idle_has_artifacts(job_id: str, st: dict[str, Any]) -> bool:
     return bool(st)
 
 
+def _longform_scene_qa_snapshots(job_id: str) -> tuple[list[dict[str, Any]], list[str]]:
+    """Project persisted QA only; polling must never trigger a semantic provider call."""
+
+    from long_form import pipeline as lf_pipeline
+
+    rows: list[dict[str, Any]] = []
+    reasons: list[str] = []
+    for index in lf_pipeline._expected_longform_scene_indices(job_id):
+        still = lf_pipeline._job_dir(job_id) / "stills" / f"scene_{index:04d}.png"
+        report = lf_pipeline._read_longform_visual_qa(still)
+        current = bool(
+            still.is_file()
+            and lf_pipeline._longform_visual_qa_is_current(still, report)
+        )
+        if not current:
+            reasons.append(f"Scene {index + 1} still QA is missing, stale, or failing")
+        clip_candidates = sorted(
+            path
+            for path in (lf_pipeline._job_dir(job_id) / "clips").glob(
+                f"clip_*_{index:04d}_*.mp4"
+            )
+            if "_stretched" not in path.stem
+        )
+        clip = clip_candidates[0] if clip_candidates else None
+        clip_report = lf_pipeline._read_longform_visual_qa(clip) if clip else {}
+        clip_current = bool(
+            clip is not None
+            and lf_pipeline._longform_visual_qa_is_current(clip, clip_report)
+        )
+        rows.append({
+            "index": int(index),
+            "sid": f"scene_{index:04d}",
+            "status": "clip_ready" if clip_current else "still_ready" if current else "qa_blocked",
+            "approved_for_video": current,
+            "approved_for_animation": clip_current,
+            "animate": clip is not None,
+            "has_clip": clip is not None,
+            "still_preview_url": f"/api/studio-agent/jobs/{job_id}/still/{index}",
+            "visual_qa": report,
+            "clip_qa": clip_report,
+            "qa_stale": not current,
+            "qa_blocked": not current,
+            "qa_summary": (
+                str(report.get("summary") or "")
+                if current
+                else f"Scene {index + 1} still QA is missing, stale, or failing"
+            ),
+        })
+    return rows, reasons
+
+
 def _longform_status(job_id: str) -> dict[str, Any]:
     from long_form import pipeline as lf_pipeline
 
@@ -452,9 +503,17 @@ def _longform_status(job_id: str) -> dict[str, Any]:
             percent = 100 if phase == "done" else percent
         else:
             phase = "failed"
-    running = phase not in ("done", "failed", "awaiting_approval", "thumbnail_review")
-    status = "complete" if phase == "done" else "failed" if phase == "failed" else (
-        "awaiting_approval" if phase in {"awaiting_approval", "thumbnail_review"} else "running"
+    running = phase not in (
+        "done", "failed", "cancelled", "awaiting_approval", "thumbnail_review",
+        "final_qa_blocked",
+    )
+    status = (
+        "complete" if phase == "done"
+        else "failed" if phase == "failed"
+        else "cancelled" if phase == "cancelled"
+        else "final_qa_blocked" if phase == "final_qa_blocked"
+        else "awaiting_approval" if phase in {"awaiting_approval", "thumbnail_review"}
+        else "running"
     )
     if status == "running":
         error = ""
@@ -501,13 +560,50 @@ def _longform_status(job_id: str) -> dict[str, Any]:
         snap["visual_proof_only"] = True
     manifest = lf_pipeline.longform_scene_manifest(job_id)
     actual_scene_indices = list(manifest.get("actual_indices") or [])
+    scene_rows, scene_qa_reasons = _longform_scene_qa_snapshots(job_id)
+    if scene_rows:
+        snap["scenes"] = scene_rows
+        snap["still_count"] = len(scene_rows)
+        snap["total_scenes"] = len(scene_rows)
+        snap["qa_state"] = {
+            "status": "pass" if not scene_qa_reasons else "fail",
+            "ready_to_post": False,
+            "reasons": scene_qa_reasons,
+            "scenes": scene_rows,
+        }
+    if phase == "final_qa_blocked":
+        final_qa = st.get("final_qa") if isinstance(st.get("final_qa"), dict) else {}
+        reasons = list(final_qa.get("failures") or []) + scene_qa_reasons
+        snap.update({
+            "ready_to_post": False,
+            "can_finalize": True,
+            "final_qa": final_qa,
+            "final_qa_blocked": True,
+            "stage_detail": str(
+                st.get("final_qa_invalidated_reason")
+                or final_qa.get("summary")
+                or "Mandatory long-form final QA did not pass"
+            )[:500],
+            "qa_state": {
+                "status": "fail",
+                "ready_to_post": False,
+                "render": final_qa,
+                "reasons": reasons or ["Mandatory long-form final QA did not pass"],
+                "scenes": scene_rows,
+            },
+        })
     scenes_gen = max(
         int(st.get("scenes_generated") or live.get("scene_total") or 0),
         int(manifest.get("actual_count") or 0),
     )
     disk_stills = _longform_still_count(job_id) if phase in {"scenes", "awaiting_approval", "done"} else 0
     if phase == "awaiting_approval" and scenes_gen > 0:
-        snap["can_finalize"] = bool(manifest.get("ready_to_finalize"))
+        snap["can_finalize"] = bool(
+            not proof_only
+            and not scene_qa_reasons
+            and scene_rows
+            and manifest.get("ready_to_finalize")
+        )
         snap["still_count"] = scenes_gen
         snap["still_preview_urls"] = [
             f"/api/studio-agent/jobs/{job_id}/still/{i}"
@@ -562,9 +658,6 @@ def _longform_status(job_id: str) -> dict[str, Any]:
             next_action="Wait for the long-form production stage to update or complete.",
         )
     if phase == "done" and mp4_rel:
-        snap["mp4_url"] = f"/api/studio-agent/jobs/{job_id}/media?kind=longform"
-        snap["download_url"] = snap["mp4_url"]
-        snap["package_url"] = f"/api/studio-agent/jobs/{job_id}/package?kind=longform"
         _attach_production_control(
             snap,
             "finalize_longform_render",
@@ -760,49 +853,45 @@ def _shortform_scene_snapshots(job_id: str, workspace: Path) -> list[dict[str, A
         return []
     if not isinstance(raw, list):
         return []
-    # Cached semantic QA is part of the persisted asset state.  When the QA
-    # contract changes, re-evaluate only outdated skeleton reports before
-    # sending the review grid; otherwise an old false failure can leave a card
-    # permanently black/blocked even though its current still is valid.
+    # Snapshot state is asset-bound. Never revive an identity-only legacy pass
+    # after correspondence or clip QA has failed for the current bytes.
     try:
-        spec = json.loads((workspace / "job_spec.json").read_text(encoding="utf-8"))
-    except Exception:
-        spec = {}
-    if "skeleton" in str((spec or {}).get("render_style") or "").lower():
-        try:
-            from studio_agent.visual_qa import STILL_SEMANTIC_QA_VERSION, _workspace_skeleton_reference, audit_skeleton_still
+        from studio_agent.visual_qa import scene_visual_qa_is_fresh
 
-            changed = False
-            reference = _workspace_skeleton_reference(workspace)
-            for fallback_idx, item in enumerate(raw):
-                if not isinstance(item, dict):
-                    continue
-                cached = item.get("still_qa") if isinstance(item.get("still_qa"), dict) else {}
-                if int(cached.get("version", 0) or 0) >= STILL_SEMANTIC_QA_VERSION:
-                    continue
-                idx = int(item.get("index", fallback_idx) or fallback_idx)
-                sid = str(item.get("sid") or f"b{idx:02d}")
-                still = workspace / str(item.get("still_rel") or f"stills/{sid}.png")
-                qa = audit_skeleton_still(
-                    still,
-                    reference=reference,
-                    locked_outfit=str((spec or {}).get("locked_outfit") or item.get("outfit") or ""),
-                    force=True,
-                )
-                item["still_qa"] = qa
-                passed = qa.get("status") == "pass" and qa.get("pass") is True
-                item["status"] = "clip_ready" if item.get("clip_rel") else ("still_ready" if passed else "qa_blocked")
-                if not passed:
-                    item["approved_for_video"] = False
-                    item["approved_for_animation"] = False
-                    item["animate"] = False
+        changed = False
+        for position, item in enumerate(raw):
+            if not isinstance(item, dict):
+                continue
+            aggregate = item.get("visual_qa") if isinstance(item.get("visual_qa"), dict) else {}
+            fresh = scene_visual_qa_is_fresh(
+                workspace,
+                item,
+                previous_scene=raw[position - 1] if position > 0 and isinstance(raw[position - 1], dict) else None,
+                next_scene=raw[position + 1] if position + 1 < len(raw) and isinstance(raw[position + 1], dict) else None,
+            )
+            current_pass = bool(fresh and aggregate.get("pass") is True)
+            stale = not fresh
+            if bool(item.get("qa_stale")) != stale:
+                item["qa_stale"] = stale
                 changed = True
-            if changed:
-                scenes_path.write_text(json.dumps(raw, indent=2), encoding="utf-8")
-        except Exception:
-            # The snapshot remains readable even if a provider QA call is
-            # temporarily unavailable; the normal approval path will retry.
-            pass
+            still_rel = str(item.get("still_rel") or "").strip()
+            still_exists = bool(still_rel and (workspace / still_rel).is_file())
+            if still_exists and not current_pass:
+                if str(item.get("status") or "") not in {"generating", "pending"}:
+                    item["status"] = "qa_blocked"
+                for key in ("approved_for_video", "approved_for_animation", "animate"):
+                    if item.get(key):
+                        item[key] = False
+                        changed = True
+            elif current_pass and str(item.get("status") or "") == "qa_blocked":
+                item["status"] = "clip_ready" if item.get("clip_rel") else "still_ready"
+                item.pop("last_repair_error", None)
+                item.pop("last_repair_qa", None)
+                changed = True
+        if changed:
+            scenes_path.write_text(json.dumps(raw, indent=2), encoding="utf-8")
+    except Exception:
+        pass
     scenes: list[dict[str, Any]] = []
     for fallback_idx, sc in enumerate(raw):
         if not isinstance(sc, dict):
@@ -830,6 +919,29 @@ def _shortform_scene_snapshots(job_id: str, workspace: Path) -> list[dict[str, A
             "has_clip": bool(sc.get("clip_rel")),
             "video_model": sc.get("video_model"),
             "still_qa": sc.get("still_qa"),
+            "scene_correspondence_qa": sc.get("scene_correspondence_qa"),
+            "i2v_qa": sc.get("i2v_qa"),
+            "visual_qa": sc.get("visual_qa"),
+            "qa_stale": bool(sc.get("qa_stale", True)),
+            "qa_blocked": bool(
+                sc.get("qa_stale", True)
+                or not isinstance(sc.get("visual_qa"), dict)
+                or sc.get("visual_qa", {}).get("pass") is not True
+            ),
+            "qa_reason": (
+                str((sc.get("visual_qa") or {}).get("summary") or "")
+                if isinstance(sc.get("visual_qa"), dict)
+                else "Aggregate QA has not run for this asset"
+            ),
+            "image_provider": sc.get("image_provider"),
+            "image_model_id": sc.get("image_model_id"),
+            "fallback_from": sc.get("fallback_from"),
+            "fallback_reason": sc.get("fallback_reason"),
+            "video_provider": sc.get("video_provider"),
+            "video_endpoint": sc.get("video_endpoint"),
+            "video_fallback_from": sc.get("video_fallback_from"),
+            "video_requested_model": sc.get("video_requested_model"),
+            "video_provider_failures": sc.get("video_provider_failures"),
             "last_edit": sc.get("last_edit"),
             "still_preview_url": _still_preview_url(job_id, idx),
             "clip_preview_url": (
@@ -1142,8 +1254,14 @@ def _shortform_status(job_id: str) -> dict[str, Any]:
     except Exception as exc:
         return _attach_cost(_shortform_failed_snap(job_id, str(exc)[:200]))
     st = str(data.get("status") or "").lower()
+    qa_blocked = st in {
+        "final_qa_blocked",
+        "render_qa_failed",
+        "visual_qa_failed",
+        "qa_blocked",
+    } or data.get("ready_to_post") is False
     video_path = _existing_shortform_video_path(workspace, data)
-    if video_path and st != "failed":
+    if video_path and st not in {"failed", "cancelled"} and not qa_blocked:
         complete = True
         st = "complete"
         data["status"] = "complete"
@@ -1167,13 +1285,13 @@ def _shortform_status(job_id: str) -> dict[str, Any]:
     if st == "cancelled":
         # If a re-edit/retry reused the workspace, a stale cancelled result can
         # briefly coexist with a finished MP4. Prefer the actual deliverable.
-        if video_path:
+        if video_path and not qa_blocked:
             st = "complete"
             data["status"] = "complete"
             data.setdefault("video_path", str(video_path))
             data.pop("error", None)
     cancelled = st == "cancelled"
-    complete = st == "complete"
+    complete = st == "complete" and not qa_blocked
     # Prefer live background stages (animate / compose) over a stale review
     # status so the chat keeps polling and shows "Animating…" then the clip.
     bg_stage = ""
@@ -1245,6 +1363,7 @@ def _shortform_status(job_id: str) -> dict[str, Any]:
         "scenes_approved",
         "awaiting_animation_review",
     }
+    final_qa_blocked = qa_blocked or st == "final_qa_blocked"
     terminal_fail = st == "failed" or cancelled
     scene_snapshots = _shortform_scene_snapshots(job_id, workspace)
     scene_count = len(scene_snapshots) or _shortform_scene_count(workspace)
@@ -1283,16 +1402,16 @@ def _shortform_status(job_id: str) -> dict[str, Any]:
     snap: dict[str, Any] = {
         "job_id": job_id,
         "kind": "shortform",
-        "status": "complete" if complete else "failed" if terminal_fail else "awaiting_approval" if awaiting_scene_review else "running",
-        "progress": 100 if complete else 0 if terminal_fail else 85 if all_scenes_approved else 80 if awaiting_scene_review else 55,
+        "status": "complete" if complete else "final_qa_blocked" if final_qa_blocked else "failed" if terminal_fail else "awaiting_approval" if awaiting_scene_review else "running",
+        "progress": 100 if complete else 99 if final_qa_blocked else 0 if terminal_fail else 85 if all_scenes_approved else 80 if awaiting_scene_review else 55,
         "stage": st or "running",
-        "stage_label": "Complete" if complete else ("Cancelled" if cancelled else "Failed") if terminal_fail else review_stage_label if awaiting_scene_review else "Rendering",
+        "stage_label": "Complete" if complete else "Final QA blocked" if final_qa_blocked else ("Cancelled" if cancelled else "Failed") if terminal_fail else review_stage_label if awaiting_scene_review else "Rendering",
         "stage_detail": (
             review_stage_detail
-            if awaiting_scene_review else data.get("detail")
+            if awaiting_scene_review else str(data.get("detail") or data.get("error") or "Final deliverable is staged until every mandatory QA check passes")
         ),
         "error": ("Cancelled by user" if cancelled else data.get("error")),
-        "running": not complete and not terminal_fail and not awaiting_scene_review,
+        "running": not complete and not final_qa_blocked and not terminal_fail and not awaiting_scene_review,
         # Repair/finalization writes a compact result.json that may omit topic.
         # The durable job spec remains authoritative; falling back straight to
         # a generic label makes same-production reconciliation block this card.
@@ -1341,7 +1460,7 @@ def _shortform_status(job_id: str) -> dict[str, Any]:
                 else "Review stills, edit or regenerate bad scenes, then approve scenes before animation or final export."
             ),
         )
-    elif not complete and not terminal_fail:
+    elif not complete and not final_qa_blocked and not terminal_fail:
         _attach_production_control(
             snap,
             "finalize_production",
@@ -1349,9 +1468,6 @@ def _shortform_status(job_id: str) -> dict[str, Any]:
             next_action="Track the server-side render until a terminal result is available.",
         )
     if complete:
-        snap["mp4_url"] = f"/api/studio-agent/jobs/{job_id}/media?kind=shortform"
-        snap["download_url"] = snap["mp4_url"]
-        snap["package_url"] = f"/api/studio-agent/jobs/{job_id}/package?kind=shortform"
         _attach_production_control(
             snap,
             "finalize_production",
@@ -1868,8 +1984,11 @@ def get_job_snapshot(job_id: str, kind: str, *, lightweight: bool = False) -> di
                 "progress": 0,
                 "running": False,
             }
-        if snap.get("status") == "complete" and kind in {"shortform", "longform"} and not lightweight:
-            _attach_render_qa(snap, job_id, kind)
+        if kind in {"shortform", "longform"} and not lightweight:
+            # A file on disk is only a staged candidate. Always evaluate it
+            # before projecting a terminal status or any download URL.
+            if resolve_media_path(job_id, kind):
+                _attach_render_qa(snap, job_id, kind)
         if kind == "shortform":
             try:
                 snap["production_slots"] = slot_snapshot()
@@ -1970,6 +2089,38 @@ def _attach_render_qa(snap: dict[str, Any], job_id: str, kind: str) -> None:
                     "summary": f"Visual QA unavailable: {str(vq_exc)[:200]}",
                 }
         snap["ready_to_post"] = ready
+        snap["qa_state"] = {
+            "status": "pass" if ready else "fail",
+            "ready_to_post": ready,
+            "render_fingerprint": str(report.get("fingerprint") or ""),
+            "render": report,
+            "visual": snap.get("visual_qa") if str(kind or "") == "shortform" else {},
+            "reasons": [
+                str(check.get("detail") or check.get("label") or "QA failed")[:300]
+                for check in list(report.get("checks") or [])
+                if isinstance(check, dict) and check.get("status") != "pass"
+            ] + ([str(snap.get("visual_qa_summary") or "Visual QA failed")[:300]] if not ready and snap.get("visual_qa_summary") else []),
+        }
+        for key in ("mp4_url", "download_url", "package_url"):
+            snap.pop(key, None)
+        if ready:
+            snap["status"] = "complete"
+            snap["stage"] = "complete"
+            snap["stage_label"] = "Complete"
+            snap["stage_detail"] = "Mandatory scene, edit, render, audio, caption, and package QA passed."
+            snap["progress"] = 100
+            snap["running"] = False
+            snap["mp4_url"] = f"/api/studio-agent/jobs/{job_id}/media?kind={kind}"
+            snap["download_url"] = snap["mp4_url"]
+            snap["package_url"] = f"/api/studio-agent/jobs/{job_id}/package?kind={kind}"
+        else:
+            snap["status"] = "final_qa_blocked"
+            snap["stage"] = "final_qa_blocked"
+            snap["stage_label"] = "Final QA blocked"
+            snap["stage_detail"] = str(report.get("summary") or snap.get("visual_qa_summary") or "Mandatory final QA did not pass")[:500]
+            snap["progress"] = 99
+            snap["running"] = False
+            snap["can_download"] = False
     except Exception as exc:
         snap["render_qa"] = {
             "version": 1,
@@ -1990,6 +2141,18 @@ def _attach_render_qa(snap: dict[str, Any], job_id: str, kind: str) -> None:
             "created_at": time.time(),
         }
         snap["ready_to_post"] = False
+        snap["qa_state"] = {
+            "status": "fail",
+            "ready_to_post": False,
+            "reasons": [str(exc)[:300]],
+        }
+        snap["status"] = "final_qa_blocked"
+        snap["stage"] = "final_qa_blocked"
+        snap["stage_label"] = "Final QA unavailable"
+        snap["progress"] = 99
+        snap["running"] = False
+        for key in ("mp4_url", "download_url", "package_url"):
+            snap.pop(key, None)
 
 
 def _cliplab_artifact_paths(job_id: str) -> tuple[dict[str, Any], list[Path]]:

@@ -18,8 +18,8 @@ from backend_settings import (
     FAL_AI_KEY,
     TEMP_DIR,
     VIDEO_PIPELINE_SETTINGS,
-    XAI_API_KEY,
 )
+from studio_agent import provider_policy
 
 log = logging.getLogger("nyptid-studio")
 
@@ -30,8 +30,7 @@ _build_scene_prompt_with_reference = (
     lambda template, visual_description, quality_mode="cinematic", skeleton_anchor="", reference_dna=None, reference_lock_mode="strict", art_style="auto": str(visual_description or "")
 )
 _longform_subject_lock = lambda topic, input_title, input_description="": ""
-_xai_json_completion = None
-_fal_openrouter_json_completion = None
+_semantic_json_completion = None
 
 
 def configure_video_pipeline_runtime_hooks(
@@ -40,6 +39,9 @@ def configure_video_pipeline_runtime_hooks(
     longform_named_human_priority_lock=None,
     build_scene_prompt_with_reference=None,
     longform_subject_lock=None,
+    anthropic_json_completion=None,
+    # Compatibility-only argument names. Older callers and tests can still
+    # provide them, but all names feed the single effective semantic hook.
     xai_json_completion=None,
     fal_openrouter_json_completion=None,
 ):
@@ -47,8 +49,7 @@ def configure_video_pipeline_runtime_hooks(
     global _longform_named_human_priority_lock
     global _build_scene_prompt_with_reference
     global _longform_subject_lock
-    global _xai_json_completion
-    global _fal_openrouter_json_completion
+    global _semantic_json_completion
     if named_human_subject_likeness_lock is not None:
         _named_human_subject_likeness_lock = named_human_subject_likeness_lock
     if longform_named_human_priority_lock is not None:
@@ -57,10 +58,9 @@ def configure_video_pipeline_runtime_hooks(
         _build_scene_prompt_with_reference = build_scene_prompt_with_reference
     if longform_subject_lock is not None:
         _longform_subject_lock = longform_subject_lock
-    if xai_json_completion is not None:
-        _xai_json_completion = xai_json_completion
-    if fal_openrouter_json_completion is not None:
-        _fal_openrouter_json_completion = fal_openrouter_json_completion
+    semantic_hook = anthropic_json_completion or fal_openrouter_json_completion or xai_json_completion
+    if semantic_hook is not None:
+        _semantic_json_completion = semantic_hook
 
 
 DEFAULT_CREATIVE_IMAGE_MODEL_ID = "ernie_image"
@@ -132,62 +132,6 @@ CREATIVE_IMAGE_MODEL_PROFILES = [
     # New default is ernie_image (3x cheaper, better cinematic quality, matches the
     # Skeleton short-form direct path at backend.py:11805).
     {
-        "id": "grok_imagine",
-        "label": "Grok Imagine",
-        "provider": "fal",
-        "tier": "basic",
-        "summary": "Fast default image lane through fal.ai.",
-        "speed": "Fast",
-        "credit_cost_per_image": 0,
-        "estimated_unit_usd": 0.02,
-        "billing_unit": "image",
-        "fal_endpoint_id": "xai/grok-imagine-image",
-        "enabled": bool(FAL_AI_KEY or XAI_API_KEY),
-        "supports_reference_conditioning": True,
-    },
-    {
-        "id": "imagen4_fast",
-        "label": "Imagen 4 Fast",
-        "provider": "fal",
-        "tier": "basic",
-        "summary": "Google's faster image model. Good for quick scene passes.",
-        "speed": "Very Fast",
-        "credit_cost_per_image": 0,
-        "estimated_unit_usd": 0.02,
-        "billing_unit": "image",
-        "fal_endpoint_id": "fal-ai/imagen4/preview/fast",
-        "enabled": bool(FAL_AI_KEY),
-        "supports_reference_conditioning": False,
-    },
-    {
-        "id": "imagen4_preview",
-        "label": "Imagen 4 Preview",
-        "provider": "fal",
-        "tier": "basic",
-        "summary": "Google's standard Imagen 4 model. Best quality-to-cost ratio.",
-        "speed": "Fast",
-        "credit_cost_per_image": 0,
-        "estimated_unit_usd": 0.03,
-        "billing_unit": "image",
-        "fal_endpoint_id": "fal-ai/imagen4/preview",
-        "enabled": bool(FAL_AI_KEY),
-        "supports_reference_conditioning": False,
-    },
-    {
-        "id": "imagen4_ultra",
-        "label": "Imagen 4 Ultra",
-        "provider": "fal",
-        "tier": "premium",
-        "summary": "Google's highest-quality text-to-image lane.",
-        "speed": "Medium",
-        "credit_cost_per_image": 4,
-        "estimated_unit_usd": 0.06,
-        "billing_unit": "image",
-        "fal_endpoint_id": "fal-ai/imagen4/preview/ultra",
-        "enabled": bool(FAL_AI_KEY),
-        "supports_reference_conditioning": False,
-    },
-    {
         "id": "recraft_v4",
         "label": "Recraft V4",
         "provider": "fal",
@@ -240,20 +184,6 @@ CREATIVE_IMAGE_MODEL_PROFILES = [
         "estimated_unit_usd": 0.03,
         "billing_unit": "processed_megapixels",
         "fal_endpoint_id": "fal-ai/flux-2-pro",
-        "enabled": bool(FAL_AI_KEY),
-        "supports_reference_conditioning": False,
-    },
-    {
-        "id": "nano_banana_pro",
-        "label": "Nano Banana Pro",
-        "provider": "fal",
-        "tier": "elite",
-        "summary": "Premium reasoning-based image generation with strong text and product composition.",
-        "speed": "Medium",
-        "credit_cost_per_image": 5,
-        "estimated_unit_usd": 0.15,
-        "billing_unit": "image",
-        "fal_endpoint_id": "fal-ai/nano-banana-pro",
         "enabled": bool(FAL_AI_KEY),
         "supports_reference_conditioning": False,
     },
@@ -371,19 +301,6 @@ CREATIVE_VIDEO_MODEL_PROFILES = [
         "enabled": bool(FAL_AI_KEY),
     },
     {
-        "id": "veo3_fast",
-        "label": "Veo 3 Fast",
-        "provider": "fal",
-        "tier": "premium",
-        "summary": "Google Veo 3 cinematic motion. Similar cost to Kling Pro, different aesthetic.",
-        "speed": "Slow",
-        "credit_multiplier": 2,  # $0.10/s audio-off → $0.50/5s → 1.79x Kling Std ($0.15/s with audio → 2.68x)
-        "estimated_unit_usd": 0.10,  # fal.ai: $0.10/s audio-off, $0.15/s with audio
-        "billing_unit": "second",
-        "fal_endpoint_id": "fal-ai/veo3/fast/image-to-video",
-        "enabled": bool(FAL_AI_KEY),
-    },
-    {
         "id": "kling21_master",
         "label": "Kling 2.1 Master",
         "provider": "fal",
@@ -397,15 +314,56 @@ CREATIVE_VIDEO_MODEL_PROFILES = [
         "enabled": bool(FAL_AI_KEY),
     },
 ]
+# Keep legacy literals inert for persisted-record compatibility, but never put
+# a denied provider family in an executable map or advertised catalog.
+CREATIVE_VIDEO_MODEL_PROFILES = [
+    profile
+    for profile in CREATIVE_VIDEO_MODEL_PROFILES
+    if not provider_policy.is_denied_video_model(profile.get("id"))
+]
 CREATIVE_VIDEO_MODEL_MAP = {str(profile["id"]): profile for profile in CREATIVE_VIDEO_MODEL_PROFILES}
 
 
 def _creative_model_catalog_copy(entries: list[dict]) -> list[dict]:
-    return [dict(entry) for entry in entries]
+    safe: list[dict] = []
+    for entry in entries:
+        model_id = str(entry.get("id") or "").strip()
+        if provider_policy.normalize_provider(entry.get("provider")) != "fal":
+            continue
+        if provider_policy.is_denied_image_model(model_id) or provider_policy.is_denied_video_model(model_id):
+            continue
+        safe.append(dict(entry))
+    return safe
+
+
+def _assert_creative_image_model_allowed(value: str | None) -> str:
+    requested = str(value or "").strip().lower()
+    if not requested:
+        return ""
+    provider_policy.assert_provider_allowed("fal", provider_policy.IMAGE_CAPABILITY)
+    if provider_policy.is_denied_image_model(requested) or requested not in CREATIVE_IMAGE_MODEL_MAP:
+        raise provider_policy.ProviderPolicyDenied(
+            f"Studio provider policy {provider_policy.POLICY_VERSION} denies image model {requested}."
+        )
+    return requested
+
+
+def _assert_creative_video_model_allowed(value: str | None) -> str:
+    requested = str(value or "").strip().lower()
+    if not requested:
+        return ""
+    provider_policy.assert_provider_allowed("fal", provider_policy.I2V_CAPABILITY)
+    if provider_policy.is_denied_video_model(requested) or requested not in CREATIVE_VIDEO_MODEL_MAP:
+        raise provider_policy.ProviderPolicyDenied(
+            f"Studio provider policy {provider_policy.POLICY_VERSION} denies video model {requested}."
+        )
+    return requested
 
 
 def _normalize_creative_image_model_id(value: str | None, template: str = "") -> str:
     requested = str(value or "").strip().lower()
+    if provider_policy.is_denied_image_model(requested):
+        requested = DEFAULT_CREATIVE_IMAGE_MODEL_ID
     if requested in CREATIVE_IMAGE_MODEL_MAP and bool(CREATIVE_IMAGE_MODEL_MAP[requested].get("enabled", False)):
         return requested
     # Skeleton template: if no explicit pick, default to the trained
@@ -418,8 +376,6 @@ def _normalize_creative_image_model_id(value: str | None, template: str = "") ->
             return "flux_lora_skeleton"
     for candidate in (
         DEFAULT_CREATIVE_IMAGE_MODEL_ID,
-        "imagen4_fast",
-        "grok_imagine",
     ):
         profile = CREATIVE_IMAGE_MODEL_MAP.get(candidate)
         if profile and bool(profile.get("enabled", False)):
@@ -428,16 +384,15 @@ def _normalize_creative_image_model_id(value: str | None, template: str = "") ->
 
 
 def _normalize_scene_image_model_id(value: str | None, template: str = "") -> str:
-    # Prior revisions force-overrode skeleton scene image gen to "imagen4_preview",
-    # conflicting with the frontend which defaulted to Grok Imagine AND preventing
-    # owner/advanced users from testing other lanes (Recraft Pro, Nano Banana Pro,
-    # ERNIE) on skeleton renders. Now we trust the caller's pick and only fall
-    # back to the global defaults via _normalize_creative_image_model_id.
+    # Preserve a safe caller selection and migrate denied legacy selections to
+    # the FAL-native default through _normalize_creative_image_model_id.
     return _normalize_creative_image_model_id(value, template=template)
 
 
 def _normalize_creative_video_model_id(value: str | None) -> str:
     requested = str(value or "").strip().lower()
+    if provider_policy.is_denied_video_model(requested):
+        requested = DEFAULT_CREATIVE_VIDEO_MODEL_ID
     if requested in CREATIVE_VIDEO_MODEL_MAP and bool(CREATIVE_VIDEO_MODEL_MAP[requested].get("enabled", False)):
         return requested
     for candidate in (
@@ -2024,8 +1979,8 @@ async def _generate_longform_chapter(
     edit_blueprint: dict | None = None,
     chapter_blueprint: dict | None = None,
 ) -> dict:
-    if _xai_json_completion is None and _fal_openrouter_json_completion is None:
-        raise RuntimeError("video_pipeline runtime hook 'xai_json_completion' or 'fal_openrouter_json_completion' must be configured")
+    if _semantic_json_completion is None:
+        raise RuntimeError("video_pipeline direct-Anthropic semantic hook must be configured")
 
     tone = _longform_detect_tone(template, topic, input_title, input_description)
     lang_name = SUPPORTED_LANGUAGES.get(language, {}).get("name", "English")
@@ -2133,16 +2088,13 @@ async def _generate_longform_chapter(
     if fix_note:
         user_prompt += f"Fix note from owner review: {fix_note}\n"
 
-    # Try FAL OpenRouter (Claude Sonnet 4.6) first, fall back to Grok
-    chapter_data = None
-    if _fal_openrouter_json_completion is not None:
-        try:
-            chapter_data = await _fal_openrouter_json_completion(system_prompt, user_prompt, temperature=0.65, timeout_sec=120)
-            log.info("Longform chapter gen succeeded via FAL OpenRouter (Claude Sonnet 4.6)")
-        except Exception as fal_exc:
-            log.warning("FAL OpenRouter chapter gen failed, falling back to Grok: %s", str(fal_exc)[:200])
-    if chapter_data is None:
-        chapter_data = await _xai_json_completion(system_prompt, user_prompt, temperature=0.65, timeout_sec=90)
+    chapter_data = await _semantic_json_completion(
+        system_prompt,
+        user_prompt,
+        temperature=0.65,
+        timeout_sec=120,
+    )
+    log.info("Longform chapter generation succeeded via direct Anthropic")
     raw_scenes = chapter_data.get("scenes", [])
     scenes = _normalize_longform_scenes_for_render(raw_scenes)
     scenes = _repair_longform_generated_scenes(
@@ -2474,19 +2426,16 @@ async def generate_script(template: str, topic: str, extra_instructions: str = "
             else "Create a viral short that stays tightly anchored to this exact topic.\n\n"
                  f"TOPIC:\n{topic_text}"
         )
-        # Studio is all-fal now. Both helpers below route through fal.ai's
-        # any-llm router internally (_fal_openrouter_json_completion is a thin
-        # alias, _xai_json_completion is too). The prior `fal -> direct XAI`
-        # fallback chain was hanging jobs at 5% because:
-        #   (a) the fal URL was wrong (fal-ai/openrouter/router returns 404)
-        #   (b) direct XAI was quota-exhausted + retried for 150s silently
-        # If fal any-llm fails now, let it raise — the outer 150s timeout +
-        # skeleton local fallback in backend.py:11850 will handle it fast.
-        if _fal_openrouter_json_completion is not None:
-            return await _fal_openrouter_json_completion(prompt_text, user_prompt, temperature=temp, timeout_sec=90)
-        if _xai_json_completion is not None:
-            return await _xai_json_completion(prompt_text, user_prompt, temperature=temp, timeout_sec=90)
-        raise RuntimeError("Script generation hook not configured (no fal any-llm path available)")
+        # Semantic generation has one effective direct-Anthropic hook. Failure
+        # surfaces to the caller; there is no cross-provider fallback.
+        if _semantic_json_completion is None:
+            raise RuntimeError("Script generation hook not configured (direct Anthropic required)")
+        return await _semantic_json_completion(
+            prompt_text,
+            user_prompt,
+            temperature=temp,
+            timeout_sec=90,
+        )
 
     def _score_story_script_quality(data: dict) -> tuple[int, list[str]]:
         scenes = data.get("scenes", [])

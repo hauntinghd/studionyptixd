@@ -5,15 +5,19 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any
 
-import httpx
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 from pydub import AudioSegment
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+from skeleton_ai import voice_fal
+
 APP_ROOT = ROOT / "ViralShorts-App"
 PUBLIC_DIR = APP_ROOT / "public"
 DIST_DIR = APP_ROOT / "dist"
@@ -21,16 +25,6 @@ CHATSTORY_ROOTS = [
     PUBLIC_DIR / "chatstory",
     DIST_DIR / "chatstory",
 ]
-VOICE_REFERENCE = Path(
-    os.getenv("CHATSTORY_VOICE_REFERENCE", str(ROOT / "voice_reference.wav"))
-).expanduser()
-LANGUAGE = str(os.getenv("CHATSTORY_LANGUAGE", "en") or "en").strip() or "en"
-ELEVENLABS_API_KEY = str(os.getenv("ELEVENLABS_API_KEY", "") or "").strip()
-ELEVENLABS_MODEL_ID = str(
-    os.getenv("CHATSTORY_ELEVENLABS_MODEL_ID", "eleven_multilingual_v2") or "eleven_multilingual_v2"
-).strip()
-ELEVENLABS_TIMEOUT_SEC = max(15.0, float(os.getenv("CHATSTORY_ELEVENLABS_TIMEOUT_SEC", "120") or 120))
-FORCE_LOCAL_TTS = str(os.getenv("CHATSTORY_FORCE_LOCAL_TTS", "0") or "0").strip().lower() in {"1", "true", "yes", "on"}
 CANVAS_W = 720
 CANVAS_H = 1280
 FPS = 12
@@ -103,31 +97,21 @@ SFX = {
     "comical_disappointment": _resolve_chatstory_asset("sfx", "comical-disappointment.wav"),
 }
 
-ELEVENLABS_DEFAULT_VOICES = {
-    "sarah": "EXAVITQu4vr4xnSDxMaL",
-    "laura": "FGY2WhTYpPnrIDTdsKH5",
-    "charlotte": "XB0fDUnXU5powFXDhCwa",
-    "adam": "pNInz6obpgDQGcFmaJgB",
-    "daniel": "onwK4e9ZLuTAKqWW03F9",
-}
-
 VOICE_PRESETS = {
-    "studio_voice_core": {"name": "Core Neutral", "speed": 1.0, "pitch": 1.0, "voice_id": ELEVENLABS_DEFAULT_VOICES["laura"]},
-    "studio_voice_hook": {"name": "Hook Sprint", "speed": 1.12, "pitch": 1.03, "voice_id": ELEVENLABS_DEFAULT_VOICES["adam"]},
-    "studio_voice_drama": {"name": "Dark Drama", "speed": 0.96, "pitch": 0.94, "voice_id": ELEVENLABS_DEFAULT_VOICES["daniel"]},
-    "studio_voice_confession": {"name": "Relatable Confession", "speed": 1.04, "pitch": 0.98, "voice_id": ELEVENLABS_DEFAULT_VOICES["charlotte"]},
-    "studio_voice_founder": {"name": "Founder Calm", "speed": 0.98, "pitch": 0.97, "voice_id": ELEVENLABS_DEFAULT_VOICES["adam"]},
-    "studio_voice_punch": {"name": "Viral Punch", "speed": 1.1, "pitch": 1.02, "voice_id": ELEVENLABS_DEFAULT_VOICES["adam"]},
-    "studio_voice_doc": {"name": "Documentary Steel", "speed": 0.97, "pitch": 0.95, "voice_id": ELEVENLABS_DEFAULT_VOICES["daniel"]},
-    "studio_voice_luxe": {"name": "Luxury Ad", "speed": 1.01, "pitch": 1.01, "voice_id": ELEVENLABS_DEFAULT_VOICES["laura"]},
-    "studio_voice_story": {"name": "Storyteller Warm", "speed": 0.99, "pitch": 1.04, "voice_id": ELEVENLABS_DEFAULT_VOICES["charlotte"]},
-    "studio_voice_intense": {"name": "Intense Clarity", "speed": 1.08, "pitch": 0.97, "voice_id": ELEVENLABS_DEFAULT_VOICES["daniel"]},
-    "studio_voice_genz": {"name": "Gen Z Hook", "speed": 1.14, "pitch": 1.05, "voice_id": ELEVENLABS_DEFAULT_VOICES["sarah"]},
-    "studio_voice_motive": {"name": "Motivation Rise", "speed": 1.03, "pitch": 1.06, "voice_id": ELEVENLABS_DEFAULT_VOICES["sarah"]},
-    "studio_voice_noir": {"name": "Noir Tension", "speed": 0.95, "pitch": 0.92, "voice_id": ELEVENLABS_DEFAULT_VOICES["daniel"]},
+    "studio_voice_core": {"name": "Core Neutral", "speed": 1.0, "pitch": 1.0, "voice_id": "English_CalmWoman"},
+    "studio_voice_hook": {"name": "Hook Sprint", "speed": 1.12, "pitch": 1.03, "voice_id": voice_fal.DEFAULT_VOICE},
+    "studio_voice_drama": {"name": "Dark Drama", "speed": 0.96, "pitch": 0.94, "voice_id": "English_ManWithDeepVoice"},
+    "studio_voice_confession": {"name": "Relatable Confession", "speed": 1.04, "pitch": 0.98, "voice_id": "English_Graceful_Lady"},
+    "studio_voice_founder": {"name": "Founder Calm", "speed": 0.98, "pitch": 0.97, "voice_id": voice_fal.DEFAULT_VOICE},
+    "studio_voice_punch": {"name": "Viral Punch", "speed": 1.1, "pitch": 1.02, "voice_id": voice_fal.DEFAULT_VOICE},
+    "studio_voice_doc": {"name": "Documentary Steel", "speed": 0.97, "pitch": 0.95, "voice_id": "English_ManWithDeepVoice"},
+    "studio_voice_luxe": {"name": "Luxury Ad", "speed": 1.01, "pitch": 1.01, "voice_id": "English_Graceful_Lady"},
+    "studio_voice_story": {"name": "Storyteller Warm", "speed": 0.99, "pitch": 1.04, "voice_id": "English_Graceful_Lady"},
+    "studio_voice_intense": {"name": "Intense Clarity", "speed": 1.08, "pitch": 0.97, "voice_id": "English_ManWithDeepVoice"},
+    "studio_voice_genz": {"name": "Gen Z Hook", "speed": 1.14, "pitch": 1.05, "voice_id": "English_CalmWoman"},
+    "studio_voice_motive": {"name": "Motivation Rise", "speed": 1.03, "pitch": 1.06, "voice_id": "English_Graceful_Lady"},
+    "studio_voice_noir": {"name": "Noir Tension", "speed": 0.95, "pitch": 0.92, "voice_id": "English_ManWithDeepVoice"},
 }
-
-_LOCAL_XTTS: Any | None = None
 
 
 def run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
@@ -344,81 +328,21 @@ def draw_phone_overlay(path: Path, theme_id: str, character_name: str, messages:
     canvas.save(path)
 
 
-def _load_local_xtts() -> Any:
-    global _LOCAL_XTTS
-    if _LOCAL_XTTS is not None:
-        return _LOCAL_XTTS
-    try:
-        import torch  # type: ignore
-        from TTS.api import TTS  # type: ignore
-    except Exception as exc:
-        raise RuntimeError(
-            "Local XTTS is unavailable. Set ELEVENLABS_API_KEY for hosted Chat Story TTS "
-            "or install TTS + torch for local rendering."
-        ) from exc
-
-    original_torch_load = torch.load
-
-    def torch_load_compat(*args: Any, **kwargs: Any) -> Any:
-        kwargs.setdefault("weights_only", False)
-        return original_torch_load(*args, **kwargs)
-
-    torch.load = torch_load_compat  # type: ignore[assignment]
-    _LOCAL_XTTS = TTS("tts_models/multilingual/multi-dataset/xtts_v2", gpu=False)
-    return _LOCAL_XTTS
-
-
-def _synthesize_segments_elevenlabs(messages: list[dict[str, Any]], preset: dict[str, Any], work_dir: Path) -> list[Path]:
-    if not ELEVENLABS_API_KEY:
-        raise RuntimeError("ELEVENLABS_API_KEY is not configured")
-    voice_id = str(preset.get("voice_id") or ELEVENLABS_DEFAULT_VOICES["laura"])
-    outputs: list[Path] = []
-    with httpx.Client(timeout=ELEVENLABS_TIMEOUT_SEC) as client:
-        for idx, message in enumerate(messages, start=1):
-            text = sanitize_text(message.get("text", ""))
-            out_path = work_dir / f"msg_{idx:02d}_raw.mp3"
-            response = client.post(
-                f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}",
-                headers={
-                    "xi-api-key": ELEVENLABS_API_KEY,
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "text": text,
-                    "model_id": ELEVENLABS_MODEL_ID,
-                    "voice_settings": {
-                        "stability": 0.5,
-                        "similarity_boost": 0.75,
-                        "style": 0.3,
-                    },
-                },
-            )
-            response.raise_for_status()
-            out_path.write_bytes(response.content)
-            outputs.append(out_path)
-    return outputs
-
-
-def _synthesize_segments_local_xtts(messages: list[dict[str, Any]], work_dir: Path) -> list[Path]:
-    if not VOICE_REFERENCE.exists():
-        raise RuntimeError(
-            f"Local XTTS voice reference is missing at {VOICE_REFERENCE}. "
-            "Set CHATSTORY_VOICE_REFERENCE or configure ELEVENLABS_API_KEY."
-        )
-    tts = _load_local_xtts()
+def synthesize_raw_segments(messages: list[dict[str, Any]], preset: dict[str, Any], work_dir: Path) -> list[Path]:
+    allowed_voice_ids = {
+        str(profile.get("voice_id") or "").strip()
+        for profile in voice_fal.VOICE_PROFILES
+    }
+    requested_voice = str(preset.get("voice_id") or "").strip()
+    voice_id = requested_voice if requested_voice in allowed_voice_ids else voice_fal.DEFAULT_VOICE
     outputs: list[Path] = []
     for idx, message in enumerate(messages, start=1):
         text = sanitize_text(message.get("text", ""))
-        out_path = work_dir / f"msg_{idx:02d}_raw.wav"
-        tts.tts_to_file(text=text, file_path=str(out_path), speaker_wav=str(VOICE_REFERENCE), language=LANGUAGE)
-        outputs.append(out_path)
+        out_path = work_dir / f"msg_{idx:02d}_raw.mp3"
+        outputs.append(
+            Path(voice_fal.synthesize(text=text, out_path=out_path, voice_id=voice_id, speed=1.0))
+        )
     return outputs
-
-
-def synthesize_raw_segments(messages: list[dict[str, Any]], preset: dict[str, Any], work_dir: Path) -> list[Path]:
-    if ELEVENLABS_API_KEY and not FORCE_LOCAL_TTS:
-        return _synthesize_segments_elevenlabs(messages, preset, work_dir)
-    return _synthesize_segments_local_xtts(messages, work_dir)
 
 
 def style_segment(raw_path: Path, out_path: Path, speed: float, pitch: float) -> None:

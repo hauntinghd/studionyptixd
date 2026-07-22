@@ -17,7 +17,7 @@ FLYCTL="${FLYCTL:-/c/Users/casey/.fly/bin/flyctl.exe}"
 
 # ---- Paste real values here, then re-run. Empty lines are skipped. ----
 declare -A SECRETS=(
-  [XAI_API_KEY]="<PASTE_XAI_API_KEY_HERE>"
+  [ANTHROPIC_API_KEY]="<PASTE_ANTHROPIC_API_KEY_HERE>"
   [ALGROW_API_KEY]="<PASTE_ALGROW_API_KEY_HERE>"
   [YOUTUBE_API_KEY]="<PASTE_YOUTUBE_API_KEY_HERE>"
   [GOOGLE_CLIENT_ID]="<PASTE_GOOGLE_CLIENT_ID_HERE>"

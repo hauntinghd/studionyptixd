@@ -79,7 +79,7 @@ export default function MembershipPremiumView({
 
             <section className="grid gap-3 md:grid-cols-3">
                 <ValueTile title="Production command" body="Studio Agent plans, edits, animates, packages, and keeps the user in the approval loop." />
-                <ValueTile title="Usage-based wallet" body="Credits map to real OpenRouter, fal, and ElevenLabs usage instead of fake render limits." />
+                <ValueTile title="Usage-based wallet" body="Credits map to direct Anthropic and fal.ai usage instead of fake render limits." />
                 <ValueTile title="Scale path" body="Start with the monthly credits you need, then upgrade the same Studio Pro plan as production grows." />
             </section>
 
@@ -136,7 +136,7 @@ export default function MembershipPremiumView({
                 <h2 className="text-lg font-semibold text-white">How billing works</h2>
                 <ol className="mt-4 list-decimal space-y-2 pl-4 text-sm text-gray-400">
                     <li>Pick the Studio Pro monthly credit tier that fits your production volume.</li>
-                    <li>Credits debit from real usage - OpenRouter tokens, fal renders, ElevenLabs characters.</li>
+                    <li>Credits debit from real usage - direct Anthropic tokens and fal.ai media or speech jobs.</li>
                     <li>Reload 1,000 additional credits for $25 whenever a production needs more capacity.</li>
                     <li>Purchased reload credits stay on your account if membership lapses.</li>
                 </ol>

@@ -44,16 +44,20 @@ def test_image_route_change_quarantines_old_result_and_commits_latest(tmp_path, 
         dispatch=dispatch,
         fallback_model="ernie_image",
         route_resolver=resolve_route,
+        qa_validator=lambda _path, _stage, _index: {
+            "status": "pass", "pass": True, "summary": "mock QA pass"
+        },
     )
 
     assert committed.read_bytes() == b"candidate-seedream_v5_lite"
-    assert dispatched == ["grok_imagine", "seedream_v5_lite"]
+    assert dispatched == ["seedream_edit", "seedream_v5_lite"]
+    assert all("grok" not in model for model in dispatched)
     assert receipt["status"] == "committed"
     assert receipt["media_route_revision"] == 2
     assert receipt["provider_model"] == "seedream_v5_lite"
     quarantined = list((tmp_path / job_id / "quarantine" / "image").glob("*.png"))
     assert len(quarantined) == 1
-    assert quarantined[0].read_bytes() == b"candidate-grok_imagine"
+    assert quarantined[0].read_bytes() == b"candidate-seedream_edit"
     canonical_receipt = json.loads(
         destination.with_suffix(".png.media-route.json").read_text(encoding="utf-8")
     )
@@ -90,6 +94,9 @@ def test_repeated_video_route_changes_preserve_prior_asset(tmp_path, monkeypatch
             dispatch=dispatch,
             fallback_model="ltx_budget",
             route_resolver=resolve_route,
+            qa_validator=lambda _path, _stage, _index: {
+                "status": "pass", "pass": True
+            },
             max_route_restarts=2,
         )
 

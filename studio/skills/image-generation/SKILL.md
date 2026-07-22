@@ -1,28 +1,20 @@
 ---
 name: image-generation
 description: >-
-  Generates keyframes for thumbnails + i2v sources via fal.ai (Gemini Nano Banana / Flux / Midjourney). Load when prompting an image model. Companion: bank.md (per-niche prompts × 12 niches + per-model adaptation notes + 8 artifact diagnostics).
+  Plans keyframes for thumbnails and i2v sources with the direct Anthropic Studio runner, then generates or edits them only through the active Studio FAL image catalog. Load when prompting the session's selected image model. Companion: bank.md (per-niche prompts × 12 niches + per-model adaptation notes + 8 artifact diagnostics).
 ---
 
 # Skill 09 — Image Generation Prompting
 
-> **⚠ Model reference (2026-05) — cost/strength notes, NOT a closed list.**
+> **Studio provider policy — binding, not advisory.**
 >
-> The table below is a starting reference of image models known to work well for these jobs, with their tradeoffs. It is **not the full set of what you can use** — fal hosts many more image models, and the Vercel AI Gateway can route others. There is no single blessed default: pick the model that best fits the task. If the user names a model that isn't in this table (e.g. a newer release), or you think something else suits the job better, **discover what's actually available and use it** — list fal's image models, query the gateway's `/v1/models`, or WebSearch + WebFetch the provider docs. **Never tell the user a model is unavailable just because it's absent from this table — verify first.**
+> - Planning, prompt refinement, and semantic QA use the direct Anthropic Studio runner.
+> - Image generation and editing use only the FAL-backed image IDs returned by the current Studio model catalog and the model selected in the active session.
+> - Never discover, recommend, or route to an unlisted provider or model. If a requested model is absent from the Studio catalog, explain that it is unavailable in Studio and offer the active FAL selection.
+> - Do not replace the user's active image selection from prose. Model changes go through the Studio picker so policy, pricing, and persisted state stay aligned.
+> - Before quoting cost, use Studio's estimator; never reuse prices from this document.
 >
-> | Strengths | Model id | Cost / use notes |
-> |---|---|---|
-> | Photoreal humans, cinematic lighting | `fal-ai/flux-pro/v1.1` | Reliable general-purpose workhorse. |
-> | Best text rendering + photoreal + multi-subject coherence | `fal-ai/gemini-25-pro-image` | Nano Banana Pro. Strong for hero/photoreal work or scenes with unavoidable in-world text. |
-> | Speed / high volume (OS, Apache 2.0) | `fal-ai/flux/schnell` | 1-3 sec/image. Cheapest for >10 generations or budget-critical sessions. |
-> | Editing / composition | `fal-ai/flux-pro/kontext` | 1-4 reference images, multi-image composition, prompt-driven edits. |
-> | Inpaint | `fal-ai/flux-pro/v1.1/inpainting` (mask) or `fal-ai/bria/eraser` (text-prompt) | Object removal / region-specific edits. |
->
-> **How to choose:** match the model to the task — photoreal/cinematic, text-heavy, high-volume/cheap, editing, or inpaint — weighing quality against cost for the specific job. Consider models beyond this table when they fit better.
->
-> **Correctness rule (applies to ANY model):** never let the image-gen model render thumbnail text. Text overlays go in code (Pillow/Sharp/Canvas) for pixel-perfect typography control. Even a model with strong text rendering (e.g. Nano Banana Pro) is only for unavoidable in-world text (signs, labels, in-world copy), never for the thumbnail's headline.
->
-> Prices and model positioning drift — treat the cost notes as approximate and re-check current rates/availability when it matters. Detailed reasoning in Section 2 below is preserved for context but its specific model lists/prices are stale.
+> **Correctness rule:** never let the image generator render thumbnail text. Text overlays go in code (Pillow/Sharp/Canvas) for pixel-perfect typography control. Unavoidable in-world text should be kept short and verified during visual QA.
 
 ---
 
@@ -49,48 +41,20 @@ The agent picks the right model per task, writes a prompt that matches the chann
 
 ## 2. Model selection
 
-Different image gen models have radically different strengths. The agent picks per task, not per project.
+Studio, not this playbook, owns the runnable model set. The agent keeps the active session selection and adapts the prompt to the task.
 
-### Nano Banana (Gemini 3 Pro Image)
-**Strengths:** Best at faces, skin texture, photorealism in 2026. Strong at instruction-following ("no studio lighting, no three-point setup"). Reliable on people in environments. Adheres to authenticity prompts better than competitors.
-**Weaknesses:** Slower than Flux. Slightly less stylized output range.
-**Cost:** ~$0.04 per image
-**Best for:** Photorealistic faces (Skills T1, T3), authentic settings (T2), B-roll with people, thumbnails featuring hosts
-**Default model when:** the image needs to look real
-
-### Flux 1.1 Pro
-**Strengths:** Fast generation, photorealistic output, good at landscapes and stylized aesthetic
-**Weaknesses:** Tends slightly cinematic / over-graded by default. Need to constrain explicitly for amateur-authentic register.
-**Cost:** ~$0.05 per image
-**Best for:** Cinematic stylized content, music video keyframes, atmospheric scenes
-**Default model when:** the image needs to look polished but not surreal
-
-### Midjourney v7
-**Strengths:** Highest aesthetic quality, strong on dramatic lighting, excellent for cinematic music video content
-**Weaknesses:** Tends to over-stylize even when prompted not to. Inconsistent character preservation.
-**Cost:** Subscription-based; ~$0.05 effective per image
-**Best for:** Music video keyframes (brick-narrative storytelling style), channel trailer imagery, hero shots
-**Default model when:** the image needs to be art-direction-quality cinematic
-
-### Ideogram
-**Strengths:** Best at clean illustration, excellent at rendering text WITHIN images (rare exception case), good at infographic-style visuals
-**Weaknesses:** Not photorealistic. Limited to illustration / graphic style.
-**Cost:** ~$0.04 per image
-**Best for:** Educational content with clean illustration, science-animation style geometric content, infographic visuals
-**Default model when:** the channel uses illustrated aesthetic
-
-### DALL-E 3
-**Strengths:** Strong at surreal compositions, good at maintaining specific objects in scenes
-**Weaknesses:** Tends toward stock-photo aesthetic. Weaker on faces than Nano Banana.
-**Cost:** ~$0.04 per image
-**Best for:** Surreal / impossible scenes (some music video content)
-**Default model when:** the image is clearly surreal not photoreal
+### Active Studio FAL lanes
+- **Reference-conditioned edit:** use the selected catalog model's edit capability for identity, product, wardrobe, or composition locks.
+- **Photoreal scene:** emphasize natural materials, plausible lighting, lens behavior, and restrained grading.
+- **Stylized scene:** define medium, shape language, palette, texture, and rendering constraints explicitly.
+- **High-volume proof set:** keep the active model, reduce candidate count, and use deterministic seeds where the tool supports them.
+- **Repair/inpaint:** use a Studio-exposed edit or repair action; do not substitute a provider or endpoint from memory.
 
 ### Selection decision tree
-1. Is the channel's register cinematic-stylized (music video, propaganda)? → Midjourney or Flux Pro
-2. Is the channel's register illustrated (science-animation / deadpan-history style)? → Ideogram
-3. Is the image surreal/impossible? → DALL-E 3
-4. Default for everything else (photoreal): → **Nano Banana**
+1. Does the active scene need identity or product continuity? → Use the active FAL edit/reference lane.
+2. Is the task a new scene without a reference? → Use the active FAL text-to-image lane.
+3. Is a local artifact isolated? → Use the available repair/inpaint action instead of regenerating the whole scene.
+4. Is the active model unsuitable? → Ask the user to choose another visible Studio FAL model; never silently route elsewhere.
 
 ## 3. Prompt structure
 
@@ -155,7 +119,7 @@ Every successful thumbnail in 2026 follows this pattern:
 2. Use Pillow / Sharp / Canvas / similar code library to add text overlay
 3. Render final composite
 
-Why: AI image gen models produce visible text artifacts that ruin thumbnails. Letters get warped, serifs melt, line spacing breaks, character widths shift. Even Nano Banana — the best at text in 2026 — produces unreliable results when the text is critical.
+Why: image generators produce visible text artifacts that ruin thumbnails. Letters get warped, serifs melt, line spacing breaks, and character widths shift. Even strong current models are unreliable when exact text matters.
 
 Text-in-code ensures:
 - Pixel-perfect rendering at any size
@@ -166,7 +130,7 @@ Text-in-code ensures:
 The agent's prompt explicitly says "leave space for text overlay top-right" or "negative space bottom 30% for text" — but never asks the model to render the text itself.
 
 ### Exceptions where AI-rendered text is acceptable
-- Ideogram, when the text is large + simple + central + the image IS text-driven (rare)
+- No provider exception: render required display text in code after image generation.
 - Background texture text that's intentionally illegible (decorative)
 - Music video keyframes where stylized text-as-art is the aesthetic
 
@@ -217,7 +181,7 @@ Always render at target aspect from the start. Cropping a 16:9 to 9:16 loses cri
 
 ## 7. The reference image input
 
-Nano Banana, Flux, and Midjourney all accept reference images as inputs. Use them strategically.
+Use reference conditioning only when the active Studio FAL model exposes it in the current catalog.
 
 ### When to use reference image input
 - **Character consistency** (per Skill T5): always feed the canonical reference for the host/composite
@@ -237,97 +201,97 @@ Goal: Generate a new thumbnail face for a personal-finance authority channel's l
 Inputs:
 - Canonical reference: the channel's locked host face from its first episode (per Skill T5 character bible)
 - Prompt: "the same person, slightly concerned expression, looking just to the right of camera, top-left composition for text overlay top-right, warm natural light"
-- Model: Nano Banana with reference image input
+- Model: the active Studio FAL reference/edit lane
 - Result: face stays consistent with the canonical, expression and composition adjusted for this episode
 
 ## 8. Niche-specific image generation patterns
 
 ### Senior finance / IRS / retirement (personal-finance authority channel)
-- **Model:** Nano Banana
+- **Model:** active Studio FAL selection
 - **Register:** authentic-amateur (T4 Register A)
 - **Compositions:** rule-of-thirds with negative space for text
 - **Color anchor:** red rage stamp accent over warm-natural base
 - **Text in code:** ALL CAPS bold yellow with thick black stroke
 
 ### Tech / AI / dev tools
-- **Model:** Nano Banana for product shots, Flux for atmospheric
+- **Model:** active Studio FAL selection, with prompt structure adapted to product or atmospheric work
 - **Register:** mid-polished (T4 Register B-light)
 - **Compositions:** product hero centered or rule-of-thirds with depth
 - **Color anchor:** brand color of product reviewed
 - **Text in code:** mid-weight, often product name + verdict word
 
 ### Gaming / Roblox / Minecraft
-- **Model:** Flux or Midjourney for stylized
+- **Model:** active Studio FAL selection with explicit stylization constraints
 - **Register:** stylized cinematic (T4 Register B)
 - **Compositions:** dramatic, character-led
 - **Color anchor:** saturated, vibrant
 - **Text in code:** bold ALL CAPS action words
 
 ### Music videos / drill / propaganda (brick-narrative storytelling channel)
-- **Model:** Midjourney or Flux for cinematic
+- **Model:** active Studio FAL selection with cinematic composition constraints
 - **Register:** full cinematic (T4 Register B)
 - **Compositions:** rule of thirds, dramatic, atmospheric
 - **Color anchor:** genre-locked (drill = dark/red, propaganda = patriotic)
 - **Text in code:** stylized, often track name + artist
 
 ### News-hijack documentary (investigative-journalism / geopolitics documentary channels)
-- **Model:** Nano Banana for hosts, Flux for cinematic recreation
+- **Model:** active Studio FAL selection; use reference conditioning for hosts when available
 - **Register:** mixed (T4 Register C)
 - **Compositions:** intimate for hosts, cinematic for recreation
 - **Color anchor:** red/black for thumbnails
 - **Text in code:** ALL CAPS rage stamp
 
 ### True crime
-- **Model:** Nano Banana for portraits, Flux for cinematic recreation
+- **Model:** active Studio FAL selection; preserve portrait identity with approved references
 - **Register:** mixed (T4 Register C)
 - **Compositions:** atmospheric, mood-led
 - **Color anchor:** dark moody
 - **Text in code:** name + date + place
 
 ### Health / medical / supplements (medical-authority channel)
-- **Model:** Nano Banana
+- **Model:** active Studio FAL selection
 - **Register:** authentic-amateur
 - **Compositions:** doctor face + body part diagram
 - **Color anchor:** clinical bright with green/yellow accent
 - **Text in code:** specific condition + supplement name
 
 ### History / explainer (long-form mystery-documentary / deadpan-history / side-project history channels)
-- **Model:** Flux or Midjourney for cinematic; Ideogram for stylized
+- **Model:** active Studio FAL selection, adapted for cinematic or illustrated output
 - **Register:** cinematic atmospheric (T4 Register B)
 - **Compositions:** single mystery object, rule of thirds
 - **Color anchor:** warm sepia
 - **Text in code:** minimal, sometimes just date
 
 ### Science (science-explainer / science-animation channels)
-- **Model:** Nano Banana for science-explainer style; Ideogram for science-animation style
+- **Model:** active Studio FAL selection, adapted for photoreal or illustrated science output
 - **Register:** clean professional (science-explainer) or geometric illustrated (science-animation)
 - **Compositions:** subject-led with clean negative space
 - **Color anchor:** muted professional or branded blue
 - **Text in code:** concept word
 
 ### Beauty / fashion / makeup
-- **Model:** Nano Banana
+- **Model:** active Studio FAL selection
 - **Register:** authentic-amateur with personality
 - **Compositions:** face + product
 - **Color anchor:** brand-relevant
 - **Text in code:** brand name + price
 
 ### Cooking / food
-- **Model:** Nano Banana for food, Flux for atmosphere
+- **Model:** active Studio FAL selection, adapted for food detail or atmosphere
 - **Register:** food-photography golden warmth
 - **Compositions:** food hero center with negative space
 - **Color anchor:** food-warm browns/cream/red
 - **Text in code:** dish name + technique word
 
 ### Real estate / home (host-led real-estate creator)
-- **Model:** Nano Banana for hosts, Flux for property hero
+- **Model:** active Studio FAL selection; use approved host/property references when available
 - **Register:** mid-polished
 - **Compositions:** host pointing at property, OR property hero
 - **Color anchor:** bright, dollar-amount-relevant
 - **Text in code:** dollar amount + property type
 
 ### Vlog / lifestyle
-- **Model:** Nano Banana
+- **Model:** active Studio FAL selection
 - **Register:** authentic with personality
 - **Compositions:** face + reaction
 - **Color anchor:** personality-driven
@@ -341,7 +305,7 @@ Inputs:
 - **Text in code:** punchline preview
 
 ### Ambient / sleep / focus
-- **Model:** Flux or Midjourney for atmospheric
+- **Model:** active Studio FAL selection with atmospheric constraints
 - **Register:** cinematic moody
 - **Compositions:** atmospheric scene, no subject
 - **Color anchor:** cool blues / warm ambers
@@ -413,7 +377,7 @@ Seed handling: pass explicit seeds for reproducibility, or omit `seed` for guara
 **Goal:** Photorealistic host face base for "MAY 1 — 13 DAYS LATE" thumbnail.
 
 **Setup:**
-- Model: Nano Banana
+- Model: active Studio FAL selection
 - Reference: canonical locked host face (T5 character bible)
 - Aspect: 16:9 1920×1080
 
@@ -431,7 +395,7 @@ The same 38-year-old male tax professional from the reference image, slightly co
 **Goal:** Cinematic brick-built scene for Verse 1 Shot 5.
 
 **Setup:**
-- Model: Midjourney v7
+- Model: active Studio FAL selection
 - No character reference (scene-led)
 - Aspect: 16:9 1920×1080
 
@@ -465,7 +429,7 @@ A single archival object — a weathered leather-bound 1872 ledger book lying on
 **Goal:** Thumbnail for senior health video about glucosamine.
 
 **Setup:**
-- Model: Nano Banana
+- Model: active Studio FAL selection
 - Reference: medical-authority doctor canonical face
 - Aspect: 16:9 1920×1080
 
@@ -497,7 +461,7 @@ The image is the most-seen artifact of any video. Thumbnails appear before the u
 
 The text-in-code rule alone saves hours of regeneration time across the channel's life. AI-rendered text in 2026 is still the #1 source of "this thumbnail looks AI-generated" reactions from viewers. Text-in-code eliminates the issue entirely.
 
-The model selection discipline (Nano Banana for photoreal, Flux for cinematic, Midjourney for art-direction-quality, Ideogram for illustration, DALL-E for surreal) is the difference between competent output and channel-defining output. Wrong model = wrong register = wrong audience signal.
+Model discipline still matters, but Studio's authenticated catalog is the authority. Keep the active FAL selection, adapt the prompt to the required visual register, and change models only through the picker so policy, cost, and persisted state stay aligned.
 
 Most importantly: **the image gen layer is where most "AI YouTube" channels reveal themselves as AI-generated.** Faces drift, text fails, lighting is wrong, register is wrong. The discipline in this skill is the discipline that makes RookCast channels look professional rather than slop.
 
@@ -507,4 +471,4 @@ Current as of April 2026. Update when:
 - New image gen models change quality positioning (every 6 months)
 - AI-text rendering crosses the threshold to be reliable (eliminates text-in-code rule)
 - New niche aesthetic conventions emerge
-- Model API changes affect prompt structure (e.g., Nano Banana adds new control parameters)
+- Catalog capability changes affect prompt structure or reference-conditioning support

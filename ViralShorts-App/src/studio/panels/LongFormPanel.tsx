@@ -5,7 +5,7 @@
  *   1. Channel — pick from registry; Catalyst signals + locked title pattern
  *                surface immediately for the picked channel so the user sees
  *                what works on THIS channel before writing a topic.
- *   2. Outline — topic input + Grok outline (PR #119: enforces channel's
+ *   2. Outline — topic input + direct Anthropic outline (PR #119: enforces channel's
  *                decoded winner pattern via title_template + description_tail).
  *                Editable.
  *   3. Render  — LIVE (PR #120 + #121): kicks a background-job render via
@@ -32,15 +32,6 @@ import {
 import { productionIdempotencyKey } from '../lib/productionIdempotency';
 import { downloadStudioAsset } from '../lib/agentProduction';
 import { useAuthenticatedMediaUrl } from '../hooks/useAuthenticatedMedia';
-
-const FALLBACK_IMAGE_MODELS: AgentModelOption[] = [
-    { id: 'seedream_edit', name: 'Seedream 4.5 Edit', provider: 'fal', recommended: true, intelligence: 5, speed: 4, estimated_unit_usd: 0.04, billing_unit: 'image', description: 'Canonical reference editing and high-fidelity stills.' },
-    { id: 'seedream_v5_lite', name: 'Seedream 5.0 Lite', provider: 'fal', intelligence: 5, speed: 5, estimated_unit_usd: 0.035, billing_unit: 'image', description: 'Fast latest-generation Seedream stills with reference-aware editing.' },
-    { id: 'seedream_v4', name: 'Seedream 4.0', provider: 'fal', intelligence: 4, speed: 5, estimated_unit_usd: 0.03, billing_unit: 'image', description: 'Lower-cost Seedream generation and reference editing.' },
-    { id: 'grok_imagine', name: 'Grok Imagine Quality', provider: 'xAI', intelligence: 5, speed: 5, estimated_unit_usd: 0.05, billing_unit: '1K image', description: '$0.05 per 1K output; premium still lane.' },
-    { id: 'grok_imagine_standard', name: 'Grok Imagine', provider: 'xAI', intelligence: 4, speed: 5, estimated_unit_usd: 0.02, billing_unit: 'image', description: '$0.02 per 1K or 2K output. Lower-cost Grok still lane.' },
-    { id: 'ernie_image', name: 'ERNIE-Image', provider: 'fal', intelligence: 4, speed: 5, estimated_unit_usd: 0.03, billing_unit: 'megapixel', description: '$0.03 per megapixel. Cost scales with output resolution.' },
-];
 
 type LongFormTab = 'channel' | 'outline' | 'render';
 
@@ -287,8 +278,8 @@ export default function LongFormPanel() {
     const [jobFullState, setJobFullState] = useState<JobFullState | null>(null);
     const [renderError, setRenderError] = useState('');
     const [renderStarting, setRenderStarting] = useState(false);
-    const [imageModel, setImageModel] = useState(() => loadImageModelPref(DEFAULT_IMAGE_MODEL));
-    const [imageModelCatalog, setImageModelCatalog] = useState<AgentModelOption[]>(FALLBACK_IMAGE_MODELS);
+    const [imageModel, setImageModel] = useState('');
+    const [imageModelCatalog, setImageModelCatalog] = useState<AgentModelOption[]>([]);
     const [imageModelPickerOpen, setImageModelPickerOpen] = useState(false);
     const [recentJobs, setRecentJobs] = useState<RecentJobRow[]>([]);
     const [recentLoading, setRecentLoading] = useState(false);
@@ -588,7 +579,11 @@ export default function LongFormPanel() {
     }, [getFreshToken, fetchJsonResilient, fetchRecentJobs]);
 
     useEffect(() => {
-        if (!accessToken) return;
+        if (!accessToken) {
+            setImageModelCatalog([]);
+            setImageModel('');
+            return;
+        }
         let cancelled = false;
         void (async () => {
             try {
@@ -599,7 +594,14 @@ export default function LongFormPanel() {
                     { retries: 2, retryDelayMs: 1500 },
                 );
                 if (cancelled || !ok) return;
-                const imageOptions = (Array.isArray(data?.image_models) ? data.image_models : [])
+                // The authenticated server catalog is authoritative. Filtering
+                // instead of merging local rows keeps disabled providers and
+                // unconfigured models out of the picker entirely.
+                const imageOptions: AgentModelOption[] = (Array.isArray(data?.image_models) ? data.image_models : [])
+                    .filter((row: Record<string, unknown>) => (
+                        String(row.provider || '').trim().toLowerCase() === 'fal'
+                        && row.enabled !== false
+                    ))
                     .map((row: Record<string, unknown>) => ({
                         id: String(row.id || row.model_id || '').trim(),
                         name: String(row.name || row.label || row.id || '').trim(),
@@ -612,15 +614,19 @@ export default function LongFormPanel() {
                         speed: typeof row.speed === 'number' ? row.speed : undefined,
                     }))
                     .filter((row: AgentModelOption) => row.id);
-                if (imageOptions.length) {
-                    setImageModelCatalog(
-                        [...FALLBACK_IMAGE_MODELS, ...imageOptions].filter(
-                            (m, i, arr) => arr.findIndex((x) => x.id === m.id) === i,
-                        ),
-                    );
-                }
+                setImageModelCatalog(imageOptions);
+                const preferred = loadImageModelPref(DEFAULT_IMAGE_MODEL);
+                const selected = imageOptions.find((row) => row.id === preferred)?.id
+                    || imageOptions.find((row) => row.id === DEFAULT_IMAGE_MODEL)?.id
+                    || imageOptions[0]?.id
+                    || '';
+                setImageModel(selected);
+                if (selected) saveImageModelPref(selected);
             } catch {
-                /* keep fallback catalog */
+                if (!cancelled) {
+                    setImageModelCatalog([]);
+                    setImageModel('');
+                }
             }
         })();
         return () => { cancelled = true; };
@@ -630,6 +636,10 @@ export default function LongFormPanel() {
     const startRender = useCallback(async () => {
         if (!selectedChannel || !outline) {
             alert('Pick a channel + generate an outline first.');
+            return;
+        }
+        if (!imageModel || !imageModelCatalog.some((row) => row.id === imageModel)) {
+            alert('Choose an enabled FAL image model from the current Studio catalog first.');
             return;
         }
         setRenderStarting(true);
@@ -673,7 +683,7 @@ export default function LongFormPanel() {
         } finally {
             setRenderStarting(false);
         }
-    }, [selectedChannel, outline, imageModel, getFreshToken, fetchJsonResilient, pollJob, fetchRecentJobs]);
+    }, [selectedChannel, outline, imageModel, imageModelCatalog, getFreshToken, fetchJsonResilient, pollJob, fetchRecentJobs]);
 
     // ── Resume an in-progress / past render from the Recent panel ───────
     const resumeJob = useCallback(async (jobId: string) => {
@@ -1622,8 +1632,14 @@ function RenderTab({
     onOpenImageModelPicker: () => void;
 }) {
     const channel = channels.find((c) => c.key === selectedChannel);
-    const imageModelLabel =
-        imageModelCatalog.find((m) => m.id === imageModel)?.name || imageModel;
+    const imageModelLabel = imageModelCatalog.find((m) => m.id === imageModel)?.name
+        || 'No enabled FAL model';
+    const channelImageDefaultLabel = imageModelCatalog.find(
+        (model) => model.id === String(channel?.image_model_default || ''),
+    )?.name || imageModelLabel;
+    const voiceProviderLabel = String(channel?.voice_provider_default || '').toLowerCase().startsWith('fal')
+        ? channel?.voice_provider_default
+        : 'FAL';
     const totalMinutes = outline ? outline.chapters.reduce((s, c) => s + c.minutes, 0) : 0;
     // PR #137: prefer the dynamic cost estimate (computed from outline +
     // real fal pricing); fall back to channel.cost_estimate_usd if the
@@ -1656,14 +1672,20 @@ function RenderTab({
                             <button
                                 type="button"
                                 onClick={onOpenImageModelPicker}
+                                disabled={imageModelCatalog.length === 0}
                                 className="inline-flex items-center gap-1.5 rounded-md border border-zinc-700 bg-zinc-900 px-2.5 py-1 text-xs font-medium text-violet-200 hover:border-violet-500/50 hover:bg-violet-500/10"
                             >
                                 <ImageIcon className="h-3.5 w-3.5" />
                                 {imageModelLabel}
                             </button>
-                            <span className="text-[10px] text-zinc-500">(channel default: {channel.image_model_default})</span>
+                            <span className="text-[10px] text-zinc-500">(channel default: {channelImageDefaultLabel})</span>
                         </div>
-                        <div className="text-sm text-zinc-300"><span className="text-zinc-500">Voice:</span> {channel.voice_provider_default}</div>
+                        {imageModelCatalog.length === 0 && (
+                            <div className="text-xs text-rose-300">
+                                No enabled FAL image model is present in the current server catalog.
+                            </div>
+                        )}
+                        <div className="text-sm text-zinc-300"><span className="text-zinc-500">Voice:</span> {voiceProviderLabel}</div>
                         <div className="text-sm text-zinc-300"><span className="text-zinc-500">Estimated fal cost:</span> ~${totalCost.toFixed(2)}{costEstimate ? <span className="text-[10px] text-zinc-500 ml-2">(stage 1 ${stage1.toFixed(2)} · stage 2 ${stage2.toFixed(2)} · {costEstimate.n_scenes} scenes{costEstimate.pricing_source ? ` · ${costEstimate.pricing_source}` : ''}{typeof costEstimate.non_fal_usd === 'number' && costEstimate.non_fal_usd > 0 ? ` · +$${costEstimate.non_fal_usd.toFixed(2)} non-fal VO` : ''})</span> : null}</div>
                     </div>
                     <div className="rounded-md bg-amber-500/10 border border-amber-500/30 px-4 py-3 text-xs text-amber-200">
@@ -1675,7 +1697,7 @@ function RenderTab({
                     </div>
                     <button
                         onClick={onStart}
-                        disabled={renderStarting}
+                        disabled={renderStarting || !imageModel || imageModelCatalog.length === 0}
                         className="rounded-md bg-violet-500 hover:bg-violet-600 disabled:bg-zinc-800 disabled:text-zinc-500 disabled:cursor-not-allowed px-4 py-2.5 text-sm font-semibold text-white flex items-center justify-center gap-2"
                     >
                         {renderStarting ? (
@@ -1816,7 +1838,7 @@ function SceneApprovalGate({
                 <strong>Stage 2 will burn ~${finalizeCostEstimate} fal</strong>{' '}
                 on{' '}
                 {channel.pipeline_kind === 'v5_episode'
-                    ? 'LTX i2v animation, ElevenLabs narration, mmaudio SFX, 2-pass loudnorm, scene mux + concat with fade-out.'
+                    ? 'LTX i2v animation, FAL MiniMax narration, mmaudio SFX, 2-pass loudnorm, scene mux + concat with fade-out.'
                     : 'fal MiniMax narration, mmaudio ambient bed, thumbnails, ffmpeg ken-burns + 2-pass loudnorm + final compose.'}{' '}
                 {presentCount}/{scenes.length} stills ready.
             </div>

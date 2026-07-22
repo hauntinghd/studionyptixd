@@ -41,7 +41,7 @@ CHANNELS: dict[str, dict[str, Any]] = {
         "fps": 24,
         "image_model_default": "seedream_45",
         "i2v_model_default": "kling_v21_standard",   # cinematic 24fps
-        "voice_provider_default": "elevenlabs",
+        "voice_provider_default": "fal_minimax",
         "voice_id_default": "",                       # falls back to Brian
         "cost_estimate_usd": 120.0,                   # $61 base / $120-160 all-in
         "pipeline_kind": "v5_episode",                # cinematic LTX + EL + silence-kill
@@ -102,7 +102,7 @@ CHANNELS: dict[str, dict[str, Any]] = {
         "fps": 30,
         "image_model_default": "seedream_45",
         "i2v_model_default": "kling_v21_standard",
-        "voice_provider_default": "elevenlabs",
+        "voice_provider_default": "fal_minimax",
         "voice_id_default": "",
         "cost_estimate_usd": 35.0,
         "pipeline_kind": "v5_episode",                # cinematic essay-style episodes
@@ -165,7 +165,7 @@ CHANNELS: dict[str, dict[str, Any]] = {
         "fps": 30,
         "image_model_default": "seedream_45",
         "i2v_model_default": "kling_v21_standard",
-        "voice_provider_default": "elevenlabs",
+        "voice_provider_default": "fal_minimax",
         "voice_id_default": "",
         "cost_estimate_usd": 45.0,
         "pipeline_kind": "v5_episode",                # forensic cinematic with SFX
@@ -454,7 +454,7 @@ CHANNELS: dict[str, dict[str, Any]] = {
         "fps": 30,
         "image_model_default": "seedream_45",
         "i2v_model_default": "kling_v21_standard",
-        "voice_provider_default": "elevenlabs",
+        "voice_provider_default": "fal_minimax",
         "voice_id_default": "",
         "cost_estimate_usd": 1.40,                     # standard skeleton-AI shorts cost
         "system_prompt": (
@@ -480,7 +480,7 @@ CHANNELS: dict[str, dict[str, Any]] = {
         "fps": 30,
         "image_model_default": "seedream_45",
         "i2v_model_default": "creatify_aurora",
-        "voice_provider_default": "elevenlabs",
+        "voice_provider_default": "fal_minimax",
         "voice_id_default": "onwK4e9ZLuTAKqWW03F9",
         "cost_estimate_usd": 22.0,
         "pipeline_kind": "cryptic_verified_rook",
@@ -525,7 +525,7 @@ CHANNELS: dict[str, dict[str, Any]] = {
         "fps": 30,
         "image_model_default": "seedream_45",
         "i2v_model_default": "pixverse_v6",
-        "voice_provider_default": "elevenlabs",
+        "voice_provider_default": "fal_minimax",
         "voice_id_default": "",
         "cost_estimate_usd": 1.20,
         "system_prompt": (

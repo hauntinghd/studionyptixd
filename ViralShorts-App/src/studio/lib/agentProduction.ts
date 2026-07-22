@@ -46,9 +46,70 @@ export type AgentSceneSnapshot = {
         summary?: string;
         issues?: string[];
     } | null;
+    scene_correspondence_qa?: {
+        status?: string;
+        pass?: boolean;
+        confidence?: number;
+        summary?: string;
+        issues?: string[];
+    } | null;
+    i2v_qa?: {
+        status?: string;
+        pass?: boolean;
+        confidence?: number;
+        summary?: string;
+        issues?: string[];
+    } | null;
+    visual_qa?: {
+        version?: number;
+        fingerprint?: string;
+        status?: string;
+        pass?: boolean;
+        require_clip?: boolean;
+        failed_components?: string[];
+        summary?: string;
+    } | null;
+    qa_stale?: boolean;
+    qa_blocked?: boolean;
+    qa_reason?: string | null;
+    image_provider?: string | null;
+    image_model_id?: string | null;
+    fallback_from?: string | null;
+    fallback_reason?: string | null;
+    video_provider?: string | null;
+    video_endpoint?: string | null;
+    video_fallback_from?: string | null;
+    video_requested_model?: string | null;
+    video_provider_failures?: unknown[];
     last_edit?: unknown;
     still_preview_url?: string;
     clip_preview_url?: string | null;
+};
+
+export type AgentQaReport = {
+    version?: number;
+    fingerprint?: string;
+    status?: string;
+    pass?: boolean;
+    score?: number;
+    summary?: string;
+    ready_to_publish?: boolean;
+    checks?: Array<{
+        id?: string;
+        label?: string;
+        status?: string;
+        detail?: string;
+        required?: boolean;
+    }>;
+};
+
+export type AgentQaState = {
+    status?: string;
+    ready_to_post?: boolean;
+    render_fingerprint?: string;
+    render?: AgentQaReport;
+    visual?: AgentQaReport;
+    reasons?: string[];
 };
 
 export type AgentJobSnapshot = {
@@ -71,6 +132,13 @@ export type AgentJobSnapshot = {
     preview_url?: string;
     thumbnail_only?: boolean;
     visual_proof_only?: boolean;
+    ready_to_post?: boolean;
+    can_download?: boolean;
+    render_qa?: AgentQaReport;
+    final_qa?: AgentQaReport;
+    visual_qa?: AgentQaReport;
+    visual_qa_summary?: string;
+    qa_state?: AgentQaState;
     thumbnail_urls?: string[];
     model_url?: string;
     model_urls?: string[];
@@ -157,8 +225,15 @@ export function agentJobSceneApprovalUrl(jobId: string, sceneIdx: number) {
     return agentApi(`/api/studio-agent/jobs/${jobId}/scene/${sceneIdx}/approval`);
 }
 
-export function agentJobSceneRegenerateUrl(jobId: string, sceneIdx: number) {
-    return agentApi(`/api/studio-agent/jobs/${jobId}/scene/${sceneIdx}/regenerate`);
+export function agentJobSceneRegenerateUrl(
+    jobId: string,
+    sceneIdx: number,
+    sessionId?: string | null,
+) {
+    // session_id lets the backend unlock job_spec.render_style when the Art Style
+    // picker changed mid-job (e.g. historical_18th_century → skeleton_host).
+    const qs = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : '';
+    return agentApi(`/api/studio-agent/jobs/${jobId}/scene/${sceneIdx}/regenerate${qs}`);
 }
 
 export function agentJobScenePromptUrl(jobId: string, sceneIdx: number) {

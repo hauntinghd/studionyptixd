@@ -269,7 +269,7 @@ export const UNIFIED_PLANS: UnifiedPlan[] = [
         features: [
             '1,000 credits / month',
             'No daily Studio Agent cap',
-            'Studio Agent + full OpenRouter catalog',
+            'Studio Agent + verified direct Anthropic catalog',
             'Image, animation, voice, and sound usage metered from one wallet',
             'Hard cost approval before paid generation',
         ],
@@ -283,7 +283,7 @@ export const UNIFIED_PLANS: UnifiedPlan[] = [
         features: [
             '2,500 credits / month',
             'Unused monthly credits roll over for one month',
-            'Studio Agent + full OpenRouter catalog',
+            'Studio Agent + verified direct Anthropic catalog',
             'More render and voice headroom',
             'Hard cost approval before paid generation',
         ],

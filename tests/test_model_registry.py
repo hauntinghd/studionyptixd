@@ -2,265 +2,241 @@ from __future__ import annotations
 
 import os
 import unittest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
-from studio_agent import model_registry, openrouter
+from studio_agent import model_registry, openrouter, provider_policy
 
 
 class ModelPolicyTests(unittest.TestCase):
-    def test_grok_build_is_visible_but_not_selectable(self) -> None:
-        catalog = openrouter.build_model_catalog([])
-        row = next(item for item in catalog if item["id"] == "grok-build-0.1")
+    def test_denied_models_are_hidden_and_rejected(self) -> None:
+        self.assertEqual(openrouter.build_model_catalog([]), [])
+        self.assertTrue(openrouter.CURATED_META)
+        self.assertTrue(all("/" not in model_id for model_id in openrouter.CURATED_META))
+        self.assertTrue(all(
+            provider_policy.model_provider(model_id) == "anthropic"
+            for model_id in openrouter.CURATED_META
+        ))
+        for model_id in (
+            "grok-4.5",
+            "x-ai/grok-4.5",
+            "openai/gpt-5.9",
+            "google/gemini-2.5-flash",
+            "deepseek/deepseek-chat",
+        ):
+            with self.subTest(model_id=model_id):
+                with self.assertRaises(model_registry.ModelDisabledError):
+                    model_registry.assert_model_selectable(model_id)
 
-        self.assertFalse(row["selectable"])
-        self.assertTrue(row["disabled"])
-        self.assertFalse(row["recommended"])
-        self.assertIn("not available", str(row["disabled_reason"]).lower())
+    def test_sonnet_five_is_default_and_alias_normalizes(self) -> None:
+        self.assertEqual(openrouter.DEFAULT_MODEL, "claude-sonnet-5")
+        self.assertEqual(openrouter._normalize_anthropic_model("sonnet"), "claude-sonnet-5")
+        self.assertEqual(
+            openrouter._normalize_anthropic_model("anthropic/claude-sonnet-5"),
+            "claude-sonnet-5",
+        )
 
-    def test_grok_build_policy_applies_to_openrouter_slug(self) -> None:
-        with self.assertRaises(model_registry.ModelDisabledError):
-            model_registry.assert_model_selectable("x-ai/grok-build-0.1")
-
-
-class ModelRouteTests(unittest.TestCase):
-    def test_anthropic_normalization_does_not_upgrade_model_version(self) -> None:
+    def test_anthropic_normalization_does_not_upgrade_explicit_version(self) -> None:
         selected = "claude-3-5-haiku-20241022"
         self.assertEqual(openrouter._normalize_anthropic_model(selected), selected)
 
-    def test_bare_grok_prefers_xai_direct(self) -> None:
+
+class ModelRouteTests(unittest.TestCase):
+    def test_direct_anthropic_wins_regardless_of_stale_denied_keys(self) -> None:
         route = model_registry.resolve_model_route(
-            "grok-4.5",
+            "anthropic/claude-sonnet-5",
             xai_configured=True,
             anthropic_configured=True,
             openrouter_configured=True,
         )
-        self.assertEqual(route.route_provider, "xai_direct")
-        self.assertEqual(route.provider_model_id, "grok-4.5")
-        self.assertEqual(route.canonical_model, "grok-4.5")
+        self.assertEqual(route.route_provider, "anthropic_direct")
+        self.assertEqual(route.provider_model_id, "claude-sonnet-5")
 
-    def test_bare_grok_uses_exact_openrouter_route_without_xai_key(self) -> None:
-        route = model_registry.resolve_model_route(
-            "grok-4.5",
-            xai_configured=False,
-            anthropic_configured=True,
-            openrouter_configured=True,
-        )
-        self.assertEqual(route.route_provider, "openrouter")
-        self.assertEqual(route.provider_model_id, "x-ai/grok-4.5")
-        self.assertEqual(route.canonical_model, "grok-4.5")
+    def test_denied_routes_fail_before_provider_selection(self) -> None:
+        for model_id in ("grok-4.5", "openai/gpt-4o", "google/gemini-2.5-pro"):
+            with self.subTest(model_id=model_id):
+                with self.assertRaises(model_registry.ModelDisabledError):
+                    model_registry.resolve_model_route(
+                        model_id,
+                        xai_configured=True,
+                        anthropic_configured=True,
+                        openrouter_configured=True,
+                    )
 
-    def test_provider_qualified_grok_stays_on_openrouter(self) -> None:
-        route = model_registry.resolve_model_route(
-            "x-ai/grok-4.5",
-            xai_configured=True,
-            anthropic_configured=False,
-            openrouter_configured=True,
-        )
-        self.assertEqual(route.route_provider, "openrouter")
-        self.assertEqual(route.provider_model_id, "x-ai/grok-4.5")
-
-    def test_non_claude_selection_never_routes_to_anthropic(self) -> None:
-        route = model_registry.resolve_model_route(
-            "deepseek/deepseek-chat",
-            xai_configured=False,
-            anthropic_configured=True,
-            openrouter_configured=True,
-        )
-        self.assertEqual(route.route_provider, "openrouter")
-        self.assertEqual(route.provider_model_id, "deepseek/deepseek-chat")
-
-    def test_bare_claude_uses_same_model_through_openrouter(self) -> None:
-        route = model_registry.resolve_model_route(
-            "claude-sonnet-4-6",
-            xai_configured=False,
-            anthropic_configured=False,
-            openrouter_configured=True,
-        )
-        self.assertEqual(route.route_provider, "openrouter")
-        self.assertEqual(route.provider_model_id, "anthropic/claude-sonnet-4.6")
-        self.assertEqual(route.canonical_model, "claude-sonnet-4-6")
-
-    def test_missing_matching_provider_does_not_substitute_model(self) -> None:
+    def test_missing_anthropic_key_never_falls_back_to_openrouter(self) -> None:
         with self.assertRaises(model_registry.ModelUnavailableError):
             model_registry.resolve_model_route(
-                "grok-4.5",
-                xai_configured=False,
-                anthropic_configured=True,
-                openrouter_configured=False,
+                "claude-sonnet-5",
+                xai_configured=True,
+                anthropic_configured=False,
+                openrouter_configured=True,
             )
 
 
+class _Response:
+    def __init__(
+        self,
+        payload: dict | None = None,
+        *,
+        error: Exception | None = None,
+        status_code: int = 200,
+        text: str = "",
+    ) -> None:
+        self.status_code = status_code
+        self.text = text
+        self._payload = payload or {}
+        self._error = error
+
+    def raise_for_status(self) -> None:
+        if self._error:
+            raise self._error
+
+    def json(self):
+        return self._payload
+
+
+class _Client:
+    def __init__(self, *, get_response: _Response | None = None, post_response: _Response | None = None) -> None:
+        self.get_response = get_response or _Response()
+        self.post_response = post_response or _Response()
+        self.posts: list[tuple[str, dict]] = []
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    async def get(self, url, *, headers):
+        return self.get_response
+
+    async def post(self, url, *, headers, json):
+        self.posts.append((url, dict(json)))
+        return self.post_response
+
+
 class OpenRouterIntegrationPolicyTests(unittest.IsolatedAsyncioTestCase):
-    async def test_live_anthropic_models_are_not_limited_to_curated_ids(self) -> None:
-        class Response:
-            status_code = 200
+    def setUp(self) -> None:
+        openrouter._LAST_KNOWN_ANTHROPIC_MODELS.clear()
+        openrouter._MODELS_CACHE.update({"at": 0.0, "by_id": {}})
 
-            def raise_for_status(self) -> None:
-                return None
-
-            def json(self):
-                return {
-                    "data": [
-                        {
-                            "id": "claude-future-9",
-                            "display_name": "Claude Future 9",
-                            "context_window": 500_000,
-                        }
-                    ]
-                }
-
-        class Client:
-            async def __aenter__(self):
-                return self
-
-            async def __aexit__(self, exc_type, exc, tb):
-                return False
-
-            async def get(self, url, *, headers):
-                return Response()
-
+    async def test_live_catalog_is_anthropic_only_ordered_and_has_no_ghost_rows(self) -> None:
+        client = _Client(get_response=_Response({
+            "data": [
+                {"id": "claude-future-9", "display_name": "Claude Future 9", "context_window": 500_000},
+                {"id": "openai/gpt-5.9", "display_name": "Denied"},
+                {"id": "claude-sonnet-4-6", "display_name": "Claude Sonnet 4.6"},
+                {"id": "claude-sonnet-5", "display_name": "Claude Sonnet 5"},
+            ]
+        }))
         with (
-            patch.object(openrouter, "anthropic_api_key", return_value="anthropic-key"),
-            patch.object(openrouter, "xai_api_key", return_value=""),
-            patch.object(openrouter, "_openrouter_api_key_optional", return_value=""),
-            patch.object(openrouter.httpx, "AsyncClient", return_value=Client()),
+            patch.dict(os.environ, {"ANTHROPIC_API_KEY": "account-a", "CLAUDE_API_KEY": ""}, clear=False),
+            patch.object(openrouter.httpx, "AsyncClient", return_value=client),
         ):
             rows = await openrouter.list_models()
+            catalog = openrouter.build_model_catalog(rows)
 
-        future = next(row for row in rows if row.get("id") == "claude-future-9")
-        self.assertEqual(future["name"], "Claude Future 9")
-        self.assertEqual(future["provider"], "Anthropic")
+        self.assertEqual(
+            [row["id"] for row in catalog],
+            ["claude-sonnet-5", "claude-sonnet-4-6", "claude-future-9"],
+        )
+        self.assertNotIn("claude-opus-4-8", {row["id"] for row in catalog})
+        self.assertTrue(all(row["provider"] == "Anthropic" for row in catalog))
+        self.assertTrue(all(row["prompt_price_per_m"] is None for row in catalog))
 
-    async def test_model_catalog_aggregates_direct_and_marketplace_models(self) -> None:
-        class Response:
-            status_code = 200
-
-            def raise_for_status(self) -> None:
-                return None
-
-            def json(self):
-                return {
-                    "data": [
-                        {
-                            "id": "openai/gpt-5.9",
-                            "name": "GPT 5.9",
-                            "architecture": {"modality": "text->text"},
-                        }
-                    ]
-                }
-
-        class Client:
-            async def __aenter__(self):
-                return self
-
-            async def __aexit__(self, exc_type, exc, tb):
-                return False
-
-            async def get(self, url, *, headers):
-                return Response()
-
-        with (
-            patch.object(openrouter, "anthropic_api_key", return_value=""),
-            patch.object(openrouter, "xai_api_key", return_value="xai-key"),
-            patch.object(openrouter, "_openrouter_api_key_optional", return_value="openrouter-key"),
-            patch.object(
-                openrouter,
-                "list_xai_models",
-                AsyncMock(return_value=[{"id": "grok-4.5", "name": "Grok 4.5", "provider": "xAI"}]),
-            ),
-            patch.object(openrouter.httpx, "AsyncClient", return_value=Client()),
-        ):
-            rows = await openrouter.list_models()
-
-        ids = {str(row.get("id") or "") for row in rows}
-        self.assertIn("grok-4.5", ids)
-        self.assertIn("openai/gpt-5.9", ids)
-
-    async def test_disabled_model_is_rejected_before_provider_request(self) -> None:
+    async def test_no_anthropic_key_returns_empty_without_constructing_client(self) -> None:
         env = {
-            "XAI_API_KEY": "test-xai-key",
-            "X_AI_API_KEY": "",
-            "GROK_API_KEY": "",
-            "OPENROUTER_API_KEY": "",
-            "OPEN_ROUTER_API_KEY": "",
             "ANTHROPIC_API_KEY": "",
             "CLAUDE_API_KEY": "",
+            "XAI_API_KEY": "stale",
+            "OPENROUTER_API_KEY": "stale",
         }
-        with patch.dict(os.environ, env, clear=False):
-            with self.assertRaises(model_registry.ModelDisabledError):
-                await openrouter.chat_completion(
-                    messages=[{"role": "user", "content": "hello"}],
-                    model="grok-build-0.1",
-                )
+        with (
+            patch.dict(os.environ, env, clear=False),
+            patch.object(openrouter.httpx, "AsyncClient", side_effect=AssertionError("network attempted")),
+        ):
+            self.assertEqual(await openrouter.list_models(), [])
 
-    async def test_explicit_anthropic_model_does_not_fall_back_to_haiku(self) -> None:
-        calls: list[str] = []
+    async def test_last_known_valid_catalog_is_scoped_to_same_key(self) -> None:
+        live = _Client(get_response=_Response({"data": [{"id": "claude-sonnet-5"}]}))
+        failed = _Client(get_response=_Response(error=RuntimeError("offline")))
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "account-a", "CLAUDE_API_KEY": ""}, clear=False):
+            with patch.object(openrouter.httpx, "AsyncClient", return_value=live):
+                self.assertEqual([row["id"] for row in await openrouter.list_models()], ["claude-sonnet-5"])
+            with patch.object(openrouter.httpx, "AsyncClient", return_value=failed):
+                cached = await openrouter.list_models()
+        self.assertEqual(cached[0]["catalog_source"], "last_known_valid")
 
-        class Response:
-            status_code = 404
-            text = "model not found"
+        with (
+            patch.dict(os.environ, {"ANTHROPIC_API_KEY": "account-b", "CLAUDE_API_KEY": ""}, clear=False),
+            patch.object(openrouter.httpx, "AsyncClient", return_value=failed),
+        ):
+            self.assertEqual(await openrouter.list_models(), [])
 
-        class Client:
-            async def __aenter__(self):
-                return self
-
-            async def __aexit__(self, exc_type, exc, tb):
-                return False
-
-            async def post(self, url, *, headers, json):
-                calls.append(str(json.get("model") or ""))
-                return Response()
-
+    async def test_denied_model_never_constructs_network_client(self) -> None:
         env = {
-            "XAI_API_KEY": "",
-            "X_AI_API_KEY": "",
-            "GROK_API_KEY": "",
-            "OPENROUTER_API_KEY": "",
-            "OPEN_ROUTER_API_KEY": "",
-            "ANTHROPIC_API_KEY": "test-anthropic-key",
+            "XAI_API_KEY": "stale-xai",
+            "OPENROUTER_API_KEY": "stale-openrouter",
+            "ANTHROPIC_API_KEY": "anthropic-key",
             "CLAUDE_API_KEY": "",
         }
         with (
             patch.dict(os.environ, env, clear=False),
-            patch.object(openrouter.httpx, "AsyncClient", return_value=Client()),
+            patch.object(openrouter.httpx, "AsyncClient", side_effect=AssertionError("network attempted")),
+        ):
+            with self.assertRaises(model_registry.ModelDisabledError):
+                await openrouter.chat_completion(
+                    messages=[{"role": "user", "content": "hello"}],
+                    model="grok-4.5",
+                )
+
+    async def test_sonnet_five_uses_release_max_tokens_and_omits_manual_controls(self) -> None:
+        client = _Client(post_response=_Response({
+            "id": "msg-test",
+            "model": "claude-sonnet-5",
+            "content": [{"type": "text", "text": "ok"}],
+            "usage": {"input_tokens": 1, "output_tokens": 1},
+        }))
+        with (
+            patch.dict(os.environ, {"ANTHROPIC_API_KEY": "account-a", "CLAUDE_API_KEY": ""}, clear=False),
+            patch.object(openrouter.httpx, "AsyncClient", return_value=client),
+        ):
+            result = await openrouter.chat_completion(
+                messages=[{"role": "user", "content": "hello"}],
+                model="claude-sonnet-5",
+                temperature=0.91,
+                reasoning_depth="deep",
+                max_tokens=777,
+            )
+
+        self.assertEqual(result["model"], "claude-sonnet-5")
+        payload = client.posts[0][1]
+        self.assertEqual(payload["max_tokens"], 777)
+        for denied_key in ("temperature", "top_p", "top_k", "thinking", "reasoning"):
+            self.assertNotIn(denied_key, payload)
+
+    async def test_explicit_anthropic_model_does_not_fall_back_to_another_claude(self) -> None:
+        client = _Client(post_response=_Response(status_code=404, text="model not found"))
+        with (
+            patch.dict(os.environ, {"ANTHROPIC_API_KEY": "account-a", "CLAUDE_API_KEY": ""}, clear=False),
+            patch.object(openrouter.httpx, "AsyncClient", return_value=client),
         ):
             with self.assertRaises(RuntimeError):
                 await openrouter.chat_completion(
                     messages=[{"role": "user", "content": "hello"}],
                     model="claude-opus-4-8",
                 )
+        self.assertEqual([payload["model"] for _, payload in client.posts], ["claude-opus-4-8"])
 
-        self.assertEqual(calls, ["claude-opus-4-8"])
-
-    def test_openrouter_route_wins_for_non_claude_even_with_anthropic_key(self) -> None:
-        env = {
-            "XAI_API_KEY": "",
-            "X_AI_API_KEY": "",
-            "GROK_API_KEY": "",
-            "OPENROUTER_API_KEY": "test-openrouter-key",
-            "OPEN_ROUTER_API_KEY": "",
-            "ANTHROPIC_API_KEY": "test-anthropic-key",
+    def test_effective_denied_keys_are_inert(self) -> None:
+        with patch.dict(os.environ, {
+            "XAI_API_KEY": "stale-xai",
+            "OPENROUTER_API_KEY": "stale-openrouter",
+            "ANTHROPIC_API_KEY": "anthropic-key",
             "CLAUDE_API_KEY": "",
-        }
-        with patch.dict(os.environ, env, clear=False):
-            route = openrouter.resolve_chat_route("openai/gpt-4o")
-        self.assertEqual(route.route_provider, "openrouter")
-        self.assertEqual(route.provider_model_id, "openai/gpt-4o")
-
-    def test_grok_with_openrouter_only_uses_openrouter_slug(self) -> None:
-        env = {
-            "XAI_API_KEY": "",
-            "X_AI_API_KEY": "",
-            "GROK_API_KEY": "",
-            "OPENROUTER_API_KEY": "test-openrouter-key",
-            "OPEN_ROUTER_API_KEY": "",
-            "ANTHROPIC_API_KEY": "",
-            "CLAUDE_API_KEY": "",
-        }
-        with patch.dict(os.environ, env, clear=False):
-            route = openrouter.resolve_chat_route("grok-4.5")
-        self.assertEqual(route.route_provider, "openrouter")
-        self.assertEqual(route.provider_model_id, "x-ai/grok-4.5")
+        }, clear=False):
+            self.assertEqual(openrouter.xai_api_key(), "")
+            self.assertEqual(openrouter._openrouter_api_key_optional(), "")
+            self.assertTrue(openrouter.any_llm_provider_configured())
 
 
 if __name__ == "__main__":

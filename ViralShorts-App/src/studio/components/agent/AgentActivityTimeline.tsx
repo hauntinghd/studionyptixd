@@ -1,5 +1,5 @@
 /**
- * Professional Grok-style activity timeline for Studio Agent turns:
+ * Professional activity timeline for Studio Agent turns:
  * "Thinking about your request · 3s" / "Searching for … · 10s" with nested result rows.
  */
 import { useEffect, useState } from 'react';

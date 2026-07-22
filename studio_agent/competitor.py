@@ -30,6 +30,8 @@ from typing import Any, Callable
 
 import httpx
 
+from studio_agent import provider_policy
+
 ROOT = Path(__file__).resolve().parents[1]
 WORK_ROOT = Path(__import__("os").environ.get("STUDIO_AGENT_COMPETITOR_DIR", str(ROOT / "data" / "competitor_analysis")))
 
@@ -205,7 +207,9 @@ def _fal_key() -> str:
 
 
 def _openrouter_key() -> str:
-    return str(os.getenv("OPENROUTER_API_KEY") or "").strip()
+    # Compatibility helper: Studio provider policy denies OpenRouter even when
+    # a stale key remains configured.
+    return ""
 
 
 def _vision_prompt_text(*, source_name: str, content_format: str) -> str:
@@ -238,50 +242,16 @@ def _summarize_keyframe_visuals_openrouter(
     prompt_text: str,
     content_format: str,
 ) -> dict[str, Any]:
-    api_key = _openrouter_key()
-    if not api_key:
-        return {"error": "openrouter_not_configured", "summary": "", "frames_reviewed": len(picks)}
-    model = str(os.getenv("STUDIO_AGENT_VISION_MODEL", "google/gemini-2.5-flash")).strip()
-    content: list[dict[str, Any]] = []
-    for path in picks:
-        try:
-            encoded = base64.standard_b64encode(Path(path).read_bytes()).decode("ascii")
-        except Exception as exc:
-            return {"error": f"frame_read_failed:{exc}", "summary": "", "frames_reviewed": 0}
-        content.append({
-            "type": "image_url",
-            "image_url": {"url": f"data:image/jpeg;base64,{encoded}"},
-        })
-    content.append({"type": "text", "text": prompt_text})
-    try:
-        with httpx.Client(timeout=90.0) as client:
-            resp = client.post(
-                "https://openrouter.ai/api/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": model,
-                    "temperature": 0.1,
-                    "messages": [{"role": "user", "content": content}],
-                },
-            )
-        resp.raise_for_status()
-        from studio_agent.stt_utils import httpx_json_dict
-
-        payload = httpx_json_dict(resp)
-        choices = payload.get("choices") if isinstance(payload, dict) else None
-        message = choices[0].get("message") if isinstance(choices, list) and choices else {}
-        summary = str((message or {}).get("content") or "").strip()
-        if not summary:
-            return {"error": "empty_vision_summary", "summary": "", "frames_reviewed": len(picks), "model": model}
-        return {"summary": summary, "frames_reviewed": len(picks), "model": model, "provider": "openrouter"}
-    except Exception as exc:
-        return {"error": str(exc)[:240], "summary": "", "frames_reviewed": len(picks), "model": model}
+    _ = (prompt_text, content_format)
+    return {
+        "error": "openrouter_disabled_by_provider_policy",
+        "summary": "",
+        "frames_reviewed": len(picks),
+    }
 
 
 def _summarize_keyframe_visuals_fal(picks: list[str], *, prompt_text: str) -> dict[str, Any]:
+    provider_policy.assert_provider_allowed("fal", provider_policy.SEMANTIC_QA_CAPABILITY)
     fal_key = _fal_key()
     if not fal_key:
         return {"error": "fal_not_configured", "summary": "", "frames_reviewed": len(picks)}
@@ -595,37 +565,12 @@ def _parse_storytelling_json(raw: str, *, model: str, provider: str) -> dict[str
 
 
 def _analyze_storytelling_openrouter(prompt: str) -> dict[str, Any]:
-    api_key = _openrouter_key()
-    if not api_key:
-        return {"error": "openrouter_not_configured", "summary": ""}
-    model = str(os.getenv("STUDIO_AGENT_ANALYSIS_MODEL", "anthropic/claude-haiku-4.5")).strip()
-    try:
-        with httpx.Client(timeout=120.0) as client:
-            resp = client.post(
-                "https://openrouter.ai/api/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": model,
-                    "temperature": 0.2,
-                    "messages": [{"role": "user", "content": prompt}],
-                },
-            )
-        resp.raise_for_status()
-        from studio_agent.stt_utils import httpx_json_dict
-
-        payload = httpx_json_dict(resp)
-        choices = payload.get("choices") if isinstance(payload, dict) else None
-        message = choices[0].get("message") if isinstance(choices, list) and choices else {}
-        raw = str((message or {}).get("content") or "").strip()
-        return _parse_storytelling_json(raw, model=model, provider="openrouter")
-    except Exception as exc:
-        return {"error": str(exc)[:240], "summary": ""}
+    _ = prompt
+    return {"error": "openrouter_disabled_by_provider_policy", "summary": ""}
 
 
 def _analyze_storytelling_fal(prompt: str) -> dict[str, Any]:
+    provider_policy.assert_provider_allowed("fal", provider_policy.SEMANTIC_QA_CAPABILITY)
     fal_key = _fal_key()
     if not fal_key:
         return {"error": "fal_not_configured", "summary": ""}
@@ -709,7 +654,6 @@ def analyze_storytelling_packaging(
     runners = {
         "anthropic": lambda: _analyze_storytelling_anthropic(prompt),
         "fal": lambda: _analyze_storytelling_fal(prompt),
-        "openrouter": lambda: _analyze_storytelling_openrouter(prompt),
     }
     for name in order:
         runner = runners.get(name)

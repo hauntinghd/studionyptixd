@@ -48,6 +48,7 @@ _ARTIFACT_TERMS = (
 # Patterns that historically caused fused glass / pods / void / sludge.
 BANNED_PROMPT_SUBSTRINGS = (
     "strict repair",
+    "master regenerate",
     "catalyst watchout",
     "exactly one skeleton",
     "shared bubble",
@@ -67,11 +68,23 @@ BANNED_PROMPT_SUBSTRINGS = (
     "lip sync",
 )
 
-_FAIL_VARIANT_BRIEFS = (
-    "Apartment hallway at dusk; medium-wide; hosts stand apart; thin glass on bones only; empty hands",
-    "City apartment living room night; medium shot; clear air gap; separate glass skins; no pods",
-    "Narrow corridor window light; wide stance; left offers open hands; right half-step back; no shared bubble",
-    "Doorway threshold dusk; medium-wide; two ivory hosts; empty palms; no chest glow; physical walls visible",
+_RETRY_COMPOSITION_VARIANTS = (
+    "medium-wide eye-level view with visible room depth",
+    "wide three-quarter view with clear foreground and background",
+    "medium side angle with doorway depth and grounded floor",
+    "wide frontal view with asymmetric blocking and physical walls",
+)
+_RETRY_CAMERA_TAGS = (
+    "medium-wide eye-level",
+    "wide three-quarter angle",
+    "medium side angle",
+    "wide frontal asymmetric",
+)
+
+_REPAIR_META_RE = re.compile(
+    r"(?i)\b(?:fresh|semantic|visual|scene[- ]correspondence)?\s*qa\s*(?:failed|failure|finding)?\b|"
+    r"\b(?:fix|repair|regenerate|retry)\s+(?:this|the|scene|still|image)\b|"
+    r"\b(?:artifact(?:ing|s)?|duplicate[- ]adjacent|narrative mismatch)\b"
 )
 
 
@@ -88,6 +101,16 @@ def scrub_banned_prompt_text(text: str) -> str:
     for banned in BANNED_PROMPT_SUBSTRINGS:
         out = re.sub(re.escape(banned), " ", out, flags=re.I)
     return re.sub(r"\s+", " ", out).strip(" ,.;")
+
+
+def _clip_at_word(text: str, limit: int) -> str:
+    clean = re.sub(r"\s+", " ", str(text or "")).strip(" ,.;")
+    if len(clean) <= limit:
+        return clean
+    clipped = clean[: max(1, int(limit))].rstrip(" ,.;")
+    if " " in clipped:
+        clipped = clipped.rsplit(" ", 1)[0].rstrip(" ,.;")
+    return clipped
 
 
 def resolve_hosts_for_scene(
@@ -111,30 +134,77 @@ def resolve_hosts_for_scene(
     )
 
 
+def narrative_scene_anchor(
+    *,
+    scene_action: str = "",
+    visual_brief: str = "",
+    narration: str = "",
+    location: str = "",
+    max_chars: int = 132,
+) -> str:
+    """Keep the scene's physical story beat while dropping repair instructions.
+
+    Retry variants may change seed/camera blocking, but they must not replace a
+    courthouse, kitchen, doorway, or character action with a generic hallway.
+    """
+
+    explicit_location = scrub_banned_prompt_text(_REPAIR_META_RE.sub(" ", str(location or "")))
+    source = next(
+        (
+            str(value or "").strip()
+            for value in (scene_action, visual_brief, narration)
+            if str(value or "").strip()
+        ),
+        "",
+    )
+    source = scrub_banned_prompt_text(_REPAIR_META_RE.sub(" ", source))
+    anchor = compact_skeleton_scene_direction(source, max_chars=max(90, int(max_chars or 132)))
+    if explicit_location:
+        loc = compact_skeleton_scene_direction(explicit_location, max_chars=72)
+        if loc.lower() not in anchor.lower():
+            anchor = f"{loc}; {anchor}"
+    anchor = re.sub(r"\s+", " ", anchor).strip(" ,.;")
+    return anchor[: max(90, int(max_chars or 132))].rstrip(" ,.;")
+
+
 def short_artifact_restage_brief(
     *,
     cast_count: int = 1,
     location: str = "",
+    story_action: str = "",
     aspect_hint: str = "",
     attempt: int = 0,
 ) -> str:
-    """Compact physical brief used when creator/QA flags artifacting."""
-    loc = re.sub(r"\s+", " ", str(location or "").strip())
-    if not loc:
-        idx = max(0, int(attempt or 0)) % len(_FAIL_VARIANT_BRIEFS)
-        if int(cast_count or 1) >= 2:
-            return scrub_banned_prompt_text(_FAIL_VARIANT_BRIEFS[idx])[:280]
-        loc = "Physical interior with visible walls and floor"
+    """Compact, narrative-preserving physical brief for one QA retry."""
+
+    anchor = narrative_scene_anchor(
+        scene_action=story_action,
+        location=location,
+        max_chars=132,
+    )
+    if not anchor:
+        anchor = "Physical interior with visible walls and floor; scene-specific opening pose"
     aspect = re.sub(r"\s+", " ", str(aspect_hint or "").strip())
-    prefix = f"{loc}; medium-wide"
-    if aspect:
-        prefix = f"{aspect}; {prefix}"
+    variant = _RETRY_COMPOSITION_VARIANTS[
+        max(0, int(attempt or 0)) % len(_RETRY_COMPOSITION_VARIANTS)
+    ]
     if int(cast_count or 1) >= 2:
-        return f"{prefix}. {dual_host_staging_brief()}"[:280]
-    return scrub_banned_prompt_text(
-        f"{prefix}; one ivory skeleton; thin glass skin on bones only; "
-        "empty hands; no chest orb/pod/dome"
-    )[:280]
+        staging = (
+            "two ivory hosts stand apart; clear air gap between torsos; "
+            "separate thin glass skins; left open palms, right half-step back"
+        )
+    else:
+        staging = (
+            "one ivory skeleton; thin glass skin on bones only; "
+            "empty hands away from torso; no chest light"
+        )
+    aspect_prefix = f"{aspect}; " if aspect else ""
+    anchor_budget = max(
+        70,
+        280 - len(aspect_prefix) - len(variant) - len(staging) - 4,
+    )
+    prefix = f"{aspect_prefix}{_clip_at_word(anchor, anchor_budget)}; {variant}"
+    return f"{prefix}; {staging}"[:280].rstrip(" ,.;")
 
 
 def fail_variant_brief(*, cast_count: int = 1, attempt: int = 0) -> str:
@@ -205,14 +275,25 @@ def artifact_fix_plan(
         scene_action=scene_action,
         user_feedback=user_feedback,
     )
+    anchor = narrative_scene_anchor(
+        scene_action=scene_action,
+        visual_brief=visual_brief,
+        narration=narration,
+        location=location,
+    )
     action = short_artifact_restage_brief(
         cast_count=hosts,
         location=location,
+        story_action=anchor,
         aspect_hint=aspect_ratio,
         attempt=attempt,
     )
+    variant_id = int(attempt or 0) % len(_RETRY_COMPOSITION_VARIANTS)
+    camera_tag = _RETRY_CAMERA_TAGS[variant_id]
+    prompt_anchor = _clip_at_word(anchor, max(58, 92 - len(camera_tag)))
+    prompt_action = f"{prompt_anchor}, {camera_tag}"
     still_prompt = compose_short_still_prompt(
-        scene_action=action,
+        scene_action=prompt_action,
         outfit=outfit,
         topic=topic,
         cast_count=hosts,
@@ -226,6 +307,7 @@ def artifact_fix_plan(
     return {
         "method": "master_regenerate",  # never edit_broken_still
         "cast_count": hosts,
+        "narrative_anchor": anchor,
         "scene_action": action,
         "still_prompt": still_prompt,
         "motion_prompt": motion_prompt,
@@ -233,6 +315,7 @@ def artifact_fix_plan(
         "still_prompt_len": len(still_prompt),
         "motion_prompt_len": len(motion_prompt),
         "attempt": int(attempt or 0),
+        "variant_id": variant_id,
         "rules": [
             "master_regenerate_only",
             "prompt_max_300_chars",

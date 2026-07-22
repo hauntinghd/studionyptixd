@@ -19,6 +19,7 @@ def _app(
     commit_fails: bool = False,
     receipt_save_fails: bool = False,
     max_video_bytes: int = 1024,
+    fal_ai_key: str = "test-key",
 ):
     jobs: dict[str, dict] = {}
     events: list[str] = []
@@ -105,8 +106,7 @@ def _app(
             commit_reservation=commit,
             storage_root=tmp_path / "thumbs",
             idempotency_ledger=ledger,
-            fal_ai_key="test-key",
-            pikzels_api_key="",
+            fal_ai_key=fal_ai_key,
             max_video_bytes=max_video_bytes,
             probe_video_duration=probe,
             extract_frame_image=extract,
@@ -161,6 +161,88 @@ def test_generation_is_idempotent_billed_before_provider_and_owner_scoped(tmp_pa
     output_url = jobs[job_id]["output_url"]
     assert client.get(output_url, headers=_auth("alice")).status_code == 200
     assert client.get(output_url, headers=_auth("bob")).status_code == 404
+
+
+def test_model_catalog_exposes_only_explicit_fal_native_models(tmp_path: Path):
+    client, _jobs, events = _app(tmp_path)
+    response = client.get("/api/thumbnails/models", headers=_auth())
+
+    assert response.status_code == 200
+    models = response.json()["models"]
+    assert [row["id"] for row in models] == list(thumb.THUMBNAIL_MODEL_ORDER)
+    assert events == []
+    for row in models:
+        model_id = row["id"]
+        profile = dict(thumb.CREATIVE_IMAGE_MODEL_MAP[model_id])
+        assert profile["provider"] == "fal"
+        assert str(profile["fal_endpoint_id"]).startswith("fal-ai/")
+        assert not thumb._thumbnail_model_is_banned(model_id)
+
+
+def test_saved_pikzels_key_cannot_create_a_thumbnail_route(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("PIKZELS_API_KEY", "saved-but-inert")
+    client, _jobs, events = _app(tmp_path, fal_ai_key="")
+
+    assert client.get("/api/thumbnails/models", headers=_auth()).json()["models"] == []
+    response = client.post(
+        "/api/thumbnails/generate",
+        headers={**_auth(), "X-Idempotency-Key": "no-fal-route"},
+        json=_generate_payload(),
+    )
+    assert response.status_code == 503
+    assert response.json()["detail"] == "FAL thumbnail image provider is not configured"
+    assert events == []
+
+
+@pytest.mark.parametrize(
+    "model_id",
+    [
+        "grok_imagine",
+        "xai/grok-imagine-image",
+        "imagen4_fast",
+        "google/imagen-4",
+        "gemini_image",
+        "nano_banana_pro",
+    ],
+)
+def test_banned_thumbnail_model_is_rejected_before_billing_or_provider(
+    tmp_path: Path,
+    model_id: str,
+):
+    client, jobs, events = _app(tmp_path)
+    payload = {**_generate_payload(), "image_model": model_id}
+
+    response = client.post(
+        "/api/thumbnails/generate",
+        headers={**_auth(), "X-Idempotency-Key": f"blocked-{model_id}"},
+        json=payload,
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Thumbnail model is disabled by provider policy"
+    assert events == []
+    assert jobs == {}
+
+
+def test_render_boundary_rejects_banned_model_before_executor_call(tmp_path: Path):
+    _client, _jobs, events = _app(tmp_path)
+    runtime = thumb._DEFAULT_RUNTIME
+    assert runtime is not None
+
+    with pytest.raises(RuntimeError, match="disabled by provider policy"):
+        asyncio.run(
+            thumb._render_thumbnail_image(
+                runtime,
+                "safe prompt",
+                "",
+                str(tmp_path / "blocked.png"),
+                user={"id": "alice"},
+                image_model="grok_imagine",
+            )
+        )
+
+    assert events == []
+    assert not (tmp_path / "blocked.png").exists()
 
 
 def test_provider_failure_releases_credit_hold(tmp_path: Path):

@@ -1,7 +1,7 @@
 """ZeroTier Pope S05 — Barry Lost using REAL comic panels (Tier P).
 
 Same script as S04 Pope winner — visuals from actual DC panel scans, not Seedream.
-fal spend: ~$0.10 MiniMax VO only (or $0 with --elevenlabs).
+FAL spend: ~$0.10 for MiniMax narration.
 
 Before render:
   1. Drop 4 panel images into D:/recaps/ZeroTier/pope_s05_BarryLost_panels/panels/
@@ -9,7 +9,6 @@ Before render:
 
 Run:
   python zerotier_private/build_pope_s05_barry_panels.py
-  python zerotier_private/build_pope_s05_barry_panels.py --elevenlabs
 """
 from __future__ import annotations
 
@@ -97,15 +96,6 @@ def _load_env() -> None:
 
 
 def main() -> None:
-    import argparse
-
-    ap = argparse.ArgumentParser()
-    ap.add_argument(
-        "--elevenlabs",
-        action="store_true",
-        help="Use ElevenLabs for VO ($0 fal)",
-    )
-    args = ap.parse_args()
     _load_env()
 
     panels_dir = OUT_ROOT / "panels"
@@ -125,13 +115,11 @@ def main() -> None:
         json.dumps(SCRIPT, ensure_ascii=False, indent=2), encoding="utf-8"
     )
 
-    vo = "elevenlabs" if args.elevenlabs else "minimax"
-    print(f"Rendering Tier P (panels + Ken Burns) -> {OUT_ROOT}  vo={vo}", flush=True)
+    print(f"Rendering Tier P (panels + Ken Burns) -> {OUT_ROOT}  vo=fal_minimax", flush=True)
     result = render_comic_panel_short(
         script_json=SCRIPT,
         workspace=OUT_ROOT,
         final_filename=FINAL_NAME,
-        vo_provider=vo,
     )
     print(json.dumps(result, indent=2), flush=True)
 

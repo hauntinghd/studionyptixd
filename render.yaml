@@ -50,7 +50,7 @@ services:
       - key: IMAGE_PROVIDER_ORDER
         value: fal
       - key: XAI_IMAGE_FALLBACK_ENABLED
-        value: "true"
+        value: "false"
       - key: HIDREAM_ENABLED
         value: "false"
       - key: HIDREAM_EDIT_ENABLED
@@ -69,7 +69,7 @@ services:
         value: "false"
       - key: WAITLIST_REQUIRE_STRIPE_PAYMENT
         value: "false"
-      - key: XAI_API_KEY
+      - key: ANTHROPIC_API_KEY
         sync: false
       - key: ALGROW_API_KEY
         sync: false

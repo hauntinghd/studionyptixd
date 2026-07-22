@@ -6,10 +6,10 @@ import concurrent.futures
 import hashlib
 import hmac
 import json
+import math
 import os
 import re
 import shutil
-import subprocess
 import sys
 import threading
 import time
@@ -18,7 +18,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-from studio_agent import production_budget, production_costs, store
+from studio_agent import production_budget, production_costs, provider_policy, store
 from studio_agent.fs_paths import skeleton_output_root
 from studio_agent.production_slots import production_slot
 from studio_agent import skills as skill_loader
@@ -30,9 +30,15 @@ from studio_agent.runpod_contract import (
     runpod_production_enabled,
     semantic_dispatch_id,
 )
-from backend_settings import FAL_PUBLIC_RENDERS_ENABLED, XAI_PUBLIC_RENDERS_ENABLED
+from backend_settings import FAL_PUBLIC_RENDERS_ENABLED
 
 ROOT = Path(__file__).resolve().parents[1]
+# Packaged app / worker processes may start with a different cwd. Keep repo root
+# importable so tool handlers like `studio_analytics_router` never fail with
+# ModuleNotFoundError mid tool-call.
+_root_str = str(ROOT)
+if _root_str not in sys.path:
+    sys.path.insert(0, _root_str)
 SKELETON_OUTPUT = skeleton_output_root()
 
 LONGFORM_TEXT_METERED_TOOLS = frozenset({
@@ -41,22 +47,10 @@ LONGFORM_TEXT_METERED_TOOLS = frozenset({
 })
 
 # Tools that mutate state or spend money â€” require confirm mode approval.
-APPROVAL_REQUIRED = frozenset({
-    "start_longform_render",
-    "start_shortform_generate",
-    "expand_visual_proof_shortform",
+APPROVAL_REQUIRED = frozenset(set(production_budget.APPROVAL_REQUIRED_TOOLS) | {
     "ingest_cliplab_attachment",
     "render_cliplab_segments",
     "remix_cliplab_short",
-    "set_production_scenes_animate",
-    "animate_production_scenes",
-    "repair_production_scene_animation",
-    "finalize_production",
-    "finalize_longform_render",
-    "expand_longform_visual_proof",
-    "regenerate_longform_thumbnail",
-    "run_build_script",
-    "write_project_file",
 })
 
 CLIPLAB_AGENT_ADMIN_USER_IDS = {
@@ -93,6 +87,7 @@ RUNNER_ONLY_AGENT_TOOLS = frozenset({
     "edit_production_scenes_still",
     "regenerate_production_scene_still",
     "regenerate_production_scene",
+    "regenerate_production_scenes",
     "set_production_scenes_animate",
     "set_production_scene_duration",
     "animate_production_scenes",
@@ -102,7 +97,17 @@ RUNNER_ONLY_AGENT_TOOLS = frozenset({
     "finalize_longform_render",
     "re_edit_production",
     "generate_longform_thumbnails",
+    "regenerate_longform_still",
     "regenerate_longform_thumbnail",
+    "cancel_longform_render",
+})
+
+# Retired generic code-mutation/subprocess escape hatches. Keep the names so
+# persisted pending actions fail closed with a policy receipt instead of ever
+# reaching an executable project file.
+DISABLED_PROVIDER_ESCAPE_TOOLS = frozenset({
+    "run_build_script",
+    "write_project_file",
 })
 
 _async_pool = concurrent.futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix="studio-agent-async")
@@ -245,22 +250,17 @@ _CREDIT_RESERVATION_FILE = "credit_reservation.json"
 
 
 def _public_provider_block_message(name: str, arguments: dict[str, Any], budget: Any, user_id: str) -> str:
-    # These are metered text/planning calls, not public media renders.  Their
-    # selected Claude/Grok/OpenRouter route is independently priced and held
-    # before inference, so the media-provider kill switches do not apply.
-    if str(name or "") in LONGFORM_TEXT_METERED_TOOLS:
-        return ""
+    payload = json.dumps({"tool": name, "arguments": arguments or {}, "budget": getattr(budget, "breakdown", {}) or {}}, default=str).lower()
+    uses_xai = any(marker in payload for marker in ("grok", "xai", "grok_imagine"))
+    if uses_xai:
+        return "xAI/Grok is disabled by Studio provider policy. Select an explicit FAL media route."
     try:
         import unified_credits as uc
         if uc.is_unlimited(user_id):
             return ""
     except Exception:
         pass
-    payload = json.dumps({"tool": name, "arguments": arguments or {}, "budget": getattr(budget, "breakdown", {}) or {}}, default=str).lower()
-    uses_xai = any(marker in payload for marker in ("grok", "xai", "grok_imagine"))
     uses_fal = any(marker in payload for marker in ("fal", "seedream", "seedance", "pixverse", "kling", "minimax", "mmaudio"))
-    if uses_xai and not XAI_PUBLIC_RENDERS_ENABLED:
-        return "xAI/Grok public rendering is temporarily disabled. Owner can test it, but public users cannot spend against the xAI key."
     if uses_fal and not FAL_PUBLIC_RENDERS_ENABLED:
         return "FAL public rendering is temporarily disabled. Owner can test it, but public users cannot spend against the FAL key."
     return ""
@@ -452,6 +452,21 @@ def _shortform_performance_score(row: dict[str, Any], latest_views_baseline: flo
     )
 
 
+def _format_short_metric_label(row: dict[str, Any]) -> str:
+    title = str((row or {}).get("title") or (row or {}).get("video_id") or "Untitled").strip()
+    parts: list[str] = []
+    views = _shortform_metric_value(row, "views", "view_count")
+    apv = _shortform_metric_value(row, "average_view_percentage")
+    avd = _shortform_metric_value(row, "average_view_duration_sec")
+    if views > 0:
+        parts.append(f"{int(views):,} views")
+    if apv > 0:
+        parts.append(f"{apv:.1f}% avg view")
+    if avd > 0:
+        parts.append(f"{int(avd)}s AVD")
+    return f"{title}" + (f" ({', '.join(parts)})" if parts else "")
+
+
 def _compare_shortform_video_metrics(video_metrics: dict[str, Any]) -> dict[str, Any]:
     rows_by_key: dict[str, dict[str, Any]] = {}
 
@@ -465,19 +480,40 @@ def _compare_shortform_video_metrics(video_metrics: dict[str, Any]) -> dict[str,
                 continue
             merged = dict(rows_by_key.get(key) or {})
             merged.update({k: v for k, v in raw.items() if v not in (None, "", [], {})})
+            # Duration-less analytics rows are still usable for Shorts comparison.
+            if not merged.get("is_short") and not merged.get("shorts") and not merged.get("is_youtube_short"):
+                try:
+                    duration = int(float(merged.get("duration_sec") or 0))
+                except Exception:
+                    duration = 0
+                if 0 < duration <= 180:
+                    merged["is_short"] = True
+                elif duration <= 0 and (
+                    _shortform_metric_value(merged, "views", "view_count") > 0
+                    or _shortform_metric_value(merged, "average_view_percentage") > 0
+                ):
+                    # YouTube Analytics often omits duration on reporting rows; treat
+                    # measured channel videos as Shorts-eligible so comparison never
+                    # collapses to empty and force a "memory only" fallback.
+                    merged["is_short"] = True
             rows_by_key[key] = merged
 
     for bucket_name in ("latest_upload", "top_shorts_by_retention", "top_by_retention", "top_by_views"):
         _add_rows((video_metrics or {}).get(bucket_name))
 
-    rows = [dict(row or {}) for row in rows_by_key.values() if _is_shortform_metric_row(row)]
+    short_rows = [dict(row or {}) for row in rows_by_key.values() if _is_shortform_metric_row(row)]
+    # Fail open: if duration/is_short metadata is missing, still compare measured rows.
+    rows = short_rows or [dict(row or {}) for row in rows_by_key.values()]
     latest = dict((video_metrics or {}).get("latest_upload") or {})
-    if latest and _is_shortform_metric_row(latest):
+    if latest:
         latest_key = str(latest.get("video_id") or "").strip() or str(latest.get("title") or "").strip().lower()
         if latest_key and latest_key in rows_by_key:
             latest.update(rows_by_key[latest_key])
-        elif latest_key:
-            rows.append(latest)
+        elif latest_key and not any(
+            str(r.get("video_id") or "") == latest_key or str(r.get("title") or "").strip().lower() == latest_key
+            for r in rows
+        ):
+            rows.append(dict(latest))
     latest_id = str(latest.get("video_id") or "").strip()
     latest_views = _shortform_metric_value(latest, "views", "view_count")
 
@@ -498,9 +534,27 @@ def _compare_shortform_video_metrics(video_metrics: dict[str, Any]) -> dict[str,
     if latest_scored:
         latest_scored["shortform_score"] = _shortform_performance_score(latest_scored, latest_views_baseline=max(latest_views, 1.0))
 
+    # Explicit winner boards so the model cannot claim "only memory" when rows exist.
+    by_retention = sorted(
+        [dict(r) for r in rows if _shortform_metric_value(r, "average_view_percentage") > 0],
+        key=lambda row: (
+            -_shortform_metric_value(row, "average_view_percentage"),
+            -_shortform_metric_value(row, "views", "view_count"),
+        ),
+    )
+    by_views = sorted(
+        [dict(r) for r in rows if _shortform_metric_value(r, "views", "view_count") > 0],
+        key=lambda row: -_shortform_metric_value(row, "views", "view_count"),
+    )
+    top_retention = by_retention[:5]
+    top_views = by_views[:5]
+    second_retention = dict(top_retention[1]) if len(top_retention) > 1 else {}
+    retention_winner = dict(top_retention[0]) if top_retention else dict(best)
+    views_winner = dict(top_views[0]) if top_views else {}
+
     available_metrics: list[str] = []
     missing_metrics: list[str] = []
-    sample_rows = [latest_scored, best, *scored_prior[:3]]
+    sample_rows = [latest_scored, best, *scored_prior[:3], *top_retention[:2], *top_views[:2]]
     metric_checks = {
         "views": ("views", "view_count"),
         "average_percentage_viewed": ("average_view_percentage",),
@@ -520,6 +574,14 @@ def _compare_shortform_video_metrics(video_metrics: dict[str, Any]) -> dict[str,
     latest_title = str(latest_scored.get("title") or "").strip()
     if best_title:
         recommendations.append(f"Use the prior winner's promise shape as the control: {best_title}")
+    if retention_winner and str(retention_winner.get("title") or "").strip():
+        recommendations.append(
+            f"Retention control: {_format_short_metric_label(retention_winner)} — copy its hook clarity and pacing density."
+        )
+    if views_winner and str(views_winner.get("title") or "").strip() and str(views_winner.get("video_id") or "") != str(retention_winner.get("video_id") or ""):
+        recommendations.append(
+            f"Reach control: {_format_short_metric_label(views_winner)} — keep the same packaging promise shape when targeting broader click-through."
+        )
     if latest_title:
         recommendations.append(f"Do not judge the latest Short from stale low private rows if public views are fresher: {latest_title}")
     if _shortform_metric_value(latest_scored, "average_view_percentage") and _shortform_metric_value(best, "average_view_percentage"):
@@ -527,18 +589,70 @@ def _compare_shortform_video_metrics(video_metrics: dict[str, Any]) -> dict[str,
             recommendations.append("Tighten the first 1-2 seconds: the latest Short is behind the prior winner on average percentage viewed.")
         else:
             recommendations.append("The latest Short is competitive on average percentage viewed; package the next upload around the same immediate-stakes hook.")
-    recommendations.append("For Lexi Manhua Shorts, title around the character conflict, betrayal, revenge, secret identity, or impossible comeback instead of generic anime/manhwa labels.")
+    if second_retention:
+        recommendations.append(
+            f"Secondary retention winner: {_format_short_metric_label(second_retention)} — reuse shared title grammar between the top two."
+        )
+
+    comparison_ready = bool(
+        (retention_winner and _shortform_metric_value(retention_winner, "views", "view_count") > 0)
+        or (best and _shortform_metric_value(best, "views", "view_count") > 0)
+        or (len(top_views) >= 2)
+    )
+    brief_lines: list[str] = []
+    if comparison_ready:
+        brief_lines.append(
+            "YouTube Analytics comparison is available from get_channel_analytics "
+            "(not perpetual memory). Answer from these measured rows only."
+        )
+        if retention_winner:
+            brief_lines.append(f"Retention winner: {_format_short_metric_label(retention_winner)}")
+        if second_retention:
+            brief_lines.append(f"Second by retention: {_format_short_metric_label(second_retention)}")
+        if views_winner:
+            brief_lines.append(f"Views leader: {_format_short_metric_label(views_winner)}")
+        if latest_scored and str(latest_scored.get("title") or "").strip():
+            brief_lines.append(f"Latest upload: {_format_short_metric_label(latest_scored)}")
+        if best and str(best.get("title") or "").strip():
+            brief_lines.append(f"Best prior composite control: {_format_short_metric_label(best)}")
+        if available_metrics:
+            brief_lines.append(f"Metrics present: {', '.join(available_metrics)}")
+        if missing_metrics:
+            brief_lines.append(
+                f"Metrics missing from API (do not invent; do not interview the user for them): "
+                f"{', '.join(missing_metrics)}"
+            )
+        brief_lines.append(
+            "Do not claim the tool only pulled memory. Do not ask the user for views/retention "
+            "already listed above. Package the next Short from the winner pattern."
+        )
+        for rec in recommendations[:4]:
+            brief_lines.append(f"Next move: {rec}")
+    else:
+        brief_lines.append(
+            "Shorts comparison is incomplete: no measured video rows with views/retention were returned. "
+            "State that exact limitation; do not invent winners from memory."
+        )
 
     return {
         "content_type": "shorts",
+        "comparison_ready": comparison_ready,
+        "comparison_brief": "\n".join(brief_lines),
         "latest_short": latest_scored,
         "best_prior_short": best,
+        "retention_winner": retention_winner,
+        "views_winner": views_winner,
+        "second_retention_winner": second_retention,
+        "top_by_retention": top_retention,
+        "top_by_views": top_views,
         "prior_short_count": len(prior_rows),
+        "compared_row_count": len(rows),
         "available_short_metrics": available_metrics,
         "missing_short_metrics": missing_metrics,
         "metric_policy": (
             "Shorts are compared on views, engaged views when available, stayed-to-watch/swipe signals when available, "
-            "average percentage viewed, AVD, and interactions per view. Long-form CTR/chapter logic is not used as a substitute."
+            "average percentage viewed, AVD, and interactions per view. Long-form CTR/chapter logic is not used as a substitute. "
+            "When comparison_ready is true, answer from comparison_brief — never claim memory-only analytics."
         ),
         "recommendations": recommendations,
     }
@@ -846,21 +960,6 @@ def tool_schemas() -> list[dict[str, Any]]:
         {
             "type": "function",
             "function": {
-                "name": "write_project_file",
-                "description": "Write or overwrite a text file under studio/ or long_form/ (approval in confirm mode).",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "relative_path": {"type": "string"},
-                        "content": {"type": "string"},
-                    },
-                    "required": ["relative_path", "content"],
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
                 "name": "start_longform_render",
                 "description": (
                     "Queue a long-form render via the Studio pipeline. "
@@ -1146,9 +1245,6 @@ def tool_schemas() -> list[dict[str, Any]]:
                             "type": "string",
                             "enum": [
                                 "ltx_budget", "seedance", "pixverse", "kling_pro",
-                                "kling21_standard", "pixverse_v6", "pixverse_c1", "kling21_pro",
-                                "veo3_fast", "kling21_master", "grok_imagine_video",
-                                "grok_imagine_video_15", "grok_imagine_video_15_1080p",
                             ],
                             "description": "i2v model for motion clips. Use ltx_budget when full animation must be cheaper.",
                         },
@@ -1158,9 +1254,7 @@ def tool_schemas() -> list[dict[str, Any]]:
                         "image_model_id": {
                             "type": "string",
                             "enum": [
-                                "grok_imagine", "grok_imagine_standard", "imagen4_fast", "imagen4_preview",
-                                "imagen4_ultra", "recraft_v4", "seedream45", "ernie_image", "flux_2_pro",
-                                "nano_banana_pro", "recraft_v4_pro", "flux_lora_skeleton",
+                                "seedream_edit", "seedream_v4", "seedream_v5_lite",
                             ],
                             "description": "Image model for still generation. Inherit the user's session picker unless they override it in chat.",
                         },
@@ -1552,31 +1646,6 @@ def tool_schemas() -> list[dict[str, Any]]:
                         },
                     },
                     "required": ["job_id", "instruction"],
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "run_build_script",
-                "description": (
-                    "Run an allowlisted long_form build script (approval in confirm mode). "
-                    "Example: long_form/build_cryptic_ctr_ss_rook.py --preview"
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "script": {
-                            "type": "string",
-                            "description": "Path under long_form/ e.g. build_cryptic_ctr_ss_rook.py",
-                        },
-                        "args": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "description": "CLI args e.g. ['--preview']",
-                        },
-                    },
-                    "required": ["script"],
                 },
             },
         },
@@ -2290,12 +2359,6 @@ def _allow_write(path: Path) -> None:
         raise ValueError(f"writes only allowed under studio/, long_form/, recaps/ â€” got {rel}")
 
 
-ALLOWED_BUILD_SCRIPTS = frozenset({
-    "build_cryptic_ctr_ss_rook.py",
-    "build_cryptic_google_ai_mode_rook.py",
-    "build_cryptic_google_ai_mode.py",
-})
-
 _PLACEHOLDER_LONGFORM_TOPICS = frozenset({
     "untitled",
     "long-form concept",
@@ -2433,6 +2496,219 @@ def _session_render_style(session_id: str | None) -> str | None:
         return None
     style = str(session.get("render_style") or "").strip()
     return style or None
+
+
+def _resolve_session_id_for_shortform_job(
+    job_id: str,
+    *,
+    session_id: str | None = None,
+    user_id: str | None = None,
+) -> str | None:
+    """Recover the owning Studio session for a shortform job.
+
+    Intelligent regenerate from the UI historically omitted session_id, which
+    blocked Art Style unlocks. Prefer an explicit id, then job_spec, then a
+    lightweight active_jobs scan for the owner.
+    """
+    explicit = str(session_id or "").strip()
+    if explicit:
+        return explicit
+    jid = str(job_id or "").strip()
+    if not jid:
+        return None
+    try:
+        spec_path = _shortform_workspace(jid) / "job_spec.json"
+        if spec_path.is_file():
+            spec = json.loads(spec_path.read_text(encoding="utf-8"))
+            if isinstance(spec, dict):
+                stored = str(spec.get("session_id") or "").strip()
+                if stored:
+                    return stored
+    except Exception:
+        pass
+    try:
+        from studio_agent import store
+
+        uid = str(user_id or "").strip()
+        if not uid:
+            access = {}
+            try:
+                from studio_agent import jobs as agent_jobs
+
+                access = agent_jobs.job_access_metadata(jid, "shortform") or {}
+            except Exception:
+                access = {}
+            uid = str(access.get("owner_id") or "").strip()
+        if not uid:
+            return None
+        for row in store.list_sessions(uid, limit=40):
+            sid = str(row.get("session_id") or "").strip()
+            if not sid:
+                continue
+            session = store.get_session(sid, user_id=uid, reconcile_jobs=False) or {}
+            for job in list(session.get("active_jobs") or []):
+                if str(job.get("job_id") or "").strip() == jid:
+                    return sid
+            last = session.get("last_production") if isinstance(session.get("last_production"), dict) else {}
+            if str(last.get("job_id") or "").strip() == jid:
+                return sid
+    except Exception:
+        return None
+    return None
+
+
+def _apply_session_render_style_to_shortform_job(
+    job_id: str,
+    *,
+    session_id: str | None = None,
+) -> dict[str, Any]:
+    """Unlock job_spec render_style when the creator switches Art Style mid-job.
+
+    Art Style is written into job_spec at start as a production-wide lock.
+    Without this, regenerates keep replaying the old style (e.g. historical_18th)
+    even after the picker is set to skeleton_host — so QA stays blocked and
+    Intelligent regenerate cannot switch pipelines.
+    """
+    from studio_agent.render_styles import is_skeleton_style, resolve_render_style
+
+    resolved_session_id = _resolve_session_id_for_shortform_job(job_id, session_id=session_id)
+    session_style = _session_render_style(resolved_session_id)
+    if not session_style:
+        return {"changed": False, "reason": "no_session_style", "session_id": resolved_session_id}
+    ws = _shortform_workspace(job_id)
+    spec_path = ws / "job_spec.json"
+    if not spec_path.is_file():
+        return {"changed": False, "reason": "no_job_spec"}
+    try:
+        spec = json.loads(spec_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {"changed": False, "reason": "invalid_job_spec"}
+    if not isinstance(spec, dict):
+        return {"changed": False, "reason": "invalid_job_spec"}
+
+    old_key = str(spec.get("render_style") or "").strip()
+    new_style = resolve_render_style(session_style, session_style=session_style)
+    new_key = str(getattr(new_style, "key", None) or session_style).strip()
+    if resolved_session_id and not str(spec.get("session_id") or "").strip():
+        # Backfill for older jobs so later regenerates can recover the picker.
+        spec["session_id"] = resolved_session_id
+        try:
+            _atomic_write_json(spec_path, spec)
+        except Exception:
+            try:
+                spec_path.write_text(json.dumps(spec, indent=2, ensure_ascii=False), encoding="utf-8")
+            except Exception:
+                pass
+    if not new_key or new_key == old_key:
+        return {
+            "changed": False,
+            "render_style": old_key or new_key,
+            "reason": "already_current",
+            "session_id": resolved_session_id,
+        }
+
+    spec["render_style"] = new_key
+    if resolved_session_id:
+        spec["session_id"] = resolved_session_id
+    if is_skeleton_style(new_key) or str(getattr(new_style, "pipeline", "") or "") == "skeleton_host":
+        # Skeleton pipeline needs the session skeleton models, not Seedream generic T2I.
+        models = _session_production_models(resolved_session_id) if resolved_session_id else {}
+        image_id = str(models.get("image_model_id") or "").strip()
+        video_id = str(models.get("video_model") or "").strip()
+        if not image_id or image_id in {"seedream", "seedream45", "seedream_edit", "ernie_image"}:
+            image_id = "seedream_edit"
+        if not video_id or "seedance" in video_id or "ltx" in video_id:
+            video_id = "seedance"
+        spec["image_model_id"] = image_id
+        spec["video_model"] = video_id
+        # Psychology skeleton host — force category away from generic food/lifestyle lanes.
+        cat = str(spec.get("category_key") or "").strip().lower()
+        if cat in {"", "people_blogs", "food", "travel"}:
+            spec["category_key"] = "human_limits"
+    spec["render_style_switched_at"] = time.time()
+    spec["render_style_previous"] = old_key
+    try:
+        _atomic_write_json(spec_path, spec)
+    except Exception:
+        spec_path.write_text(json.dumps(spec, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    # Keep result.json in sync so _style_for() does not prefer a stale result style.
+    result_path = ws / "result.json"
+    if result_path.is_file():
+        try:
+            result = json.loads(result_path.read_text(encoding="utf-8"))
+            if isinstance(result, dict):
+                result["render_style"] = new_key
+                result["render_style_label"] = str(getattr(new_style, "label", None) or new_key)
+                if is_skeleton_style(new_key):
+                    result["stills_model"] = str(spec.get("image_model_id") or "seedream_edit")
+                    result["image_model_id"] = str(spec.get("image_model_id") or "seedream_edit")
+                result_path.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
+        except Exception:
+            pass
+
+    # Skeleton pipeline needs a locked master reference in the workspace.
+    if is_skeleton_style(new_key) or str(getattr(new_style, "pipeline", "") or "") == "skeleton_host":
+        try:
+            from skeleton_ai.styled_pipeline import _resolve_skeleton_master_reference
+
+            _resolve_skeleton_master_reference(ws, None)
+        except Exception:
+            pass
+        # Drop Live Demand food/meme pollution that made historical T2I invent
+        # Shikanji hashtag collages after a skeleton switch.
+        brief = str(spec.get("visual_brief") or "")
+        if brief and any(
+            token in brief.lower()
+            for token in ("live demand", "shikanji", "#shorts", "nimbupani", "strong_public_precedent")
+        ):
+            spec["visual_brief"] = (
+                "Short-form psychology skeleton host. Ivory anatomical skeleton in thin clear glass shell, "
+                "empty hands, no text overlays, no hashtags, no meme collage, one continuous 9:16 frame."
+            )
+            try:
+                _atomic_write_json(spec_path, spec)
+            except Exception:
+                try:
+                    spec_path.write_text(json.dumps(spec, indent=2, ensure_ascii=False), encoding="utf-8")
+                except Exception:
+                    pass
+
+    # Mark scenes for creative redesign so regenerate does not re-edit the wrong still.
+    try:
+        from skeleton_ai.styled_pipeline import load_scenes, save_scenes
+
+        scenes = load_scenes(ws)
+        for scene in scenes:
+            if not isinstance(scene, dict):
+                continue
+            scene["render_style"] = new_key
+            scene["status"] = "needs_regenerate"
+            scene["approved_for_video"] = False
+            scene["approved_for_animation"] = False
+            scene["animate"] = False
+            # Drop historical/period prompt overrides so skeleton redesign owns the frame.
+            if is_skeleton_style(new_key):
+                scene.pop("prompt_user_override", None)
+                scene.pop("prompt", None)
+                scene["outfit"] = str(
+                    spec.get("locked_outfit")
+                    or "no clothing; full clear glass shell and ivory skeleton visible; empty hands; no jewelry"
+                )
+            scene.pop("still_qa", None)
+            scene.pop("qa_detail", None)
+            scene.pop("last_repair_error", None)
+        save_scenes(ws, scenes)
+    except Exception:
+        pass
+
+    return {
+        "changed": True,
+        "from": old_key,
+        "to": new_key,
+        "pipeline": str(getattr(new_style, "pipeline", "") or ""),
+        "session_id": resolved_session_id,
+    }
 
 
 def _session_channel_brand(session_id: str | None) -> str:
@@ -2628,6 +2904,10 @@ def _write_shortform_credit_reservation(
         "tool": str(tool or ""),
         "session_id": str(session_id or ""),
         "budget": budget or {},
+        "cost_baseline_usd": float(
+            production_costs.load_summary(Path(workspace)).get("total_usd_decimal", 0.0)
+            or 0.0
+        ),
         "created_at": time.time(),
     }
     try:
@@ -2924,6 +3204,8 @@ def _spawn_shortform_job(
         "sound_design_brief": sound_design_brief,
         "background_music": background_music,
         "user_id": user_id,
+        # Persist so Intelligent regenerate can unlock Art Style without a query param.
+        "session_id": str(credit_session_id or "").strip() or None,
         "reference_images": list(reference_images or []),
         "skeleton_reference_image": str((reference_images or [""])[0] or "").strip(),
         "product_reference": product_reference or None,
@@ -3148,6 +3430,7 @@ def generate_longform_thumbnails(
     channel_key: str = "history_rewind",
     prompt: str = "",
     user_id: str = "",
+    requested_job_id: str = "",
 ) -> str:
     """Generate/iterate long-form thumbnails without starting video production."""
     from long_form import pipeline as lf
@@ -3165,7 +3448,12 @@ def generate_longform_thumbnails(
         job_id = ""
         state = None
     if not state:
-        job_id = lf._new_job_id()
+        requested = str(requested_job_id or "").strip()
+        job_id = (
+            requested
+            if requested and len(requested) <= 48 and requested.replace("_", "").isalnum()
+            else lf._new_job_id()
+        )
         lf._ensure_job_dir(job_id)
         resolved_title = str(title or "Untitled long-form video").strip()[:180]
         resolved_channel = str(channel_key or "history_rewind").strip().lower()
@@ -3416,6 +3704,8 @@ def expand_visual_proof_shortform(
             raise ValueError(f"job {job_id} has invalid job_spec.json")
         if credit_user_id and str(command_spec.get("user_id") or "") != str(credit_user_id):
             raise ValueError("job ownership mismatch")
+        if store.migrate_provider_policy_state(command_spec):
+            _atomic_write_json(spec_path, command_spec)
         existing_rows: list[dict[str, Any]] = []
         scenes_path = ws / "scenes.json"
         if scenes_path.is_file():
@@ -3972,6 +4262,208 @@ def _still_candidate_sidecars(path: Path) -> tuple[Path, ...]:
     )
 
 
+def _still_correspondence_contract(scene: dict[str, Any]) -> str:
+    """Narration plus frame-zero staging; never multi-second motion."""
+
+    action = str(scene.get("scene_action") or scene.get("action") or "").strip()
+    action = re.sub(
+        r"(?is)\b(?:PERFORMANCE|MOTION|VFX|SILENT|i2v)\b.*$",
+        "",
+        action,
+    ).strip(" .;")
+    action = re.sub(
+        r"(?i)\b(?:weight\s+shift|torso\s+twist|quarter[- ]turn|shrug|parallax|"
+        r"camera\s+push|head\s+tilt[- ]?back|snap[- ]forward)[^.|;]*[.|;]?",
+        "",
+        action,
+    )
+    return " ".join(
+        part
+        for part in (str(scene.get("narration") or "").strip(), action)
+        if part
+    )[:900]
+
+
+def _scene_still_path(workspace: Path, scene: dict[str, Any]) -> Path:
+    scene_id = str(scene.get("sid") or f"b{int(scene.get('index') or 0):02d}")
+    return workspace / str(scene.get("still_rel") or f"stills/{scene_id}.png")
+
+
+def _refresh_scene_visual_qa(
+    workspace: Path,
+    scenes: list[dict[str, Any]],
+    scene_index: int,
+    *,
+    force: bool = False,
+    require_clip: bool | None = None,
+) -> dict[str, Any]:
+    """Run and persist the authoritative per-scene QA aggregate."""
+
+    from studio_agent import visual_qa
+
+    workspace = Path(workspace)
+    position = next(
+        (
+            pos
+            for pos, row in enumerate(scenes)
+            if int(row.get("index", -1)) == int(scene_index)
+        ),
+        -1,
+    )
+    if position < 0:
+        raise ValueError(f"scene {scene_index} not found")
+    scene = scenes[position]
+    previous = scenes[position - 1] if position > 0 else None
+    following = scenes[position + 1] if position + 1 < len(scenes) else None
+    expected_clip = (
+        bool(scene.get("clip_rel"))
+        if require_clip is None
+        else bool(require_clip)
+    )
+    aggregate = scene.get("visual_qa") if isinstance(scene.get("visual_qa"), dict) else {}
+    if (
+        not force
+        and aggregate
+        and bool(aggregate.get("require_clip")) == expected_clip
+        and visual_qa.scene_visual_qa_is_fresh(
+            workspace,
+            scene,
+            previous_scene=previous,
+            next_scene=following,
+        )
+    ):
+        return dict(aggregate)
+
+    try:
+        spec = json.loads((workspace / "job_spec.json").read_text(encoding="utf-8"))
+        if not isinstance(spec, dict):
+            spec = {}
+    except Exception:
+        spec = {}
+    render_style = str(spec.get("render_style") or "").lower()
+    skeleton_mode = "skeleton" in render_style
+    product = spec.get("product_reference") if isinstance(spec.get("product_reference"), dict) else {}
+    still = _scene_still_path(workspace, scene)
+    locked_outfit = str(spec.get("locked_outfit") or scene.get("outfit") or "")
+    cast_count = int(scene.get("cast_count") or spec.get("cast_count") or 1)
+    if skeleton_mode:
+        still_report = visual_qa.audit_skeleton_still(
+            still,
+            reference=visual_qa._workspace_skeleton_reference(workspace),
+            locked_outfit=locked_outfit,
+            cast_count=cast_count,
+            force=force,
+        )
+    elif product:
+        references = [
+            Path(str(image.get("path") or ""))
+            for image in list(product.get("images") or [])
+            if isinstance(image, dict) and str(image.get("path") or "").strip()
+        ]
+        still_report = visual_qa.audit_product_still(
+            still,
+            references=references,
+            product_name=str(product.get("product_name") or ""),
+            force=force,
+        )
+    else:
+        still_report = visual_qa.audit_generic_still(
+            still,
+            scene_contract=_still_correspondence_contract(scene),
+            force=force,
+        )
+
+    still_passed = (
+        still_report.get("status") == "pass"
+        and still_report.get("pass") is True
+    )
+    if still_passed:
+        correspondence_report = visual_qa.audit_scene_correspondence(
+            still,
+            scene_contract=_still_correspondence_contract(scene),
+            previous_still=_scene_still_path(workspace, previous) if previous else None,
+            previous_contract=_still_correspondence_contract(previous) if previous else "",
+            next_still=_scene_still_path(workspace, following) if following else None,
+            next_contract=_still_correspondence_contract(following) if following else "",
+        )
+    else:
+        correspondence_report = {
+            "status": "fail",
+            "pass": False,
+            "summary": "Correspondence QA skipped because still identity/artifact QA failed",
+            "issues": ["still_qa_failed"],
+        }
+
+    clip_report: dict[str, Any] = {}
+    if expected_clip:
+        clip_rel = str(scene.get("clip_rel") or "").strip()
+        clip = (
+            workspace / clip_rel
+            if clip_rel
+            else workspace / "clips" / f"{scene.get('sid', f'b{int(scene_index):02d}')}.mp4"
+        )
+        if skeleton_mode:
+            clip_report = visual_qa.audit_skeleton_clip(
+                clip,
+                still=still,
+                locked_outfit=locked_outfit,
+                cast_count=cast_count,
+                force=force,
+            )
+        elif product:
+            references = [
+                Path(str(image.get("path") or ""))
+                for image in list(product.get("images") or [])
+                if isinstance(image, dict) and str(image.get("path") or "").strip()
+            ]
+            clip_report = visual_qa.audit_product_clip(
+                clip,
+                still=still,
+                references=references,
+                product_name=str(product.get("product_name") or ""),
+                force=force,
+            )
+        else:
+            clip_report = visual_qa.audit_generic_clip(
+                clip,
+                scene_contract=" ".join(
+                    str(value or "")
+                    for value in (
+                        scene.get("prompt"),
+                        scene.get("scene_action"),
+                        scene.get("narration"),
+                    )
+                ),
+            )
+
+    scene["still_qa"] = still_report
+    scene["scene_correspondence_qa"] = correspondence_report
+    if expected_clip:
+        scene["i2v_qa"] = clip_report
+    aggregate = visual_qa.build_scene_visual_qa(
+        workspace,
+        scene,
+        previous_scene=previous,
+        next_scene=following,
+        still_qa=still_report,
+        correspondence_qa=correspondence_report,
+        clip_qa=clip_report,
+        require_clip=expected_clip,
+    )
+    scene["visual_qa"] = aggregate
+    scene["qa_stale"] = False
+    if aggregate.get("pass") is True:
+        scene["status"] = "clip_ready" if expected_clip else "still_ready"
+        scene.pop("last_repair_error", None)
+    else:
+        scene["status"] = "qa_blocked"
+        scene["approved_for_video"] = False
+        scene["approved_for_animation"] = False
+        scene["animate"] = False
+        scene["last_repair_error"] = str(aggregate.get("summary") or "Scene QA failed")[:300]
+    return aggregate
+
+
 def _discard_still_candidate(
     workspace: Path,
     candidate: Path,
@@ -4009,6 +4501,7 @@ def regenerate_production_scene_still(
     fallback_image_model_id: str | None = None,
     session_id: str | None = None,
     route_revision: int | None = None,
+    fix_plan: dict[str, Any] | None = None,
 ) -> str:
     ws = _shortform_workspace(job_id)
     from studio_agent.catalyst_still_audit import audit_scene_still, record_catalyst_still_artifact_learning
@@ -4021,6 +4514,17 @@ def regenerate_production_scene_still(
     from studio_agent import visual_qa
 
     idx = int(scene_index)
+    session_id = _resolve_session_id_for_shortform_job(job_id, session_id=session_id)
+    # Honor Art Style picker switches (historical → skeleton_host, etc.).
+    style_switch = _apply_session_render_style_to_shortform_job(job_id, session_id=session_id)
+    if style_switch.get("changed"):
+        # Full redesign required — old historical still must not be style-locked.
+        force_master_regenerate = True
+        if not str(reason or "").strip():
+            reason = (
+                f"Art style switched from {style_switch.get('from')} to {style_switch.get('to')}. "
+                "Rebuild this scene in the new locked style."
+            )
     route_switches: list[dict[str, Any]] = []
     quarantined: list[str] = []
     last_route = _repair_route_snapshot(
@@ -4047,29 +4551,104 @@ def regenerate_production_scene_still(
             spec = json.loads((ws / "job_spec.json").read_text(encoding="utf-8"))
         except Exception:
             spec = {}
+        original_scene = json.loads(json.dumps(scene))
+        base_fix_plan = dict(fix_plan or {})
+        # After a style switch to skeleton, prefer session/skeleton image models.
+        if style_switch.get("changed") and "skeleton" in str(style_switch.get("to") or "").lower():
+            skeleton_image = str(spec.get("image_model_id") or "").strip()
+            if skeleton_image:
+                image_model_id = skeleton_image
+                route = _repair_route_snapshot(
+                    session_id,
+                    image_model_id=skeleton_image,
+                    route_revision=route_revision,
+                )
+                last_route = route
         sid = str(scene.get("sid") or f"b{idx:02d}")
         still_rel = str(scene.get("still_rel") or f"stills/{sid}.png")
         still_target = ws / still_rel
-        selected_image = str(route.get("image_model_id") or image_model_id or "").strip()
-        selected_fallback = str(fallback_image_model_id or "").strip()
-        if not selected_fallback and selected_image and not selected_image.startswith("grok"):
+        selected_image = provider_policy.migrated_image_model(
+            route.get("image_model_id") or image_model_id or "seedream_edit"
+        )
+        selected_fallback = provider_policy.migrated_image_model(
+            fallback_image_model_id or "seedream_edit"
+        )
+        if not selected_fallback and selected_image:
             selected_fallback = selected_image
         if not selected_fallback:
             selected_fallback = "seedream_edit"
 
         repair_audit = audit_scene_still(ws, idx)
-        if force_master_regenerate:
+        if force_master_regenerate or style_switch.get("changed"):
             repair_audit["method"] = "regenerate"
             repair_audit["fix_instruction"] = ""
             repair_audit["creative_redesign"] = True
         if str(reason or "").strip():
             repair_audit["user_reason"] = str(reason).strip()[:500]
+        # Prior still QA / last error often names chest orbs even when Catalyst
+        # issue flags were empty — feed that into the repair brief.
+        try:
+            prior_qa = scene.get("still_qa") if isinstance(scene.get("still_qa"), dict) else {}
+            prior_blob = " ".join(
+                [
+                    str(prior_qa.get("summary") or ""),
+                    str(scene.get("last_repair_error") or ""),
+                    " ".join(str(x) for x in (prior_qa.get("issues") or [])),
+                ]
+            ).lower()
+            if any(
+                term in prior_blob
+                for term in ("chest", "orb", "ribcage", "self-emitting", "embedded light", "symbolic_clutter")
+            ):
+                repair_audit["method"] = "regenerate"
+                repair_audit["fix_instruction"] = (
+                    "Master regenerate: clean closed ribcage under thin glass only; "
+                    "no interior chest light/orb/glow; empty hands away from torso."
+                )
+                repair_audit.setdefault("issues", [])
+                if "symbolic_clutter" not in list(repair_audit.get("issues") or []):
+                    repair_audit["issues"] = list(repair_audit.get("issues") or []) + ["symbolic_clutter"]
+        except Exception:
+            pass
+
+        skeleton_mode_for_fix = "skeleton" in str((spec or {}).get("render_style") or "").lower()
+        if skeleton_mode_for_fix and (
+            base_fix_plan
+            or force_master_regenerate
+            or str(repair_audit.get("method") or "").lower() == "regenerate"
+        ):
+            from studio_agent.visual_fix_contract import artifact_fix_plan
+
+            source_action = str(
+                base_fix_plan.get("narrative_anchor")
+                or original_scene.get("scene_action")
+                or original_scene.get("prompt")
+                or ""
+            )
+            base_fix_plan = artifact_fix_plan(
+                topic=str((spec or {}).get("topic") or ""),
+                visual_brief=str((spec or {}).get("visual_brief") or ""),
+                narration=str(original_scene.get("narration") or ""),
+                scene_action=source_action,
+                user_feedback=str(reason or repair_audit.get("user_reason") or ""),
+                job_cast=(spec or {}).get("cast_count"),
+                scene_cast=original_scene.get("cast_count"),
+                outfit=str(
+                    original_scene.get("outfit")
+                    or (spec or {}).get("locked_outfit")
+                    or "no clothing"
+                ),
+                aspect_ratio="9:16",
+                attempt=0,
+            )
 
         candidate = ws / "stills" / (
             f".{sid}.route-{int(route.get('revision') or 1)}-{uuid.uuid4().hex[:10]}.candidate.png"
         )
         current_audit: dict[str, Any] = {}
         current_still_qa: dict[str, Any] = {}
+        current_correspondence_qa: dict[str, Any] = {}
+        accepted_fix_plan: dict[str, Any] = {}
         res: dict[str, Any] = {}
         retry_count = 0
         route_changed = False
@@ -4092,16 +4671,92 @@ def regenerate_production_scene_still(
                 )
                 return _same_media_route(route, current_route, stage="image")
 
+            attempt_fix_plan: dict[str, Any] = {}
+            if base_fix_plan:
+                from studio_agent.visual_fix_contract import artifact_fix_plan
+
+                attempt_fix_plan = artifact_fix_plan(
+                    topic=str((spec or {}).get("topic") or ""),
+                    visual_brief=str((spec or {}).get("visual_brief") or ""),
+                    narration=str(original_scene.get("narration") or ""),
+                    scene_action=str(
+                        base_fix_plan.get("narrative_anchor")
+                        or original_scene.get("scene_action")
+                        or ""
+                    ),
+                    user_feedback=" ".join(
+                        value
+                        for value in (
+                            str(current_still_qa.get("summary") or ""),
+                            str(current_correspondence_qa.get("summary") or ""),
+                        )
+                        if value
+                    ),
+                    job_cast=(spec or {}).get("cast_count"),
+                    scene_cast=base_fix_plan.get("cast_count") or original_scene.get("cast_count"),
+                    outfit=str(
+                        original_scene.get("outfit")
+                        or (spec or {}).get("locked_outfit")
+                        or "no clothing"
+                    ),
+                    aspect_ratio="9:16",
+                    attempt=retry_count,
+                )
             try:
                 res = regenerate_scene_with_catalyst(
                     ws,
                     idx,
-                    audit=repair_audit if retry_count == 0 else current_audit,
+                    # Always prefer the latest repair brief (chest-orb escalation
+                    # mutates repair_audit between retries).
+                    audit=repair_audit,
                     image_model_id=selected_image or None,
                     fallback_image_model_id=selected_fallback,
                     candidate_path=candidate,
                     defer_commit=True,
                     fallback_guard=_fallback_route_is_current,
+                    fix_plan=attempt_fix_plan or None,
+                    provider_route_revision=int(route.get("revision") or 0),
+                )
+            except production_budget.BudgetExceededError as exc:
+                rejected = _discard_still_candidate(
+                    ws,
+                    candidate,
+                    scene_index=idx,
+                    label="budget-blocked",
+                )
+                if rejected:
+                    quarantined.append(rejected)
+                current_scenes = load_scenes(ws)
+                current = next(
+                    (row for row in current_scenes if int(row.get("index", -1)) == idx),
+                    None,
+                )
+                if current is not None:
+                    current.clear()
+                    current.update(json.loads(json.dumps(original_scene)))
+                    current["last_repair_error"] = str(exc)[:300]
+                    save_scenes(ws, current_scenes)
+                _merge_shortform_result(
+                    ws,
+                    {
+                        "status": "budget_exceeded",
+                        "job_id": job_id,
+                        "budget_exceeded": True,
+                        "error": str(exc),
+                    },
+                )
+                return json.dumps(
+                    {
+                        "ok": False,
+                        "job_id": job_id,
+                        "scene_index": idx,
+                        "committed": False,
+                        "budget_exceeded": True,
+                        "route": route,
+                        "quarantined_candidates": quarantined,
+                        "error": str(exc),
+                    },
+                    indent=2,
                 )
             except MediaRouteChangedError:
                 route_changed = True
@@ -4117,10 +4772,92 @@ def regenerate_production_scene_still(
             if not _same_media_route(route, after_provider, stage="image"):
                 route_changed = True
                 break
-            # ``method=regenerate`` is a Catalyst *generation strategy*, not
-            # a failure verdict.  The old condition retried every candidate
-            # with that label and then rejected the final one even when visual
-            # QA passed, which stranded a repair with no animation path.
+            # Every candidate must pass identity/style plus scene correspondence;
+            # the repair strategy label is never itself a failure verdict.
+            if not route_changed:
+                if skeleton_mode_for_fix:
+                    current_still_qa = visual_qa.audit_skeleton_still(
+                        candidate,
+                        reference=visual_qa._workspace_skeleton_reference(ws),
+                        locked_outfit=str(
+                            (spec or {}).get("locked_outfit")
+                            or original_scene.get("outfit")
+                            or ""
+                        ),
+                        cast_count=int(attempt_fix_plan.get("cast_count") or 1),
+                        force=True,
+                    )
+                else:
+                    current_still_qa = visual_qa.audit_generic_still(
+                        candidate,
+                        scene_contract=_still_correspondence_contract(original_scene),
+                        force=True,
+                    )
+                identity_passed = bool(
+                    current_still_qa.get("status") == "pass"
+                    and current_still_qa.get("pass") is True
+                )
+                current_correspondence_qa = {}
+                if identity_passed:
+                    candidate_scenes = load_scenes(ws)
+                    position = next(
+                        (
+                            pos
+                            for pos, row in enumerate(candidate_scenes)
+                            if int(row.get("index", -1)) == idx
+                        ),
+                        -1,
+                    )
+                    previous = candidate_scenes[position - 1] if position > 0 else None
+                    following = (
+                        candidate_scenes[position + 1]
+                        if position >= 0 and position + 1 < len(candidate_scenes)
+                        else None
+                    )
+                    current_row = candidate_scenes[position] if position >= 0 else original_scene
+                    current_correspondence_qa = visual_qa.audit_scene_correspondence(
+                        candidate,
+                        scene_contract=_still_correspondence_contract(current_row),
+                        previous_still=_scene_still_path(ws, previous) if previous else None,
+                        previous_contract=_still_correspondence_contract(previous) if previous else "",
+                        next_still=_scene_still_path(ws, following) if following else None,
+                        next_contract=_still_correspondence_contract(following) if following else "",
+                    )
+                correspondence_passed = bool(
+                    current_correspondence_qa.get("status") == "pass"
+                    and current_correspondence_qa.get("pass") is True
+                )
+                if identity_passed and correspondence_passed:
+                    accepted_fix_plan = attempt_fix_plan
+                    break
+                if retry_count >= 2:
+                    break
+                rejected = _discard_still_candidate(
+                    ws, candidate, scene_index=idx, label=f"qa-variant-{retry_count + 1}"
+                )
+                if rejected:
+                    quarantined.append(rejected)
+                candidate = ws / "stills" / (
+                    f".{sid}.route-{int(route.get('revision') or 1)}-{uuid.uuid4().hex[:10]}.candidate.png"
+                )
+                retry_count += 1
+                continue
+
+        if route_changed:
+            rejected = _discard_still_candidate(ws, candidate, scene_index=idx, label="stale-route")
+            if rejected:
+                quarantined.append(rejected)
+            latest = _repair_route_snapshot(session_id, image_model_id=image_model_id, route_revision=route_revision)
+            route_switches.append({"from": route, "to": latest, "stage": "image"})
+            continue
+
+        # Always re-read job_spec after a possible mid-job Art Style switch.
+        try:
+            spec = json.loads((ws / "job_spec.json").read_text(encoding="utf-8"))
+        except Exception:
+            pass
+        skeleton_mode = "skeleton" in str((spec or {}).get("render_style") or "").lower()
+        if not current_still_qa:
             if skeleton_mode:
                 current_still_qa = visual_qa.audit_skeleton_still(
                     candidate,
@@ -4132,36 +4869,50 @@ def regenerate_production_scene_still(
             else:
                 current_still_qa = visual_qa.audit_generic_still(
                     candidate,
-                    scene_contract=" ".join(
-                        str(scene.get(key) or "") for key in ("prompt", "scene_action", "narration")
-                    ),
+                    scene_contract=_still_correspondence_contract(scene),
                     force=True,
                 )
-            if current_still_qa.get("status") == "pass" and current_still_qa.get("pass") is True:
-                break
-            if retry_count >= 2:
-                break
-            rejected = _discard_still_candidate(
-                ws, candidate, scene_index=idx, label=f"qa-retry-{retry_count + 1}"
+        if (
+            current_still_qa.get("status") == "pass"
+            and current_still_qa.get("pass") is True
+            and not current_correspondence_qa
+        ):
+            candidate_scenes = load_scenes(ws)
+            position = next(
+                (
+                    pos
+                    for pos, row in enumerate(candidate_scenes)
+                    if int(row.get("index", -1)) == idx
+                ),
+                -1,
             )
-            if rejected:
-                quarantined.append(rejected)
-            candidate = ws / "stills" / (
-                f".{sid}.route-{int(route.get('revision') or 1)}-{uuid.uuid4().hex[:10]}.candidate.png"
+            current_row = candidate_scenes[position] if position >= 0 else scene
+            previous = candidate_scenes[position - 1] if position > 0 else None
+            following = (
+                candidate_scenes[position + 1]
+                if position >= 0 and position + 1 < len(candidate_scenes)
+                else None
             )
-            retry_count += 1
-
-        if route_changed:
-            rejected = _discard_still_candidate(ws, candidate, scene_index=idx, label="stale-route")
-            if rejected:
-                quarantined.append(rejected)
-            latest = _repair_route_snapshot(session_id, image_model_id=image_model_id, route_revision=route_revision)
-            route_switches.append({"from": route, "to": latest, "stage": "image"})
-            continue
-
+            current_correspondence_qa = visual_qa.audit_scene_correspondence(
+                candidate,
+                scene_contract=_still_correspondence_contract(current_row),
+                previous_still=_scene_still_path(ws, previous) if previous else None,
+                previous_contract=_still_correspondence_contract(previous) if previous else "",
+                next_still=_scene_still_path(ws, following) if following else None,
+                next_contract=_still_correspondence_contract(following) if following else "",
+            )
+        # Commit on semantic QA (and correspondence for master-fix plans).
+        # Catalyst method=regenerate used to block
+        # every intelligent/style-switch regenerate forever (deadlock: retries
+        # end with method still "regenerate", so even a clean skeleton candidate
+        # was discarded and the old historical still stayed on screen).
         passed = bool(
             current_still_qa.get("status") == "pass"
             and current_still_qa.get("pass") is True
+            and (
+                current_correspondence_qa.get("status") == "pass"
+                and current_correspondence_qa.get("pass") is True
+            )
         )
         learning = record_catalyst_still_artifact_learning(
             channel_key=str(current_audit.get("channel_key") or ""),
@@ -4173,15 +4924,28 @@ def regenerate_production_scene_still(
             rejected = _discard_still_candidate(ws, candidate, scene_index=idx, label="qa-failed")
             if rejected:
                 quarantined.append(rejected)
+            failure_qa = (
+                current_correspondence_qa
+                if current_correspondence_qa and current_correspondence_qa.get("pass") is not True
+                else current_still_qa
+            )
             scenes = load_scenes(ws)
             current = next((item for item in scenes if int(item.get("index", -1)) == idx), None)
             if current is not None:
+                # Provider generation may stage a retry contract in scenes.json.
+                # Restore the accepted scene metadata when every candidate fails.
+                current.clear()
+                current.update(json.loads(json.dumps(original_scene)))
                 current["last_repair_error"] = str(
-                    current_still_qa.get("summary")
-                    or current_still_qa.get("error")
+                    failure_qa.get("summary")
+                    or failure_qa.get("error")
                     or "Replacement candidate did not pass still QA"
                 )[:300]
                 current["last_repair_route"] = route
+                current["last_repair_qa"] = {
+                    "still": current_still_qa,
+                    "correspondence": current_correspondence_qa,
+                }
                 save_scenes(ws, scenes)
             res.update({
                 "candidate_path": None,
@@ -4189,14 +4953,28 @@ def regenerate_production_scene_still(
                 "catalyst_repair_audit": repair_audit,
                 "catalyst_audit": current_audit,
                 "still_qa": current_still_qa,
+                "scene_correspondence_qa": current_correspondence_qa,
+                "visual_fix_contract": accepted_fix_plan or base_fix_plan or None,
                 "committed": False,
             })
+            _merge_shortform_result(
+                ws,
+                {
+                    "status": "qa_blocked",
+                    "job_id": job_id,
+                    "qa_blocked": True,
+                    "budget_exceeded": False,
+                    "error": str(current.get("last_repair_error") if current else "")
+                    or "Replacement still failed visual QA",
+                },
+            )
             return json.dumps({
                 "ok": False,
                 "job_id": job_id,
                 "scene_index": idx,
                 "scene": res,
                 "still_qa": current_still_qa,
+                "scene_correspondence_qa": current_correspondence_qa,
                 "catalyst_audit": current_audit,
                 "catalyst_repair_audit": repair_audit,
                 "catalyst_learning": learning,
@@ -4254,16 +5032,60 @@ def regenerate_production_scene_still(
         clip.with_suffix(clip.suffix + ".fal.json").unlink(missing_ok=True)
         clip.with_suffix(clip.suffix + ".visualqa.json").unlink(missing_ok=True)
         scenes = load_scenes(ws)
+        job_qa_blocked = False
         current = next((item for item in scenes if int(item.get("index", -1)) == idx), None)
         if current is not None:
             current["still_qa"] = current_still_qa
+            current["scene_correspondence_qa"] = current_correspondence_qa
             current["status"] = "still_ready"
             current["clip_rel"] = None
             current["approved_for_video"] = False
             current["approved_for_animation"] = False
             current["image_model_id"] = str(res.get("image_model_id") or selected_image or "")
+            current["image_provider"] = str(res.get("image_provider") or "")
+            current["fallback_from"] = res.get("fallback_from")
+            current["fallback_reason"] = res.get("fallback_reason")
+            current["provider_error"] = res.get("provider_error")
             current["media_route_revision"] = int(route.get("revision") or 1)
             current.pop("last_repair_error", None)
+            current.pop("last_repair_qa", None)
+            position = scenes.index(current)
+            current["visual_qa"] = visual_qa.build_scene_visual_qa(
+                ws,
+                current,
+                previous_scene=scenes[position - 1] if position > 0 else None,
+                next_scene=scenes[position + 1] if position + 1 < len(scenes) else None,
+                still_qa=current_still_qa,
+                correspondence_qa=current_correspondence_qa,
+                clip_qa={},
+                require_clip=False,
+            )
+            current["qa_stale"] = False
+            for neighbor_position in (position - 1, position + 1):
+                if neighbor_position < 0 or neighbor_position >= len(scenes):
+                    continue
+                neighbor = scenes[neighbor_position]
+                try:
+                    _refresh_scene_visual_qa(
+                        ws,
+                        scenes,
+                        int(neighbor.get("index", neighbor_position)),
+                        require_clip=bool(neighbor.get("clip_rel")),
+                    )
+                except Exception as exc:
+                    visual_qa.invalidate_scene_visual_qa(neighbor)
+                    neighbor["status"] = "qa_blocked"
+                    neighbor["approved_for_video"] = False
+                    neighbor["approved_for_animation"] = False
+                    neighbor["animate"] = False
+                    neighbor["last_repair_error"] = (
+                        f"Adjacent correspondence QA could not refresh: {str(exc)[:240]}"
+                    )
+            job_qa_blocked = any(
+                not isinstance(scene.get("visual_qa"), dict)
+                or scene.get("visual_qa", {}).get("pass") is not True
+                for scene in scenes
+            )
             save_scenes(ws, scenes)
         res.update({
             "candidate_path": None,
@@ -4271,15 +5093,32 @@ def regenerate_production_scene_still(
             "catalyst_repair_audit": repair_audit,
             "catalyst_audit": current_audit,
             "still_qa": current_still_qa,
+            "scene_correspondence_qa": current_correspondence_qa,
+            "visual_fix_contract": accepted_fix_plan or base_fix_plan or None,
             "committed": True,
             "media_route_revision": int(route.get("revision") or 1),
         })
+        _merge_shortform_result(
+            ws,
+            {
+                "status": "awaiting_scene_review",
+                "job_id": job_id,
+                "qa_blocked": job_qa_blocked,
+                "budget_exceeded": False,
+                "error": (
+                    "One or more adjacent scenes need refreshed correspondence QA."
+                    if job_qa_blocked else None
+                ),
+                "last_media_route": route,
+            },
+        )
         return json.dumps({
             "ok": True,
             "job_id": job_id,
             "scene_index": idx,
             "scene": res,
             "still_qa": current_still_qa,
+            "scene_correspondence_qa": current_correspondence_qa,
             "catalyst_audit": current_audit,
             "catalyst_repair_audit": repair_audit,
             "catalyst_learning": learning,
@@ -4318,9 +5157,18 @@ def regenerate_production_scene(
     The UI's Regenerate action is a scene-level recovery, not a confusing
     still-only replacement. Targeted Edit remains the intentional way to
     change only an image before committing animation spend.
+
+    Mid-job Art Style switches (session picker) rewrite job_spec before
+    redesign so historical stills can flip to skeleton_host.
     """
+    session_id = _resolve_session_id_for_shortform_job(job_id, session_id=session_id)
+    style_switch = _apply_session_render_style_to_shortform_job(job_id, session_id=session_id)
+    # Do not inject the style-switch note as a scene direction prompt — that would
+    # render words like "Art style switched" instead of redesigning from narration.
+    force_style_redesign = bool(style_switch.get("changed"))
     direction_update: dict[str, Any] | None = None
     force_master_for_artifact = False
+    visual_fix_plan: dict[str, Any] | None = None
     # Short notes such as "fix the hand" remain Catalyst feedback. A real
     # spoken/typed art direction becomes the replacement scene brief.
     reason_text = str(reason or "").strip()
@@ -4331,7 +5179,13 @@ def regenerate_production_scene(
         re.I,
     ))
     try:
-        if structured_restage:
+        if force_style_redesign and not structured_restage and not reuse_existing_direction:
+            from skeleton_ai.styled_pipeline import redesign_scene_from_narration
+
+            direction_update = redesign_scene_from_narration(
+                _shortform_workspace(job_id), int(scene_index),
+            )
+        elif structured_restage:
             # QA's concrete restage is structured execution input. Do not let
             # the generic "correspondence QA" reason branch discard it.
             from skeleton_ai.styled_pipeline import apply_scene_direction
@@ -4356,7 +5210,7 @@ def regenerate_production_scene(
         ):
             # Exact fix method: short cast-aware master regenerate (visual_fix_contract).
             from studio_agent.visual_fix_contract import artifact_fix_plan
-            from skeleton_ai.styled_pipeline import apply_scene_direction, load_scenes, save_scenes
+            from skeleton_ai.styled_pipeline import load_scenes
 
             ws = _shortform_workspace(job_id)
             scenes = load_scenes(ws)
@@ -4365,7 +5219,7 @@ def regenerate_production_scene(
                 spec = json.loads((ws / "job_spec.json").read_text(encoding="utf-8"))
             except Exception:
                 spec = {}
-            plan = artifact_fix_plan(
+            visual_fix_plan = artifact_fix_plan(
                 topic=str(spec.get("topic") or ""),
                 visual_brief=str(spec.get("visual_brief") or ""),
                 narration=str(scene.get("narration") or ""),
@@ -4376,25 +5230,15 @@ def regenerate_production_scene(
                 outfit=str(scene.get("outfit") or spec.get("locked_outfit") or "no clothing"),
                 aspect_ratio="9:16",
             )
-            direction_update = apply_scene_direction(ws, int(scene_index), plan["scene_action"])
-            scenes = load_scenes(ws)
-            scene = next((row for row in scenes if int(row.get("index", -1)) == int(scene_index)), None)
-            if scene is not None:
-                scene["cast_count"] = plan["cast_count"]
-                scene["prompt"] = plan["still_prompt"]
-                scene["motion_prompt"] = plan["motion_prompt"]
-                scene["prompt_user_override"] = True
-                scene["visual_fix_contract"] = {
-                    "method": plan["method"],
-                    "prompt_budget": plan["prompt_budget"],
-                    "rules": plan["rules"],
-                }
-                save_scenes(ws, scenes)
-            try:
-                spec["cast_count"] = plan["cast_count"]
-                (ws / "job_spec.json").write_text(json.dumps(spec, indent=2), encoding="utf-8")
-            except Exception:
-                pass
+            # Do not mutate the accepted scene metadata yet. The candidate
+            # renderer stages this plan and the still commit gate promotes it
+            # only after identity and correspondence QA both pass.
+            direction_update = {
+                "changed": True,
+                "source": "visual_fix_contract",
+                "scene_action": visual_fix_plan["scene_action"],
+                "cast_count": visual_fix_plan["cast_count"],
+            }
             force_master_for_artifact = True
         elif re.search(r"\b(?:scene\s+)?correspondence\s+qa\b|\bduplicate(?:\s+adjacent)?\b|\bnarrative\s+(?:mismatch|qa)\b", reason_text, re.I):
             # A QA finding is evidence, not a literal art prompt.  Re-direct from
@@ -4423,14 +5267,21 @@ def regenerate_production_scene(
         # scene manifest must not abort the actual still + clip regeneration.
         direction_update = None
     creative_redesign = bool(direction_update and direction_update.get("changed"))
+    still_reason = reason
+    if force_style_redesign and not str(still_reason or "").strip():
+        still_reason = (
+            f"Art style switched from {style_switch.get('from')} to {style_switch.get('to')}. "
+            "Rebuild this scene in the new locked style."
+        )
     still_raw = regenerate_production_scene_still(
         job_id,
         scene_index,
-        reason=reason,
-        force_master_regenerate=creative_redesign or force_master_for_artifact,
+        reason=still_reason,
+        force_master_regenerate=creative_redesign or force_master_for_artifact or force_style_redesign,
         image_model_id=image_model_id,
         session_id=session_id,
         route_revision=route_revision,
+        fix_plan=visual_fix_plan,
     )
     still_result = json.loads(still_raw)
     if not animate:
@@ -4440,7 +5291,7 @@ def regenerate_production_scene(
     # structured per-scene result so one blocked scene cannot abort a selected
     # five-scene batch and falsely report that later scenes were handled.
     still_qa = still_result.get("still_qa") if isinstance(still_result.get("still_qa"), dict) else {}
-    if not bool(still_result.get("ok", False)) or (still_qa and still_qa.get("pass") is not True):
+    if not bool(still_result.get("ok", False)) or (still_qa and still_qa.get("pass") is not True and still_qa.get("status") != "warn"):
         return json.dumps({
             "ok": False,
             "job_id": job_id,
@@ -4503,7 +5354,8 @@ def regenerate_production_scenes(
     same state-repair, still QA, animation, and sampled-frame QA as a targeted
     scene regeneration; it is not six blind, concurrent API calls.
     """
-    from skeleton_ai.styled_pipeline import load_scenes
+    from skeleton_ai.styled_pipeline import load_scenes, save_scenes
+    from studio_agent import visual_qa
 
     workspace = _shortform_workspace(job_id)
     scenes = load_scenes(workspace)
@@ -4529,11 +5381,97 @@ def regenerate_production_scenes(
         except Exception as exc:
             failed.append(index)
             results.append({"ok": False, "scene_index": index, "error": str(exc)})
+
+    # A later scene replacement changes the neighbor fingerprint of an earlier
+    # one. Re-run sequence correspondence after the whole batch is stable and
+    # persist fresh aggregate receipts for every changed scene and neighbor.
+    # Without this final pass a batch could report success while final render QA
+    # correctly saw stale evidence from the first scene in the loop.
+    persisted = load_scenes(workspace)
+    affected_indices = set(indices)
+    for index in indices:
+        affected_indices.update({index - 1, index + 1})
+    affected_positions = [
+        position
+        for position, scene in enumerate(persisted)
+        if int(scene.get("index", position)) in affected_indices
+    ]
+    sequence_failures: list[int] = []
+    for position in affected_positions:
+        scene = persisted[position]
+        scene_index = int(scene.get("index", position))
+        previous = persisted[position - 1] if position > 0 else None
+        following = persisted[position + 1] if position + 1 < len(persisted) else None
+        sid = str(scene.get("sid") or f"b{scene_index:02d}")
+        still = workspace / str(scene.get("still_rel") or f"stills/{sid}.png")
+        deterministic_graphic = str(
+            (scene.get("visual_treatment") or {}).get("kind") or ""
+        ) == "motion_graphic"
+        if deterministic_graphic:
+            correspondence = {
+                "status": "pass",
+                "pass": True,
+                "summary": "Deterministic graphic is bound to this scene treatment",
+                "kind": "deterministic_motion_graphic",
+            }
+        else:
+            previous_sid = str((previous or {}).get("sid") or "")
+            next_sid = str((following or {}).get("sid") or "")
+            correspondence = visual_qa.audit_scene_correspondence(
+                still,
+                scene_contract=visual_qa._scene_contract_text(scene),
+                previous_still=(
+                    workspace / str(previous.get("still_rel") or f"stills/{previous_sid}.png")
+                    if previous else None
+                ),
+                previous_contract=visual_qa._scene_contract_text(previous) if previous else "",
+                next_still=(
+                    workspace / str(following.get("still_rel") or f"stills/{next_sid}.png")
+                    if following else None
+                ),
+                next_contract=visual_qa._scene_contract_text(following) if following else "",
+            )
+        scene["scene_correspondence_qa"] = correspondence
+        scene["visual_qa"] = visual_qa.build_scene_visual_qa(
+            workspace,
+            scene,
+            previous_scene=previous,
+            next_scene=following,
+            still_qa=scene.get("still_qa") if isinstance(scene.get("still_qa"), dict) else {},
+            correspondence_qa=correspondence,
+            clip_qa=scene.get("i2v_qa") if isinstance(scene.get("i2v_qa"), dict) else {},
+            require_clip=bool(scene.get("clip_rel")),
+        )
+        scene["qa_stale"] = False
+        if scene["visual_qa"].get("pass") is not True:
+            sequence_failures.append(scene_index)
+            scene["status"] = "qa_blocked"
+            scene["approved_for_video"] = False
+            scene["approved_for_animation"] = False
+    save_scenes(workspace, persisted)
+
+    for position in affected_positions:
+        scene = persisted[position]
+        scene_index = int(scene.get("index", position))
+        fresh = visual_qa.scene_visual_qa_is_fresh(
+            workspace,
+            scene,
+            previous_scene=persisted[position - 1] if position > 0 else None,
+            next_scene=persisted[position + 1] if position + 1 < len(persisted) else None,
+        )
+        aggregate = scene.get("visual_qa") if isinstance(scene.get("visual_qa"), dict) else {}
+        if not fresh or aggregate.get("status") != "pass" or aggregate.get("pass") is not True:
+            sequence_failures.append(scene_index)
+
+    failed = sorted(set(failed) | set(sequence_failures))
+    postcondition_verified = not failed
     return json.dumps({
-        "ok": not failed,
+        "ok": postcondition_verified,
+        "postcondition_verified": postcondition_verified,
         "job_id": job_id,
         "regenerated": indices,
         "failed": failed,
+        "sequence_qa_failed": sorted(set(sequence_failures)),
         "scenes": results,
         "note": (
             "All requested scenes completed still + I2V regeneration and QA."
@@ -4557,82 +5495,28 @@ def set_production_scenes_animate(job_id: str, animate: bool, scene_indices: lis
             if len(scenes) == 1:
                 scene_indices = [int(scenes[0].get("index", 0))]
     idx_set = set(scene_indices) if scene_indices else None
-    try:
-        spec = json.loads((ws / "job_spec.json").read_text(encoding="utf-8"))
-    except Exception:
-        spec = {}
-    if "skeleton" in str((spec or {}).get("render_style") or "").lower():
-        from studio_agent import visual_qa
-
-        reference = visual_qa._workspace_skeleton_reference(ws)
-        failed_qa: list[dict[str, Any]] = []
-        for sc in scenes:
-            if idx_set is not None and sc.get("index") not in idx_set:
-                continue
-            sid = str(sc.get("sid") or f"b{int(sc.get('index', 0)):02d}")
-            still_rel = str(sc.get("still_rel") or f"stills/{sid}.png")
-            qa = visual_qa.audit_skeleton_still(
-                ws / still_rel,
-                reference=reference,
-                locked_outfit=str((spec or {}).get("locked_outfit") or sc.get("outfit") or ""),
-                cast_count=int(sc.get("cast_count") or (spec or {}).get("cast_count") or 1),
-            )
-            sc["still_qa"] = qa
-            if qa.get("status") != "pass" or qa.get("pass") is not True:
-                sc["approved_for_video"] = False
-                sc["approved_for_animation"] = False
-                sc["animate"] = False
-                failed_qa.append({
-                    "scene": int(sc.get("index", -1)) + 1,
-                    "summary": str(qa.get("summary") or "Canonical skeleton identity was not proven")[:300],
-                    "issues": list(qa.get("issues") or []),
-                })
-        if failed_qa:
-            save_scenes(ws, scenes)
-            details = "; ".join(
-                f"scene {item['scene']}: {item['summary']}" for item in failed_qa
-            )
-            raise RuntimeError(
-                "Still approval blocked by semantic visual QA. " + details[:900]
-            )
-    elif isinstance((spec or {}).get("product_reference"), dict):
-        from studio_agent import visual_qa
-
-        product = dict((spec or {}).get("product_reference") or {})
-        references = [
-            Path(str(image.get("path") or ""))
-            for image in list(product.get("images") or [])
-            if isinstance(image, dict) and str(image.get("path") or "").strip()
-        ]
-        failed_qa: list[dict[str, Any]] = []
-        for sc in scenes:
-            if idx_set is not None and sc.get("index") not in idx_set:
-                continue
-            sid = str(sc.get("sid") or f"b{int(sc.get('index', 0)):02d}")
-            still_rel = str(sc.get("still_rel") or f"stills/{sid}.png")
-            qa = visual_qa.audit_product_still(
-                ws / still_rel,
-                references=references,
-                product_name=str(product.get("product_name") or ""),
-            )
-            sc["still_qa"] = qa
-            if qa.get("status") != "pass" or qa.get("pass") is not True:
-                sc["approved_for_video"] = False
-                sc["approved_for_animation"] = False
-                sc["animate"] = False
-                failed_qa.append({
-                    "scene": int(sc.get("index", -1)) + 1,
-                    "summary": str(qa.get("summary") or "Product identity was not proven")[:300],
-                    "issues": list(qa.get("issues") or []),
-                })
-        if failed_qa:
-            save_scenes(ws, scenes)
-            details = "; ".join(
-                f"scene {item['scene']}: {item['summary']}" for item in failed_qa
-            )
-            raise RuntimeError(
-                "Product still approval blocked by semantic visual QA. " + details[:900]
-            )
+    failed_qa: list[dict[str, Any]] = []
+    for sc in scenes:
+        if idx_set is not None and sc.get("index") not in idx_set:
+            continue
+        aggregate = _refresh_scene_visual_qa(
+            ws,
+            scenes,
+            int(sc.get("index", -1)),
+            require_clip=False,
+        )
+        if aggregate.get("pass") is not True:
+            failed_qa.append({
+                "scene": int(sc.get("index", -1)) + 1,
+                "summary": str(aggregate.get("summary") or "Scene QA was not proven")[:300],
+                "issues": list(aggregate.get("failed_components") or []),
+            })
+    if failed_qa:
+        save_scenes(ws, scenes)
+        details = "; ".join(
+            f"scene {item['scene']}: {item['summary']}" for item in failed_qa
+        )
+        raise RuntimeError("Still approval blocked by aggregate visual QA. " + details[:900])
     for sc in scenes:
         if idx_set is None or sc.get("index") in idx_set:
             sc["animate"] = bool(animate)
@@ -4640,6 +5524,31 @@ def set_production_scenes_animate(job_id: str, animate: bool, scene_indices: lis
             sc["approved_for_animation"] = bool(animate)
             changed.append(sc.get("index"))
     save_scenes(ws, scenes)
+    durable_scenes = load_scenes(ws)
+    durable_by_index = {
+        int(item.get("index", -1)): item
+        for item in durable_scenes
+        if isinstance(item, dict)
+    }
+    committed = bool(changed) and all(
+        isinstance(durable_by_index.get(int(index)), dict)
+        and durable_by_index[int(index)].get("approved_for_video") is True
+        and durable_by_index[int(index)].get("approved_for_animation") is bool(animate)
+        for index in changed
+    )
+    if not committed:
+        return json.dumps({
+            "ok": False,
+            "status": "failed",
+            "postcondition_verified": False,
+            "job_id": job_id,
+            "affected": changed,
+            "error": "Scene approval mutation was not durable",
+        }, indent=2)
+    _invalidate_shortform_final_after_contract_change(
+        ws,
+        status="scene_approval_updated",
+    )
     approved_count = sum(1 for sc in scenes if sc.get("approved_for_video"))
     all_approved = bool(scenes) and approved_count == len(scenes)
     if all_approved:
@@ -4670,36 +5579,15 @@ def set_production_scenes_animate(job_id: str, animate: bool, scene_indices: lis
                     break
             except OSError:
                 continue
-        if final_video and str(result.get("status") or "").lower() in {"complete", "completed", "ready", "scenes_approved"}:
-            result["status"] = "complete"
-            result["job_id"] = job_id
-            result["video_path"] = str(final_video)
-            result["scene_count"] = len(scenes)
-            result["approved_scene_count"] = approved_count
-            result["animation_pending_count"] = 0
-            result.pop("error", None)
-            result_path.write_text(json.dumps(result, indent=2), encoding="utf-8")
-            (ws / "progress.json").write_text(json.dumps({
-                "stage": "complete",
-                "progress": 100,
-                "detail": "Final MP4 ready.",
-            }, indent=2), encoding="utf-8")
-            return json.dumps({
-                "ok": True,
-                "job_id": job_id,
-                "affected": changed,
-                "animate": animate,
-                "approved_for_video": changed,
-                "approved_count": approved_count,
-                "scene_count": len(scenes),
-                "all_approved": all_approved,
-                "status": "complete",
-                "video_path": str(final_video),
-                "note": (
-                    "The final MP4 already exists, so Studio kept this job complete instead of moving it "
-                    "back to scene review. Use a re-edit or regenerate flow for changes after export."
-                ),
-            }, indent=2)
+        if final_video:
+            # Any approval/animation-policy mutation changes the requested edit
+            # contract. The prior MP4 becomes staged evidence, never an
+            # automatically re-published deliverable.
+            result["staged_video_path"] = str(final_video)
+            result.pop("video_path", None)
+            result["ready_to_post"] = False
+            result.pop("render_qa", None)
+            result.pop("qa_state", None)
         result.update({
             "status": "scenes_approved",
             "job_id": job_id,
@@ -4719,6 +5607,8 @@ def set_production_scenes_animate(job_id: str, animate: bool, scene_indices: lis
         }, indent=2), encoding="utf-8")
     return json.dumps({
         "ok": True,
+        "status": "complete",
+        "postcondition_verified": True,
         "job_id": job_id,
         "affected": changed,
         "animate": animate,
@@ -4734,16 +5624,135 @@ def set_production_scenes_animate(job_id: str, animate: bool, scene_indices: lis
     }, indent=2)
 
 
+def set_production_scene_prompt(job_id: str, scene_index: int, prompt: str) -> str:
+    """Persist an exact creator prompt with a verifiable mutation receipt."""
+    from skeleton_ai.styled_pipeline import set_scene_prompt_override
+
+    scene = set_scene_prompt_override(_shortform_workspace(job_id), int(scene_index), str(prompt or ""))
+    expected = re.sub(r"\s+", " ", str(prompt or "")).strip()
+    committed = bool(
+        isinstance(scene, dict)
+        and scene.get("prompt_user_override") is True
+        and str(scene.get("prompt") or "").strip() == expected
+    )
+    if committed:
+        _invalidate_shortform_final_after_contract_change(
+            _shortform_workspace(job_id),
+            status="prompt_updated",
+        )
+    return json.dumps({
+        "ok": committed,
+        "status": "complete" if committed else "failed",
+        "postcondition_verified": committed,
+        "job_id": job_id,
+        "scene_index": int(scene_index),
+        "scene": scene,
+        "error": "Prompt mutation was not durable" if not committed else "",
+    }, indent=2)
+
+
+def _invalidate_shortform_final_after_contract_change(
+    workspace: Path,
+    *,
+    status: str,
+) -> None:
+    """Keep the last accepted asset staged while revoking its publish projection."""
+
+    workspace = Path(workspace)
+    result_path = workspace / "result.json"
+    result: dict[str, Any] = {}
+    try:
+        loaded = json.loads(result_path.read_text(encoding="utf-8"))
+        if isinstance(loaded, dict):
+            result.update(loaded)
+    except Exception:
+        pass
+    prior_video = str(result.get("video_path") or "").strip()
+    if prior_video:
+        result["staged_video_path"] = prior_video
+    result.pop("video_path", None)
+    result.pop("render_qa", None)
+    result.pop("qa_state", None)
+    result.update({
+        "status": str(status or "contract_changed"),
+        "ready_to_post": False,
+        "final_qa_blocked": True,
+    })
+    _atomic_write_json(result_path, result)
+    for stale in ("render_qa.json", "package_qa.json"):
+        try:
+            (workspace / stale).unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 def set_production_scene_duration(job_id: str, scene_index: int, duration_sec: float) -> str:
+    """Persist a pacing override and prove the exact value survived a reread."""
+
+    if not math.isfinite(float(duration_sec)) or not 0.5 <= float(duration_sec) <= 120.0:
+        raise ValueError("duration_sec must be a finite value between 0.5 and 120 seconds")
     ws = _shortform_workspace(job_id)
     from skeleton_ai.styled_pipeline import load_scenes, save_scenes
     scenes = load_scenes(ws)
     for sc in scenes:
         if sc.get("index") == int(scene_index):
             sc["duration_sec"] = float(duration_sec)
+            sc["approved_for_video"] = False
+            sc["approved_for_animation"] = False
+            from studio_agent.visual_qa import invalidate_scene_visual_qa
+
+            invalidate_scene_visual_qa(sc, contract_changed=True)
             save_scenes(ws, scenes)
-            return json.dumps({"ok": True, "job_id": job_id, "scene_index": scene_index, "duration_sec": duration_sec}, indent=2)
+            durable = next(
+                (
+                    item for item in load_scenes(ws)
+                    if int(item.get("index", -1)) == int(scene_index)
+                ),
+                None,
+            )
+            committed = bool(
+                isinstance(durable, dict)
+                and math.isclose(
+                    float(durable.get("duration_sec", -1.0)),
+                    float(duration_sec),
+                    rel_tol=0.0,
+                    abs_tol=1e-6,
+                )
+                and durable.get("approved_for_video") is False
+                and durable.get("approved_for_animation") is False
+            )
+            if committed:
+                _invalidate_shortform_final_after_contract_change(
+                    ws,
+                    status="duration_updated",
+                )
+            return json.dumps({
+                "ok": committed,
+                "status": "complete" if committed else "failed",
+                "postcondition_verified": committed,
+                "job_id": job_id,
+                "scene_index": int(scene_index),
+                "duration_sec": float(duration_sec),
+                "ready_to_post": False,
+                "error": "Duration mutation was not durable" if not committed else "",
+            }, indent=2)
     raise ValueError(f"scene {scene_index} not found")
+
+
+def _merge_shortform_result(workspace: Path, patch: dict[str, Any]) -> dict[str, Any]:
+    target = Path(workspace) / "result.json"
+    merged: dict[str, Any] = {}
+    if target.is_file():
+        try:
+            prior = json.loads(target.read_text(encoding="utf-8"))
+            if isinstance(prior, dict):
+                merged.update(prior)
+        except Exception:
+            pass
+    merged.update(dict(patch or {}))
+    target.parent.mkdir(parents=True, exist_ok=True)
+    _atomic_write_json(target, merged)
+    return merged
 
 
 def _spawn_shortform_background_stage(
@@ -4806,9 +5815,9 @@ def _spawn_shortform_background_stage(
             except Exception:
                 pass
             try:
-                (ws / "result.json").write_text(
-                    json.dumps({"status": "failed", "job_id": job_id, "error": str(exc)}, indent=2),
-                    encoding="utf-8",
+                _merge_shortform_result(
+                    ws,
+                    {"status": "failed", "job_id": job_id, "error": str(exc)},
                 )
             except Exception:
                 pass
@@ -4920,6 +5929,15 @@ def animate_production_scenes(
 ) -> str:
     ws = _shortform_workspace(job_id)
     from skeleton_ai.styled_pipeline import animate_scenes_stage, load_scenes, save_scenes
+    # Keep a prior failure visible until a replacement actually succeeds.
+    # Prefer the job-locked video model over a stale session Seedance default.
+    if not str(video_model or "").strip():
+        try:
+            spec = json.loads((ws / "job_spec.json").read_text(encoding="utf-8"))
+            if isinstance(spec, dict):
+                video_model = str(spec.get("video_model") or "").strip() or video_model
+        except Exception:
+            pass
     scenes = load_scenes(ws)
     if scene_indices is None:
         try:
@@ -4967,11 +5985,32 @@ def animate_production_scenes(
         ) if session_id or video_model else None,
     )
     scenes_after = load_scenes(ws)
+    aggregate_qa_failed: set[int] = set()
+    for target in targets:
+        current = next(
+            (sc for sc in scenes_after if int(sc.get("index", -1)) == int(target)),
+            None,
+        )
+        if (
+            current is None
+            or str(current.get("status") or "") == "error"
+            or not str(current.get("clip_rel") or "").strip()
+        ):
+            continue
+        aggregate = _refresh_scene_visual_qa(
+            ws,
+            scenes_after,
+            int(target),
+            require_clip=True,
+        )
+        if aggregate.get("pass") is not True:
+            aggregate_qa_failed.add(int(target))
+    save_scenes(ws, scenes_after)
     reported_failed = {
         int(value)
         for value in (res.get("failed") or [])
         if str(value).lstrip("-").isdigit()
-    }
+    } | aggregate_qa_failed
     failed = sorted(reported_failed | {
         int(sc.get("index", -1))
         for sc in scenes_after
@@ -4992,6 +6031,11 @@ def animate_production_scenes(
             and sc.get("clip_rel")
         )
     ]
+    budget_failure = any(
+        "budget_exceeded" in str(sc.get("last_repair_error") or "").lower()
+        for sc in scenes_after
+        if int(sc.get("index", -1)) in set(failed)
+    )
     result_path = ws / "result.json"
     result: dict[str, Any] = {}
     try:
@@ -5012,13 +6056,21 @@ def animate_production_scenes(
     human_failed = [index + 1 for index in aggregate_failed]
     if aggregate_failed:
         result.update({
-            "status": "failed" if failed and not animated_ok else "partial",
+            "status": (
+                "budget_exceeded"
+                if budget_failure and failed and not animated_ok
+                else "failed"
+                if failed and not animated_ok
+                else "partial"
+            ),
             "job_id": job_id,
             "scene_count": len(scenes_after),
             "animated_scene_count": sum(bool(sc.get("clip_rel")) for sc in scenes_after),
             "animation_failed": aggregate_failed,
             "animation_failed_scene_numbers": human_failed,
             "error": f"Animation failed for scene(s): {human_failed}",
+            "budget_exceeded": bool(budget_failure),
+            "qa_blocked": bool(aggregate_qa_failed),
         })
         result_path.write_text(json.dumps(result, indent=2), encoding="utf-8")
         (ws / "progress.json").write_text(json.dumps({
@@ -5034,6 +6086,8 @@ def animate_production_scenes(
             "animated_scene_count": sum(bool(sc.get("clip_rel")) for sc in scenes_after),
             "animation_failed": [],
             "animation_failed_scene_numbers": [],
+            "budget_exceeded": False,
+            "qa_blocked": False,
         })
         result.pop("error", None)
         result_path.write_text(json.dumps(result, indent=2), encoding="utf-8")
@@ -5451,7 +6505,7 @@ def audit_and_repair_production_scenes(
             )
         scene["still_qa"] = still_qa
         save_scenes(ws, scenes)
-        if still_qa.get("pass") is not True:
+        if still_qa.get("pass") is not True and still_qa.get("status") != "warn":
             attempted_still_repairs.append(index)
             try:
                 repair = json.loads(regenerate_production_scene(
@@ -5489,7 +6543,7 @@ def audit_and_repair_production_scenes(
         )
         scene["scene_correspondence_qa"] = correspondence_qa
         save_scenes(ws, scenes)
-        if correspondence_qa.get("pass") is not True:
+        if correspondence_qa.get("pass") is not True and correspondence_qa.get("status") != "warn":
             motion_only_fail = _scene_correspondence_motion_only(correspondence_qa)
             # Motion belongs in i2v. Do not rebuild the still for a performance brief.
             if motion_only_fail:
@@ -5568,7 +6622,7 @@ def audit_and_repair_production_scenes(
         if current is not None:
             current["i2v_qa"] = clip_qa
             save_scenes(ws, scenes)
-        if clip_qa.get("pass") is not True:
+        if clip_qa.get("pass") is not True and clip_qa.get("status") != "warn":
             attempted_animation_repairs.append(index)
             try:
                 repair = json.loads(repair_production_scene_animation(
@@ -5780,7 +6834,125 @@ def shortform_finalize_preflight(job_id: str) -> dict[str, Any]:
                 "Studio will not silently downgrade requested animation into still-only video."
             ),
         }
+    qa_failures: list[dict[str, Any]] = []
+    try:
+        for scene in scenes:
+            scene_index = int(scene.get("index", -1))
+            aggregate = _refresh_scene_visual_qa(
+                ws,
+                scenes,
+                scene_index,
+                require_clip=bool(
+                    scene.get("animate")
+                    or scene.get("approved_for_animation")
+                    or scene.get("clip_rel")
+                ),
+            )
+            if aggregate.get("pass") is not True:
+                qa_failures.append({
+                    "scene_index": scene_index,
+                    "scene_number": scene_index + 1,
+                    "summary": str(aggregate.get("summary") or "Scene QA failed")[:500],
+                    "failed_components": list(aggregate.get("failed_components") or []),
+                    "fingerprint": str(aggregate.get("fingerprint") or ""),
+                })
+        from skeleton_ai.styled_pipeline import save_scenes
+
+        save_scenes(ws, scenes)
+    except Exception as exc:
+        return {
+            "status": "visual_qa_unavailable",
+            "job_id": job_id,
+            "error": f"Studio could not prove current scene QA: {str(exc)[:300]}",
+            "note": "Finalize did not start. No unverified asset was published.",
+        }
+    if qa_failures:
+        return {
+            "status": "visual_qa_failed",
+            "job_id": job_id,
+            "qa_blocked": True,
+            "failed_scenes": qa_failures,
+            "error": "Current scene assets did not pass identity, correspondence, and clip QA.",
+            "note": "Regenerate only the listed current assets, then retry finalize.",
+        }
     return {"status": "ready", "job_id": job_id}
+
+
+def _project_staged_shortform_final(job_id: str, result: dict[str, Any]) -> dict[str, Any]:
+    """Run the authoritative final gate and persist only its public projection."""
+    from studio_agent import jobs as agent_jobs
+
+    ws = _shortform_workspace(job_id)
+    snapshot = agent_jobs.get_job_snapshot(job_id, "shortform", lightweight=False)
+    ready = snapshot.get("ready_to_post") is True and snapshot.get("status") == "complete"
+    qa_state = snapshot.get("qa_state") if isinstance(snapshot.get("qa_state"), dict) else {}
+    public: dict[str, Any] = {
+        "status": "complete" if ready else "final_qa_blocked",
+        "job_id": job_id,
+        "ready_to_post": ready,
+        "qa_state": qa_state,
+        "render_qa": snapshot.get("render_qa") or {},
+        "visual_qa": snapshot.get("visual_qa") or {},
+        "animated_scenes": result.get("animated_scenes"),
+        "sound_design": result.get("sound_design"),
+        "final_audio_path": result.get("final_audio_path"),
+    }
+    if ready:
+        public.update({
+            "video_path": result.get("video_path"),
+            "mp4_url": f"/api/studio-agent/jobs/{job_id}/media?kind=shortform",
+            "download_url": f"/api/studio-agent/jobs/{job_id}/media?kind=shortform",
+            "package_url": f"/api/studio-agent/jobs/{job_id}/package?kind=shortform",
+            "note": "Final scene, story, pacing, caption, audio, render, and package QA passed.",
+        })
+    else:
+        public.update({
+            "staged_video_path": result.get("video_path") or result.get("staged_video_path"),
+            "qa_blocked": True,
+            "note": "The render remains staged. No MP4 URL, download, complete status, or package is exposed until every mandatory QA check passes.",
+        })
+
+    result_path = ws / "result.json"
+    try:
+        durable: dict[str, Any] = {}
+        if result_path.is_file():
+            loaded = json.loads(result_path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                durable = loaded
+        durable.update({
+            "status": public["status"],
+            "ready_to_post": ready,
+            "qa_state": qa_state,
+            "render_qa": public["render_qa"],
+            "visual_qa": public["visual_qa"],
+        })
+        if ready:
+            durable["video_path"] = str(result.get("video_path") or durable.get("video_path") or "")
+            durable.pop("staged_video_path", None)
+            durable.pop("error", None)
+        else:
+            durable["staged_video_path"] = str(result.get("video_path") or result.get("staged_video_path") or durable.get("video_path") or "")
+            durable.pop("video_path", None)
+            durable["error"] = str(snapshot.get("stage_detail") or "Mandatory final QA did not pass")[:500]
+        result_path.write_text(json.dumps(durable, indent=2), encoding="utf-8")
+        (ws / "progress.json").write_text(json.dumps({
+            "stage": public["status"],
+            "progress": 100 if ready else 99,
+            "detail": public["note"],
+        }, indent=2), encoding="utf-8")
+    except Exception as exc:
+        # Persistence is a postcondition. If it cannot be recorded, fail closed
+        # even when the in-memory QA report passed.
+        public = {
+            "status": "final_qa_blocked",
+            "job_id": job_id,
+            "ready_to_post": False,
+            "qa_blocked": True,
+            "staged_video_path": result.get("video_path") or result.get("staged_video_path"),
+            "error": f"Could not persist final QA postcondition: {str(exc)[:300]}",
+            "note": "The staged render was withheld because its durable QA receipt could not be saved.",
+        }
+    return public
 
 
 def finalize_production(
@@ -5807,44 +6979,6 @@ def finalize_production(
     preflight = shortform_finalize_preflight(job_id)
     if preflight.get("status") != "ready":
         return json.dumps(preflight, indent=2)
-    try:
-        # Visual QA gate: block only when explicitly required (fail-open for launch stability).
-        qa_required = os.getenv("STUDIO_FINALIZE_QA_REQUIRED", "false").strip().lower() in {"1", "true", "yes"}
-        try:
-            from studio_agent import visual_qa
-
-            vq = visual_qa.analyze_shortform_workspace(ws)
-            block, reason = visual_qa.should_block_publish(vq)
-            if block and qa_required:
-                return json.dumps({
-                    "status": "visual_qa_failed",
-                    "job_id": job_id,
-                    "visual_qa": vq,
-                    "error": reason or "Visual QA failed",
-                    "note": (
-                        "Finalize blocked: visual QA detected identity/prompt/background failures. "
-                        "Regenerate failing stills or fix wardrobe locks, re-animate if needed, then finalize again."
-                    ),
-                }, indent=2)
-        except Exception as qa_exc:
-            if qa_required:
-                return json.dumps({
-                    "status": "visual_qa_unavailable",
-                    "job_id": job_id,
-                    "error": f"Visual QA could not run: {str(qa_exc)[:300]}",
-                    "note": (
-                        "Finalize blocked because Studio could not prove visual identity safety. "
-                        "No artifacted clip will be marked ready while QA is unavailable."
-                    ),
-                }, indent=2)
-    except Exception as inspect_exc:
-        if os.getenv("STUDIO_FINALIZE_QA_REQUIRED", "false").strip().lower() in {"1", "true", "yes"}:
-            return json.dumps({
-                "status": "visual_qa_unavailable",
-                "job_id": job_id,
-                "error": f"Scene inspection failed before finalize: {str(inspect_exc)[:300]}",
-                "note": "Finalize blocked until Studio can inspect every requested animation clip.",
-            }, indent=2)
     voice_id = opts.pop("voice_id", None)
     opts.pop("voice_provider", None)
     from skeleton_ai.voice_auto import AutoVoiceClient
@@ -5858,21 +6992,13 @@ def finalize_production(
         el=el,
         **opts,
     )
-    status = str(result.get("status") or "complete").lower()
-    return json.dumps({
-        "status": status if status in {"complete", "completed", "ready"} else "running",
-        "job_id": job_id,
-        "video_path": result.get("video_path"),
-        "mp4_url": f"/api/studio-agent/jobs/{job_id}/media?kind=shortform" if result.get("video_path") else None,
-        "download_url": f"/api/studio-agent/jobs/{job_id}/media?kind=shortform" if result.get("video_path") else None,
-        "animated_scenes": result.get("animated_scenes"),
-        "sound_design": result.get("sound_design"),
-        "final_audio_path": result.get("final_audio_path"),
+    projection = _project_staged_shortform_final(job_id, result)
+    projection.update({
         "watermark_text": opts.get("watermark_text"),
         "captions_enabled": opts.get("captions_enabled"),
         "caption_mode": "word" if opts.get("captions_enabled") else "off",
-        "note": "Finalize complete. The Studio UI can display/download the MP4." if result.get("video_path") else "Finalize running. Poll job status until complete for MP4.",
-    }, indent=2)
+    })
+    return json.dumps(projection, indent=2)
 
 
 def re_edit_production(job_id: str, instruction: str, kind: str = "shortform") -> str:
@@ -5919,6 +7045,10 @@ def re_edit_production(job_id: str, instruction: str, kind: str = "shortform") -
     except Exception:
         pass
 
+    preflight = shortform_finalize_preflight(job_id)
+    if preflight.get("status") != "ready":
+        return json.dumps(preflight, indent=2)
+
     # Drive a re-finalize on the *existing* workspace (re-uses stills, existing clips, scenes.json).
     # The per-scene VO + trim_with_captions + CTA logic inside finalize will produce the "properly re-edited" video.
     from skeleton_ai.styled_pipeline import finalize_stage
@@ -5937,22 +7067,15 @@ def re_edit_production(job_id: str, instruction: str, kind: str = "shortform") -
         el=el,
         **opts,
     )
-    status = str(result.get("status") or "complete").lower()
-
-    return json.dumps({
-        "status": status if status in {"complete", "completed", "ready"} else "running",
-        "job_id": job_id,
+    projection = _project_staged_shortform_final(job_id, result)
+    projection.update({
         "kind": "shortform",
-        "video_path": result.get("video_path"),
-        "mp4_url": f"/api/studio-agent/jobs/{job_id}/media?kind=shortform" if result.get("video_path") else None,
-        "download_url": f"/api/studio-agent/jobs/{job_id}/media?kind=shortform" if result.get("video_path") else None,
-        "sound_design": result.get("sound_design"),
-        "final_audio_path": result.get("final_audio_path"),
         "watermark_text": opts.get("watermark_text"),
         "captions_enabled": opts.get("captions_enabled"),
         "caption_mode": "word" if opts.get("captions_enabled") else "off",
-        "note": "Re-edit complete (re-used prior stills/clips from the video the user replied to). The new MP4 is ready in the Studio UI." if result.get("video_path") else "Re-edit is still running. Poll job status until complete for MP4.",
-    }, indent=2)
+        "reedit_instruction": instruction[:300],
+    })
+    return json.dumps(projection, indent=2)
 
 
 # Lightweight long-form scene helpers (longform has chapter gates + regenerate; we expose
@@ -6125,20 +7248,22 @@ def expand_longform_chapter_logged(args: dict[str, Any]) -> str:
 
 
 def regenerate_longform_still(job_id: str, scene_idx: int, reason: str = "") -> str:
-    """Regenerate one long-form still. Artifact complaints use the short-prompt contract."""
+    """Regenerate one long-form still and report only a QA-proven commit."""
     from pathlib import Path
 
     from long_form import pipeline as lf
     from studio_agent.visual_fix_contract import artifact_fix_plan, is_visual_artifact_complaint
 
+    visual_fix: dict[str, Any] | None = None
+    prompt = str(reason or "").strip() or None
     try:
         if is_visual_artifact_complaint(reason):
             topic = ""
             outfit = "no clothing"
             try:
-                d = lf._job_dir(job_id) if hasattr(lf, "_job_dir") else None
-                if d is not None and (Path(d) / "state.json").is_file():
-                    state = json.loads((Path(d) / "state.json").read_text(encoding="utf-8"))
+                directory = lf._job_dir(job_id) if hasattr(lf, "_job_dir") else None
+                if directory is not None and (Path(directory) / "state.json").is_file():
+                    state = json.loads((Path(directory) / "state.json").read_text(encoding="utf-8"))
                     topic = str(state.get("topic") or state.get("title") or "")
                     outfit = str(state.get("locked_outfit") or outfit)
             except Exception:
@@ -6149,33 +7274,48 @@ def regenerate_longform_still(job_id: str, scene_idx: int, reason: str = "") -> 
                 outfit=outfit,
                 aspect_ratio="16:9",
             )
-            new_path = lf.regenerate_still(job_id, int(scene_idx), new_prompt=plan["still_prompt"])
-            version = int(new_path.stat().st_mtime)
-            return json.dumps({
-                "ok": True,
-                "job_id": job_id,
-                "scene_idx": scene_idx,
-                "still_url": f"/api/long-form/jobs/{job_id}/still/{scene_idx}?v={version}",
-                "new_prompt_used": True,
-                "visual_fix_contract": {
-                    "method": plan["method"],
-                    "prompt_budget": plan["prompt_budget"],
-                    "still_prompt_len": plan["still_prompt_len"],
-                    "cast_count": plan["cast_count"],
-                    "rules": plan["rules"],
-                },
-            }, indent=2)
-        new_path = lf.regenerate_still(job_id, int(scene_idx), new_prompt=str(reason or "").strip() or None)
-        version = int(new_path.stat().st_mtime)
-        return json.dumps({
-            "ok": True,
+            prompt = plan["still_prompt"]
+            visual_fix = {
+                "method": plan["method"],
+                "prompt_budget": plan["prompt_budget"],
+                "still_prompt_len": plan["still_prompt_len"],
+                "cast_count": plan["cast_count"],
+                "rules": plan["rules"],
+            }
+
+        committed_path = lf.regenerate_still(job_id, int(scene_idx), new_prompt=prompt)
+        report = lf._read_longform_visual_qa(committed_path)
+        committed = bool(lf._longform_visual_qa_is_current(committed_path, report))
+        version = int(committed_path.stat().st_mtime) if committed and committed_path.is_file() else 0
+        payload: dict[str, Any] = {
+            "ok": committed,
+            "status": "complete" if committed else "visual_qa_failed",
+            "postcondition_verified": committed,
             "job_id": job_id,
-            "scene_idx": scene_idx,
-            "still_url": f"/api/long-form/jobs/{job_id}/still/{scene_idx}?v={version}",
-            "new_prompt_used": bool(str(reason or "").strip()),
+            "scene_idx": int(scene_idx),
+            "ready_to_post": False,
+            "asset_path": str(committed_path) if committed else "",
+            "still_url": (
+                f"/api/long-form/jobs/{job_id}/still/{int(scene_idx)}?v={version}"
+                if committed else ""
+            ),
+            "new_prompt_used": bool(prompt),
+            "qa": report,
+            "error": "Long-form still did not retain current passing QA" if not committed else "",
+        }
+        if visual_fix is not None:
+            payload["visual_fix_contract"] = visual_fix
+        return json.dumps(payload, indent=2)
+    except Exception as exc:
+        return json.dumps({
+            "ok": False,
+            "status": "failed",
+            "postcondition_verified": False,
+            "job_id": job_id,
+            "scene_idx": int(scene_idx),
+            "ready_to_post": False,
+            "error": str(exc)[:300],
         }, indent=2)
-    except Exception as e:
-        raise RuntimeError(f"long-form still regeneration failed: {str(e)[:300]}") from e
 
 
 def regenerate_longform_thumbnail(
@@ -6183,30 +7323,77 @@ def regenerate_longform_thumbnail(
     idx: int,
     custom_prompt: str = "",
 ) -> str:
+    """Regenerate one thumbnail through the candidate/QA promotion boundary."""
     from long_form import pipeline as lf
 
+    clean_job_id = str(job_id or "").strip()
     try:
-        new_path = lf.regenerate_thumbnail(
-            str(job_id or "").strip(),
+        committed_path = lf.regenerate_thumbnail(
+            clean_job_id,
             int(idx),
             str(custom_prompt or "").strip() or None,
         )
-    except Exception as exc:
-        raise RuntimeError(f"long-form thumbnail regeneration failed: {str(exc)[:300]}") from exc
-    version = int(new_path.stat().st_mtime)
-    return json.dumps(
-        {
-            "ok": True,
-            "job_id": str(job_id or "").strip(),
+        report = lf._read_longform_visual_qa(committed_path)
+        committed = bool(lf._longform_visual_qa_is_current(committed_path, report))
+        version = int(committed_path.stat().st_mtime) if committed and committed_path.is_file() else 0
+        return json.dumps({
+            "ok": committed,
+            "status": "complete" if committed else "visual_qa_failed",
+            "postcondition_verified": committed,
+            "job_id": clean_job_id,
             "idx": int(idx),
+            "index": int(idx),
+            "ready_to_post": False,
+            "thumbnail_path": str(committed_path) if committed else "",
             "thumbnail_url": (
-                f"/api/long-form/jobs/{str(job_id or '').strip()}/thumbnail/{int(idx)}?v={version}"
+                f"/api/long-form/jobs/{clean_job_id}/thumbnail/{int(idx)}?v={version}"
+                if committed else ""
             ),
             "custom_prompt_used": bool(str(custom_prompt or "").strip()),
-        },
-        indent=2,
-    )
+            "qa": report,
+            "error": "Long-form thumbnail did not retain current passing QA" if not committed else "",
+        }, indent=2)
+    except Exception as exc:
+        return json.dumps({
+            "ok": False,
+            "status": "failed",
+            "postcondition_verified": False,
+            "job_id": clean_job_id,
+            "idx": int(idx),
+            "index": int(idx),
+            "ready_to_post": False,
+            "error": str(exc)[:300],
+        }, indent=2)
 
+
+def cancel_longform_render(job_id: str) -> str:
+    """Cancel long-form work and prove the persisted phase after mutation."""
+    from long_form import pipeline as lf
+
+    clean_job_id = str(job_id or "").strip()
+    try:
+        result = dict(lf.cancel_render(clean_job_id) or {})
+        durable = lf.load_state(clean_job_id) or {}
+        committed = str(durable.get("phase") or "") == "cancelled"
+        return json.dumps({
+            "ok": committed,
+            "status": "complete" if committed else "failed",
+            "postcondition_verified": committed,
+            "job_id": clean_job_id,
+            "phase": str(durable.get("phase") or result.get("phase") or ""),
+            "was_running": bool(result.get("was_running")),
+            "ready_to_post": False,
+            "error": "Long-form cancellation did not persist" if not committed else "",
+        }, indent=2)
+    except Exception as exc:
+        return json.dumps({
+            "ok": False,
+            "status": "failed",
+            "postcondition_verified": False,
+            "job_id": clean_job_id,
+            "ready_to_post": False,
+            "error": str(exc)[:300],
+        }, indent=2)
 
 def _reclaim_orphaned_shortform_jobs() -> int:
     """On process start (or module import), find job_spec.json that have no result.json yet
@@ -6276,7 +7463,14 @@ def _reclaim_orphaned_shortform_jobs() -> int:
                     except Exception:
                         pass
                     try:
-                        (w / "result.json").write_text(json.dumps({"status": "failed", "job_id": s.get("job_id"), "error": str(e2)}, indent=2), encoding="utf-8")
+                        _merge_shortform_result(
+                            w,
+                            {
+                                "status": "failed",
+                                "job_id": s.get("job_id"),
+                                "error": str(e2),
+                            },
+                        )
                     except Exception:
                         pass
                 finally:
@@ -6323,14 +7517,34 @@ def cancel_shortform_job(job_id: str) -> bool:
     return True
 
 
+def cancel_production_job(job_id: str) -> str:
+    """Cancel locally and return a receipt backed by the durable cancel flag."""
+
+    cancelled = cancel_shortform_job(job_id)
+    workspace = _shortform_workspace(job_id)
+    from skeleton_ai.pipeline import CANCEL_FLAG
+
+    committed = bool(cancelled and (workspace / CANCEL_FLAG).is_file())
+    return json.dumps({
+        "ok": committed,
+        "status": "cancelling" if committed else "failed",
+        "postcondition_verified": committed,
+        "job_id": str(job_id or ""),
+        "error": "Job workspace was not found or cancellation was not durable" if not committed else "",
+    }, indent=2)
+
+
 _SHORTFORM_EXISTING_JOB_TOOLS = frozenset({
+    "cancel_production_job",
     "expand_visual_proof_shortform",
     "list_production_scenes",
     "edit_production_scene_still",
     "edit_production_scenes_still",
     "regenerate_production_scene_still",
     "regenerate_production_scene",
+    "regenerate_production_scenes",
     "set_production_scenes_animate",
+    "set_production_scene_prompt",
     "set_production_scene_duration",
     "animate_production_scenes",
     "repair_production_scene_animation",
@@ -6343,6 +7557,7 @@ _LONGFORM_EXISTING_JOB_TOOLS = frozenset({
     "regenerate_longform_still",
     "regenerate_longform_thumbnail",
     "list_longform_scenes",
+    "cancel_longform_render",
     "finalize_longform_render",
 })
 _COMPETITOR_EXISTING_JOB_TOOLS = frozenset({
@@ -6389,6 +7604,59 @@ def _enforce_tool_job_ownership(name: str, args: dict[str, Any], user_id: str) -
     raise PermissionError("production job not found")
 
 
+_LONGFORM_BUDGET_CONTEXT_TOOLS = frozenset({
+    "start_longform_render",
+    "expand_longform_visual_proof",
+    "finalize_longform_render",
+    "generate_longform_thumbnails",
+    "regenerate_longform_still",
+    "regenerate_longform_thumbnail",
+})
+
+
+def _persist_longform_execution_budget(
+    name: str,
+    args: dict[str, Any],
+    *,
+    user_id: str,
+    session_id: str | None,
+) -> None:
+    """Bind the wallet hold/cap to the exact LF workspace before provider I/O."""
+
+    if name not in _LONGFORM_BUDGET_CONTEXT_TOOLS:
+        return
+    budget = args.get("_credit_budget")
+    if not isinstance(budget, dict):
+        return
+    from long_form import pipeline as lf_pipeline
+
+    existing_job_id = str(args.get("job_id") or "").strip()
+    requested_job_id = str(args.get("_requested_job_id") or "").strip()
+    if name == "start_longform_render":
+        budget_job_id = requested_job_id
+    elif name == "generate_longform_thumbnails":
+        existing_state = lf_pipeline.load_state(existing_job_id) if existing_job_id else None
+        budget_job_id = (
+            existing_job_id
+            if isinstance(existing_state, dict) and existing_state.get("thumbnail_only") is True
+            else requested_job_id
+        )
+    else:
+        budget_job_id = existing_job_id
+        if not budget_job_id or not lf_pipeline._job_dir(budget_job_id).is_dir():
+            raise FileNotFoundError("long-form job workspace not found")
+    if not budget_job_id:
+        raise RuntimeError(f"{name} requires a stable long-form job id before reserving spend")
+    lf_pipeline.persist_longform_credit_reservation(
+        budget_job_id,
+        reservation=args.get("_credit_reservation") if isinstance(args.get("_credit_reservation"), dict) else None,
+        budget=budget,
+        user_id=str(user_id or ""),
+        tool=name,
+        session_id=str(session_id or args.get("_credit_session_id") or ""),
+    )
+
+
 def execute_tool(
     name: str,
     arguments: dict[str, Any],
@@ -6398,6 +7666,10 @@ def execute_tool(
     session_id: str | None = None,
 ) -> str:
     args = arguments or {}
+    if name in DISABLED_PROVIDER_ESCAPE_TOOLS:
+        raise provider_policy.ProviderPolicyDenied(
+            f"Studio provider policy {provider_policy.POLICY_VERSION} disables tool {name}."
+        )
     if name in OWNER_ONLY_AGENT_TOOLS:
         _require_cliplab_admin(user_id)
     if name in {
@@ -6415,6 +7687,12 @@ def execute_tool(
     if name in ("analyze_reference_video", "analyze_competitor_video"):
         name = "analyze_reference_video"
     _enforce_tool_job_ownership(name, args, user_id)
+    _persist_longform_execution_budget(
+        name,
+        args,
+        user_id=user_id,
+        session_id=session_id,
+    )
 
     if name == "list_skills":
         return json.dumps({"skills": skill_loader.list_skill_slugs()}, indent=2)
@@ -6451,13 +7729,6 @@ def execute_tool(
         if len(text) > max_chars:
             text = text[:max_chars] + "\nâ€¦ truncated"
         return text
-
-    if name == "write_project_file":
-        path = _safe_path(str(args.get("relative_path", "")))
-        _allow_write(path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(str(args.get("content") or ""), encoding="utf-8")
-        return json.dumps({"written": str(path.relative_to(ROOT)), "bytes": path.stat().st_size})
 
     if name == "list_longform_scenes":
         return list_longform_scenes(str(args.get("job_id") or "").strip())
@@ -6598,7 +7869,10 @@ def execute_tool(
             requested_job_id=str(args.get("_requested_job_id") or "").strip() or None,
         )
         return json.dumps({
-            "status": "awaiting_scene_review",
+            "status": "running",
+            "accepted": True,
+            "complete": False,
+            "next_status": "awaiting_scene_review",
             "job_id": job_id,
             "channel_key": channel_key,
             "pipeline_kind": channel.get("pipeline_kind") or "sleep_doc",
@@ -6623,7 +7897,10 @@ def execute_tool(
         job_id = str(args.get("job_id") or "").strip()
         lf_pipeline.expand_visual_proof(job_id)
         return json.dumps({
-            "status": "expanding_scene_gallery", "job_id": job_id,
+            "status": "running", "job_id": job_id,
+            "accepted": True,
+            "complete": False,
+            "stage": "expanding_scene_gallery",
             "note": "The approved proof scene is preserved. Studio is generating the remaining review gallery.",
         }, indent=2)
 
@@ -6744,6 +8021,7 @@ def execute_tool(
             channel_key=str(args.get("channel_key") or (session or {}).get("registry_key") or "history_rewind"),
             prompt=str(args.get("prompt") or ""),
             user_id=str(user_id or ""),
+            requested_job_id=str(args.get("_requested_job_id") or ""),
         )
 
     if name == "start_shortform_generate":
@@ -6886,11 +8164,6 @@ def execute_tool(
                 f"({ref_note}). No image-to-video runs until scenes are approved. "
                 f"Later video model: {resolved_vm}."
             )
-        elif image_model_low.startswith("grok"):
-            pipeline_note = (
-                f"Grok/xAI stills selected via {image_model_id}. "
-                f"No image-to-video runs until scenes are approved. Later video model: {resolved_vm}."
-            )
         else:
             pipeline_note = (
                 f"{style.label} - {'product-locked Seedream reference edits' if reference_images else 'Seedream stills'} only. "
@@ -7018,12 +8291,22 @@ def execute_tool(
             indices,
         )
 
+    if name == "set_production_scene_prompt":
+        return set_production_scene_prompt(
+            str(args.get("job_id") or ""),
+            int(args.get("scene_index") or 0),
+            str(args.get("prompt") or ""),
+        )
+
     if name == "set_production_scene_duration":
         return set_production_scene_duration(
             str(args.get("job_id") or ""),
             int(args.get("scene_index") or 0),
             float(args.get("duration_sec") or 5.0),
         )
+
+    if name == "cancel_production_job":
+        return cancel_production_job(str(args.get("job_id") or ""))
 
     if name == "animate_production_scenes":
         raw_idx = args.get("scene_indices")
@@ -7092,26 +8375,15 @@ def execute_tool(
             reason=str(args.get("reason") or ""),
         )
 
-    if name == "run_build_script":
-        script_name = Path(str(args.get("script", ""))).name
-        if script_name not in ALLOWED_BUILD_SCRIPTS:
-            raise ValueError(f"script not allowlisted: {script_name}")
-        script_path = ROOT / "long_form" / script_name
-        if not script_path.is_file():
-            raise FileNotFoundError(script_name)
-        cli_args = [sys.executable, str(script_path)] + [str(a) for a in (args.get("args") or [])]
-        proc = subprocess.run(
-            cli_args,
-            cwd=str(ROOT),
-            capture_output=True,
-            text=True,
-            timeout=3600,
+    if name == "regenerate_longform_thumbnail":
+        return regenerate_longform_thumbnail(
+            str(args.get("job_id") or ""),
+            int(args.get("index") or args.get("idx") or 1),
+            custom_prompt=str(args.get("custom_prompt") or ""),
         )
-        return json.dumps({
-            "exit_code": proc.returncode,
-            "stdout_tail": (proc.stdout or "")[-8000:],
-            "stderr_tail": (proc.stderr or "")[-4000:],
-        }, indent=2)
+
+    if name == "cancel_longform_render":
+        return cancel_longform_render(str(args.get("job_id") or ""))
 
     if name == "youtube_oauth_status":
         from backend_settings import YOUTUBE_API_KEYS
@@ -7485,6 +8757,9 @@ def execute_tool(
 
     if name == "get_public_search_trends":
         async def _fetch():
+            # Re-assert path for workers that strip sys.path after import.
+            if _root_str not in sys.path:
+                sys.path.insert(0, _root_str)
             from studio_analytics_router import (
                 _default_queries_for_registry,
                 _merge_public_search_orders,
@@ -7952,7 +9227,7 @@ def execute_tool(
         if "long" in fmt:
             result = optimize_longform(
                 target_duration_sec=int(float(args.get("duration_seconds") or 1200)),
-                image_model_id=str(args.get("image_model_id") or session_models.get("image_model_id") or "grok_imagine_standard"),
+                image_model_id=str(args.get("image_model_id") or session_models.get("image_model_id") or "seedream_edit"),
                 **common,
             )
         else:
@@ -7960,8 +9235,8 @@ def execute_tool(
             result = optimize_shortform(
                 scene_count=int(args.get("scene_count") or max(1, round(duration / 5))),
                 duration_seconds=duration,
-                image_model_id=str(args.get("image_model_id") or session_models.get("image_model_id") or "grok_imagine"),
-                video_model=str(args.get("video_model") or session_models.get("video_model") or "grok_imagine_video"),
+                image_model_id=str(args.get("image_model_id") or session_models.get("image_model_id") or "seedream_edit"),
+                video_model=str(args.get("video_model") or session_models.get("video_model") or "seedance"),
                 animate=bool(args.get("animate", True)),
                 **common,
             )
@@ -8701,6 +9976,7 @@ def execute_tool_logged(
         "expand_visual_proof_shortform",
         "regenerate_production_scene_still",
         "regenerate_production_scene",
+        "regenerate_production_scenes",
         "animate_production_scenes",
         "repair_production_scene_animation",
         "audit_and_repair_production_scenes",
@@ -8711,7 +9987,27 @@ def execute_tool_logged(
         route = _repair_route_snapshot(session_id)
         arguments = dict(arguments or {})
         arguments["image_model_id"] = route.get("image_model_id")
-        arguments["video_model"] = route.get("video_model")
+        session_video = str(route.get("video_model") or "").strip()
+        job_video = ""
+        job_id_for_route = str(arguments.get("job_id") or "").strip()
+        if job_id_for_route and name in {
+            "regenerate_production_scenes",
+            "animate_production_scenes",
+            "repair_production_scene_animation",
+            "audit_and_repair_production_scenes",
+            "expand_visual_proof_shortform",
+        }:
+            # Job production lock wins over a stale session default (e.g. Seedance).
+            # Otherwise budget preflight prices Seedance while the card shows LTX.
+            try:
+                spec_path = _shortform_workspace(job_id_for_route) / "job_spec.json"
+                if spec_path.is_file():
+                    spec = json.loads(spec_path.read_text(encoding="utf-8"))
+                    if isinstance(spec, dict):
+                        job_video = str(spec.get("video_model") or "").strip()
+            except Exception:
+                job_video = ""
+        arguments["video_model"] = job_video or session_video
         arguments["_media_route_revision"] = int(route.get("revision") or 1)
     budget_estimate = None
     credit_reservation: dict[str, Any] | None = None
@@ -8725,6 +10021,24 @@ def execute_tool_logged(
     runpod_lease_dispatch_id = ""
     runpod_lease_created = False
     command_id = _runpod_command_id(arguments)
+    if command_id and name in {
+        "start_shortform_generate",
+        "start_longform_render",
+        "generate_longform_thumbnails",
+    }:
+        # Local and RunPod starts share the same deterministic Studio identity.
+        # A replay cannot create a second workspace even if the process exits
+        # between the async spawn and receipt persistence.
+        arguments = dict(arguments or {})
+        arguments.setdefault(
+            "_requested_job_id",
+            _runpod_studio_job_id(
+                name,
+                command_id=command_id,
+                user_id=user_id,
+                session_id=session_id,
+            ),
+        )
     local_mutation_claim = None
     try:
         if not runpod_route and command_id:
@@ -8857,12 +10171,34 @@ def execute_tool_logged(
                 "edit_production_scenes_still",
                 "regenerate_production_scene_still",
                 "regenerate_production_scene",
+                "regenerate_production_scenes",
                 "re_edit_production",
+                "start_longform_render",
+                "expand_longform_visual_proof",
+                "finalize_longform_render",
+                "generate_longform_thumbnails",
+                "regenerate_longform_still",
+                "regenerate_longform_thumbnail",
             } or runpod_route:
                 arguments = dict(arguments or {})
                 arguments["_credit_reservation"] = credit_reservation
                 arguments["_credit_session_id"] = session_id or ""
                 arguments["_credit_budget"] = budget_estimate.as_dict()
+                existing_job_id = str(arguments.get("job_id") or "").strip()
+                if (
+                    existing_job_id
+                    and not runpod_route
+                    and name not in _LONGFORM_BUDGET_CONTEXT_TOOLS
+                    and name not in {"start_shortform_generate", "expand_visual_proof_shortform"}
+                ):
+                    _write_shortform_credit_reservation(
+                        _shortform_workspace(existing_job_id),
+                        reservation=credit_reservation,
+                        user_id=user_id,
+                        tool=name,
+                        session_id=session_id,
+                        budget=budget_estimate.as_dict(),
+                    )
         if runpod_route:
             from studio_agent import runpod_bridge
 
@@ -8973,6 +10309,44 @@ def execute_tool_logged(
             }
             result = json.dumps(payload, indent=2, ensure_ascii=False)
             billed_with_actuals = True
+        # A conflicting/replayed async expansion started no billable work. Settle
+        # its hold before common receipt validation raises the caller-visible
+        # failure; otherwise the exception path loses the structured no-start
+        # reason and may retain a needless reservation.
+        if credit_reservation and not runpod_dispatched and name == "expand_visual_proof_shortform":
+            try:
+                async_payload = json.loads(result or "{}")
+            except Exception:
+                async_payload = {}
+            if isinstance(async_payload, dict):
+                async_status = str(async_payload.get("status") or "").strip().lower()
+                no_start = bool(
+                    async_payload.get("idempotent_replay")
+                    or async_payload.get("ok") is False
+                    or async_status in {"conflict", "failed", "error", "cancelled", "rejected"}
+                )
+                if no_start and not credit_reservation.get("unlimited"):
+                    import unified_credits as uc
+
+                    no_start_reason = (
+                        "idempotent_replay"
+                        if async_payload.get("idempotent_replay")
+                        else (async_status or "rejected")
+                    )
+                    uc.release_reservation(
+                        user_id,
+                        str(credit_reservation.get("reservation_id") or ""),
+                        reason=f"studio_tool_not_started:expand_visual_proof_shortform:{no_start_reason}",
+                    )
+                    async_payload["credits"] = {
+                        "charged": 0,
+                        "reservation_released": True,
+                        "reason": no_start_reason,
+                    }
+                    result = json.dumps(async_payload, indent=2, ensure_ascii=False)
+                    credit_reservation = None
+                    billed_with_actuals = True
+        result = _validate_mutation_result(name, result)
         if credit_reservation and not runpod_dispatched and name in {
             "animate_production_scenes",
             "repair_production_scene_animation",
@@ -8982,6 +10356,7 @@ def execute_tool_logged(
             "edit_production_scenes_still",
             "regenerate_production_scene_still",
             "regenerate_production_scene",
+            "regenerate_production_scenes",
             "re_edit_production",
         }:
             try:
@@ -9114,6 +10489,7 @@ def execute_tool_logged(
                     "edit_production_scenes_still",
                     "regenerate_production_scene_still",
                     "regenerate_production_scene",
+                    "regenerate_production_scenes",
                     "re_edit_production",
                 }:
                     pending = production_costs.pending_billable_usd(_shortform_workspace(job_id))
@@ -9136,6 +10512,9 @@ def execute_tool_logged(
                             user_id,
                             str(credit_reservation.get("reservation_id") or ""),
                             reason=f"studio_tool_failed:{name}",
+                        )
+                        _clear_shortform_credit_reservation(
+                            _shortform_workspace(job_id)
                         )
                 else:
                     uc.release_reservation(
@@ -9211,6 +10590,74 @@ def execute_tool_logged(
     return result
 
 
+def _validate_mutation_result(name: str, result: str) -> str:
+    """Normalize accepted async work and reject false mutation success.
+
+    All callers (runner, REST, and approval continuations) pass through this
+    boundary. A transport response is not a durable postcondition: explicit
+    failures, stale/unverifiable receipts, and blocked final QA raise. Queued
+    work is represented as accepted-but-incomplete and never as ``ok: true``.
+    """
+    mutation_tools = set(APPROVAL_REQUIRED) | {
+        "regenerate_production_scene",
+        "regenerate_production_scenes",
+        "regenerate_production_scene_still",
+        "edit_production_scene_still",
+        "edit_production_scenes_still",
+        "set_production_scene_duration",
+        "set_production_scene_prompt",
+        "cancel_production_job",
+        "re_edit_production",
+        "regenerate_longform_still",
+    }
+    if str(name or "") not in mutation_tools:
+        return result
+    try:
+        payload = json.loads(result or "{}")
+    except Exception as exc:
+        raise RuntimeError(f"{name} returned an unverifiable non-JSON mutation receipt: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"{name} returned an unverifiable mutation receipt")
+    status = str(payload.get("status") or "").strip().lower()
+    if status in {
+        "queued", "running", "accepted", "started", "claim_pending",
+        "awaiting_approval", "awaiting_scene_review", "reedit_marked",
+    }:
+        payload.pop("ok", None)
+        payload["accepted"] = True
+        payload["complete"] = False
+        return json.dumps(payload, indent=2, ensure_ascii=False)
+    failure_statuses = {
+        "failed", "error", "rejected", "cancelled", "conflict",
+        "qa_blocked", "visual_qa_failed", "render_qa_failed",
+        "final_qa_blocked", "stale", "unverifiable",
+    }
+    failure = bool(
+        payload.get("ok") is False
+        or payload.get("stale") is True
+        or payload.get("verifiable") is False
+        or payload.get("postcondition_verified") is False
+        or status in failure_statuses
+    )
+    if str(name or "") in {"finalize_production", "re_edit_production", "finalize_longform_render"}:
+        failure = failure or payload.get("ready_to_post") is not True
+    if failure:
+        reason = str(payload.get("error") or payload.get("note") or status or "durable postcondition missing")[:600]
+        raise RuntimeError(f"{name} did not reach a verified durable postcondition: {reason}")
+    explicitly_verified = {
+        "regenerate_production_scenes",
+        "set_production_scenes_animate",
+        "set_production_scene_duration",
+        "set_production_scene_prompt",
+        "cancel_production_job",
+        "regenerate_longform_still",
+        "regenerate_longform_thumbnail",
+        "cancel_longform_render",
+    }
+    if str(name or "") in explicitly_verified and payload.get("postcondition_verified") is not True:
+        raise RuntimeError(f"{name} did not return an explicit durable postcondition receipt")
+    return json.dumps(payload, indent=2, ensure_ascii=False)
+
+
 def requires_approval(name: str) -> bool:
     return name in APPROVAL_REQUIRED
-

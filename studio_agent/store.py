@@ -11,7 +11,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Literal
 
-from .image_model_catalog import MODAL_SEEDREAM_MODEL_ID
+from . import provider_policy
 
 ApprovalMode = Literal["auto", "confirm"]
 ContentFormat = Literal["short", "long", "both"]
@@ -21,39 +21,27 @@ DEFAULT_RENDER_STYLE = "cinematic"
 DEFAULT_IMAGE_MODEL = "ernie_image"
 DEFAULT_VIDEO_MODEL = "seedance"
 SKELETON_DEFAULT_IMAGE_MODEL = "seedream_edit"
-SKELETON_DEFAULT_VIDEO_MODEL = "grok_imagine_video"
+SKELETON_DEFAULT_VIDEO_MODEL = "seedance"
 IMAGE_MODELS = {
-    "grok_imagine",
-    "grok_imagine_quality",
-    "grok_imagine_standard",
-    "grok-imagine-image",
-    "imagen4_fast",
-    "imagen4_preview",
-    "imagen4_ultra",
     "recraft_v4",
     "seedream45",
     "ernie_image",
     "flux_2_pro",
-    "nano_banana_pro",
     "recraft_v4_pro",
     "flux_lora_skeleton",
     "seedream_edit",
     "seedream_v45_edit",
     "seedream_v4",
     "seedream_v5_lite",
-    MODAL_SEEDREAM_MODEL_ID,
 }
 
 
 _IMAGE_MODEL_ALIASES = {
-    "grok_imagine_quality": "grok_imagine",
-    "grok-imagine-image": "grok_imagine_standard",
     "seedream_v45_edit": "seedream_edit",
     "seedream4": "seedream_v4",
     "seedream_v4_edit": "seedream_v4",
     "seedream5_lite": "seedream_v5_lite",
     "seedream_v5_lite_edit": "seedream_v5_lite",
-    "seedream5_lite_modal": MODAL_SEEDREAM_MODEL_ID,
 }
 VIDEO_MODELS = {
     "ltx_budget",
@@ -64,23 +52,248 @@ VIDEO_MODELS = {
     "pixverse_v6",
     "pixverse_c1",
     "kling21_pro",
-    "veo3_fast",
     "kling21_master",
-    "grok_imagine_video",
-    "grok_imagine_video_15",
-    "grok_imagine_video_15_1080p",
 }
+
+
+def _has_denied_media_provider(value: Any) -> bool:
+    provider = provider_policy.model_provider(value)
+    return provider not in {"fal", "unknown"}
+
+
+def _migrated_image_model(value: Any) -> str:
+    if _has_denied_media_provider(value):
+        return provider_policy.DEFAULT_FAL_IMAGE_MODEL
+    return provider_policy.migrated_image_model(value)
+
+
+def _migrated_video_model(value: Any) -> str:
+    if _has_denied_media_provider(value):
+        return provider_policy.DEFAULT_FAL_VIDEO_MODEL
+    return provider_policy.migrated_video_model(value)
 
 
 def normalize_image_model(value: Any) -> str:
     model = str(value or "").strip().lower().replace(" ", "_")
+    if provider_policy.is_denied_image_model(model) or _has_denied_media_provider(model):
+        raise provider_policy.ProviderPolicyDenied(
+            f"Studio image model {model} is denied by {provider_policy.POLICY_VERSION}; select a FAL model."
+        )
     model = _IMAGE_MODEL_ALIASES.get(model, model)
     return model if model in IMAGE_MODELS else DEFAULT_IMAGE_MODEL
 
 
 def normalize_video_model(value: Any) -> str:
     model = str(value or "").strip().lower().replace(" ", "_").replace("-", "_")
+    if provider_policy.is_denied_video_model(model) or _has_denied_media_provider(model):
+        raise provider_policy.ProviderPolicyDenied(
+            f"Studio video model {model} is denied by {provider_policy.POLICY_VERSION}; select a FAL model."
+        )
     return model if model in VIDEO_MODELS else DEFAULT_VIDEO_MODEL
+
+
+_POLICY_IMAGE_FIELDS = frozenset({
+    "image_model", "image_model_id", "stills_model", "fallback_image_model_id",
+    "requested_image_model", "image_model_default",
+})
+_POLICY_VIDEO_FIELDS = frozenset({
+    "video_model", "video_model_id", "i2v_model", "fallback_video_model",
+    "requested_video_model", "i2v_model_default",
+})
+_POLICY_RUNNER_FIELDS = frozenset({"runner_model", "chat_model", "llm_model"})
+_POLICY_TTS_PROVIDER_FIELDS = frozenset({"voice_provider", "tts_provider", "voice_provider_default"})
+_POLICY_STT_PROVIDER_FIELDS = frozenset({"stt_provider", "dictation_provider"})
+_POLICY_SEMANTIC_PROVIDER_FIELDS = frozenset({"qa_provider", "visual_qa_provider", "analysis_provider"})
+
+
+def _policy_migration_entry(
+    *,
+    path: str,
+    capability: str,
+    previous: Any,
+    replacement: Any,
+    migrated_at: float,
+) -> dict[str, Any]:
+    return {
+        "policy_version": provider_policy.POLICY_VERSION,
+        "migrated_at": migrated_at,
+        "field_path": path,
+        "capability": capability,
+        "previous": previous,
+        "replacement": replacement,
+    }
+
+
+def _migrate_session_provider_policy(session: dict[str, Any]) -> bool:
+    """Migrate durable legacy routes once, with a versioned audit trail.
+
+    Loading old state is intentionally different from accepting a new picker
+    choice: persisted denied routes move to direct Anthropic/FAL equivalents,
+    while the public normalizers above reject a new denied selection.
+    """
+
+    if not isinstance(session, dict):
+        return False
+    migrated_at = time.time()
+    migrations: list[dict[str, Any]] = []
+    route_changed = False
+
+    def replace(
+        row: dict[str, Any],
+        key: str,
+        replacement: Any,
+        *,
+        path: str,
+        capability: str,
+    ) -> None:
+        nonlocal route_changed
+        previous = row.get(key)
+        if replacement == previous:
+            return
+        row[key] = replacement
+        migrations.append(_policy_migration_entry(
+            path=path,
+            capability=capability,
+            previous=previous,
+            replacement=replacement,
+            migrated_at=migrated_at,
+        ))
+        if capability in {provider_policy.IMAGE_CAPABILITY, provider_policy.I2V_CAPABILITY}:
+            route_changed = True
+
+    def visit(value: Any, path: str) -> None:
+        if isinstance(value, list):
+            for index, item in enumerate(value):
+                visit(item, f"{path}[{index}]")
+            return
+        if not isinstance(value, dict):
+            return
+        for key in list(value):
+            if key == "provider_policy_migrations":
+                continue
+            current = value.get(key)
+            field_path = f"{path}.{key}" if path else key
+            if isinstance(current, str) and key in _POLICY_IMAGE_FIELDS:
+                if provider_policy.is_denied_image_model(current) or _has_denied_media_provider(current):
+                    replace(
+                        value,
+                        key,
+                        _migrated_image_model(current),
+                        path=field_path,
+                        capability=provider_policy.IMAGE_CAPABILITY,
+                    )
+                    current = value.get(key)
+            elif isinstance(current, str) and key in _POLICY_VIDEO_FIELDS:
+                if provider_policy.is_denied_video_model(current) or _has_denied_media_provider(current):
+                    replace(
+                        value,
+                        key,
+                        _migrated_video_model(current),
+                        path=field_path,
+                        capability=provider_policy.I2V_CAPABILITY,
+                    )
+                    current = value.get(key)
+            elif isinstance(current, str) and key in _POLICY_RUNNER_FIELDS:
+                model_provider = provider_policy.model_provider(current)
+                if model_provider not in {"anthropic", "unknown"}:
+                    replace(
+                        value,
+                        key,
+                        provider_policy.DEFAULT_RUNNER_MODEL,
+                        path=field_path,
+                        capability=provider_policy.RUNNER_CAPABILITY,
+                    )
+                    current = value.get(key)
+                elif model_provider == "anthropic":
+                    direct = provider_policy.normalize_anthropic_model_id(current)
+                    if direct != current:
+                        replace(
+                            value,
+                            key,
+                            direct,
+                            path=field_path,
+                            capability=provider_policy.RUNNER_CAPABILITY,
+                        )
+                        current = value.get(key)
+            elif isinstance(current, str) and key in _POLICY_TTS_PROVIDER_FIELDS:
+                if not provider_policy.is_provider_allowed(current, provider_policy.TTS_CAPABILITY):
+                    replace(
+                        value,
+                        key,
+                        provider_policy.DEFAULT_FAL_VOICE_PROVIDER,
+                        path=field_path,
+                        capability=provider_policy.TTS_CAPABILITY,
+                    )
+                    current = value.get(key)
+            elif isinstance(current, str) and key in _POLICY_STT_PROVIDER_FIELDS:
+                if not provider_policy.is_provider_allowed(current, provider_policy.STT_CAPABILITY):
+                    replace(
+                        value,
+                        key,
+                        "fal",
+                        path=field_path,
+                        capability=provider_policy.STT_CAPABILITY,
+                    )
+                    current = value.get(key)
+            elif isinstance(current, str) and key in _POLICY_SEMANTIC_PROVIDER_FIELDS:
+                if not provider_policy.is_provider_allowed(current, provider_policy.SEMANTIC_QA_CAPABILITY):
+                    replace(
+                        value,
+                        key,
+                        "anthropic",
+                        path=field_path,
+                        capability=provider_policy.SEMANTIC_QA_CAPABILITY,
+                    )
+                    current = value.get(key)
+            visit(current, field_path)
+
+    root_model = str(session.get("model") or "").strip()
+    root_provider = provider_policy.model_provider(root_model)
+    if root_provider not in {"anthropic", "unknown"}:
+        replace(
+            session,
+            "model",
+            provider_policy.DEFAULT_RUNNER_MODEL,
+            path="model",
+            capability=provider_policy.RUNNER_CAPABILITY,
+        )
+    elif root_provider == "anthropic":
+        direct_model = provider_policy.normalize_anthropic_model_id(root_model)
+        if direct_model != root_model:
+            replace(
+                session,
+                "model",
+                direct_model,
+                path="model",
+                capability=provider_policy.RUNNER_CAPABILITY,
+            )
+
+    visit(session, "")
+    prior_version = str(session.get("provider_policy_version") or "")
+    if prior_version != provider_policy.POLICY_VERSION:
+        session["provider_policy_version"] = provider_policy.POLICY_VERSION
+        session["provider_policy_migrated_at"] = migrated_at
+    if migrations:
+        audit = list(session.get("provider_policy_migrations") or [])
+        audit.extend(migrations)
+        session["provider_policy_migrations"] = audit[-200:]
+        session["provider_policy_migrated_at"] = migrated_at
+    if route_changed:
+        try:
+            revision = max(1, int(session.get("media_route_revision") or 1))
+        except (TypeError, ValueError):
+            revision = 1
+        session["media_route_revision"] = revision + 1
+        session["media_route_updated_at"] = migrated_at
+    return bool(migrations or prior_version != provider_policy.POLICY_VERSION)
+
+
+def migrate_provider_policy_state(state: dict[str, Any]) -> bool:
+    """Migrate a persisted Studio state tree before reusing provider choices."""
+
+    if not isinstance(state, dict):
+        return False
+    return _migrate_session_provider_policy(state)
 
 
 def media_route_snapshot(session: dict[str, Any] | None) -> dict[str, Any]:
@@ -110,6 +323,74 @@ def media_route_snapshot(session: dict[str, Any] | None) -> dict[str, Any]:
 # Cap context sent to OpenRouter (full transcript still stored on disk).
 MAX_MESSAGES_FOR_MODEL = 80
 COMPACT_AT_MESSAGES = int(MAX_MESSAGES_FOR_MODEL * 0.8)
+
+
+def _assistant_tool_call_ids(message: dict[str, Any]) -> list[str]:
+    """Return tool-call ids from an assistant message."""
+    ids: list[str] = []
+    for call in list(message.get("tool_calls") or []):
+        if not isinstance(call, dict):
+            continue
+        call_id = str(call.get("id") or "").strip()
+        if call_id:
+            ids.append(call_id)
+    return ids
+
+
+def align_tool_message_boundary(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep only complete assistant-to-tool sequences in provider context.
+
+    A tool result must follow the assistant request with the same call id, and
+    every requested call must have a result before the next conversation turn.
+    Truncation can otherwise leave Anthropic with an invalid message history.
+    """
+    if not messages:
+        return []
+    out: list[dict[str, Any]] = []
+    i = 0
+    n = len(messages)
+    while i < n:
+        msg = messages[i]
+        if not isinstance(msg, dict):
+            i += 1
+            continue
+        role = str(msg.get("role") or "")
+        if role == "tool":
+            # Drop orphan tool results with no preceding assistant request.
+            i += 1
+            continue
+        tool_ids = _assistant_tool_call_ids(msg) if role == "assistant" else []
+        if role == "assistant" and tool_ids:
+            needed = set(tool_ids)
+            collected: list[dict[str, Any]] = []
+            j = i + 1
+            while j < n:
+                candidate = messages[j]
+                if not isinstance(candidate, dict) or str(candidate.get("role") or "") != "tool":
+                    break
+                collected.append(candidate)
+                tool_call_id = str(candidate.get("tool_call_id") or "").strip()
+                if tool_call_id in needed:
+                    needed.discard(tool_call_id)
+                j += 1
+            if needed:
+                # Preserve any assistant prose but remove an incomplete call set.
+                text = str(msg.get("content") or "").strip()
+                if text:
+                    cleaned = {key: value for key, value in msg.items() if key != "tool_calls"}
+                    cleaned["content"] = text
+                    out.append(cleaned)
+                i = j
+                continue
+            out.append(msg)
+            out.extend(collected)
+            i = j
+            continue
+        out.append(msg)
+        i += 1
+    return out
+
+
 MAX_SYNC_PENDING_SCAN = 400
 MAX_RUN_EVENTS = 120
 ACTIVE_RUN_STATUSES = {"queued", "running", "stream_disconnected"}
@@ -2817,16 +3098,17 @@ def compact_session_if_needed(session_id: str) -> dict[str, Any] | None:
 
 def trim_messages_for_model(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Keep system row + the most recent turns so long chats stay within model limits."""
-    if len(messages) <= MAX_MESSAGES_FOR_MODEL + 1:
-        return messages
+    aligned = align_tool_message_boundary(list(messages or []))
+    if len(aligned) <= MAX_MESSAGES_FOR_MODEL + 1:
+        return align_tool_message_boundary(aligned)
     head: list[dict[str, Any]] = []
     tail_start = 0
-    if messages and messages[0].get("role") == "system":
-        head = [messages[0]]
+    if aligned and aligned[0].get("role") == "system":
+        head = [aligned[0]]
         tail_start = 1
-    tail = messages[tail_start:]
+    tail = aligned[tail_start:]
     if len(tail) <= MAX_MESSAGES_FOR_MODEL:
-        return head + tail
+        return align_tool_message_boundary(head + tail)
     omitted = len(tail) - MAX_MESSAGES_FOR_MODEL
     note = {
         "role": "system",
@@ -2835,9 +3117,10 @@ def trim_messages_for_model(messages: list[dict[str, Any]]) -> list[dict[str, An
             "The full transcript is still saved in this session.]"
         ),
     }
+    window = list(tail[-MAX_MESSAGES_FOR_MODEL:])
     if head:
-        return [head[0], note, *tail[-MAX_MESSAGES_FOR_MODEL:]]
-    return [note, *tail[-MAX_MESSAGES_FOR_MODEL:]]
+        return align_tool_message_boundary([head[0], note, *window])
+    return align_tool_message_boundary([note, *window])
 
 
 _legacy_trim_messages_for_model = trim_messages_for_model
@@ -2849,16 +3132,17 @@ def trim_messages_for_model(
     session: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Keep system row + compacted memory + recent turns so long chats stay within model limits."""
-    if len(messages) <= MAX_MESSAGES_FOR_MODEL + 1:
-        return messages
+    aligned = align_tool_message_boundary(list(messages or []))
+    if len(aligned) <= MAX_MESSAGES_FOR_MODEL + 1:
+        return align_tool_message_boundary(aligned)
     head: list[dict[str, Any]] = []
     tail_start = 0
-    if messages and messages[0].get("role") == "system":
-        head = [messages[0]]
+    if aligned and aligned[0].get("role") == "system":
+        head = [aligned[0]]
         tail_start = 1
-    tail = messages[tail_start:]
+    tail = aligned[tail_start:]
     if len(tail) <= MAX_MESSAGES_FOR_MODEL:
-        return head + tail
+        return align_tool_message_boundary(head + tail)
     omitted = len(tail) - MAX_MESSAGES_FOR_MODEL
     summary = str((session or {}).get("context_summary") or "").strip()
     if not summary:
@@ -2871,9 +3155,10 @@ def trim_messages_for_model(
             f"{summary}"
         ),
     }
+    window = list(tail[-MAX_MESSAGES_FOR_MODEL:])
     if head:
-        return [head[0], note, *tail[-MAX_MESSAGES_FOR_MODEL:]]
-    return [note, *tail[-MAX_MESSAGES_FOR_MODEL:]]
+        return align_tool_message_boundary([head[0], note, *window])
+    return align_tool_message_boundary([note, *window])
 
 
 def derive_title(session: dict[str, Any]) -> str:
@@ -3209,10 +3494,13 @@ def create_session(
 ) -> dict[str, Any]:
     SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
     sid = f"sa_{uuid.uuid4().hex[:16]}"
+    requested_model = str(model or "").strip()
+    if provider_policy.model_provider(requested_model) != "unknown":
+        requested_model = provider_policy.assert_runner_model_allowed(requested_model)
     session = {
         "session_id": sid,
         "user_id": user_id,
-        "model": model,
+        "model": requested_model,
         "agent_mode": agent_mode if agent_mode in {"plan", "studio", "cliplab"} else "plan",
         "approval_mode": approval_mode,
         "content_format": content_format,
@@ -3252,6 +3540,9 @@ def create_session(
         "interaction_state": "plan",
         "production_gate_open": False,
         "active_command_id": "",
+        "provider_policy_version": provider_policy.POLICY_VERSION,
+        "provider_policy_migrated_at": _now(),
+        "provider_policy_migrations": [],
     }
     _save(session)
     return session
@@ -3504,6 +3795,8 @@ def get_session(
         return None
     if user_id and session.get("user_id") != user_id:
         return None
+    if _migrate_session_provider_policy(session):
+        _save(session)
     session = _reconcile_session_concept(_sanitize_session_pending(session))
     if _prune_active_jobs:
         session = prune_stale_active_jobs(session, persist=True)
@@ -3702,6 +3995,7 @@ def _sanitize_session_pending(session: dict[str, Any]) -> dict[str, Any]:
 def _write_session_unlocked(session: dict[str, Any]) -> None:
     """Atomically replace one session while its process and file locks are held."""
 
+    _migrate_session_provider_policy(session)
     destination = _session_path(str(session["session_id"]))
     destination.parent.mkdir(parents=True, exist_ok=True)
     session["updated_at"] = _now()
@@ -3714,6 +4008,7 @@ def _write_session_unlocked(session: dict[str, Any]) -> None:
 
 
 def _save(session: dict[str, Any]) -> None:
+    _migrate_session_provider_policy(session)
     session_id = str(session["session_id"])
     destination = _session_path(session_id)
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -3723,6 +4018,7 @@ def _save(session: dict[str, Any]) -> None:
         # another writer began from an older copy of the session.
         existing = _read_session_file(destination) if destination.is_file() else None
         if isinstance(existing, dict):
+            _migrate_session_provider_policy(existing)
             existing_route = media_route_snapshot(existing)
             incoming_route = media_route_snapshot(session)
             existing_is_newer = (
@@ -3822,11 +4118,18 @@ def close_production_gate(
 def _update_session_locked(session: dict[str, Any], **fields: Any) -> dict[str, Any]:
     """Apply fields to the latest on-disk value under the session file lock."""
 
+    _migrate_session_provider_policy(session)
     previous_route = media_route_snapshot(session)
+    if "model" in fields:
+        requested_model = str(fields.get("model") or "").strip()
+        if provider_policy.model_provider(requested_model) != "unknown":
+            fields["model"] = provider_policy.assert_runner_model_allowed(requested_model)
     if "video_model" in fields:
         fields["video_model"] = normalize_video_model(fields.get("video_model"))
     if "image_model" in fields:
         fields["image_model"] = normalize_image_model(fields.get("image_model"))
+    if "image_model_id" in fields:
+        fields["image_model_id"] = normalize_image_model(fields.get("image_model_id"))
     route_requested = "image_model" in fields or "video_model" in fields
     next_image_model = str(fields.get("image_model") or previous_route["image_model_id"])
     next_video_model = str(fields.get("video_model") or previous_route["video_model"])

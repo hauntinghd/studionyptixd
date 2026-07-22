@@ -1,27 +1,18 @@
 ---
 name: image-to-video
 description: >-
-  Generates video clips from keyframes via i2v models (Kling / Hailuo / Veo / Sora / LTX-2.3). Load when prompting an i2v model for a shot. Companion: cookbook.md (10 shot-type templates + per-model fingerprint bank + motion verb bank).
+  Plans motion prompts with the direct Anthropic Studio runner and animates approved keyframes only through the active Studio FAL video catalog. Load when prompting an i2v model for a shot. Companion: cookbook.md (10 shot-type templates + motion verb bank).
 ---
 
 # Skill 07 — Image-to-Video Prompting
 
-> **⚠ Model reference (2026-05) — cost/strength notes, NOT a closed list.**
+> **Studio provider policy — binding, not advisory.**
 >
-> The table below is a starting reference of i2v models known to work well for these jobs, with their per-second costs. It is **not the full set of what you can use** — fal hosts more i2v models, and the Vercel AI Gateway can route others. There is no single blessed default: pick the model that best fits the shot. If the user names a model that isn't in this table (e.g. a newer release), or you think something else suits the shot better, **discover what's actually available and use it** — list fal's video models, query the gateway's `/v1/models`, or WebSearch + WebFetch the provider docs. **Never tell the user a model is unavailable just because it's absent from this table — verify first.**
->
-> | Strengths | Model id | Cost / use notes |
-> |---|---|---|
-> | B-roll, atmospheric, dialogue close-ups | `fal-ai/kling-video/v2.6-turbo/image-to-video` | ~$0.11/sec. Reliable general workhorse. |
-> | Dramatic camera moves, action, faces in motion | `fal-ai/kling-video/v3.0/pro/image-to-video` | ~$0.40/sec. 10s max. |
-> | High volume, budget (OS, Apache 2.0) | `fal-ai/wan/v2.2-a14b/image-to-video` | ~$0.02/sec. |
-> | Cheap fast commercial | `fal-ai/minimax/hailuo-2.3/fast/image-to-video` | Hailuo 2.3 Fast. ~$0.03/sec. |
-> | Cheapest | `fal-ai/lightricks/ltx-video-v2.3/image-to-video` | ~$0.01/sec. Already in the brick-narrative storytelling pipeline. |
-> | Audio gen / long-form coherence | `fal-ai/veo3/image-to-video` (audio), `fal-ai/sora-2/image-to-video` (coherence) | Premium edge cases. |
->
-> **How to choose:** match the model to the shot — general B-roll, hero/dramatic, high-volume/cheap, or premium audio/coherence — weighing fidelity against per-second cost. Pick per shot (not per project), and consider models beyond this table when they fit better. Once chosen, lock to one or two models per project for visual consistency.
->
-> Prices and model positioning drift — treat the per-second costs as approximate and re-check current rates/availability when it matters. Detailed reasoning in Section 2 below is preserved for context but its specific model lists/prices are stale.
+> - Planning, motion-prompt refinement, and semantic QA use direct Anthropic.
+> - Animation uses only the FAL-backed video IDs returned by the authenticated Studio catalog.
+> - Never discover or route to a provider/model outside that catalog. If a requested model is absent, explain that it is unavailable in Studio and offer the active FAL selection.
+> - Do not silently switch models. Model changes go through the Studio picker so policy, price estimates, and saved state stay aligned.
+> - Use Studio's current estimator before approval; prices in prose are never authoritative.
 
 ---
 
@@ -43,61 +34,25 @@ A weak i2v prompt produces stiff motion, melted faces, six fingers, surreal fail
 
 The agent's job is to write strong prompts on the first attempt by understanding what each model is actually good at and matching the prompt structure to the model.
 
-## 2. Model selection — match the model to the shot
+## 2. Model selection — use the active Studio catalog
 
-Different i2v models have radically different strengths, costs, and failure modes. The agent picks the model per shot, not per project.
+Studio owns the runnable model set. Keep the session's active FAL selection unless the user changes it in the picker; never substitute a remembered endpoint or provider.
 
-### Kling 2.0 Standard
-**Strengths:** Cinematic camera moves, realistic lighting, dependable on faces, strong in 5-10 second range
-**Weaknesses:** Can be slow to render, sometimes over-smooths motion
-**Cost:** ~$0.084/sec via fal.ai
-**Best for:** Cinematic establishing shots, dramatic interludes, news-hijack documentary visuals
-**Default model when:** the user hasn't specified and we need balanced quality/cost
+### Capability matching
 
-### Kling 2.1 Pro
-**Strengths:** Higher fidelity faces, better motion coherence, strong on action sequences
-**Weaknesses:** ~70% more expensive than Standard
-**Cost:** ~$0.140/sec
-**Best for:** Hero shots, hook moments, anything with prominent faces
-
-### Kling 2.1 Master
-**Strengths:** Highest quality in the Kling family, premium cinematic
-**Cost:** ~$0.280/sec
-**Best for:** Channel trailer, Year-in-Review, any shot the user is willing to pay for
-
-### Hailuo 02
-**Strengths:** Cheapest premium-quality option, surprisingly strong on stylized content
-**Weaknesses:** Less consistent on photoreal humans, slightly grainier output
-**Cost:** ~$0.020/sec
-**Best for:** B-roll, atmospheric shots, music video filler shots, ambient
-**Use when:** budget-conscious or stylized aesthetic favors slight grain (e.g., brick-narrative storytelling)
-
-### Veo 3 Fast / Veo 3
-**Strengths:** Strong on physical realism, excellent at camera moves, good on text legibility within frame
-**Weaknesses:** Tighter aspect ratio constraints, slower generation
-**Cost:** ~$0.180/sec (Fast), ~$0.300/sec (full)
-**Best for:** When realism is the brand register (documentary, science visualization)
-
-### Sora 2 Pro
-**Strengths:** Highest perceived realism, best on complex scenes, longer durations
-**Weaknesses:** Most expensive, queue times can be long, content policy more restrictive
-**Cost:** ~$0.500/sec
-**Best for:** Premium cinematic moments, channel trailer, hero shots where audience expectation is "this looks like a movie"
-
-### LTX-2.3 (self-hosted RunPod)
-**Strengths:** Pass-through cost — only pay GPU time, ~$0.004/clip; high volume capable; strong on stylized content
-**Weaknesses:** Requires self-hosting; lower fidelity than commercial models on photoreal humans
-**Cost:** ~$0.004/sec (compute only)
-**Best for:** Music videos at scale (brick-narrative storytelling style), high-volume B-roll, anyone running 50+ clips per video
+- **Balanced motion:** restrained camera moves, ordinary B-roll, and scenes with one dominant subject.
+- **High-fidelity motion:** hero moments, close faces, product shots, or action where coherence justifies the catalog's higher estimate.
+- **High-volume lane:** repeated B-roll where the current catalog exposes a lower-cost FAL option and visual continuity has already passed a sample.
+- **Repair/regeneration:** keep the accepted still, model, seed, duration, and aspect ratio fixed; change only the failed motion instruction.
 
 ### Selection decision tree
-1. Is the shot a stylized music video / propaganda visual? → LTX-2.3 (cheap, stylized matches)
-2. Is it a hero shot or face-centric and quality matters? → Kling 2.1 Pro
-3. Is it a budget B-roll filler? → Hailuo 02
-4. Is realism the brand and budget allows? → Veo 3 or Sora 2 Pro
-5. Default for everything else → Kling 2.0 Standard
 
-The agent surfaces model selection to the user when running the Sample Gate (§5). User can override.
+1. Does the active selection support the requested duration and aspect ratio? If yes, keep it.
+2. Is this a high-risk hero or face shot? Ask the user to choose a visible higher-fidelity FAL option if needed.
+3. Is this a validated bulk pattern? Keep one approved FAL model for consistency and cap the batch budget.
+4. Is the requested model absent? Explain that it is unavailable in Studio; do not discover or route around the catalog.
+
+The agent surfaces the active model and current Studio estimate at the Sample Gate. Any override happens through the picker.
 
 ## 3. Prompt structure
 
@@ -172,7 +127,7 @@ i2v models are extremely sensitive to verb choice. Some verbs produce clean moti
 - **Subtle** — small expression shifts, slow camera. Reliable.
 - **Moderate** — full body movement, walking, turning. Mixed reliability.
 - **High** — running, fighting, rapid action. Use sparingly. Plan to re-render multiple times.
-- **Extreme** — flying, transforming, surreal. Most unpredictable. Often better with stylized models (LTX, Hailuo) than photoreal (Kling, Sora).
+- **Extreme** — flying, transforming, surreal. Most unpredictable. Use only when the active Studio FAL selection explicitly supports the motion and a sample passes.
 
 The agent always biases toward LOWER motion intensity than the storyboard might initially imply. Static is the friend. Cinema is mostly stillness.
 
@@ -257,10 +212,10 @@ Every i2v generation uses a seed (numerical value that controls randomness). See
 | Aspect | Use case | Models that handle natively |
 |---|---|---|
 | 16:9 (1920×1080) | YouTube long-form | All |
-| 9:16 (1080×1920) | Vertical Shorts, Roblox-scenario | All but check Veo (some constraints) |
+| 9:16 (1080×1920) | Vertical Shorts, Roblox-scenario | Check the active Studio FAL model profile |
 | 1:1 (1080×1080) | Instagram crossposting | Most via cropping; native in Hailuo |
-| 4:3 (1440×1080) | Retro / archival aesthetic | Kling, Sora |
-| 21:9 (cinematic ultra-wide) | Premium hero shots | Kling Pro/Master, Sora |
+| 4:3 (1440×1080) | Retro / archival aesthetic | Only when exposed by the active Studio profile |
+| 21:9 (cinematic ultra-wide) | Premium hero shots | Only when exposed by the active Studio profile |
 
 The agent matches output aspect to the channel's primary platform. For YouTube long-form: always 16:9. For Roblox-style shorts: 9:16. For multi-platform creators: generate 16:9 and crop in post.
 
@@ -302,7 +257,7 @@ The agent matches output aspect to the channel's primary platform. For YouTube l
 - **Duration:** 3-8 seconds per shot
 
 ### News-hijack documentary (investigative-journalism / medical-authority)
-- **Default model:** Kling 2.0 or Veo 3 Fast (realism matters)
+- **Default model:** the active Studio FAL model; use a higher-fidelity visible option when realism matters
 - **Aspect:** 16:9
 - **Motion intensity:** Subtle — documentary pacing rewards stillness
 - **Use case:** Cinematic interludes between host segments
@@ -331,7 +286,7 @@ The agent matches output aspect to the channel's primary platform. For YouTube l
 
 **Selected model:** Kling 2.0 Standard ($0.084/sec)
 
-**Reference image:** Generated via Nano Banana — 70-year-old woman in beige cardigan at kitchen table, holding a letter, neutral expression
+**Reference image:** Generated and approved through the active Studio FAL image lane — 70-year-old woman in beige cardigan at kitchen table, holding a letter, neutral expression
 
 **Prompt:**
 ```
@@ -346,9 +301,9 @@ A 70-year-old grandmother in a beige cardigan and reading glasses on a chain sit
 
 **Storyboard shot:** "Brick-toy crowd in town square, mid-density, slowly turning toward camera as if recognizing speaker"
 
-**Selected model:** LTX-2.3 self-hosted (~$0.04 for 8-sec clip)
+**Selected model:** the approved high-volume Studio FAL lane at its current estimate
 
-**Reference image:** Generated via Nano Banana — brick-toy town square, ~30 brick-toy figures with neutral expressions, mid-density
+**Reference image:** Generated and approved through the active Studio FAL image lane — brick-toy town square, ~30 brick-toy figures with neutral expressions, mid-density
 
 **Prompt:**
 ```
@@ -364,7 +319,7 @@ A brick-toy town square crowd of approximately 30 figures slowly turns their hea
 
 **Selected model:** Kling 2.1 Pro ($0.140/sec) — fidelity matters for archival aesthetic
 
-**Reference image:** Generated via Nano Banana — historically-accurate Roman engineer in toga, holding clay tablet near a stone basin
+**Reference image:** Generated and approved through the active Studio FAL image lane — historically accurate Roman engineer in toga, holding clay tablet near a stone basin
 
 **Prompt:**
 ```
@@ -397,7 +352,7 @@ If any check fails, regenerate or surface to user. Never bulk-render without sam
 ## Update log
 
 This skill is current as of April 2026. Update when:
-- New i2v models change cost-quality positioning (Kling 3, Sora 3, etc.)
-- LTX self-hosted improves to match commercial fidelity
+- The authenticated Studio catalog changes capability or cost positioning
+- The active FAL adapter changes duration, aspect, or reference requirements
 - Aspect ratio support changes across models
 - Anti-pattern catalog grows as new failure modes emerge

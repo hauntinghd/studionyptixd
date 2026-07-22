@@ -3,18 +3,18 @@ Skeleton AI end-to-end orchestrator.
 
 Inputs:
   - category_key (one of: human_limits, marvel_vs_dc, ancient_history, futuristic_socrates)
-  - topic_text (optional — Grok picks if absent)
+  - topic_text (optional — direct Anthropic picks if absent)
   - tier ("standard" → Seedance 2.0, "premium" → Kling 2.1 Pro)
-  - voice_id (ElevenLabs voice id; defaults to Brian)
+  - voice_id (FAL MiniMax voice id; defaults to Trustworthy Man)
   - workspace_dir (where clips/stills/output land)
 
 Pipeline steps:
-  1. Grok writes the 60s script (~12 beats).
-  2. Per beat: derive outfit + scene_action via small Grok call.
+  1. Direct Anthropic writes the 60s script (~12 beats).
+  2. Per beat: derive outfit + scene_action via a bounded Anthropic call.
   3. Seedream v4.5 *edit* per beat from canonical-skeleton-master.png
      (same skeleton every scene; only background/props/wardrobe change).
   4. Seedance 2.0 (or Kling Pro) i2v on each still.
-  5. ElevenLabs TTS narration of full script.
+  5. FAL MiniMax TTS narration of the full script.
   6. ffmpeg compose: trim each clip to its beat duration with captions, concat, mux.
 
 Output: a single .mp4 at workspace_dir/skeleton_short.mp4 + metadata files.
@@ -34,8 +34,10 @@ from .canonical_edit import build_scene_edit_prompt, generate_still_edit, saniti
 from .i2v_engine import (
     ac_cost_for_video_model,
     generate as gen_clip,
+    normalize_fal_video_model_id,
     resolve_video_model_chain,
 )
+from .styled_stills import normalize_fal_image_model_id
 from .voice_fal import FalVoiceClient
 from .compose import decode_audio_clock, probe_duration, trim_with_captions, concat_demuxer, mux_narration
 from .prompts.category_registry import get_category
@@ -590,6 +592,10 @@ def run(
     """Run the full Skeleton AI pipeline. Returns a result dict."""
     workspace = Path(workspace)
     workspace.mkdir(parents=True, exist_ok=True)
+    requested_image_model = str(image_model_id or "").strip().lower()
+    effective_image_model = normalize_fal_image_model_id(image_model_id)
+    requested_video_model = str(video_model or "").strip().lower()
+    effective_video_model = normalize_fal_video_model_id(video_model, tier=tier)
     master_ref = str(master_reference_url or "").strip()
     if not master_ref:
         try:
@@ -637,7 +643,7 @@ def run(
     # 3. Split into beats.
     sentences = split_script_into_beats(script_text, target_count=beats_target)
     if not sentences:
-        raise RuntimeError("Grok returned empty script")
+        raise RuntimeError("Anthropic returned empty script")
 
     # 4. For each beat, derive outfit/action/motion using the locked plan.
     requested_cast = cast_count
@@ -752,11 +758,11 @@ def run(
                     master_url=master_ref,
                     seed=420100 + beat.index,
                     cast_count=production_cast,
-                    image_model_id=image_model_id or "seedream_edit",
+                    image_model_id=effective_image_model,
                 )
                 amount, note, key = production_costs.price_fal_image(
                     edit=True,
-                    model_id=image_model_id or "seedream_edit",
+                    model_id=effective_image_model,
                 )
                 production_costs.record_event(
                     workspace,
@@ -785,7 +791,7 @@ def run(
             extra_refs=extra_refs,
             seed=420042 + beat.index,
             cast_count=production_cast,
-            image_model_id=image_model_id or "seedream_edit",
+            image_model_id=effective_image_model,
         )
         still_path = Path(
             still_result["local_path"]
@@ -794,7 +800,7 @@ def run(
         )
         amount, note, key = production_costs.price_fal_image(
             edit=True,
-            model_id=image_model_id or "seedream_edit",
+            model_id=effective_image_model,
         )
         production_costs.record_event(
             workspace,
@@ -812,8 +818,9 @@ def run(
             beat.motion_prompt,
             clips_dir / f"{sid}.mp4",
             tier=tier,
-            video_model=video_model,
+            video_model=effective_video_model,
             duration_sec=10 if float(beat.duration_sec or 0) > 5 else 5,
+            budget_workspace=workspace,
         )
         try:
             sidecar = clip_path.with_suffix(clip_path.suffix + ".fal.json")
@@ -834,7 +841,7 @@ def run(
             endpoint=endpoint,
             request_id=str(clip_meta.get("request_id") or ""),
             scene_index=beat.index,
-            metadata={"pricing_note": note, "video_model": clip_meta.get("video_model") or video_model},
+            metadata={"pricing_note": note, "video_model": clip_meta.get("video_model") or effective_video_model},
         )
         render_scene_captions = captions_enabled and normalized_caption_mode != "word"
         trimmed = trim_with_captions(
@@ -917,7 +924,7 @@ def run(
     )
 
     # 7. Cost / AC tracking.
-    _, resolved_vm = resolve_video_model_chain(video_model=video_model, tier=tier)
+    _, resolved_vm = resolve_video_model_chain(video_model=effective_video_model, tier=tier)
     ac_cost = ac_cost_for_video_model(video_model=resolved_vm, tier=tier)
     result = {
         "video_path": str(final),
@@ -930,6 +937,19 @@ def run(
         "beats": [asdict(b) for b in beats],
         "tier": tier,
         "video_model": resolved_vm,
+        "requested_video_model": requested_video_model or None,
+        "video_model_migrated_from": (
+            requested_video_model
+            if requested_video_model and requested_video_model != resolved_vm
+            else None
+        ),
+        "image_model": effective_image_model,
+        "requested_image_model": requested_image_model or None,
+        "image_model_migrated_from": (
+            requested_image_model
+            if requested_image_model and requested_image_model != effective_image_model
+            else None
+        ),
         "stills_model": "seedream_v45_edit_canonical",
         "cast_count": production_cast,
         "ac_charged": ac_cost,

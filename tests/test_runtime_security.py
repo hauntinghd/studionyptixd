@@ -141,7 +141,12 @@ def test_backend_registers_cors_once_and_public_health_omits_provider_url() -> N
     assert sum(item.cls is CORSMiddleware for item in backend.app.user_middleware) == 1
     payload = asyncio.run(backend._base_health_payload())
     assert "comfyui_url" not in payload
-    assert isinstance(payload["comfyui_configured"], bool)
+    assert payload["comfyui_configured"] is False
+    assert payload["runway_key_configured"] is False
+    assert payload["runway_key_source"] == ""
+    assert payload["runway_video_model"] == ""
+    assert payload["xai_image_fallback_enabled"] is False
+    assert set(payload["image_provider_order"]) <= {"fal"}
     assert "http" not in str(payload["queue_consumer"].get("last_error", ""))
 
 

@@ -169,7 +169,16 @@ def acquire_production_lease(
     try:
         descriptor = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     except FileExistsError:
-        existing = _read_json_file(path)
+        # O_EXCL publishes the directory entry before the winning process has
+        # flushed its JSON payload. A same-dispatch contender may observe that
+        # tiny window; retry the read without weakening the durable lease.
+        existing: dict[str, Any] = {}
+        for attempt in range(25):
+            existing = _read_json_file(path)
+            if existing:
+                break
+            if attempt < 24:
+                time.sleep(0.01)
         if not existing:
             raise RunPodDispatchPolicyError(
                 "RunPod production lease is unreadable; refusing another production command"

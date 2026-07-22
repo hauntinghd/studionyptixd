@@ -37,7 +37,7 @@ from studio_agent import jobs as agent_jobs
 from studio_agent.access import account_profile, can_use_studio_agent, is_owner
 from studio_agent.dictation import transcribe_audio_bytes
 
-from studio_agent import model_registry, openrouter, skills
+from studio_agent import model_registry, openrouter, provider_policy, skills
 from studio_agent import memory, production_budget, runner, store, training_capture
 from studio_agent.image_model_catalog import seedream_model_profiles
 from studio_agent.video_model_catalog import video_model_profiles
@@ -82,6 +82,111 @@ def _direct_production_command_id(request: Request, *, runpod_enabled: bool) -> 
     if len(command_id) > 512:
         raise HTTPException(400, "X-Idempotency-Key is too long.")
     return command_id
+
+
+def _verified_mutation_payload(raw: Any, *, operation: str) -> dict[str, Any]:
+    """Parse one mutation receipt and turn false success into an HTTP failure."""
+
+    if isinstance(raw, dict):
+        payload = dict(raw)
+    else:
+        try:
+            parsed = json.loads(str(raw or "{}"))
+        except Exception as exc:
+            raise HTTPException(502, {
+                "code": "unverifiable_mutation_receipt",
+                "operation": operation,
+                "message": str(exc)[:300],
+            }) from exc
+        if not isinstance(parsed, dict):
+            raise HTTPException(502, {
+                "code": "unverifiable_mutation_receipt",
+                "operation": operation,
+            })
+        payload = parsed
+    status = str(payload.get("status") or "").strip().lower()
+    blocked = bool(
+        payload.get("ok") is False
+        or payload.get("stale") is True
+        or payload.get("verifiable") is False
+        or payload.get("postcondition_verified") is False
+        or status in {
+            "failed", "error", "rejected", "cancelled", "conflict",
+            "qa_blocked", "visual_qa_failed", "render_qa_failed",
+            "final_qa_blocked", "stale", "unverifiable",
+        }
+    )
+    if blocked:
+        raise HTTPException(409, {
+            "code": "mutation_postcondition_failed",
+            "operation": operation,
+            "receipt": payload,
+        })
+    return payload
+
+
+def _effective_runner_catalog(rows: Any, *, anthropic_enabled: bool) -> list[dict[str, Any]]:
+    """Return only direct Claude rows verified for the configured account."""
+
+    if not anthropic_enabled or not isinstance(rows, list):
+        return []
+    catalog: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for raw in rows:
+        if not isinstance(raw, dict):
+            continue
+        model_id = str(raw.get("id") or "").strip()
+        provider = provider_policy.normalize_provider(raw.get("provider"))
+        try:
+            direct_id = provider_policy.assert_runner_model_allowed(model_id)
+        except provider_policy.ProviderPolicyDenied:
+            continue
+        # Marketplace-qualified IDs are not proof of direct Anthropic account
+        # entitlement, even when their model family happens to be Claude.
+        if direct_id != model_id or provider not in {"", "anthropic"} or direct_id in seen:
+            continue
+        row = dict(raw)
+        row["id"] = direct_id
+        row["provider"] = "Anthropic"
+        row["selectable"] = row.get("selectable") is not False
+        if row["selectable"] is not True:
+            continue
+        catalog.append(row)
+        seen.add(direct_id)
+    return catalog
+
+
+def _effective_media_catalog(
+    rows: Any,
+    *,
+    capability: str,
+    fal_enabled: bool,
+) -> list[dict[str, Any]]:
+    """Return enabled FAL rows only; stale keys never create picker entries."""
+
+    if not fal_enabled or not isinstance(rows, list):
+        return []
+    catalog: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for raw in rows:
+        if not isinstance(raw, dict) or raw.get("enabled") is False:
+            continue
+        if not provider_policy.is_provider_allowed(raw.get("provider"), capability):
+            continue
+        model_id = str(raw.get("id") or raw.get("model_id") or "").strip()
+        if not model_id or model_id in seen:
+            continue
+        if capability == provider_policy.IMAGE_CAPABILITY and provider_policy.is_denied_image_model(model_id):
+            continue
+        if capability == provider_policy.I2V_CAPABILITY and provider_policy.is_denied_video_model(model_id):
+            continue
+        row = dict(raw)
+        row["id"] = model_id
+        row["provider"] = "fal"
+        row["enabled"] = True
+        catalog.append(row)
+        seen.add(model_id)
+    return catalog
 
 
 class CreateSessionRequest(BaseModel):
@@ -169,7 +274,7 @@ class SceneApprovalRequest(BaseModel):
 
 
 class ScenePromptRequest(BaseModel):
-    prompt: str = Field(..., min_length=12, max_length=759)
+    prompt: str = Field(..., min_length=12, max_length=300)
 
 
 class SceneBulkApprovalRequest(BaseModel):
@@ -315,64 +420,119 @@ def build_studio_agent_router(
     @router.get("/models")
     async def list_models(user: dict = Depends(_agent_user)):
         now = time.time()
-        cached = _MODELS_CACHE.get("payload")
-        if isinstance(cached, dict) and now - float(_MODELS_CACHE.get("at") or 0) < _MODELS_CACHE_SEC:
-            return cached
+        anthropic_enabled = bool(openrouter.anthropic_api_key())
         fal_enabled = bool(str(os.getenv("FAL_KEY") or os.getenv("FAL_AI_KEY") or "").strip())
+        setup_reasons = [
+            reason
+            for enabled, reason in (
+                (anthropic_enabled, "Add ANTHROPIC_API_KEY to enable Studio runner and semantic-QA models."),
+                (fal_enabled, "Add FAL_KEY or FAL_AI_KEY to enable Studio image, video, voice, and dictation models."),
+            )
+            if not enabled
+        ]
+        cache_scope = (provider_policy.POLICY_VERSION, anthropic_enabled, fal_enabled)
+        cached = _MODELS_CACHE.get("payload")
+        if (
+            isinstance(cached, dict)
+            and _MODELS_CACHE.get("scope") == cache_scope
+            and now - float(_MODELS_CACHE.get("at") or 0) < _MODELS_CACHE_SEC
+        ):
+            return cached
 
         async def _video_profiles() -> list[dict[str, Any]]:
             try:
-                return await asyncio.wait_for(
+                profiles = await asyncio.wait_for(
                     run_in_threadpool(video_model_profiles, fal_enabled=fal_enabled),
                     timeout=5.0,
                 )
             except Exception:
-                # Pricing must never delay Agent boot. Verified effective
-                # fallbacks stay visible until the provider cache warms.
-                return video_model_profiles(
+                # Pricing must never delay Agent boot. Static endpoint metadata
+                # remains usable only when the effective FAL capability exists.
+                profiles = video_model_profiles(
                     fal_enabled=fal_enabled,
                     pricing_snapshot={"source": "fallback", "prices": {}},
                 )
+            return _effective_media_catalog(
+                profiles,
+                capability=provider_policy.I2V_CAPABILITY,
+                fal_enabled=fal_enabled,
+            )
+
+        def _image_profiles() -> list[dict[str, Any]]:
+            return _effective_media_catalog(
+                seedream_model_profiles(fal_enabled=fal_enabled),
+                capability=provider_policy.IMAGE_CAPABILITY,
+                fal_enabled=fal_enabled,
+            )
+
         # Provider catalogs are optional enrichment. Bound the live refresh so
-        # a slow Anthropic/xAI/OpenRouter catalog can never hold Agent boot open.
+        # a slow direct-provider catalog can never hold Agent boot open.
         video_profiles_task = asyncio.create_task(_video_profiles())
         try:
-            live = await asyncio.wait_for(openrouter.list_models(), timeout=6.0)
-            catalog = openrouter.build_model_catalog(live)
+            live = (
+                await asyncio.wait_for(openrouter.list_models(), timeout=6.0)
+                if anthropic_enabled
+                else []
+            )
+            catalog = _effective_runner_catalog(
+                openrouter.build_model_catalog(live),
+                anthropic_enabled=anthropic_enabled,
+            )
             ids = [m.get("id") for m in catalog if m.get("id")]
             recommended = [m["id"] for m in catalog if m.get("recommended")]
             if not recommended:
-                recommended = [m for m in openrouter.RECOMMENDED_MODELS if m in ids] or openrouter.RECOMMENDED_MODELS
+                recommended = [m for m in openrouter.RECOMMENDED_MODELS if m in ids]
             providers = sorted({str(m.get("provider") or "") for m in catalog if m.get("provider")})
             payload = {
                 "models": catalog,
-                "image_models": seedream_model_profiles(
-                    fal_enabled=bool(str(os.getenv("FAL_KEY") or os.getenv("FAL_AI_KEY") or "").strip())
-                ),
+                "image_models": _image_profiles(),
                 "video_models": await video_profiles_task,
                 "recommended": recommended,
                 "count": len(ids),
                 "providers": providers,
-                "xai_configured": bool(openrouter.xai_api_key()),
-                "anthropic_configured": bool(openrouter.anthropic_api_key()),
+                "anthropic_configured": anthropic_enabled,
+                "fal_configured": fal_enabled,
+                "provider_policy": {
+                    "version": provider_policy.POLICY_VERSION,
+                    "runner": sorted(provider_policy.allowed_providers(provider_policy.RUNNER_CAPABILITY)),
+                    "semantic_qa": sorted(provider_policy.allowed_providers(provider_policy.SEMANTIC_QA_CAPABILITY)),
+                    "image": sorted(provider_policy.allowed_providers(provider_policy.IMAGE_CAPABILITY)),
+                    "i2v": sorted(provider_policy.allowed_providers(provider_policy.I2V_CAPABILITY)),
+                    "tts": sorted(provider_policy.allowed_providers(provider_policy.TTS_CAPABILITY)),
+                    "stt": sorted(provider_policy.allowed_providers(provider_policy.STT_CAPABILITY)),
+                },
+                "setup_reasons": setup_reasons,
                 "cached": False,
             }
         except Exception as exc:
-            catalog = openrouter.build_model_catalog(None)
             payload = {
-                "models": catalog,
-                "image_models": seedream_model_profiles(
-                    fal_enabled=bool(str(os.getenv("FAL_KEY") or os.getenv("FAL_AI_KEY") or "").strip())
-                ),
+                "models": [],
+                "image_models": _image_profiles(),
                 "video_models": await video_profiles_task,
-                "recommended": openrouter.RECOMMENDED_MODELS,
+                "recommended": [],
+                "count": 0,
+                "providers": [],
                 "error": str(exc),
-                "xai_configured": bool(getattr(openrouter, "xai_api_key", lambda: "")()),
-                "anthropic_configured": bool(openrouter.anthropic_api_key()),
+                "anthropic_configured": anthropic_enabled,
+                "fal_configured": fal_enabled,
+                "provider_policy": {
+                    "version": provider_policy.POLICY_VERSION,
+                    "runner": sorted(provider_policy.allowed_providers(provider_policy.RUNNER_CAPABILITY)),
+                    "semantic_qa": sorted(provider_policy.allowed_providers(provider_policy.SEMANTIC_QA_CAPABILITY)),
+                    "image": sorted(provider_policy.allowed_providers(provider_policy.IMAGE_CAPABILITY)),
+                    "i2v": sorted(provider_policy.allowed_providers(provider_policy.I2V_CAPABILITY)),
+                    "tts": sorted(provider_policy.allowed_providers(provider_policy.TTS_CAPABILITY)),
+                    "stt": sorted(provider_policy.allowed_providers(provider_policy.STT_CAPABILITY)),
+                },
+                "setup_reasons": setup_reasons,
                 "cached": False,
             }
         _MODELS_CACHE["payload"] = payload
-        _MODELS_CACHE["at"] = now
+        # A transient direct-provider refresh failure must not hide every
+        # picker row for the full catalog TTL. Successful capability snapshots
+        # remain cached; error payloads retry on the next request.
+        _MODELS_CACHE["at"] = 0.0 if payload.get("error") else now
+        _MODELS_CACHE["scope"] = cache_scope
         return payload
 
     @router.get("/skills")
@@ -688,7 +848,9 @@ def build_studio_agent_router(
                 snapshot = agent_jobs.get_job_snapshot(job_id, "longform")
             else:
                 snapshot = agent_jobs.get_job_snapshot(job_id, "shortform")
-            parsed = json.loads(tool_result or "{}")
+            parsed = _verified_mutation_payload(tool_result, operation=tool_name)
+        except HTTPException:
+            raise
         except Exception as exc:
             raise HTTPException(400, f"scene_regenerate_failed: {exc}") from exc
         return {
@@ -719,7 +881,21 @@ def build_studio_agent_router(
             scene = await run_in_threadpool(
                 set_scene_prompt_override, _shortform_workspace(job_id), scene_idx, body.prompt,
             )
+            normalized_prompt = " ".join(str(body.prompt or "").split())
+            if not (
+                isinstance(scene, dict)
+                and int(scene.get("index", -1)) == scene_idx
+                and scene.get("prompt_user_override") is True
+                and str(scene.get("prompt") or "") == normalized_prompt
+            ):
+                raise HTTPException(409, {
+                    "code": "mutation_postcondition_failed",
+                    "operation": "set_production_scene_prompt",
+                    "receipt": scene if isinstance(scene, dict) else {"raw": str(scene)},
+                })
             snapshot = agent_jobs.get_job_snapshot(job_id, "shortform")
+        except HTTPException:
+            raise
         except Exception as exc:
             raise HTTPException(400, f"scene_prompt_update_failed: {exc}") from exc
         return {"ok": True, "job_id": job_id, "scene_index": scene_idx, "scene": scene, "snapshot": snapshot}
@@ -753,6 +929,10 @@ def build_studio_agent_router(
                 bool(body.animate),
                 [scene_idx],
             )
+            approval_parsed = _verified_mutation_payload(
+                tool_result,
+                operation="set_production_scenes_animate",
+            )
             spawn_parsed = None
             if body.animate:
                 if runpod_enabled:
@@ -776,10 +956,15 @@ def build_studio_agent_router(
                         command_id=command_id,
                     )
                 try:
-                    spawn_parsed = __import__("json").loads(raw_spawn or "{}")
-                except Exception:
-                    spawn_parsed = {"status": "running", "raw": raw_spawn}
+                    spawn_parsed = _verified_mutation_payload(
+                        raw_spawn,
+                        operation="animate_production_scenes",
+                    )
+                except HTTPException:
+                    raise
             snapshot = agent_jobs.get_job_snapshot(job_id, "shortform")
+        except HTTPException:
+            raise
         except Exception as exc:
             raise HTTPException(400, f"scene_approval_failed: {exc}") from exc
         payload: dict = {
@@ -787,7 +972,7 @@ def build_studio_agent_router(
             "job_id": job_id,
             "scene_index": scene_idx,
             "animate": bool(body.animate),
-            "tool_result": tool_result,
+            "tool_result": approval_parsed,
             "snapshot": snapshot,
         }
         if body.animate:
@@ -830,6 +1015,10 @@ def build_studio_agent_router(
                 bool(body.animate),
                 indices,
             )
+            approval_parsed = _verified_mutation_payload(
+                tool_result,
+                operation="set_production_scenes_animate",
+            )
             spawn_parsed = None
             if body.animate:
                 if runpod_enabled:
@@ -853,10 +1042,15 @@ def build_studio_agent_router(
                         command_id=command_id,
                     )
                 try:
-                    spawn_parsed = __import__("json").loads(raw_spawn or "{}")
-                except Exception:
-                    spawn_parsed = {"status": "running", "raw": raw_spawn}
+                    spawn_parsed = _verified_mutation_payload(
+                        raw_spawn,
+                        operation="animate_production_scenes",
+                    )
+                except HTTPException:
+                    raise
             snapshot = agent_jobs.get_job_snapshot(job_id, "shortform")
+        except HTTPException:
+            raise
         except Exception as exc:
             raise HTTPException(400, f"scene_bulk_approval_failed: {exc}") from exc
         payload: dict = {
@@ -864,7 +1058,7 @@ def build_studio_agent_router(
             "job_id": job_id,
             "scene_indices": indices,
             "animate": bool(body.animate),
-            "tool_result": tool_result,
+            "tool_result": approval_parsed,
             "snapshot": snapshot,
         }
         if body.animate:
@@ -915,11 +1109,10 @@ def build_studio_agent_router(
                     user_id=_user_id(user),
                     command_id=command_id,
                 )
-            try:
-                parsed = __import__("json").loads(raw or "{}")
-            except Exception:
-                parsed = {"status": "running", "raw": raw}
+            parsed = _verified_mutation_payload(raw, operation="animate_production_scenes")
             snapshot = agent_jobs.get_job_snapshot(job_id, "shortform")
+        except HTTPException:
+            raise
         except Exception as exc:
             raise HTTPException(400, f"animation_failed: {exc}") from exc
         return {
@@ -1315,32 +1508,36 @@ def build_studio_agent_router(
         selected_model = body.model or openrouter.DEFAULT_MODEL
         try:
             model_registry.assert_model_selectable(selected_model)
-        except model_registry.ModelSelectionError as exc:
+            selected_model = provider_policy.assert_runner_model_allowed(selected_model)
+        except (model_registry.ModelSelectionError, provider_policy.ProviderPolicyDenied) as exc:
             raise HTTPException(422, str(exc)) from exc
         try:
             openrouter.api_key()
         except RuntimeError as exc:
             raise HTTPException(503, str(exc)) from exc
         image_model = str(body.image_model_id or body.image_model or "").strip()
-        session = store.create_session(
-            user_id=_user_id(user),
-            model=selected_model,
-            agent_mode=body.agent_mode,
-            approval_mode=body.approval_mode,
-            content_format=body.content_format,
-            reasoning_depth=body.reasoning_depth,
-            render_style=body.render_style or store.DEFAULT_RENDER_STYLE,
-            image_model=store.normalize_image_model(image_model or store.DEFAULT_IMAGE_MODEL),
-            video_model=store.normalize_video_model(body.video_model or store.DEFAULT_VIDEO_MODEL),
-            channel_id=body.channel_id or "",
-            registry_key=body.registry_key or "",
-            channel_title=body.channel_title or "",
-            web_search=body.web_search,
-            animate=body.animate,
-            captions_enabled=body.captions_enabled,
-            caption_mode=body.caption_mode,
-            product_website=body.product_website,
-        )
+        try:
+            session = store.create_session(
+                user_id=_user_id(user),
+                model=selected_model,
+                agent_mode=body.agent_mode,
+                approval_mode=body.approval_mode,
+                content_format=body.content_format,
+                reasoning_depth=body.reasoning_depth,
+                render_style=body.render_style or store.DEFAULT_RENDER_STYLE,
+                image_model=store.normalize_image_model(image_model or store.DEFAULT_IMAGE_MODEL),
+                video_model=store.normalize_video_model(body.video_model or store.DEFAULT_VIDEO_MODEL),
+                channel_id=body.channel_id or "",
+                registry_key=body.registry_key or "",
+                channel_title=body.channel_title or "",
+                web_search=body.web_search,
+                animate=body.animate,
+                captions_enabled=body.captions_enabled,
+                caption_mode=body.caption_mode,
+                product_website=body.product_website,
+            )
+        except provider_policy.ProviderPolicyDenied as exc:
+            raise HTTPException(422, str(exc)) from exc
         return {"session": _public_session(session)}
 
     @router.get("/memory")
@@ -1525,9 +1722,9 @@ def build_studio_agent_router(
         if body.model is not None:
             try:
                 model_registry.assert_model_selectable(body.model)
-            except model_registry.ModelSelectionError as exc:
+                updates["model"] = provider_policy.assert_runner_model_allowed(body.model)
+            except (model_registry.ModelSelectionError, provider_policy.ProviderPolicyDenied) as exc:
                 raise HTTPException(422, str(exc)) from exc
-            updates["model"] = body.model
         if body.agent_mode is not None:
             updates["agent_mode"] = body.agent_mode
             if body.agent_mode == "plan":
@@ -1541,12 +1738,15 @@ def build_studio_agent_router(
             updates["reasoning_depth"] = body.reasoning_depth
         if body.render_style is not None:
             updates["render_style"] = body.render_style
-        if body.image_model_id is not None or body.image_model is not None:
-            updates["image_model"] = store.normalize_image_model(
-                body.image_model_id or body.image_model
-            )
-        if body.video_model is not None:
-            updates["video_model"] = store.normalize_video_model(body.video_model)
+        try:
+            if body.image_model_id is not None or body.image_model is not None:
+                updates["image_model"] = store.normalize_image_model(
+                    body.image_model_id or body.image_model
+                )
+            if body.video_model is not None:
+                updates["video_model"] = store.normalize_video_model(body.video_model)
+        except provider_policy.ProviderPolicyDenied as exc:
+            raise HTTPException(422, str(exc)) from exc
         if body.channel_id is not None:
             updates["channel_id"] = body.channel_id.strip()
         if body.registry_key is not None:

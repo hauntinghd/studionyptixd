@@ -16,17 +16,199 @@ import time
 from pathlib import Path
 from typing import Any
 
-VISUAL_QA_VERSION = 4
-SEMANTIC_QA_VERSION = 4
+VISUAL_QA_VERSION = 5
+SEMANTIC_QA_VERSION = 5
 # Bump whenever the acceptance contract changes so old cached decisions
 # cannot keep a scene blocked after the rules have been corrected.
-STILL_SEMANTIC_QA_VERSION = 7
-PRODUCT_SEMANTIC_QA_VERSION = 1
+STILL_SEMANTIC_QA_VERSION = 8
+PRODUCT_SEMANTIC_QA_VERSION = 2
+SCENE_VISUAL_QA_VERSION = 2
 
 
 def _env_bool(name: str, default: bool) -> bool:
     raw = str(os.getenv(name, "1" if default else "0") or "").strip().lower()
     return raw in {"1", "true", "yes", "on"}
+
+
+def _asset_version_token(path: Path | None) -> str:
+    if path is None:
+        return "none"
+    asset = Path(path)
+    try:
+        digest = hashlib.sha256()
+        with asset.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return f"{asset.name}:sha256:{digest.hexdigest()}"
+    except OSError:
+        return f"{asset.name}:missing"
+
+
+def _scene_contract_text(scene: dict[str, Any]) -> str:
+    action = str(scene.get("scene_action") or scene.get("action") or "").strip()
+    action = re.sub(
+        r"(?is)\b(?:PERFORMANCE|MOTION|VFX|SILENT|i2v)\b.*$",
+        "",
+        action,
+    ).strip(" .;")
+    return " ".join(
+        part
+        for part in (str(scene.get("narration") or "").strip(), action)
+        if part
+    )[:900]
+
+
+def scene_visual_qa_fingerprint(
+    workspace: Path,
+    scene: dict[str, Any],
+    *,
+    previous_scene: dict[str, Any] | None = None,
+    next_scene: dict[str, Any] | None = None,
+) -> str:
+    """Bind one aggregate verdict to exact assets, contract, cast, and neighbors."""
+
+    workspace = Path(workspace)
+
+    def _still(row: dict[str, Any] | None) -> Path | None:
+        if not row:
+            return None
+        sid = str(row.get("sid") or f"b{int(row.get('index') or 0):02d}")
+        return workspace / str(row.get("still_rel") or f"stills/{sid}.png")
+
+    sid = str(scene.get("sid") or f"b{int(scene.get('index') or 0):02d}")
+    still = _still(scene)
+    clip_rel = str(scene.get("clip_rel") or "").strip()
+    clip = workspace / clip_rel if clip_rel else workspace / "clips" / f"{sid}.mp4"
+    parts = [
+        str(SCENE_VISUAL_QA_VERSION),
+        _asset_version_token(still),
+        _asset_version_token(clip if clip_rel or clip.is_file() else None),
+        _asset_version_token(_still(previous_scene)),
+        _asset_version_token(_still(next_scene)),
+        _scene_contract_text(scene),
+        str(scene.get("cast_count") or 1),
+        str(scene.get("outfit") or ""),
+        str(bool(scene.get("clip_rel"))),
+    ]
+    return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()
+
+
+def build_scene_visual_qa(
+    workspace: Path,
+    scene: dict[str, Any],
+    *,
+    previous_scene: dict[str, Any] | None = None,
+    next_scene: dict[str, Any] | None = None,
+    still_qa: dict[str, Any] | None = None,
+    correspondence_qa: dict[str, Any] | None = None,
+    clip_qa: dict[str, Any] | None = None,
+    require_clip: bool | None = None,
+) -> dict[str, Any]:
+    """Create the authoritative identity + story + clip acceptance state."""
+
+    still_report = dict(still_qa or scene.get("still_qa") or {})
+    correspondence_report = dict(
+        correspondence_qa or scene.get("scene_correspondence_qa") or {}
+    )
+    clip_report = dict(clip_qa or scene.get("i2v_qa") or {})
+    needs_clip = (
+        bool(scene.get("clip_rel"))
+        if require_clip is None
+        else bool(require_clip)
+    )
+    still_passed = (
+        still_report.get("status") == "pass"
+        and still_report.get("pass") is True
+    )
+    correspondence_passed = (
+        correspondence_report.get("status") == "pass"
+        and correspondence_report.get("pass") is True
+    )
+    clip_passed = (
+        not needs_clip
+        or (
+            clip_report.get("status") == "pass"
+            and clip_report.get("pass") is True
+        )
+    )
+    passed = bool(still_passed and correspondence_passed and clip_passed)
+    failed_components = [
+        name
+        for name, ok in (
+            ("identity", still_passed),
+            ("correspondence", correspondence_passed),
+            ("clip", clip_passed),
+        )
+        if not ok
+    ]
+    summaries = [
+        str(report.get("summary") or "").strip()
+        for report in (still_report, correspondence_report, clip_report if needs_clip else {})
+        if isinstance(report, dict) and str(report.get("summary") or "").strip()
+    ]
+    return {
+        "version": SCENE_VISUAL_QA_VERSION,
+        "fingerprint": scene_visual_qa_fingerprint(
+            Path(workspace),
+            scene,
+            previous_scene=previous_scene,
+            next_scene=next_scene,
+        ),
+        "status": "pass" if passed else "fail",
+        "pass": passed,
+        "require_clip": needs_clip,
+        "failed_components": failed_components,
+        "summary": (
+            "Identity, scene correspondence, and required clip QA passed"
+            if passed
+            else "; ".join(summaries)[:700]
+            or f"QA not proven: {', '.join(failed_components)}"
+        ),
+        "still": still_report,
+        "correspondence": correspondence_report,
+        "clip": clip_report if needs_clip else {},
+        "created_at": time.time(),
+    }
+
+
+def scene_visual_qa_is_fresh(
+    workspace: Path,
+    scene: dict[str, Any],
+    *,
+    previous_scene: dict[str, Any] | None = None,
+    next_scene: dict[str, Any] | None = None,
+) -> bool:
+    aggregate = scene.get("visual_qa") if isinstance(scene.get("visual_qa"), dict) else {}
+    expected_clip = bool(scene.get("clip_rel"))
+    return bool(
+        aggregate
+        and int(aggregate.get("version") or 0) == SCENE_VISUAL_QA_VERSION
+        and bool(aggregate.get("require_clip")) == expected_clip
+        and str(aggregate.get("fingerprint") or "")
+        == scene_visual_qa_fingerprint(
+            Path(workspace),
+            scene,
+            previous_scene=previous_scene,
+            next_scene=next_scene,
+        )
+    )
+
+
+def invalidate_scene_visual_qa(
+    scene: dict[str, Any],
+    *,
+    still_changed: bool = False,
+    clip_changed: bool = False,
+    contract_changed: bool = False,
+) -> None:
+    scene.pop("visual_qa", None)
+    scene["qa_stale"] = True
+    if still_changed or contract_changed:
+        scene.pop("still_qa", None)
+        scene.pop("scene_correspondence_qa", None)
+        scene.pop("i2v_qa", None)
+    elif clip_changed:
+        scene.pop("i2v_qa", None)
 
 
 def _asset_cast_count(asset_path: Path, requested: Any = None) -> int:
@@ -121,7 +303,7 @@ def analyze_shortform_workspace(workspace: Path) -> dict[str, Any]:
         pass
     strict_skeleton_identity = "skeleton" in render_style
 
-    for sc in scenes:
+    for position, sc in enumerate(scenes):
         report = _scene_visual_report(
             workspace,
             sc,
@@ -133,6 +315,27 @@ def analyze_shortform_workspace(workspace: Path) -> dict[str, Any]:
         scene_reports.append(report)
         for c in report.get("checks") or []:
             checks.append(c)
+        aggregate = sc.get("visual_qa") if isinstance(sc.get("visual_qa"), dict) else {}
+        aggregate_fresh = scene_visual_qa_is_fresh(
+            workspace,
+            sc,
+            previous_scene=scenes[position - 1] if position > 0 else None,
+            next_scene=scenes[position + 1] if position + 1 < len(scenes) else None,
+        )
+        checks.append({
+            "id": f"scene_{int(sc.get('index', position))}_aggregate_qa",
+            "label": f"Scene {int(sc.get('index', position)) + 1} aggregate QA is current",
+            "status": (
+                "pass"
+                if aggregate_fresh and aggregate.get("pass") is True
+                else "fail"
+            ),
+            "detail": (
+                str(aggregate.get("summary") or "Identity, correspondence, and clip QA passed")
+                if aggregate_fresh
+                else "Aggregate QA is missing or stale for the current asset"
+            ),
+        })
 
     # Job-level: all approved animations should exist
     anim_targets = [
@@ -359,14 +562,14 @@ def _scene_visual_report(
                 "semantic": product_i2v,
             })
 
-    status = "fail" if any(c["status"] == "fail" for c in checks) else "pass"
+    status = "fail" if any(c.get("status") != "pass" for c in checks) else "pass"
     return {"index": idx, "status": status, "checks": checks}
 
 
 def should_block_publish(visual_report: dict[str, Any] | None) -> tuple[bool, str]:
     if not isinstance(visual_report, dict):
         return True, "Visual QA did not return a report"
-    if visual_report.get("ready_to_publish") is False or visual_report.get("status") == "fail":
+    if visual_report.get("status") != "pass" or visual_report.get("ready_to_publish") is False:
         return True, str(visual_report.get("summary") or "Visual QA failed")
     return False, ""
 
@@ -447,6 +650,70 @@ def _probe_clip_duration(clip_path: Path) -> float:
         return 0.0
 
 
+def _audio_silence_report(clip_path: Path) -> dict[str, Any]:
+    """Require an i2v clip with no audio stream; unavailable probing blocks."""
+
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe:
+        return {
+            "status": "fail",
+            "pass": False,
+            "summary": "Audio-silence QA unavailable because ffprobe is missing",
+            "qa_unavailable": True,
+        }
+    try:
+        process = subprocess.run(
+            [
+                ffprobe,
+                "-v", "error",
+                "-select_streams", "a",
+                "-show_entries", "stream=index,codec_name",
+                "-of", "json",
+                str(clip_path),
+            ],
+            check=False,
+            timeout=15,
+            capture_output=True,
+            text=True,
+        )
+        if process.returncode != 0:
+            return {
+                "status": "fail",
+                "pass": False,
+                "summary": f"Audio-silence QA probe failed: {(process.stderr or '').strip()[:240]}",
+                "qa_unavailable": True,
+            }
+        payload = json.loads(process.stdout or "{}")
+        streams = payload.get("streams") if isinstance(payload, dict) else None
+        if not isinstance(streams, list):
+            return {
+                "status": "fail",
+                "pass": False,
+                "summary": "Audio-silence QA returned an invalid stream report",
+                "qa_unavailable": True,
+            }
+        if streams:
+            return {
+                "status": "fail",
+                "pass": False,
+                "summary": "Generated i2v clip contains an audio stream; Studio clips must remain silent",
+                "audio_streams": streams,
+            }
+        return {
+            "status": "pass",
+            "pass": True,
+            "summary": "No audio stream is present",
+            "audio_streams": [],
+        }
+    except Exception as exc:
+        return {
+            "status": "fail",
+            "pass": False,
+            "summary": f"Audio-silence QA unavailable: {str(exc)[:240]}",
+            "qa_unavailable": True,
+        }
+
+
 def _frame_timestamps(duration: float, count: int = 5) -> list[float]:
     """Return timestamps spanning the complete timeline, including the last beat."""
     duration = max(0.1, float(duration or 0.0))
@@ -516,9 +783,9 @@ def _semantic_fingerprint(
     locked_outfit: str,
     cast_count: int = 1,
 ) -> str:
-    parts = [str(SEMANTIC_QA_VERSION), str(clip_path.stat().st_size), str(clip_path.stat().st_mtime_ns)]
+    parts = [str(SEMANTIC_QA_VERSION), _asset_version_token(clip_path)]
     if still and still.is_file():
-        parts.extend([str(still.stat().st_size), str(still.stat().st_mtime_ns)])
+        parts.append(_asset_version_token(still))
     parts.append(str(locked_outfit or ""))
     parts.append(f"cast_count={2 if int(cast_count or 1) >= 2 else 1}")
     return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()
@@ -584,27 +851,19 @@ def _semantic_prompt(*, frame_count: int, locked_outfit: str, cast_count: int = 
 
 
 def _run_semantic_vision(image_paths: list[str], *, prompt: str) -> dict[str, Any]:
-    """Use Studio's existing Anthropic/FAL/OpenRouter vision chain."""
+    """Run semantic QA through direct Anthropic only."""
     from studio_agent import competitor
-    from studio_agent.reference_providers import run_provider_chain, vision_provider_order
+    from studio_agent import provider_policy
 
-    configured = str(os.getenv("STUDIO_I2V_QA_PROVIDER_ORDER", "") or "").strip()
-    order = [item.strip().lower() for item in configured.split(",") if item.strip()] or vision_provider_order()
-    result = run_provider_chain(
-        order,
-        {
-            "anthropic": lambda: competitor._summarize_keyframe_visuals_anthropic(
-                image_paths, prompt_text=prompt
-            ),
-            "fal": lambda: competitor._summarize_keyframe_visuals_fal(
-                image_paths, prompt_text=prompt
-            ),
-            "openrouter": lambda: competitor._summarize_keyframe_visuals_openrouter(
-                image_paths, prompt_text=prompt, content_format="short"
-            ),
-        },
-        success_key="summary",
+    provider_policy.assert_provider_allowed(
+        "anthropic", provider_policy.SEMANTIC_QA_CAPABILITY
     )
+    result = competitor._summarize_keyframe_visuals_anthropic(
+        image_paths,
+        prompt_text=prompt,
+    )
+    if not isinstance(result, dict):
+        result = {"error": "anthropic_invalid_result", "summary": ""}
     summary = str(result.get("summary") or "").strip()
     return {**result, "parsed": _parse_json_object(summary), "raw_summary": summary[:4000]}
 
@@ -631,9 +890,9 @@ def _still_semantic_fingerprint(
     locked_outfit: str,
     cast_count: int = 1,
 ) -> str:
-    parts = [str(STILL_SEMANTIC_QA_VERSION), str(still.stat().st_size), str(still.stat().st_mtime_ns)]
+    parts = [str(STILL_SEMANTIC_QA_VERSION), _asset_version_token(still)]
     if reference and reference.is_file():
-        parts.extend([str(reference.stat().st_size), str(reference.stat().st_mtime_ns)])
+        parts.append(_asset_version_token(reference))
     parts.append(str(locked_outfit or ""))
     parts.append(f"cast_count={2 if int(cast_count or 1) >= 2 else 1}")
     return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()
@@ -759,15 +1018,35 @@ def audit_skeleton_still(
         issues = [field for field in issue_fields if parsed.get(field) is True]
         if not parsed and vision.get("error"):
             issues.append("qa_unavailable")
+        summary = str(parsed.get("summary") or vision.get("error") or (
+            "Still preserves the canonical skeleton" if parsed.get("pass") is True else "Still identity was not proven"
+        ))[:500]
+        # Vision models often fail pass with a clear summary but forget to set
+        # boolean flags — backfill issues so regenerate applies the right fix.
+        if parsed.get("pass") is not True or issues:
+            slow = summary.lower()
+            if any(
+                term in slow
+                for term in (
+                    "chest", "ribcage", "rib cage", "sternum", "orb", "embedded light",
+                    "self-emitting", "internal light", "glowing light", "chest glow",
+                    "chest cavity", "light source",
+                )
+            ) and "symbolic_clutter" not in issues:
+                issues.append("symbolic_clutter")
+            if any(term in slow for term in ("human skin", "flesh", "hair", "mannequin")) and "human_or_skin" not in issues:
+                issues.append("human_or_skin")
+            if any(term in slow for term in ("split", "diptych", "collage", "multi-panel")) and "layout_artifact" not in issues:
+                issues.append("layout_artifact")
+            if any(term in slow for term in ("text", "hashtag", "watermark", "caption overlay")) and "text_artifact" not in issues:
+                issues.append("text_artifact")
         passed = parsed.get("pass") is True and confidence >= 0.80 and not issues
         report = {
             "version": STILL_SEMANTIC_QA_VERSION,
             "status": "pass" if passed else ("fail" if required else "warn"),
             "pass": bool(passed), "confidence": confidence,
             "provider": str(vision.get("provider") or ""), "model": str(vision.get("model") or ""),
-            "summary": str(parsed.get("summary") or vision.get("error") or (
-                "Still preserves the canonical skeleton" if passed else "Still identity was not proven"
-            ))[:500],
+            "summary": summary,
             "issues": issues, "fingerprint": fingerprint, "created_at": time.time(),
             "cast_count": 2 if int(cast_count or 1) >= 2 else 1,
         }
@@ -881,11 +1160,78 @@ def audit_scene_correspondence(
             pass
 
 
-def audit_generic_still(still: Path, *, scene_contract: str, force: bool = False) -> dict[str, Any]:
+_LAUNCH_STYLE_RUBRICS = {
+    "skeleton_host": (
+        "SKELETON_HOST RUBRIC: require the intended cast count of ivory anatomical skeleton hosts, "
+        "complete plausible bones/hands/feet, no human skin or flesh, no duplicated or merged host, and "
+        "a separate close-fitting clear glass skin for each host with a visible air gap between dual hosts."
+    ),
+    "cinematic": (
+        "CINEMATIC RUBRIC: require deliberate foreground/midground/background composition, a readable focal "
+        "subject, motivated lighting, coherent perspective and depth, intentional crop, and scene-specific staging; "
+        "fail generic centered presenter staging or accidental edge cuts."
+    ),
+    "ultra_realism": (
+        "ULTRA_REALISM RUBRIC: require anatomically plausible faces, eyes, hands, fingers, limbs and joints; "
+        "physically credible skin, hair, fabric, glass, metal and other materials; consistent contact shadows, "
+        "reflections, lighting and perspective; fail waxy, melted, fused or synthetic-looking anatomy/materials."
+    ),
+    "historical_18th_century": (
+        "HISTORICAL_18TH_CENTURY RUBRIC: require period-correct 18th-century clothing construction, hair, "
+        "architecture, furniture, tools, transport and lighting; fail electricity, LEDs, plastic, zippers, modern "
+        "vehicles, contemporary signage, devices, materials or any other anachronism."
+    ),
+}
+
+
+def _normalized_launch_style(value: Any) -> str:
+    raw = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+    aliases = {
+        "skeleton": "skeleton_host",
+        "skeleton_hosts": "skeleton_host",
+        "ultra_realistic": "ultra_realism",
+        "photoreal": "ultra_realism",
+        "historical": "historical_18th_century",
+        "18th_century": "historical_18th_century",
+    }
+    return aliases.get(raw, raw)
+
+
+def _asset_render_style(asset_path: Path, explicit: str = "") -> str:
+    normalized = _normalized_launch_style(explicit)
+    if normalized:
+        return normalized
+    asset = Path(asset_path)
+    workspace = asset.parent.parent if asset.parent.name in {"stills", "clips"} else asset.parent
+    try:
+        spec = json.loads((workspace / "job_spec.json").read_text(encoding="utf-8"))
+        return _normalized_launch_style((spec or {}).get("render_style"))
+    except Exception:
+        return ""
+
+
+def audit_generic_still(
+    still: Path,
+    *,
+    scene_contract: str,
+    force: bool = False,
+    render_style: str = "",
+) -> dict[str, Any]:
     """Strict scene-contract QA for every non-reference-led generated still."""
     still = Path(still)
     if not still.is_file():
         return {"status": "fail", "pass": False, "summary": "Still is missing"}
+    style = _asset_render_style(still, render_style)
+    rubric = _LAUNCH_STYLE_RUBRICS.get(
+        style,
+        "GENERIC RUBRIC: require coherent anatomy, geometry, materials, composition, perspective and scene-specific staging.",
+    )
+    fingerprint = hashlib.sha256("|".join((
+        str(STILL_SEMANTIC_QA_VERSION),
+        _asset_version_token(still),
+        style,
+        str(scene_contract or ""),
+    )).encode("utf-8")).hexdigest()
     frame_dir = still.parent / f".vq_generic_{still.stem}"
     candidate = _qa_jpeg(still, frame_dir / "candidate.jpg")
     if not candidate:
@@ -895,17 +1241,37 @@ def audit_generic_still(still: Path, *, scene_contract: str, force: bool = False
             "You are a strict generated-image QC classifier. Judge the candidate against this scene contract: "
             f"{str(scene_contract or '')[:700]}. Pass only if it is one coherent scene matching the requested subject, "
             "setting, action, and style. Fail for malformed anatomy or geometry, duplicate/merged subjects, unintended "
-            "text/watermarks, split/collage layout, black/empty scene, unrelated objects, or obvious visual artifacts. "
-            'Return JSON only: {"pass":false,"confidence":0.0,"summary":"reason","artifact":false,"identity_drift":false,"layout_artifact":false,"text_artifact":false}. Uncertainty is a fail.'
+            "text/watermarks, split/collage layout, black/empty scene, unrelated objects, cropped-off required anatomy "
+            "or products, visible generation seams, or obvious visual artifacts. "
+            f"{rubric} "
+            'Return JSON only: {"pass":false,"confidence":0.0,"summary":"reason","style_match":false,'
+            '"artifact":false,"identity_drift":false,"layout_artifact":false,"text_artifact":false,'
+            '"crop_artifact":false,"seam_artifact":false,"style_violation":false,"composition_failure":false,'
+            '"anatomy_artifact":false,"material_artifact":false,"cast_integrity_failure":false,'
+            '"glass_shell_failure":false,"anachronism":false}. Uncertainty or unavailable QA is a fail.'
         )
         vision = _run_semantic_vision([str(candidate)], prompt=prompt) or {}
         parsed = vision.get("parsed") if isinstance(vision.get("parsed"), dict) else {}
-        issues = [key for key in ("artifact", "identity_drift", "layout_artifact", "text_artifact") if parsed.get(key) is True]
+        issue_fields = (
+            "artifact", "identity_drift", "layout_artifact", "text_artifact",
+            "crop_artifact", "seam_artifact", "style_violation",
+            "composition_failure", "anatomy_artifact", "material_artifact",
+            "cast_integrity_failure", "glass_shell_failure", "anachronism",
+        )
+        issues = [key for key in issue_fields if parsed.get(key) is True]
+        if not parsed or vision.get("error"):
+            issues.append("qa_unavailable")
         confidence = float(parsed.get("confidence") or 0.0)
-        passed = parsed.get("pass") is True and confidence >= 0.80 and not issues
+        passed = (
+            parsed.get("pass") is True
+            and parsed.get("style_match") is True
+            and confidence >= 0.80
+            and not issues
+        )
         return {"status": "pass" if passed else "fail", "pass": bool(passed), "confidence": confidence,
                 "provider": str(vision.get("provider") or ""), "model": str(vision.get("model") or ""),
-                "summary": str(parsed.get("summary") or vision.get("error") or "Scene quality was not proven")[:500], "issues": issues}
+                "summary": str(parsed.get("summary") or vision.get("error") or "Scene quality was not proven")[:500],
+                "issues": issues, "render_style": style, "rubric": rubric, "fingerprint": fingerprint}
     finally:
         try:
             candidate.unlink(missing_ok=True)
@@ -914,87 +1280,104 @@ def audit_generic_still(still: Path, *, scene_contract: str, force: bool = False
             pass
 
 
-def audit_generic_clip(clip_path: Path, *, scene_contract: str) -> dict[str, Any]:
-    """Sample a generic I2V clip; provider success is never visual acceptance."""
-    frames = _extract_clip_frames(Path(clip_path), count=5)
+def _motion_brief_for_clip(clip_path: Path, explicit: str, fallback: str) -> str:
+    if str(explicit or "").strip():
+        return str(explicit).strip()[:300]
+    clip = Path(clip_path)
+    workspace = clip.parent.parent if clip.parent.name == "clips" else clip.parent
+    try:
+        raw = json.loads((workspace / "scenes.json").read_text(encoding="utf-8"))
+        for scene in raw if isinstance(raw, list) else []:
+            if not isinstance(scene, dict):
+                continue
+            rel = str(scene.get("clip_rel") or "").replace("\\", "/").strip()
+            expected = (workspace / rel).resolve() if rel else None
+            if expected == clip.resolve():
+                brief = str(scene.get("motion_prompt") or scene.get("scene_action") or "").strip()
+                if brief:
+                    return brief[:300]
+    except Exception:
+        pass
+    return str(fallback or "").strip()[:300]
+
+
+def audit_generic_clip(
+    clip_path: Path,
+    *,
+    scene_contract: str,
+    motion_brief: str = "",
+    render_style: str = "",
+    force: bool = False,
+) -> dict[str, Any]:
+    """Block until a silent clip proves motion and full-timeline visual quality."""
+
+    clip_path = Path(clip_path)
+    if not clip_path.is_file():
+        return {"status": "fail", "pass": False, "summary": "Clip is missing"}
+    style = _asset_render_style(clip_path, render_style)
+    rubric = _LAUNCH_STYLE_RUBRICS.get(style, "Preserve the requested style in every sampled frame.")
+    motion = _motion_brief_for_clip(clip_path, motion_brief, scene_contract)
+    fingerprint = hashlib.sha256("|".join((
+        str(SEMANTIC_QA_VERSION),
+        _asset_version_token(clip_path),
+        style,
+        str(scene_contract or ""),
+        motion,
+    )).encode("utf-8")).hexdigest()
+    audio = _audio_silence_report(clip_path)
+    if audio.get("status") != "pass" or audio.get("pass") is not True:
+        return {
+            "status": "fail",
+            "pass": False,
+            "summary": str(audio.get("summary") or "Clip silence was not proven")[:500],
+            "violations": ["audio_not_silent"],
+            "audio_silence": audio,
+            "motion_brief": motion,
+            "render_style": style,
+            "fingerprint": fingerprint,
+        }
+
+    frames = _extract_clip_frames(clip_path, count=7)
     if len(frames) < 4:
-        return {"status": "fail", "pass": False, "summary": "Could not sample full clip timeline"}
+        return {
+            "status": "fail",
+            "pass": False,
+            "summary": "Could not sample full clip timeline",
+            "violations": ["qa_unavailable"],
+            "audio_silence": audio,
+            "motion_brief": motion,
+            "render_style": style,
+            "fingerprint": fingerprint,
+        }
     try:
         vision = _run_semantic_vision([str(frame) for frame in frames], prompt=(
             "You are a strict generated-video QC classifier. These are chronological frames from one clip. "
             f"Scene contract: {str(scene_contract or '')[:700]}. Pass only if all frames preserve one coherent subject, "
-            "setting, action, and style. Fail for morphing, anatomy/geometry artifacts, identity/background drift, duplicate subjects, text/watermarks, collage layouts, or black frames. "
-            'Return JSON only: {"pass":false,"confidence":0.0,"summary":"reason","violations":[]}.'
+            "setting, action, and style. Fail for morphing, anatomy/geometry artifacts, identity/background drift, "
+            "duplicate subjects, text/watermarks, collage layouts, black frames, temporal seams, frozen/dead frames, "
+            "or motion that contradicts or fails to visibly realize the brief across time. "
+            f"Motion brief (must be visibly satisfied): {motion}. {rubric} "
+            'Return JSON only: {"pass":false,"confidence":0.0,"summary":"reason",'
+            '"motion_brief_satisfied":false,"violations":[]}. Uncertainty or unavailable QA is a fail.'
         )) or {}
         parsed = vision.get("parsed") if isinstance(vision.get("parsed"), dict) else {}
         violations = list(parsed.get("violations") or [])
+        if not parsed or vision.get("error"):
+            violations.append("qa_unavailable")
+        if parsed.get("motion_brief_satisfied") is not True:
+            violations.append("motion_brief_not_proven")
         confidence = float(parsed.get("confidence") or 0.0)
         passed = parsed.get("pass") is True and confidence >= 0.75 and not violations
         return {"status": "pass" if passed else "fail", "pass": bool(passed), "confidence": confidence,
                 "provider": str(vision.get("provider") or ""), "model": str(vision.get("model") or ""),
-                "summary": str(parsed.get("summary") or vision.get("error") or "Clip quality was not proven")[:500], "violations": violations}
+                "summary": str(parsed.get("summary") or vision.get("error") or "Clip quality was not proven")[:500],
+                "violations": violations, "audio_silence": audio, "motion_brief": motion,
+                "render_style": style, "rubric": rubric, "fingerprint": fingerprint,
+                "frames_reviewed": len(frames)}
     finally:
         try:
             for frame in frames: frame.unlink(missing_ok=True)
             frames[0].parent.rmdir()
-        except Exception:
-            pass
-
-    frame_dir = still.parent / f".vq_still_{still.stem}"
-    ref_jpg = _qa_jpeg(reference, frame_dir / "reference.jpg")
-    candidate_jpg = _qa_jpeg(still, frame_dir / "candidate.jpg")
-    if not ref_jpg or not candidate_jpg:
-        return {
-            "status": "fail" if required else "warn",
-            "pass": False,
-            "confidence": 0.0,
-            "summary": "Could not prepare still images for semantic QA",
-            "fingerprint": fingerprint,
-        }
-    try:
-        vision = _run_semantic_vision(
-            [str(ref_jpg), str(candidate_jpg)],
-            prompt=_still_semantic_prompt(locked_outfit=locked_outfit, cast_count=cast_count),
-        ) or {}
-        parsed = vision.get("parsed") if isinstance(vision.get("parsed"), dict) else {}
-        confidence = float(parsed.get("confidence") or 0.0)
-        issue_fields = (
-            "identity_drift", "human_or_skin", "anatomy_artifact", "wardrobe_drift",
-            "layout_artifact", "symbolic_clutter", "text_artifact", "background_artifact",
-        )
-        issues = [field for field in issue_fields if parsed.get(field) is True]
-        if not parsed and vision.get("error"):
-            issues.append("qa_unavailable")
-        passed = parsed.get("pass") is True and confidence >= 0.80 and not issues
-        report = {
-            "version": STILL_SEMANTIC_QA_VERSION,
-            "status": "pass" if passed else ("fail" if required else "warn"),
-            "pass": bool(passed),
-            "confidence": confidence,
-            "provider": str(vision.get("provider") or ""),
-            "model": str(vision.get("model") or ""),
-            "summary": str(
-                parsed.get("summary")
-                or vision.get("error")
-                or ("Still preserves the canonical skeleton" if passed else "Still identity was not proven")
-            )[:500],
-            "issues": issues,
-            "fingerprint": fingerprint,
-            "created_at": time.time(),
-        }
-        try:
-            cache_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
-        except Exception:
-            pass
-        return report
-    finally:
-        for path in (ref_jpg, candidate_jpg):
-            try:
-                path.unlink(missing_ok=True)
-            except Exception:
-                pass
-        try:
-            frame_dir.rmdir()
         except Exception:
             pass
 
@@ -1019,8 +1402,8 @@ def audit_product_still(
             "summary": "Product reference image is unavailable",
         }
 
-    fingerprint_parts = [str(PRODUCT_SEMANTIC_QA_VERSION), str(still.stat().st_size), str(still.stat().st_mtime_ns)]
-    fingerprint_parts.extend(f"{path.stat().st_size}:{path.stat().st_mtime_ns}" for path in refs)
+    fingerprint_parts = [str(PRODUCT_SEMANTIC_QA_VERSION), _asset_version_token(still)]
+    fingerprint_parts.extend(_asset_version_token(path) for path in refs)
     fingerprint_parts.append(str(product_name or ""))
     fingerprint = hashlib.sha256("|".join(fingerprint_parts).encode("utf-8")).hexdigest()
     cache_path = still.with_suffix(still.suffix + ".productqa.json")

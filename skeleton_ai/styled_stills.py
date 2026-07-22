@@ -1,9 +1,6 @@
-"""Seedream v4.5 text-to-image stills for styled shortform (non-skeleton)."""
+"""FAL Seedream still generation and reference-aware editing."""
 from __future__ import annotations
 
-import os
-import base64
-import json
 from pathlib import Path
 from typing import Any
 
@@ -17,17 +14,23 @@ from .fal_auth import require_fal_key
 from .canonical_edit import _first_result_image_url, _queue_result
 from . import render_simulation
 from studio_agent.image_model_catalog import (
-    modal_seedream_request_headers,
     normalize_seedream_model_id,
     seedream_endpoint,
     seedream_model_spec,
-    seedream_provider,
 )
 
 SEEDREAM_T2I_URL = "https://fal.run/fal-ai/bytedance/seedream/v4.5/text-to-image"
-XAI_IMAGE_URL = "https://api.x.ai/v1/images/generations"
-XAI_IMAGE_EDIT_URL = "https://api.x.ai/v1/images/edits"
-XAI_USD_TICKS_PER_DOLLAR = 10_000_000_000
+DEFAULT_FAL_IMAGE_MODEL = "seedream_edit"
+LEGACY_NON_FAL_IMAGE_MODEL_IDS = frozenset(
+    {
+        "grok_imagine",
+        "grok_imagine_standard",
+        "grok-imagine-image",
+        "grok-imagine-image-quality",
+        "seedream_v5_lite_modal",
+        "seedream5_lite_modal",
+    }
+)
 
 
 class StyledStillError(RuntimeError):
@@ -45,53 +48,16 @@ class StyledStillError(RuntimeError):
         self.operation = operation
 
 
-def _xai_error_cost_usd(text: str) -> float | None:
-    try:
-        payload = json.loads(str(text or ""))
-        usage = payload.get("usage") if isinstance(payload, dict) else None
-        ticks = usage.get("cost_in_usd_ticks") if isinstance(usage, dict) else None
-        if ticks is None:
-            return None
-        return max(0.0, float(ticks) / XAI_USD_TICKS_PER_DOLLAR)
-    except Exception:
-        return None
-
-
-def _xai_payload_cost_usd(payload: dict[str, Any]) -> float | None:
-    try:
-        usage = payload.get("usage") if isinstance(payload, dict) else None
-        ticks = usage.get("cost_in_usd_ticks") if isinstance(usage, dict) else None
-        if ticks is None:
-            return None
-        return max(0.0, float(ticks) / XAI_USD_TICKS_PER_DOLLAR)
-    except Exception:
-        return None
-
-
-def _data_uri(path: Path) -> str:
-    suffix = path.suffix.lower()
-    mime = "image/jpeg" if suffix in {".jpg", ".jpeg"} else "image/png"
-    return f"data:{mime};base64,{base64.b64encode(path.read_bytes()).decode('ascii')}"
-
-
-def _write_xai_image_response(response_json: dict[str, Any], out_path: Path) -> dict[str, Any]:
-    data = (response_json or {}).get("data") or []
-    item = (data[0] or {}) if data else {}
-    b64 = str(item.get("b64_json") or "").strip()
-    url = str(item.get("url") or "").strip()
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    if b64:
-        out_path.write_bytes(base64.b64decode(b64))
-    elif url:
-        _download(url, out_path)
-    else:
-        raise StyledStillError(f"xAI returned no image data: {str(response_json)[:200]}")
-    return {
-        "local_path": str(out_path),
-        "cdn_url": url or None,
-        "cost_usd": _xai_payload_cost_usd(response_json),
-        "bytes": out_path.stat().st_size,
-    }
+def normalize_fal_image_model_id(value: Any) -> str:
+    """Map saved non-FAL selections to an explicit runnable FAL model."""
+    raw = str(value or "").strip().lower().replace(" ", "_")
+    if raw in {"seedream_v5_lite_modal", "seedream5_lite_modal"}:
+        return "seedream_v5_lite"
+    normalized = normalize_seedream_model_id(raw)
+    spec = seedream_model_spec(normalized)
+    if str(spec.get("provider") or "").lower() == "fal":
+        return normalized
+    return DEFAULT_FAL_IMAGE_MODEL
 
 
 def _ensure_fal() -> None:
@@ -99,6 +65,8 @@ def _ensure_fal() -> None:
         require_fal_key("styled still generation")
     except RuntimeError as exc:
         raise StyledStillError(str(exc)) from exc
+    if fal_client is None:
+        raise StyledStillError("FAL client is unavailable for styled still generation")
 
 
 def _download(url: str, dest: Path) -> None:
@@ -128,6 +96,7 @@ def _seedream_t2i_payload(
         payload["max_images"] = 1
         payload["enable_safety_checker"] = True
     elif normalized == "seedream_v4":
+        # Seedream v4's published schema does not accept negative_prompt.
         payload["seed"] = int(seed)
         payload["enable_safety_checker"] = True
     else:
@@ -135,39 +104,6 @@ def _seedream_t2i_payload(
         payload["seed"] = int(seed)
         payload["enable_safety_checker"] = True
     return payload
-
-
-def _modal_seedream_t2i_result(
-    endpoint_url: str,
-    payload: dict[str, Any],
-    *,
-    remote_model_id: str,
-) -> dict[str, Any]:
-    """Call the optional operator-supplied Modal Seedream HTTP contract."""
-    if not endpoint_url:
-        raise StyledStillError("Modal Seedream is not configured")
-    headers = modal_seedream_request_headers()
-    timeout = max(30, int(os.getenv("MODAL_SEEDREAM_TIMEOUT_SEC", "300") or "300"))
-    with httpx.Client(timeout=timeout, follow_redirects=False) as client:
-        response = client.post(
-            endpoint_url,
-            headers=headers,
-            json={"task": "text_to_image", "model": remote_model_id, "input": payload},
-        )
-    if response.status_code not in (200, 201):
-        raise StyledStillError(
-            f"Modal Seedream generation failed ({response.status_code}): {response.text[:300]}"
-        )
-    result = response.json()
-    if not isinstance(result, dict):
-        raise StyledStillError("Modal Seedream generation returned a non-object response")
-    for key in ("output", "data"):
-        nested = result.get(key)
-        if isinstance(nested, dict) and (
-            nested.get("images") or nested.get("image") or nested.get("image_url")
-        ):
-            return nested
-    return result
 
 
 def build_styled_scene_prompt(
@@ -199,10 +135,13 @@ def generate_still_t2i(
     image_model_id: str = "",
 ) -> dict[str, Any]:
     out_path = Path(out_path)
+    requested_model = str(image_model_id or "").strip().lower()
+    normalized_seedream = normalize_fal_image_model_id(requested_model)
     if out_path.exists() and out_path.stat().st_size > 1024:
         return {
             "local_path": str(out_path),
-            "provider": "seedream_v45_t2i",
+            "provider": normalized_seedream,
+            "provider_transport": "fal",
             "cached": True,
         }
 
@@ -211,56 +150,15 @@ def generate_still_t2i(
         return {
             "local_path": str(out_path),
             "provider": "simulation_seedream_t2i",
+            "selected_model": normalized_seedream,
             "seed": seed,
             "bytes": out_path.stat().st_size,
             "simulated": True,
         }
 
-    normalized_model = str(image_model_id or "").strip().lower()
-    if normalized_model in {"grok_imagine", "grok_imagine_standard"}:
-        api_key = str(os.environ.get("XAI_API_KEY") or "").strip()
-        if not api_key:
-            raise StyledStillError("xAI image generation requires XAI_API_KEY")
-        xai_model = "grok-imagine-image-quality" if normalized_model == "grok_imagine" else "grok-imagine-image"
-        payload = {
-            "model": xai_model,
-            "prompt": str(prompt or "")[:759],
-            "n": 1,
-            "response_format": "b64_json",
-            "aspect_ratio": "9:16",
-            "resolution": "2k",
-        }
-        with httpx.Client(timeout=240, follow_redirects=True) as client:
-            response = client.post(
-                XAI_IMAGE_URL,
-                json=payload,
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                },
-            )
-        if response.status_code not in (200, 201):
-            raise StyledStillError(
-                f"{xai_model} {response.status_code}: {response.text[:300]}",
-                cost_usd=_xai_error_cost_usd(response.text),
-                provider="xai",
-                operation=normalized_model,
-            )
-        response_json = response.json() or {}
-        written = _write_xai_image_response(response_json, out_path)
-        return {
-            **written,
-            "provider": normalized_model,
-            "xai_model": xai_model,
-            "seed": seed,
-        }
-
-    normalized_seedream = normalize_seedream_model_id(normalized_model)
     model_spec = seedream_model_spec(normalized_seedream)
     if not model_spec:
-        normalized_seedream = "seedream_edit"
-        model_spec = seedream_model_spec(normalized_seedream)
-    provider = seedream_provider(normalized_seedream)
+        raise StyledStillError(f"FAL image model is unavailable: {normalized_seedream}")
     endpoint = seedream_endpoint(normalized_seedream, edit=False)
     if not endpoint:
         raise StyledStillError(f"Seedream generation model is unavailable: {normalized_seedream}")
@@ -271,15 +169,8 @@ def generate_still_t2i(
         seed=seed,
     )
     try:
-        if provider == "modal":
-            result = _modal_seedream_t2i_result(
-                endpoint,
-                payload,
-                remote_model_id=str(model_spec.get("remote_model_id") or "bytedance/seedream/v5/lite"),
-            )
-        else:
-            _ensure_fal()
-            result = _queue_result(endpoint, payload, timeout_sec=300)
+        _ensure_fal()
+        result = _queue_result(endpoint, payload, timeout_sec=300)
     except Exception as exc:
         if isinstance(exc, StyledStillError):
             raise
@@ -292,9 +183,13 @@ def generate_still_t2i(
         "local_path": str(out_path),
         "cdn_url": url,
         "provider": normalized_seedream,
-        "provider_transport": provider,
+        "provider_transport": "fal",
         "seed": seed,
         "bytes": out_path.stat().st_size,
+        "requested_model": requested_model or None,
+        "model_migrated_from": (
+            requested_model if requested_model and requested_model != normalized_seedream else None
+        ),
     }
 
 
@@ -303,54 +198,59 @@ def generate_still_xai_edit(
     out_path: Path,
     *,
     reference_path: str | Path,
-    image_model_id: str = "grok_imagine",
+    image_model_id: str = DEFAULT_FAL_IMAGE_MODEL,
 ) -> dict[str, Any]:
+    """Compatibility shim that migrates legacy xAI edits to FAL Seedream."""
     out_path = Path(out_path)
     ref = Path(reference_path)
     if not ref.is_file() or ref.stat().st_size <= 1024:
-        raise StyledStillError("xAI image edit requires a usable source image")
+        raise StyledStillError("FAL image edit requires a usable source image")
+    requested_model = str(image_model_id or "").strip().lower()
+    normalized_model = normalize_fal_image_model_id(requested_model)
     if render_simulation.enabled():
-        render_simulation.write_still(out_path, label="xAI image edit simulation")
+        render_simulation.write_still(out_path, label="FAL image edit simulation")
         return {
             "local_path": str(out_path),
-            "provider": "simulation_xai_image_edit",
+            "provider": "simulation_seedream_image_edit",
+            "selected_model": normalized_model,
             "simulated": True,
             "cost_usd": 0.0,
         }
-    api_key = str(os.environ.get("XAI_API_KEY") or "").strip()
-    if not api_key:
-        raise StyledStillError("xAI image edit requires XAI_API_KEY")
-    normalized_model = str(image_model_id or "grok_imagine").strip().lower()
-    xai_model = "grok-imagine-image" if normalized_model == "grok_imagine_standard" else "grok-imagine-image-quality"
+    _ensure_fal()
+    endpoint = seedream_endpoint(normalized_model, edit=True)
+    if not endpoint:
+        raise StyledStillError(f"FAL image edit model is unavailable: {normalized_model}")
+    try:
+        reference_url = fal_client.upload_file(str(ref))
+    except Exception as exc:
+        raise StyledStillError(f"FAL reference upload failed: {exc}") from exc
+    if not str(reference_url or "").strip():
+        raise StyledStillError("FAL reference upload returned no image URL")
     payload = {
-        "model": xai_model,
         "prompt": str(prompt or "")[:759],
-        "image": {"url": _data_uri(ref), "type": "image_url"},
-        "response_format": "b64_json",
-        "resolution": "2k",
+        "image_urls": [str(reference_url)],
+        "image_size": "auto_2K",
+        "num_images": 1,
+        "enable_safety_checker": True,
     }
-    with httpx.Client(timeout=240, follow_redirects=True) as client:
-        response = client.post(
-            XAI_IMAGE_EDIT_URL,
-            json=payload,
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-        )
-    if response.status_code not in (200, 201):
-        raise StyledStillError(
-            f"{xai_model} edit {response.status_code}: {response.text[:300]}",
-            cost_usd=_xai_error_cost_usd(response.text),
-            provider="xai",
-            operation=f"{normalized_model}_edit",
-        )
-    response_json = response.json() or {}
-    written = _write_xai_image_response(response_json, out_path)
+    try:
+        result = _queue_result(endpoint, payload, timeout_sec=300)
+    except Exception as exc:
+        raise StyledStillError(f"{normalized_model} edit failed: {exc}") from exc
+    url = _first_result_image_url(result)
+    if not url:
+        raise StyledStillError(f"{normalized_model} edit returned no image URL")
+    _download(url, out_path)
     return {
-        **written,
-        "provider": f"{normalized_model}_edit",
-        "xai_model": xai_model,
+        "local_path": str(out_path),
+        "cdn_url": url,
+        "provider": normalized_model,
+        "provider_transport": "fal",
+        "bytes": out_path.stat().st_size,
+        "requested_model": requested_model or None,
+        "model_migrated_from": (
+            requested_model if requested_model and requested_model != normalized_model else None
+        ),
     }
 
 

@@ -8,17 +8,14 @@ from typing import Any
 
 
 SHORT_IMAGE_RATES = {
-    "grok_imagine": (0.10, 5.0),
-    "grok_imagine_standard": (0.04, 4.4),
+    "seedream_v4": (0.04, 4.9),
     "seedream_edit": (0.04, 4.6),
+    "recraft_v4": (0.04, 4.5),
     "ernie_image": (0.03, 3.8),
 }
 
 SHORT_VIDEO_ROUTES = (
-    ("grok_imagine_video_15_1080p", 5.0),
-    ("grok_imagine_video_15", 4.8),
     ("kling_pro", 4.7),
-    ("grok_imagine_video", 4.5),
     ("kling21_standard", 4.2),
     ("pixverse", 4.0),
     ("seedance", 3.9),
@@ -54,12 +51,16 @@ def optimize_shortform(
     target_margin: float = 0.70,
     max_provider_cost_usd: float | None = None,
 ) -> dict[str, Any]:
-    from studio_agent import production_budget, store
+    from studio_agent import production_budget, provider_policy, store
 
     scenes = max(1, min(60, int(scene_count or 1)))
     seconds = max(1.0, min(600.0, float(duration_seconds or scenes * 5)))
-    image_model = store.normalize_image_model(image_model_id)
-    video = store.normalize_video_model(video_model)
+    image_model = store.normalize_image_model(
+        provider_policy.migrated_image_model(image_model_id)
+    )
+    video = store.normalize_video_model(
+        provider_policy.migrated_video_model(video_model)
+    )
     still_rate, quality_score = SHORT_IMAGE_RATES.get(image_model, (0.04, 4.0))
     still_cost = scenes * still_rate
     video_cost, video_rate, _ = production_budget._video_cost(video, seconds if animate else 0.0)
@@ -121,7 +122,7 @@ def optimize_shortform(
 def optimize_longform(
     *,
     target_duration_sec: int,
-    image_model_id: str = "grok_imagine_standard",
+    image_model_id: str = "seedream_v4",
     selling_price_usd: float | None = None,
     target_margin: float = 0.70,
     max_provider_cost_usd: float | None = None,
@@ -133,15 +134,15 @@ def optimize_longform(
     duration = max(60, int(target_duration_sec or 1200))
     outline = _build_outline_from_args({"title": "Cost projection", "topic": "Cost projection", "target_duration_sec": duration})
     profiles = [
-        ("premium", 30, "grok_imagine", 5.0),
-        ("balanced", 20, "grok_imagine_standard", 4.6),
-        ("economy", 15, "grok_imagine_standard", 4.2),
+        ("premium", 30, "seedream_v4", 5.0),
+        ("balanced", 20, "seedream_edit", 4.6),
+        ("economy", 15, "ernie_image", 4.2),
     ]
     options = []
     for label, scenes_per_chapter, model, score in profiles:
         channel = dict(get_channel("history_rewind"))
         channel["image_model_default"] = model
-        channel["voice_provider_default"] = "xai"
+        channel["voice_provider_default"] = "fal_minimax"
         cost = compute_render_cost(channel, outline, scenes_per_chapter_override=scenes_per_chapter)
         total = float(cost.get("all_in_usd") or 0.0)
         options.append({
@@ -155,7 +156,9 @@ def optimize_longform(
             "within_budget": max_provider_cost_usd is None or total <= float(max_provider_cost_usd),
             **_margin_fields(total, selling_price_usd, target_margin),
         })
-    selected_model = str(image_model_id or "").strip().lower()
+    from studio_agent import provider_policy
+
+    selected_model = provider_policy.migrated_image_model(image_model_id)
     preferred = [row for row in options if row["image_model_id"] == selected_model and row["within_budget"]]
     eligible = [row for row in options if row["within_budget"]]
     recommended = max(preferred or eligible or options, key=lambda row: (row["quality_score"], -row["projected_provider_cost_usd"]))
@@ -180,12 +183,12 @@ def optimize_from_session(session: dict[str, Any]) -> dict[str, Any] | None:
     if "long" in fmt:
         return optimize_longform(
             target_duration_sec=int(concept.get("duration_sec") or 1200),
-            image_model_id=str(session.get("image_model") or concept.get("image_model") or "grok_imagine_standard"),
+            image_model_id=str(session.get("image_model") or concept.get("image_model") or "seedream_v4"),
         )
     return optimize_shortform(
         scene_count=int(concept.get("scene_count") or 6),
         duration_seconds=float(concept.get("duration_sec") or 30),
-        image_model_id=str(session.get("image_model") or concept.get("image_model") or "grok_imagine"),
-        video_model=str(session.get("video_model") or concept.get("video_model") or "grok_imagine_video"),
+        image_model_id=str(session.get("image_model") or concept.get("image_model") or "seedream_edit"),
+        video_model=str(session.get("video_model") or concept.get("video_model") or "seedance"),
         animate=True,
     )

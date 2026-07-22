@@ -31,11 +31,15 @@ def test_video_catalog_has_concrete_safe_prices_without_live_rows() -> None:
     assert models["ltx_budget"]["estimated_unit_usd"] > 0
 
 
-def test_video_catalog_preserves_published_xai_rates() -> None:
+def test_video_catalog_exposes_only_fal_models() -> None:
     models = _by_id(video_model_profiles(pricing_snapshot={"source": "fallback", "prices": {}}))
-    assert models["grok_imagine_video"]["estimated_unit_usd"] == 0.07
-    assert models["grok_imagine_video"]["input_image_usd"] == 0.002
-    assert models["grok_imagine_video_15"]["estimated_unit_usd"] == 0.14
-    assert models["grok_imagine_video_15"]["input_image_usd"] == 0.01
-    assert models["grok_imagine_video_15_1080p"]["estimated_unit_usd"] == 0.25
-    assert models["grok_imagine_video"]["pricing_source"] == "xai_published"
+    assert set(models) == {"seedance", "pixverse", "kling_pro", "ltx_budget"}
+    assert all(model["provider"] == "fal" for model in models.values())
+
+
+def test_video_catalog_is_empty_when_fal_is_unconfigured() -> None:
+    rows = video_model_profiles(
+        fal_enabled=False,
+        pricing_snapshot={"source": "fallback", "prices": {}},
+    )
+    assert rows == []

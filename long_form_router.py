@@ -504,6 +504,179 @@ def build_long_form_router(
             "runpod": snapshot.get("runpod"),
         }
 
+    def _strict_qa_report_passed(report: Any) -> bool:
+        if not isinstance(report, dict) or report.get("status") != "pass":
+            return False
+        checks = report.get("checks")
+        return bool(
+            isinstance(checks, list)
+            and checks
+            and all(
+                isinstance(check, dict) and check.get("status") == "pass"
+                for check in checks
+            )
+        )
+
+    def _state_mp4_path(job_id: str, state: dict[str, Any]) -> Path | None:
+        raw = str(state.get("mp4_path") or "").strip()
+        if not raw:
+            return None
+        root = Path(lf_pipeline.LF_OUTPUT_ROOT).resolve()
+        candidate = Path(raw)
+        candidate = candidate.resolve() if candidate.is_absolute() else (root / candidate).resolve()
+        try:
+            candidate.relative_to((root / job_id).resolve())
+        except ValueError:
+            return None
+        return candidate if candidate.is_file() and candidate.suffix.lower() == ".mp4" else None
+
+    def _qa_evidence_for_state(state: dict[str, Any]) -> tuple[bool, dict[str, Any], float]:
+        final_qa = state.get("final_qa")
+        if isinstance(final_qa, dict):
+            render = final_qa.get("render")
+            package = final_qa.get("package")
+            assets = final_qa.get("current_assets")
+            passed = bool(
+                final_qa.get("status") == "pass"
+                and final_qa.get("pass") is True
+                and _strict_qa_report_passed(render)
+                and isinstance(package, dict)
+                and package.get("status") == "pass"
+                and package.get("pass") is True
+                and isinstance(assets, dict)
+                and assets.get("status") == "pass"
+                and assets.get("pass") is True
+            )
+            created_at = float(
+                final_qa.get("created_at")
+                or (render or {}).get("created_at")
+                or 0
+            )
+            return passed, render if isinstance(render, dict) else {}, created_at
+
+        qa_state = state.get("qa_state")
+        render = state.get("render_qa")
+        if isinstance(qa_state, dict):
+            nested_render = qa_state.get("render")
+            if isinstance(nested_render, dict):
+                render = nested_render
+            passed = bool(
+                qa_state.get("status") == "pass"
+                and qa_state.get("ready_to_post") is True
+                and _strict_qa_report_passed(render)
+            )
+            return passed, render if isinstance(render, dict) else {}, float(
+                (render or {}).get("created_at") or qa_state.get("created_at") or 0
+            )
+
+        if isinstance(render, dict):
+            return _strict_qa_report_passed(render), render, float(render.get("created_at") or 0)
+        return False, {}, 0.0
+
+    def _verified_publish_state(
+        job_id: str,
+        state: dict[str, Any] | None,
+    ) -> tuple[bool, Path | None]:
+        if not isinstance(state, dict) or state.get("ready_to_post") is not True:
+            return False, None
+        path = _state_mp4_path(job_id, state)
+        if path is None:
+            return False, None
+        qa_passed, render_report, qa_created_at = _qa_evidence_for_state(state)
+        if not qa_passed or qa_created_at <= 0:
+            return False, None
+        try:
+            if path.stat().st_mtime > qa_created_at + 1.0:
+                return False, None
+        except OSError:
+            return False, None
+        if not str(render_report.get("fingerprint") or "").strip():
+            return False, None
+
+        final_qa = state.get("final_qa")
+        if isinstance(final_qa, dict):
+            expected_mp4 = final_qa.get("mp4_fingerprint")
+            if isinstance(expected_mp4, dict):
+                try:
+                    if lf_pipeline._longform_asset_fingerprint(path) != expected_mp4:
+                        return False, None
+                except Exception:
+                    return False, None
+            package = final_qa.get("package")
+            package_raw = str((package or {}).get("path") or "").strip()
+            if not package_raw:
+                return False, None
+            root = Path(lf_pipeline.LF_OUTPUT_ROOT).resolve()
+            job_root = (root / job_id).resolve()
+            raw_path = Path(package_raw)
+            candidates = (
+                [raw_path.resolve()]
+                if raw_path.is_absolute()
+                else [raw_path.resolve(), (root / raw_path).resolve(), (job_root / raw_path).resolve()]
+            )
+            package_path = None
+            for candidate in candidates:
+                try:
+                    candidate.relative_to(job_root)
+                except ValueError:
+                    continue
+                if candidate.is_file():
+                    package_path = candidate
+                    break
+            try:
+                if package_path is None or package_path.stat().st_mtime > qa_created_at + 1.0:
+                    return False, None
+            except OSError:
+                return False, None
+            expected_package = final_qa.get("package_fingerprint")
+            if isinstance(expected_package, dict):
+                try:
+                    if lf_pipeline._longform_asset_fingerprint(package_path) != expected_package:
+                        return False, None
+                except Exception:
+                    return False, None
+        return True, path
+
+    def _strip_unverified_publish_claims(
+        job_id: str,
+        payload: dict[str, Any],
+        persisted: dict[str, Any] | None,
+    ) -> tuple[dict[str, Any], bool, Path | None]:
+        projected = dict(payload or {})
+        ready, path = _verified_publish_state(job_id, persisted)
+        if ready:
+            projected["ready_to_post"] = True
+            return projected, True, path
+
+        terminal_claim = bool(
+            (persisted or {}).get("ready_to_post") is False
+            or (persisted or {}).get("mp4_path")
+            or isinstance((persisted or {}).get("final_qa"), dict)
+        )
+        for key in (
+            "mp4_present", "mp4_url", "download_url", "package_url",
+            "mp4_path", "complete",
+        ):
+            projected.pop(key, None)
+        projected["ready_to_post"] = False
+        for key in ("phase", "status", "stage"):
+            value = str(projected.get(key) or "").strip().lower()
+            if value in {"done", "complete", "completed", "ready_to_post"}:
+                projected[key] = "final_qa_blocked"
+                terminal_claim = True
+        if terminal_claim and not projected.get("error"):
+            projected["final_qa_blocked"] = True
+        return projected, False, None
+
+    def _normalize_async_mutation_receipt(payload: dict[str, Any]) -> dict[str, Any]:
+        normalized = dict(payload or {})
+        status = str(normalized.get("status") or "").strip().lower()
+        if status in {"accepted", "queued", "running", "started", "claim_pending"}:
+            normalized.pop("ok", None)
+            normalized["accepted"] = True
+            normalized["complete"] = False
+        return normalized
+
     @router.post("/render-start")
     async def render_start_route(body: RenderRequest, request: Request, user: dict = auth_dep):
         _gate_admin(user)
@@ -563,30 +736,36 @@ def build_long_form_router(
                 except HTTPException:
                     continue
             outline = st.get("outline") or {}
-            mp4_rel = st.get("mp4_path") or ""
-            mp4_present = bool(mp4_rel)
+            projected, publish_ready, _mp4_path = _strip_unverified_publish_claims(
+                job_id, st, st
+            )
             thumbs_count = int(st.get("thumbnails_generated", 0) or 0)
-            out.append({
+            row = {
                 "job_id": st.get("job_id"),
                 "channel_key": st.get("channel_key"),
                 "channel_label": st.get("channel_label"),
                 "pipeline_kind": st.get("pipeline_kind", ""),
                 "title": outline.get("title", ""),
-                "phase": st.get("phase", ""),
+                "phase": projected.get("phase", ""),
                 "percent": int(st.get("percent", 0) or 0),
                 "error": st.get("error", ""),
                 "created_at": st.get("created_at", 0),
                 "started_at": st.get("started_at", 0),
                 "finished_at": st.get("finished_at", 0),
-                "mp4_present": mp4_present,
-                "mp4_url": f"/api/long-form/jobs/{st.get('job_id')}/mp4" if mp4_present else "",
+                "ready_to_post": publish_ready,
                 "mp4_duration_sec": float(st.get("mp4_duration_sec", 0) or 0),
                 "mp4_size_bytes": int(st.get("mp4_size_bytes", 0) or 0),
                 "thumbnail_url": (
                     f"/api/long-form/jobs/{st.get('job_id')}/thumbnail/1"
                     if thumbs_count > 0 else ""
                 ),
-            })
+            }
+            if projected.get("final_qa_blocked"):
+                row["final_qa_blocked"] = True
+            if publish_ready:
+                row["mp4_present"] = True
+                row["mp4_url"] = f"/api/long-form/jobs/{job_id}/mp4"
+            out.append(row)
         return {"jobs": out, "total": len(out)}
 
     @router.get("/jobs/{job_id}")
@@ -598,12 +777,21 @@ def build_long_form_router(
         if not st:
             runpod_snapshot = _runpod_snapshot(job_id)
             if runpod_snapshot is not None:
-                return {
+                payload = {
                     **_legacy_status_from_snapshot(job_id, runpod_snapshot),
                     "kind": "longform",
                     "status": runpod_snapshot.get("status"),
                     "title": runpod_snapshot.get("title") or "Long-form production",
                 }
+                payload.update({
+                    key: runpod_snapshot[key]
+                    for key in ("ready_to_post", "qa_state", "render_qa", "final_qa", "mp4_path")
+                    if key in runpod_snapshot
+                })
+                projected, _ready, _path = _strip_unverified_publish_claims(
+                    job_id, payload, runpod_snapshot
+                )
+                return projected
             raise HTTPException(404, "no such job")
         # Merge in the live status snapshot (phase + percent from registry,
         # in case the on-disk state is stale between phase boundaries).
@@ -616,8 +804,11 @@ def build_long_form_router(
                   "narration_done", "narration_total", "chapter_done", "chapter_total"):
             if k in live:
                 merged[k] = live[k]
-        # Surface URLs for media that exists.
-        if merged.get("mp4_path"):
+        merged, publish_ready, _mp4_path = _strip_unverified_publish_claims(
+            job_id, merged, merged
+        )
+        if publish_ready:
+            merged["mp4_present"] = True
             merged["mp4_url"] = f"/api/long-form/jobs/{job_id}/mp4"
         thumbs = int(merged.get("thumbnails_generated", 0) or 0)
         merged["thumbnail_urls"] = [
@@ -648,11 +839,20 @@ def build_long_form_router(
         _require_owned_longform_job(job_id, user)
         runpod_snapshot = _runpod_snapshot(job_id)
         if runpod_snapshot is not None:
-            return _legacy_status_from_snapshot(job_id, runpod_snapshot)
+            payload = _legacy_status_from_snapshot(job_id, runpod_snapshot)
+            payload.update({
+                key: runpod_snapshot[key]
+                for key in ("ready_to_post", "qa_state", "render_qa", "final_qa", "mp4_path")
+                if key in runpod_snapshot
+            })
+            projected, _ready, _path = _strip_unverified_publish_claims(
+                job_id, payload, runpod_snapshot
+            )
+            return projected
         live = lf_pipeline.get_status(job_id)
+        st = lf_pipeline.load_state(job_id)
         if live is None:
             # Fall back to disk state (process restart).
-            st = lf_pipeline.load_state(job_id)
             if not st:
                 raise HTTPException(404, "no such job")
             live = {
@@ -660,7 +860,7 @@ def build_long_form_router(
                 "percent": int(st.get("percent", 0) or 0),
                 "error": st.get("error", ""),
             }
-        return {
+        payload = {
             "job_id": job_id,
             "phase": live.get("phase", "unknown"),
             "percent": int(live.get("percent", 0) or 0),
@@ -673,6 +873,10 @@ def build_long_form_router(
             "chapter_total": int(live.get("chapter_total", 0) or 0),
             "updated_at": float(live.get("updated_at", 0) or 0),
         }
+        projected, _ready, _path = _strip_unverified_publish_claims(
+            job_id, payload, st
+        )
+        return projected
 
     # Private media serving. Native media elements cannot attach a Bearer
     # header, so the frontend fetches these routes with auth and uses temporary
@@ -683,9 +887,14 @@ def build_long_form_router(
         _gate_admin(user)
         _validate_job_id(job_id)
         _require_owned_longform_job(job_id, user)
-        path = lf_pipeline.job_mp4_path(job_id)
-        if not path or not path.exists():
-            raise HTTPException(404, "mp4_not_ready")
+        state = lf_pipeline.load_state(job_id)
+        if not state:
+            if _runpod_snapshot(job_id) is None:
+                raise HTTPException(404, "no such job")
+            raise HTTPException(409, "final_qa_blocked")
+        publish_ready, path = _verified_publish_state(job_id, state)
+        if not publish_ready or path is None:
+            raise HTTPException(409, "final_qa_blocked")
         return FileResponse(
             path,
             media_type="video/mp4",
@@ -758,7 +967,22 @@ def build_long_form_router(
             user_id=_user_id(user),
             content_format="long",
         )
+        payload = _normalize_async_mutation_receipt(payload)
         payload.update({"job_id": job_id, "scene_idx": int(body.scene_idx)})
+        if payload.get("accepted") is True and payload.get("complete") is False:
+            return payload
+        if payload.get("postcondition_verified") is not True:
+            raise HTTPException(409, "regenerate_postcondition_unverified")
+        new_path = lf_pipeline.job_still_path(job_id, body.scene_idx)
+        if not new_path or not new_path.is_file():
+            raise HTTPException(409, "regenerate_postcondition_unverified")
+        payload.update({
+            "still_url": (
+                f"/api/long-form/jobs/{job_id}/still/{body.scene_idx}"
+                f"?v={int(new_path.stat().st_mtime_ns)}"
+            ),
+            "new_prompt_used": bool(body.new_prompt),
+        })
         return payload
 
     @router.post("/jobs/{job_id}/finalize")
@@ -779,6 +1003,12 @@ def build_long_form_router(
             user_id=_user_id(user),
             content_format="long",
         )
+        payload = _normalize_async_mutation_receipt(payload)
+        if not (
+            payload.get("postcondition_verified") is True
+            or (payload.get("accepted") is True and payload.get("complete") is False)
+        ):
+            raise HTTPException(409, "finalize_postcondition_unverified")
         payload.update({
             "job_id": job_id,
             "phase": "finalizing",

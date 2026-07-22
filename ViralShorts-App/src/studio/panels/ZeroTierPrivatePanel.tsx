@@ -162,7 +162,7 @@ function likeRate(v: UploadedVideo): number | null {
 //   - "every / ranked / vs every" power-scaling rankers
 //   - already-uploaded topics
 //
-// Future Phase 3 replaces this with a Grok-scored predictor that learns
+// Future Phase 3 replaces this with a Claude-scored predictor that learns
 // from logged predictions vs actual outcomes harvested by Catalyst.
 // ────────────────────────────────────────────────────────────────────
 
@@ -368,7 +368,7 @@ export default function ZeroTierPrivatePanel() {
     // Manual topic input (always available, doesn't require Catalyst candidates)
     const [manualTopic, setManualTopic] = useState('');
 
-    // Phase 4: autonomous topic generation — Grok-generated topics from your
+    // Phase 4: autonomous topic generation — Claude-generated topics from your
     // own channel data + competitor patterns, no manual input required.
     const [genLoading, setGenLoading] = useState(false);
     const [genTopics, setGenTopics] = useState<string[]>([]);
@@ -506,7 +506,7 @@ export default function ZeroTierPrivatePanel() {
         [manualTopic, existingTitles],
     );
 
-    // Score every Grok-generated topic on the client (heuristic v1)
+    // Score every Claude-generated topic on the client (heuristic v1)
     const scoredGenTopics = useMemo(
         () => genTopics
             .map((title) => ({ title, ...scoreVirality(title, existingTitles) }))
@@ -632,7 +632,7 @@ export default function ZeroTierPrivatePanel() {
     // PR #154 — always-visible Catalyst calibration. Fetch the HIT/MISS/
     // WEAK pattern buckets on mount + after every channel sync, so the
     // panel shows what Catalyst has learned BEFORE Casey clicks Generate
-    // Topic Ideas. No Grok call — pure bucket data from /calibration.
+    // Topic Ideas. No model call — pure bucket data from /calibration.
     const fetchCalibration = useCallback(async () => {
         if (!accessToken) return;
         try {
@@ -680,7 +680,7 @@ export default function ZeroTierPrivatePanel() {
                 // PR #142 — hydrate previously-saved YouTube metadata
                 // from disk so a resumed finished job shows the same
                 // description + tags Casey saw at finalize time, instead
-                // of re-firing Grok (which would burn fal-budget +
+                // of re-firing Claude (which would spend the semantic budget +
                 // produce a different output every time).
                 const meta = (data?.youtube_metadata || data?.result?.youtube_metadata) as
                     { description?: string; tags?: string[] } | undefined;
@@ -967,7 +967,7 @@ export default function ZeroTierPrivatePanel() {
             // Render is done, MP4 is on disk — no reason to make Casey click
             // a separate button before he can copy/paste into YouTube Studio.
             // If the job already had youtube_metadata baked into result.json
-            // (e.g. on a resume), skip the regeneration to save a Grok call.
+            // (e.g. on a resume), skip the regeneration to save a Claude call.
             if (!result?.youtube_metadata?.description) {
                 generateMetadataRef.current?.(finishedJobId).catch(() => {});
             }
@@ -979,7 +979,7 @@ export default function ZeroTierPrivatePanel() {
     }, [accessToken, stillsJobId, finalizeLoading, pollJobStatus, getFreshToken, fetchJsonResilient]);
 
     // PR #142 — YouTube metadata generator. Calls
-    // POST /api/zerotier-private/generate-metadata which uses Grok with
+    // POST /api/zerotier-private/generate-metadata which uses direct Anthropic with
     // ZeroTier-locked metadata system prompt to produce description + tags
     // from the title + scene narration. Result is also persisted into
     // result.json on disk so it survives a page reload.
@@ -1296,7 +1296,7 @@ export default function ZeroTierPrivatePanel() {
                                     <h2 className="text-lg font-bold text-white">AI topic generator</h2>
                                 </div>
                                 <p className="text-xs text-zinc-400 mt-1">
-                                    Grok reads your channel's actual top performers, under-performers,
+                                    Claude reads your channel's actual top performers, under-performers,
                                     + decoded competitor patterns (CreationsComic, TheManDeeDubs)
                                     and proposes fresh "The Time Wally West" topics. No typing required.
                                 </p>
@@ -1392,7 +1392,7 @@ export default function ZeroTierPrivatePanel() {
                                     );
                                 })()}
                                 <div className="mt-2 text-[10px] text-zinc-500 italic">
-                                    Grok sees this calibration on every topic-gen call — biases toward HIT patterns, avoids MISSED.
+                                    Claude sees this calibration on every topic-gen call — biases toward HIT patterns, avoids MISSED.
                                 </div>
                             </div>
                         )}
@@ -1586,7 +1586,7 @@ export default function ZeroTierPrivatePanel() {
                                     <div className="grid gap-3 sm:grid-cols-2">
                                         <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/[0.04] p-3">
                                             <div className="text-[10px] uppercase tracking-[0.15em] text-emerald-300 mb-2 font-semibold">
-                                                ✓ HIT — Catalyst biases Grok toward these
+                                                ✓ HIT — Catalyst biases Claude toward these
                                             </div>
                                             {hits.length === 0 ? (
                                                 <div className="text-xs text-zinc-500 italic">
@@ -1614,7 +1614,7 @@ export default function ZeroTierPrivatePanel() {
                                         </div>
                                         <div className="rounded-lg border border-rose-500/30 bg-rose-500/[0.04] p-3">
                                             <div className="text-[10px] uppercase tracking-[0.15em] text-rose-300 mb-2 font-semibold">
-                                                ✗ MISSED — Catalyst tells Grok to avoid
+                                                ✗ MISSED — Catalyst tells Claude to avoid
                                             </div>
                                             {misses.length === 0 ? (
                                                 <div className="text-xs text-zinc-500 italic">
@@ -1662,7 +1662,7 @@ export default function ZeroTierPrivatePanel() {
                                 );
                             })()}
                             <div className="mt-3 text-[11px] text-zinc-500">
-                                Grok sees this exact calibration in its prompt on every Generate Topic Ideas call.
+                                Claude sees this exact calibration in its prompt on every Generate Topic Ideas call.
                                 Updates after every channel Sync.
                             </div>
                         </section>
@@ -1874,7 +1874,7 @@ export default function ZeroTierPrivatePanel() {
                                 className="inline-flex items-center gap-2 rounded-lg bg-violet-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-violet-500 disabled:opacity-50"
                             >
                                 {buildLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
-                                {buildLoading ? 'Generating with Grok…' : (buildScript ? 'Regenerate Script' : 'Generate Script')}
+                                {buildLoading ? 'Generating with Claude…' : (buildScript ? 'Regenerate Script' : 'Generate Script')}
                             </button>
                             <button
                                 type="button"
@@ -2063,7 +2063,7 @@ export default function ZeroTierPrivatePanel() {
 
                                 {!renderResult.description && !metadataLoading && !metadataError && (
                                     <div className="text-[11px] text-violet-200/70 italic">
-                                        No metadata yet. Click "Generate" to ask Grok for a tuned description + tag list.
+                                        No metadata yet. Click "Generate" to ask Claude for a tuned description + tag list.
                                     </div>
                                 )}
 
@@ -2165,7 +2165,7 @@ export default function ZeroTierPrivatePanel() {
                             <div className="mt-3 rounded-lg border border-white/[0.08] bg-black/30 p-3">
                                 <div className="flex items-center justify-between mb-2">
                                     <div className="text-xs font-semibold uppercase tracking-[0.18em] text-zinc-400">
-                                        Grok output (zerotier_private template) — editable
+                                        Claude output (zerotier_private template) — editable
                                     </div>
                                     <span className="text-[10px] text-zinc-500">{buildScript.length} chars</span>
                                 </div>

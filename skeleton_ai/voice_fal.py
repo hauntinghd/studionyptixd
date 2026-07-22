@@ -23,6 +23,36 @@ from . import render_simulation
 TTS_ENDPOINT = "fal-ai/minimax/speech-02-hd"
 DEFAULT_VOICE = "English_Trustworthy_Man"
 
+# MiniMax's built-in voices are provider-owned identifiers. Keep the Studio
+# picker deliberately small and explicit instead of leaking rows from a
+# retired voice provider or pretending an unconfigured capability is usable.
+VOICE_PROFILES: tuple[dict[str, str], ...] = (
+    {
+        "voice_id": DEFAULT_VOICE,
+        "name": "Trustworthy Man",
+        "category": "narration",
+        "provider": "fal_minimax",
+    },
+    {
+        "voice_id": "English_Graceful_Lady",
+        "name": "Graceful Lady",
+        "category": "narration",
+        "provider": "fal_minimax",
+    },
+    {
+        "voice_id": "English_CalmWoman",
+        "name": "Calm Woman",
+        "category": "narration",
+        "provider": "fal_minimax",
+    },
+    {
+        "voice_id": "English_ManWithDeepVoice",
+        "name": "Deep Voice Man",
+        "category": "narration",
+        "provider": "fal_minimax",
+    },
+)
+
 
 def _require_https_url(url: object) -> str:
     value = str(url or "").strip()
@@ -52,6 +82,18 @@ def _ensure_fal_key() -> str:
         raise RuntimeError("FAL_AI_KEY not set — cannot synthesize narration")
     os.environ["FAL_KEY"] = key  # fal_client reads this
     return key
+
+
+def configured() -> bool:
+    """Whether Studio can actually run the FAL narration capability."""
+    return bool((os.getenv("FAL_AI_KEY", "") or os.getenv("FAL_KEY", "")).strip())
+
+
+def list_voices() -> list[dict[str, str]]:
+    """Return only configured FAL MiniMax voices without network I/O."""
+    if not configured():
+        return []
+    return [dict(profile) for profile in VOICE_PROFILES]
 
 
 def synthesize(

@@ -372,128 +372,6 @@ function normalizeAgentMessage(raw: unknown): ChatMessage | null {
     return { ...(row as Partial<ChatMessage>), role, content: String(content || '') } as ChatMessage;
 }
 
-const FALLBACK_MODELS: AgentModelOption[] = [
-    {
-        id: 'claude-sonnet-4-6',
-        name: 'Claude Sonnet 4.6',
-        provider: 'Anthropic',
-        recommended: true,
-        intelligence: 5,
-        speed: 4,
-        prompt_price_per_m: 3.0,
-        completion_price_per_m: 15.0,
-        est_cost_10k_2k: 0.06,
-        context_length: 200_000,
-        description: 'Default Studio runner for tool use and production planning.',
-    },
-    {
-        id: 'claude-opus-4-8',
-        name: 'Claude Opus 4.8',
-        provider: 'Anthropic',
-        recommended: true,
-        intelligence: 5,
-        speed: 2,
-        prompt_price_per_m: 15.0,
-        completion_price_per_m: 75.0,
-        est_cost_10k_2k: 0.3,
-        context_length: 200_000,
-        description: 'Highest-depth Claude runner for complex production sessions.',
-    },
-    {
-        id: 'claude-haiku-4-5-20251001',
-        name: 'Claude Haiku 4.5',
-        provider: 'Anthropic',
-        recommended: true,
-        intelligence: 4,
-        speed: 5,
-        prompt_price_per_m: 1.0,
-        completion_price_per_m: 5.0,
-        est_cost_10k_2k: 0.02,
-        context_length: 200_000,
-        description: 'Fast, lower-cost Claude runner for status checks and lightweight tool loops.',
-    },
-    // xAI Grok chat models (same key as speech dictation) — official docs.x.ai pricing
-    {
-        id: 'grok-4.5',
-        name: 'Grok 4.5',
-        provider: 'xAI',
-        recommended: true,
-        intelligence: 5,
-        speed: 4,
-        prompt_price_per_m: 2.0,
-        completion_price_per_m: 6.0,
-        est_cost_10k_2k: 0.032,
-        context_length: 500_000,
-        description: 'xAI flagship for code, agentic tool calling, and low-hallucination Studio runs.',
-    },
-    {
-        id: 'grok-4.3',
-        name: 'Grok 4.3',
-        provider: 'xAI',
-        recommended: true,
-        intelligence: 5,
-        speed: 4,
-        prompt_price_per_m: 1.25,
-        completion_price_per_m: 2.5,
-        est_cost_10k_2k: 0.0175,
-        context_length: 1_000_000,
-        description: 'Strong general-purpose Grok runner with 1M context and solid tool use.',
-    },
-    {
-        id: 'grok-4.20-0309-reasoning',
-        name: 'Grok 4.20 Reasoning',
-        provider: 'xAI',
-        recommended: true,
-        intelligence: 5,
-        speed: 3,
-        prompt_price_per_m: 1.25,
-        completion_price_per_m: 2.5,
-        est_cost_10k_2k: 0.0175,
-        context_length: 1_000_000,
-        description: 'Reasoning-optimized Grok 4.20 for deep planning and multi-step tool loops.',
-    },
-    {
-        id: 'grok-4.20-0309-non-reasoning',
-        name: 'Grok 4.20 Non-Reasoning',
-        provider: 'xAI',
-        recommended: true,
-        intelligence: 4,
-        speed: 5,
-        prompt_price_per_m: 1.25,
-        completion_price_per_m: 2.5,
-        est_cost_10k_2k: 0.0175,
-        context_length: 1_000_000,
-        description: 'Fast Grok 4.20 without extra reasoning overhead — good for light orchestration.',
-    },
-    {
-        id: 'grok-4.20-multi-agent-0309',
-        name: 'Grok 4.20 Multi-Agent',
-        provider: 'xAI',
-        intelligence: 5,
-        speed: 3,
-        prompt_price_per_m: 1.25,
-        completion_price_per_m: 2.5,
-        est_cost_10k_2k: 0.0175,
-        context_length: 1_000_000,
-        description: 'Multi-agent orchestration SKU for long context and agent loops.',
-    },
-    {
-        id: 'grok-build-0.1',
-        name: 'Grok Build 0.1',
-        provider: 'xAI',
-        selectable: false,
-        disabled: true,
-        disabled_reason: 'Grok Build 0.1 is not available as a Studio Agent runner.',
-        intelligence: 4,
-        speed: 4,
-        prompt_price_per_m: 1.0,
-        completion_price_per_m: 2.0,
-        est_cost_10k_2k: 0.014,
-        context_length: 256_000,
-        description: 'xAI code-focused model. Shown for catalog completeness but unavailable in Studio Agent.',
-    },
-];
-
 type ContentFormat = 'short' | 'long' | 'both';
 type ReasoningDepth = 'fast' | 'balanced' | 'deep';
 type CaptionMode = 'word' | 'off';
@@ -580,39 +458,45 @@ const REASONING_OPTIONS: { id: ReasoningDepth; label: string; hint: string }[] =
 const DEFAULT_IMAGE_MODEL = 'ernie_image';
 const DEFAULT_VIDEO_MODEL = 'seedance';
 
-const FALLBACK_IMAGE_MODELS: AgentModelOption[] = [
-    { id: 'seedream_edit', name: 'Seedream 4.5 Edit', provider: 'fal', recommended: true, intelligence: 5, speed: 4, estimated_unit_usd: 0.04, billing_unit: 'image', description: 'Canonical reference editing and high-fidelity stills.' },
-    { id: 'seedream_v5_lite', name: 'Seedream 5.0 Lite', provider: 'fal', intelligence: 5, speed: 5, estimated_unit_usd: 0.035, billing_unit: 'image', description: 'Fast latest-generation Seedream stills with reference-aware editing.' },
-    { id: 'seedream_v4', name: 'Seedream 4.0', provider: 'fal', intelligence: 4, speed: 5, estimated_unit_usd: 0.03, billing_unit: 'image', description: 'Lower-cost Seedream generation and reference editing.' },
-    { id: 'grok_imagine', name: 'Grok Imagine Quality', provider: 'xAI', intelligence: 5, speed: 5, estimated_unit_usd: 0.05, billing_unit: '1K image', description: '$0.05 per 1K output; $0.07 at 2K. Premium history still lane.' },
-    { id: 'grok_imagine_standard', name: 'Grok Imagine', provider: 'xAI', intelligence: 4, speed: 5, estimated_unit_usd: 0.02, billing_unit: 'image', description: '$0.02 per 1K or 2K output. Lower-cost Grok still lane.' },
-    { id: 'ernie_image', name: 'ERNIE-Image', provider: 'fal', intelligence: 4, speed: 5, estimated_unit_usd: 0.03, billing_unit: 'megapixel', description: '$0.03 per megapixel. Cost scales with output resolution.' },
-];
+function isAllowedServerChatModel(model: AgentModelOption): boolean {
+    const id = String(model?.id || '').trim().toLowerCase();
+    const provider = String(model?.provider || '').trim().toLowerCase();
+    return Boolean(id && id.startsWith('claude-') && provider === 'anthropic');
+}
 
-const FALLBACK_VIDEO_MODELS: AgentModelOption[] = [
-    { id: 'grok_imagine_video', name: 'Grok Imagine Video', provider: 'xAI', recommended: true, intelligence: 4, speed: 5, estimated_unit_usd: 0.07, billing_unit: 'second', input_image_usd: 0.002, pricing_source: 'xai_published', pricing_assumptions: '720p', description: 'Current published 720p Grok I2V rate.' },
-    { id: 'grok_imagine_video_15', name: 'Grok Imagine Video 1.5', provider: 'xAI', intelligence: 5, speed: 4, estimated_unit_usd: 0.14, billing_unit: 'second', input_image_usd: 0.01, pricing_source: 'xai_published', pricing_assumptions: '720p', description: 'Current published 720p Grok I2V 1.5 rate.' },
-    { id: 'grok_imagine_video_15_1080p', name: 'Grok Imagine Video 1.5 1080p', provider: 'xAI', intelligence: 5, speed: 2, estimated_unit_usd: 0.25, billing_unit: 'second', input_image_usd: 0.01, pricing_source: 'xai_published', pricing_assumptions: '1080p', description: 'Current published 1080p Grok I2V 1.5 rate.' },
-    { id: 'seedance', name: 'Seedance 2.0', provider: 'fal', intelligence: 5, speed: 4, estimated_unit_usd: 0.3024, billing_unit: 'second', pricing_source: 'fallback', pricing_assumptions: '720p, standard, no audio', description: 'Premium cinematic motion. Live provider base pricing is converted to Studio effective render cost.' },
-    { id: 'pixverse', name: 'PixVerse V6', provider: 'fal', intelligence: 4, speed: 4, estimated_unit_usd: 0.045, billing_unit: 'second', description: '~$0.225 per 5s at 720p. Strong value and moderation fallback.' },
-    { id: 'kling_pro', name: 'Kling 2.1 Pro', provider: 'fal', intelligence: 5, speed: 3, estimated_unit_usd: 0.098, billing_unit: 'second', description: '~$0.49 per 5s at 720p. Premium hero-scene motion with model-specific prompt adapter.' },
-    { id: 'ltx_budget', name: 'LTX 13B Budget', provider: 'fal', intelligence: 3, speed: 5, estimated_unit_usd: 0.02, billing_unit: 'second', pricing_source: 'fallback', description: 'Lowest-cost full-motion lane. Live provider pricing replaces this fallback when available.' },
-];
+function isFalCreativeProfile(profile: CreativeModelProfile): boolean {
+    const provider = String(profile.provider || '').trim().toLowerCase();
+    const id = String(profile.id || '').trim().toLowerCase();
+    return Boolean(
+        id
+        && provider === 'fal'
+        && !/(?:grok|xai|imagen|gemini|veo|google|openai|openrouter)/.test(id)
+    );
+}
 
-// These are the model keys with a real Studio Agent adapter: prompt compiler,
-// provider request shape, pricing ledger, fallback behavior, and QA. Do not
-// surface a catalog-only model that the short-form renderer cannot actually run.
-const SUPPORTED_AGENT_IMAGE_MODEL_IDS = new Set(['seedream_edit', 'seedream_v5_lite', 'seedream_v4', 'seedream_v5_lite_modal', 'grok_imagine', 'grok_imagine_standard', 'ernie_image']);
-const SUPPORTED_AGENT_VIDEO_MODEL_IDS = new Set(FALLBACK_VIDEO_MODELS.map((item) => item.id));
+function isLegacyDeniedMediaModel(value: unknown): boolean {
+    const id = String(value || '').trim().toLowerCase();
+    return /(?:grok|xai|imagen|gemini|veo|google|openai|openrouter)/.test(id);
+}
 
-const VIDEO_MODEL_OPTIONS = FALLBACK_VIDEO_MODELS.map((model) => ({
-    id: model.id,
-    label: model.name,
-    price: String(model.provider || ''),
-}));
+function normalizeImageModel(value: unknown): string {
+    const id = String(value || '').trim();
+    return !id || isLegacyDeniedMediaModel(id) ? DEFAULT_IMAGE_MODEL : id;
+}
 
 function normalizeVideoModel(value: unknown): string {
-    return String(value || '').trim() || DEFAULT_VIDEO_MODEL;
+    const id = String(value || '').trim();
+    return !id || isLegacyDeniedMediaModel(id) ? DEFAULT_VIDEO_MODEL : id;
+}
+
+function selectCatalogModel(
+    models: AgentModelOption[],
+    requested: string,
+    preferredDefault: string,
+): string {
+    if (models.some((model) => model.id === requested)) return requested;
+    if (models.some((model) => model.id === preferredDefault)) return preferredDefault;
+    return models.find((model) => model.recommended)?.id || models[0]?.id || preferredDefault;
 }
 
 function isPersistedAgentSessionId(id: string | null | undefined): id is string {
@@ -638,15 +522,15 @@ function tierStars(tier?: string): number {
 
 function creativeModelOption(profile: CreativeModelProfile): AgentModelOption | null {
     const id = String(profile.id || '').trim();
-    if (!id || profile.enabled === false) return null;
+    if (!id || profile.enabled === false || !isFalCreativeProfile(profile)) return null;
     const cost = typeof profile.estimated_unit_usd === 'number'
         ? `$${profile.estimated_unit_usd.toFixed(3).replace(/0+$/, '').replace(/\.$/, '')}/${profile.billing_unit || 'unit'}`
         : '';
     return {
         id,
         name: String(profile.label || id),
-        provider: String(profile.provider || 'Other').toUpperCase() === 'XAI' ? 'xAI' : String(profile.provider || 'Other'),
-        recommended: id.includes('grok') || id === DEFAULT_IMAGE_MODEL || id === 'kling21_standard',
+        provider: 'fal',
+        recommended: id === DEFAULT_IMAGE_MODEL || id === DEFAULT_VIDEO_MODEL,
         intelligence: tierStars(profile.tier),
         speed: speedStars(profile.speed),
         estimated_unit_usd: typeof profile.estimated_unit_usd === 'number' ? profile.estimated_unit_usd : undefined,
@@ -660,19 +544,8 @@ function creativeModelOption(profile: CreativeModelProfile): AgentModelOption | 
     };
 }
 
-function mergeCreativeModelOptions(
-    fallback: AgentModelOption[],
-    providerModels: AgentModelOption[],
-): AgentModelOption[] {
-    const merged = new Map(fallback.map((model) => [model.id, { ...model }]));
-    for (const model of providerModels) {
-        merged.set(model.id, { ...(merged.get(model.id) || {}), ...model });
-    }
-    return Array.from(merged.values());
-}
-
 function selectedModelLabel(models: AgentModelOption[], selectedId: string, fallback: string): string {
-    return models.find((m) => m.id === selectedId)?.name || selectedId || fallback;
+    return models.find((m) => m.id === selectedId)?.name || fallback;
 }
 
 interface RenderStyleOption {
@@ -1549,13 +1422,14 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
     const canUseLongform = isAdminUser || Boolean(studioLaneAccess.longform);
     const userCacheKey = String((session as any)?.user?.id || (session as any)?.user?.email || 'anon');
     const [sessionId, setSessionId] = useState<string | null>(null);
-    const [model, setModel] = useState(FALLBACK_MODELS[0].id);
-    const [modelCatalog, setModelCatalog] = useState<AgentModelOption[]>(FALLBACK_MODELS);
+    const [model, setModel] = useState('');
+    const [modelCatalog, setModelCatalog] = useState<AgentModelOption[]>([]);
+    const modelCatalogRef = useRef<AgentModelOption[]>([]);
     const [modelPickerOpen, setModelPickerOpen] = useState(false);
-    const [imageModel, setImageModel] = useState(() => loadImageModelPref(DEFAULT_IMAGE_MODEL));
-    const [imageModelCatalog, setImageModelCatalog] = useState<AgentModelOption[]>(FALLBACK_IMAGE_MODELS);
+    const [imageModel, setImageModel] = useState(() => normalizeImageModel(loadImageModelPref(DEFAULT_IMAGE_MODEL)));
+    const [imageModelCatalog, setImageModelCatalog] = useState<AgentModelOption[]>([]);
     const [imageModelPickerOpen, setImageModelPickerOpen] = useState(false);
-    const [videoModelCatalog, setVideoModelCatalog] = useState<AgentModelOption[]>(FALLBACK_VIDEO_MODELS);
+    const [videoModelCatalog, setVideoModelCatalog] = useState<AgentModelOption[]>([]);
     const [videoModelPickerOpen, setVideoModelPickerOpen] = useState(false);
     const [approvalMode, setApprovalMode] = useState<ApprovalMode>('confirm');
     const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -2736,7 +2610,11 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
         } else if (!rawConcept || forceServer) {
             setConceptPlan(null);
         }
-        if (raw.model) setModel(String(raw.model));
+        if (raw.model) {
+            const requestedModel = String(raw.model).trim();
+            const serverModel = modelCatalogRef.current.find((option) => option.id === requestedModel);
+            if (serverModel) setModel(serverModel.id);
+        }
         if (raw.agent_mode === 'plan' || raw.agent_mode === 'studio' || raw.agent_mode === 'cliplab') {
             const mode = raw.agent_mode as AgentMode;
             setAgentMode(!isAdminUser && mode === 'cliplab' ? 'plan' : mode);
@@ -2754,8 +2632,10 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
         }
         const rs = String(raw.render_style || '').trim();
         if (rs) setRenderStyle(rs);
-        setImageModel(String(raw.image_model || raw.image_model_id || DEFAULT_IMAGE_MODEL).trim() || DEFAULT_IMAGE_MODEL);
-        setVideoModel(String(raw.video_model || DEFAULT_VIDEO_MODEL).trim() || DEFAULT_VIDEO_MODEL);
+        const nextImageModel = normalizeImageModel(raw.image_model || raw.image_model_id);
+        setImageModel(nextImageModel);
+        saveImageModelPref(nextImageModel);
+        setVideoModel(normalizeVideoModel(raw.video_model));
         const rawCaptionMode = String(raw.caption_mode || '').trim();
         if (rawCaptionMode === 'word' || rawCaptionMode === 'off') {
             setCaptionMode(rawCaptionMode);
@@ -3342,69 +3222,47 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
             setBooting(true);
             setError('');
             try {
-                // Do not serially block the conversation on three unrelated
-                // fetches. The general config endpoint is optional for Agent
-                // boot and may be slower than the Fly-hosted Agent API.
-                // The picker already has a complete baked-in catalog. A slow
-                // provider catalog refresh must never fail or block Agent boot.
-                const modelsRequest = authFetch('/api/studio-agent/models', { timeoutMs: 12_000 })
-                    .catch(() => ({} as Record<string, unknown>));
+                // The authenticated Studio endpoint is the only authority for
+                // selectable runner and media models. Never synthesize rows
+                // from local constants or the unauthenticated config endpoint.
+                const modelsRequest = authFetch('/api/studio-agent/models', { timeoutMs: 12_000 });
                 const sessionsRequest = authFetch('/api/studio-agent/sessions?limit=50', { timeoutMs: 45_000, retries: SESSION_LOAD_RETRIES });
-                void authFetch('/api/config', { timeoutMs: 3500 })
-                    .then((configData) => {
-                        const creative = (configData?.creative_model_catalog || {}) as {
-                            image_models?: CreativeModelProfile[];
-                            video_models?: CreativeModelProfile[];
-                        };
-                    const imageOptions = (creative.image_models || [])
-                        .map(creativeModelOption)
-                        .filter((m): m is AgentModelOption => Boolean(m))
-                        .filter((m) => SUPPORTED_AGENT_IMAGE_MODEL_IDS.has(m.id));
-                    const videoOptions = (creative.video_models || [])
-                        .map(creativeModelOption)
-                        .filter((m): m is AgentModelOption => Boolean(m))
-                        .filter((m) => SUPPORTED_AGENT_VIDEO_MODEL_IDS.has(m.id));
-                        if (!cancelled) {
-                            // The remote creative catalog is intentionally partial: it only
-                            // advertises profiles supplied by this deployment.  Replacing the
-                            // baked-in list with it hid direct xAI Grok Imagine whenever the
-                            // catalog happened to contain only a FAL profile.  Merge instead,
-                            // so every model with a real Agent adapter remains selectable.
-                            if (imageOptions.length) setImageModelCatalog(mergeCreativeModelOptions(FALLBACK_IMAGE_MODELS, imageOptions));
-                            if (videoOptions.length) setVideoModelCatalog(mergeCreativeModelOptions(FALLBACK_VIDEO_MODELS, videoOptions));
-                        }
-                    })
-                    .catch(() => { /* baked picker catalog is already ready */ });
                 const [modelData, listData] = await Promise.all([modelsRequest, sessionsRequest]);
-                const catalog = (modelData?.models as AgentModelOption[]) || [];
+                const catalog = ((modelData?.models as AgentModelOption[]) || [])
+                    .filter(isAllowedServerChatModel);
                 const modelDataImageOptions = ((modelData?.image_models as CreativeModelProfile[]) || [])
                     .map(creativeModelOption)
-                    .filter((m): m is AgentModelOption => Boolean(m))
-                    .filter((m) => SUPPORTED_AGENT_IMAGE_MODEL_IDS.has(m.id));
+                    .filter((m): m is AgentModelOption => Boolean(m));
                 const modelDataVideoOptions = ((modelData?.video_models as CreativeModelProfile[]) || [])
                     .map(creativeModelOption)
-                    .filter((m): m is AgentModelOption => Boolean(m))
-                    .filter((m) => SUPPORTED_AGENT_VIDEO_MODEL_IDS.has(m.id));
+                    .filter((m): m is AgentModelOption => Boolean(m));
                 const rec = (modelData?.recommended as string[]) || [];
-                let pickModel = FALLBACK_MODELS[0].id;
+                let pickModel = '';
                 if (!cancelled) {
-                    if (modelDataImageOptions.length) setImageModelCatalog(mergeCreativeModelOptions(FALLBACK_IMAGE_MODELS, modelDataImageOptions));
-                    if (modelDataVideoOptions.length) setVideoModelCatalog(mergeCreativeModelOptions(FALLBACK_VIDEO_MODELS, modelDataVideoOptions));
-                    if (catalog.length) {
-                        setModelCatalog(catalog);
-                        pickModel = catalog.find((m) => m.recommended)?.id || catalog[0].id;
-                        setModel(pickModel);
-                    } else if (rec.length) {
-                        setModelCatalog(
-                            rec.map((id) => FALLBACK_MODELS.find((m) => m.id === id) || {
-                                id,
-                                name: displayModelName(FALLBACK_MODELS, id),
-                                provider: 'Anthropic',
-                            }),
-                        );
-                        pickModel = rec[0];
-                        setModel(pickModel);
-                    }
+                    modelCatalogRef.current = catalog;
+                    setModelCatalog(catalog);
+                    pickModel = catalog.find((option) => option.recommended)?.id
+                        || catalog.find((option) => rec.includes(option.id))?.id
+                        || catalog[0]?.id
+                        || '';
+                    setModel(pickModel);
+
+                    setImageModelCatalog(modelDataImageOptions);
+                    const requestedImageModel = normalizeImageModel(loadImageModelPref(DEFAULT_IMAGE_MODEL));
+                    const nextImageModel = selectCatalogModel(
+                        modelDataImageOptions,
+                        requestedImageModel,
+                        DEFAULT_IMAGE_MODEL,
+                    );
+                    setImageModel(nextImageModel);
+                    saveImageModelPref(nextImageModel);
+
+                    setVideoModelCatalog(modelDataVideoOptions);
+                    setVideoModel(selectCatalogModel(
+                        modelDataVideoOptions,
+                        DEFAULT_VIDEO_MODEL,
+                        DEFAULT_VIDEO_MODEL,
+                    ));
                 }
                 const sessions = (listData?.sessions as SessionSummary[]) || [];
                 if (!cancelled) setHistory(sessions);
@@ -3436,7 +3294,7 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                             model: pickModel,
                             approval_mode: 'confirm',
                             content_format: canUseLongform ? 'both' : 'short',
-                            image_model: loadImageModelPref(DEFAULT_IMAGE_MODEL),
+                            image_model: normalizeImageModel(loadImageModelPref(DEFAULT_IMAGE_MODEL)),
                             video_model: DEFAULT_VIDEO_MODEL,
                         }),
                     });
@@ -4579,8 +4437,9 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                 models={modelCatalog}
                 selectedId={model}
                 title="Choose a runner model"
-                subtitle="Used for planning, tool calls, and production orchestration. Claude via Anthropic · Grok via xAI."
-                searchPlaceholder="Search Claude, Grok, providers, or costs..."
+                subtitle="Used for planning, tool calls, and production orchestration. Options come directly from the authenticated Studio catalog."
+                statusText={`${modelCatalog.length} Anthropic models available from Studio`}
+                searchPlaceholder="Search Claude models or costs..."
                 onSelect={(id) => {
                     setModel(id);
                     patchSession({ model: id });
@@ -4948,12 +4807,23 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                                                                 onClick={() => {
                                                                     setRenderStyle(s.key);
                                                                     if (s.key === 'skeleton_host') {
-                                                                        setImageModel('grok_imagine');
-                                                                        setVideoModel('grok_imagine_video');
+                                                                        const nextImageModel = selectCatalogModel(
+                                                                            imageModelCatalog,
+                                                                            DEFAULT_IMAGE_MODEL,
+                                                                            DEFAULT_IMAGE_MODEL,
+                                                                        );
+                                                                        const nextVideoModel = selectCatalogModel(
+                                                                            videoModelCatalog,
+                                                                            DEFAULT_VIDEO_MODEL,
+                                                                            DEFAULT_VIDEO_MODEL,
+                                                                        );
+                                                                        setImageModel(nextImageModel);
+                                                                        saveImageModelPref(nextImageModel);
+                                                                        setVideoModel(nextVideoModel);
                                                                         void patchSession({
                                                                             render_style: s.key,
-                                                                            image_model: 'grok_imagine',
-                                                                            video_model: 'grok_imagine_video',
+                                                                            image_model: nextImageModel,
+                                                                            video_model: nextVideoModel,
                                                                         });
                                                                     } else {
                                                                         void patchSession({ render_style: s.key });
@@ -5026,9 +4896,9 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                                 }}
                                 className="max-w-[120px] bg-transparent text-[9px] font-semibold uppercase text-cyan-100 outline-none"
                             >
-                                {VIDEO_MODEL_OPTIONS.map((opt) => (
+                                {videoModelCatalog.map((opt) => (
                                     <option key={opt.id} value={opt.id} className="bg-black text-white">
-                                        {opt.label} · {opt.price}
+                                        {opt.name} · {opt.provider}
                                     </option>
                                 ))}
                             </select>
@@ -5633,15 +5503,9 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                                         ? 'bg-rose-600/25 text-rose-200 ring-1 ring-rose-500/50 shadow-[0_0_18px_rgba(244,63,94,0.25)]'
                                         : 'text-gray-400 hover:bg-white/[0.06] hover:text-white'
                                 } disabled:opacity-40`}
-                                title={
-                                    dictation.engine === 'live-xai'
-                                        ? 'Voice dictation (live xAI Grok STT)'
-                                        : dictation.engine === 'record'
-                                          ? 'Voice dictation (record then xAI transcribe)'
-                                          : dictation.engine === 'webspeech'
-                                            ? 'Voice dictation (browser speech)'
-                                            : 'Voice dictation not supported'
-                                }
+                                title={dictation.engine === 'record'
+                                    ? 'Voice dictation (record then FAL transcribe)'
+                                    : 'Voice dictation not supported'}
                             >
                                 {dictation.listening ? (
                                     <MicOff className="h-4 w-4" />
@@ -5660,8 +5524,9 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                             )}
                             <button
                                 type="button"
+                                disabled={!modelCatalog.length}
                                 onClick={() => setModelPickerOpen(true)}
-                                className="inline-flex max-w-[45%] items-center gap-1.5 truncate rounded-lg px-2 py-1.5 text-[11px] font-semibold uppercase tracking-wide text-gray-200 transition hover:bg-white/[0.06] sm:max-w-none"
+                                className="inline-flex max-w-[45%] items-center gap-1.5 truncate rounded-lg px-2 py-1.5 text-[11px] font-semibold uppercase tracking-wide text-gray-200 transition hover:bg-white/[0.06] disabled:opacity-50 sm:max-w-none"
                             >
                                 <Sparkles className="h-3.5 w-3.5 shrink-0 text-sky-400" />
                                 <span className="truncate">{displayModelName(modelCatalog, model)}</span>
@@ -5695,8 +5560,9 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                                 <>
                                     <button
                                         type="button"
+                                        disabled={!imageModelCatalog.length}
                                         onClick={() => setImageModelPickerOpen(true)}
-                                        className="inline-flex max-w-[150px] items-center gap-1.5 rounded-lg px-2 py-1.5 text-[11px] font-medium text-cyan-100 transition hover:bg-cyan-500/10"
+                                        className="inline-flex max-w-[150px] items-center gap-1.5 rounded-lg px-2 py-1.5 text-[11px] font-medium text-cyan-100 transition hover:bg-cyan-500/10 disabled:opacity-50"
                                         title="Image model for stills, scenes, and thumbnails (short-form and long-form)."
                                     >
                                         <ImageIcon className="h-3.5 w-3.5 shrink-0 text-cyan-300" />
@@ -5706,8 +5572,9 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                                     </button>
                                     <button
                                         type="button"
+                                        disabled={!videoModelCatalog.length}
                                         onClick={() => setVideoModelPickerOpen(true)}
-                                        className="inline-flex max-w-[150px] items-center gap-1.5 rounded-lg px-2 py-1.5 text-[11px] font-medium text-cyan-100 transition hover:bg-cyan-500/10"
+                                        className="inline-flex max-w-[150px] items-center gap-1.5 rounded-lg px-2 py-1.5 text-[11px] font-medium text-cyan-100 transition hover:bg-cyan-500/10 disabled:opacity-50"
                                         title="Video model for image-to-video animation (short-form and long-form motion)."
                                     >
                                         <Video className="h-3.5 w-3.5 shrink-0 text-cyan-300" />

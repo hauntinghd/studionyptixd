@@ -8,7 +8,12 @@ from __future__ import annotations
 
 import json
 import os
+import threading
+import time
+import uuid
 from dataclasses import dataclass
+from decimal import Decimal
+from pathlib import Path
 from typing import Any
 
 from studio_agent.image_model_catalog import (
@@ -19,6 +24,15 @@ from studio_agent.image_model_catalog import (
 
 class BudgetExceededError(RuntimeError):
     pass
+
+
+# Incremental provider attempts are checked and recorded under one process-wide
+# lock.  A long-form render fans scenes out across a thread pool, so a plain
+# "check remaining, then append cost" sequence lets several workers all spend
+# the same last few cents.  Keeping both operations in one critical section
+# makes the persisted cost ledger the reservation mechanism as well as the
+# audit trail.
+_INCREMENTAL_SPEND_LOCK = threading.RLock()
 
 
 @dataclass(frozen=True)
@@ -53,6 +67,7 @@ EXPENSIVE_TOOLS = frozenset({
     "edit_production_scenes_still",
     "regenerate_production_scene_still",
     "regenerate_production_scene",
+    "regenerate_production_scenes",
     "animate_production_scenes",
     "repair_production_scene_animation",
     "audit_and_repair_production_scenes",
@@ -66,7 +81,11 @@ DEFAULT_CAPS_USD = {
     "generate_longform_outline": 1.0,
     "expand_longform_chapter": 1.0,
     "start_shortform_generate": 5.0,
-    "expand_visual_proof_shortform": 8.0,
+    # A normal five-scene expansion now quotes the bounded two-candidate still
+    # envelope plus current FAL video pricing. Keep the ceiling finite, but high
+    # enough for that reviewed 30-second path; larger scopes still require an
+    # explicit higher max_budget_usd or a cheaper animation route.
+    "expand_visual_proof_shortform": 12.0,
     "start_longform_render": 8.0,
     "expand_longform_visual_proof": 12.0,
     "finalize_longform_render": 35.0,
@@ -74,13 +93,13 @@ DEFAULT_CAPS_USD = {
     "regenerate_longform_thumbnail": 0.25,
     "edit_production_scene_still": 0.25,
     "edit_production_scenes_still": 1.0,
-    "regenerate_production_scene_still": 0.25,
-    "regenerate_production_scene": 2.0,
-    # A review-approved short commonly has three 5-second clips.  Seedance's
-    # current live rate makes that roughly $4.54, so the former $3 default
-    # rejected an otherwise approved production action before a provider call.
-    # This remains a hard cap (and users still need credits); it is simply high
-    # enough for Studio's normal selected-model animation batch.
+    "regenerate_production_scene_still": 0.50,
+    "regenerate_production_scene": 5.0,
+    # A normal Short can contain twelve scenes. Quote every bounded still and
+    # i2v retry, then enforce one finite ceiling for the entire selected batch.
+    "regenerate_production_scenes": 60.0,
+    # Multi-scene i2v batches routinely exceed $3 when Seedance is priced in;
+    # LTX is cheap, but the estimate must not hard-fail a normal 30s short.
     "animate_production_scenes": 12.0,
     "repair_production_scene_animation": 2.0,
     "audit_and_repair_production_scenes": 12.0,
@@ -98,7 +117,6 @@ FALLBACK_USD = {
     "seedream_v5_lite_per_image": 0.035,
     "seedream_v5_lite_edit_per_image": 0.035,
     "fal_minimax_per_1k_chars": 0.10,
-    "xai_tts_per_1m_chars": 15.00,
     "kling_v21_standard_per_second": 0.056,
     "kling_v21_pro_per_second": 0.098,
     "pixverse_v6_per_second": 0.045,
@@ -114,13 +132,25 @@ APPROVAL_REQUIRED_TOOLS = frozenset({
     "expand_visual_proof_shortform",
     "start_longform_render",
     "expand_longform_visual_proof",
+    "generate_longform_thumbnails",
+    "edit_production_scene_still",
+    "edit_production_scenes_still",
+    "regenerate_production_scene_still",
+    "regenerate_production_scene",
+    "regenerate_production_scenes",
     "set_production_scenes_animate",
+    "set_production_scene_prompt",
+    "set_production_scene_duration",
     "animate_production_scenes",
     "repair_production_scene_animation",
     "audit_and_repair_production_scenes",
     "finalize_production",
+    "re_edit_production",
+    "cancel_production_job",
     "finalize_longform_render",
+    "regenerate_longform_still",
     "regenerate_longform_thumbnail",
+    "cancel_longform_render",
 })
 
 
@@ -137,6 +167,7 @@ TOOL_LANES = {
     "edit_production_scenes_still": "render",
     "regenerate_production_scene_still": "render",
     "regenerate_production_scene": "render",
+    "regenerate_production_scenes": "render",
     "regenerate_longform_still": "render",
     "animate_production_scenes": "render",
     "repair_production_scene_animation": "render",
@@ -166,6 +197,7 @@ STAGE_GATES = {
     "edit_production_scenes_still": ["cost_preflight", "batch_edit_stills", "await_scene_review"],
     "regenerate_production_scene_still": ["cost_preflight", "regenerate_still", "await_scene_review"],
     "regenerate_production_scene": ["cost_preflight", "regenerate_still", "image_to_video", "await_animation_result"],
+    "regenerate_production_scenes": ["cost_preflight", "regenerate_stills", "image_to_video", "await_animation_result"],
     "animate_production_scenes": ["scene_approval_required", "image_to_video", "await_animation_result"],
     "repair_production_scene_animation": ["approved_still_preserved", "image_to_video", "sampled_frame_qa", "await_animation_result"],
     "audit_and_repair_production_scenes": [
@@ -181,7 +213,7 @@ STAGE_GATES = {
     "expand_longform_visual_proof": ["proof_approved", "cost_preflight", "gallery_stills", "await_chapter_review"],
     "finalize_longform_render": ["chapter_approval_required", "compose", "package"],
     "generate_longform_thumbnails": ["cost_preflight", "thumbnail_variants", "await_packaging_review"],
-    "regenerate_longform_thumbnail": ["cost_preflight", "regenerate_thumbnail", "await_packaging_review"],
+    "regenerate_longform_thumbnail": ["cost_preflight", "thumbnail_candidate", "await_packaging_review"],
 }
 
 
@@ -219,8 +251,327 @@ def enforce_budget(tool_name: str, args: dict[str, Any]) -> BudgetEstimate | Non
     return estimate
 
 
+def persist_execution_budget_context(
+    workspace: Path,
+    *,
+    reservation: dict[str, Any] | None,
+    budget: dict[str, Any] | None,
+    user_id: str = "",
+    tool: str = "",
+    session_id: str = "",
+) -> dict[str, Any]:
+    """Atomically persist the approved cap before asynchronous provider work.
+
+    The wallet reservation and the execution cap are related but distinct: an
+    unlimited/admin reservation still needs a hard approved dollar ceiling.
+    Therefore ``budget.max_budget_usd`` is required even when ``reservation``
+    is empty or unlimited.
+    """
+
+    workspace = Path(workspace)
+    budget_payload = dict(budget or {})
+    cap = _float(budget_payload.get("max_budget_usd"), None)
+    if cap is None or float(cap) < 0:
+        raise BudgetExceededError(
+            "A durable max_budget_usd is required before provider work can start."
+        )
+    from studio_agent import production_costs
+
+    with _INCREMENTAL_SPEND_LOCK:
+        workspace.mkdir(parents=True, exist_ok=True)
+        baseline = max(
+            0.0,
+            float(
+                production_costs.load_summary(workspace).get(
+                    "total_usd_decimal", 0.0
+                )
+                or 0.0
+            ),
+        )
+        payload = {
+            "version": 1,
+            "reservation": dict(reservation or {}),
+            "user_id": str(user_id or ""),
+            "tool": str(tool or budget_payload.get("tool") or ""),
+            "session_id": str(session_id or ""),
+            "budget": budget_payload,
+            "cost_baseline_usd": baseline,
+            "created_at": time.time(),
+        }
+        target = workspace / "credit_reservation.json"
+        temp = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            temp.write_text(
+                json.dumps(payload, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            os.replace(temp, target)
+        finally:
+            temp.unlink(missing_ok=True)
+        return payload
+
+
+def execution_budget_context(workspace: Path) -> dict[str, Any]:
+    """Load the approved cap and cost baseline persisted for the active tool."""
+
+    path = Path(workspace) / "credit_reservation.json"
+    if not path.is_file():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    budget = payload.get("budget") if isinstance(payload.get("budget"), dict) else {}
+    cap = _float(budget.get("max_budget_usd"), None)
+    if cap is None:
+        return {}
+    return {
+        "tool": str(payload.get("tool") or budget.get("tool") or ""),
+        "max_budget_usd": max(0.0, float(cap)),
+        "baseline_usd": max(0.0, float(_float(payload.get("cost_baseline_usd"), 0.0) or 0.0)),
+    }
+
+
+def _incremental_attempt_receipt(
+    workspace: Path,
+    attempt_id: str,
+) -> dict[str, Any] | None:
+    """Find a prior cost-ledger row for an idempotent provider attempt."""
+
+    if not attempt_id:
+        return None
+    path = Path(workspace) / "cost_ledger.jsonl"
+    if not path.is_file():
+        return None
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except Exception:
+        return None
+    for line in reversed(lines):
+        try:
+            row = json.loads(line)
+        except Exception:
+            continue
+        if not isinstance(row, dict):
+            continue
+        metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+        if str(metadata.get("budget_attempt_id") or "") == attempt_id:
+            return row
+    return None
+
+
+def record_incremental_spend_attempt(
+    workspace: Path,
+    next_estimated_usd: Any,
+    *,
+    attempt_id: str,
+    operation: str,
+    provider: str = "",
+    model: str = "",
+    require_context: bool = False,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Reserve and record one provider submission exactly once.
+
+    Call this immediately before the network submission.  The durable ledger
+    entry is written before control returns, so failed provider requests still
+    consume their approved attempt and concurrent workers cannot oversubscribe
+    the same remaining budget.  Reusing ``attempt_id`` replays the existing
+    receipt without charging twice.
+    """
+
+    workspace = Path(workspace)
+    normalized_attempt_id = str(attempt_id or "").strip()
+    if not normalized_attempt_id:
+        raise ValueError("incremental provider attempts require a stable attempt_id")
+    try:
+        estimate = max(0.0, float(Decimal(str(next_estimated_usd or 0))))
+    except Exception:
+        estimate = 0.0
+
+    from studio_agent import production_costs
+
+    with _INCREMENTAL_SPEND_LOCK:
+        replay = _incremental_attempt_receipt(workspace, normalized_attempt_id)
+        if replay is not None:
+            replay_operation = str(replay.get("operation") or "")
+            replay_endpoint = str(replay.get("endpoint") or "")
+            if replay_operation != str(operation or "") or replay_endpoint != str(model or ""):
+                raise RuntimeError(
+                    "incremental provider attempt_id collision with different operation/model"
+                )
+            return {
+                "enforced": bool(execution_budget_context(workspace)),
+                "recorded": False,
+                "idempotent_replay": True,
+                "attempt_id": normalized_attempt_id,
+                "event": replay,
+            }
+
+        state = enforce_incremental_spend(
+            workspace,
+            estimate,
+            operation=operation,
+            provider=provider,
+            model=model,
+        )
+        if require_context and not state.get("enforced"):
+            raise BudgetExceededError(
+                json.dumps(
+                    {
+                        "error": "execution_budget_context_missing",
+                        "message": (
+                            "No durable approved execution budget exists for this "
+                            "provider attempt. The provider was not called."
+                        ),
+                        "operation": str(operation or ""),
+                        "provider": str(provider or ""),
+                        "model": str(model or ""),
+                    },
+                    indent=2,
+                )
+            )
+        event_metadata = dict(metadata or {})
+        event_metadata.update(
+            {
+                "budget_guarded": bool(state.get("enforced")),
+                "budget_attempt_id": normalized_attempt_id,
+                "submission_state": "about_to_submit",
+            }
+        )
+        event = production_costs.record_event(
+            workspace,
+            stage="longform",
+            provider=str(provider or "fal"),
+            operation=str(operation or "longform_provider_attempt"),
+            usd=estimate,
+            quantity=1,
+            unit="provider_attempt",
+            endpoint=str(model or ""),
+            metadata=event_metadata,
+        )
+        return {
+            **state,
+            "recorded": True,
+            "idempotent_replay": False,
+            "attempt_id": normalized_attempt_id,
+            "event": event,
+        }
+
+
+def remaining_execution_budget(
+    workspace: Path,
+    *,
+    in_flight_usd: float = 0.0,
+) -> dict[str, Any]:
+    context = execution_budget_context(Path(workspace))
+    if not context:
+        return {"enforced": False}
+    from studio_agent import production_costs
+
+    summary = production_costs.load_summary(Path(workspace))
+    actual = max(
+        0.0,
+        float(summary.get("total_usd_decimal", summary.get("total_usd", 0.0)) or 0.0),
+    )
+    baseline = float(context.get("baseline_usd") or 0.0)
+    spent = max(0.0, actual - baseline)
+    pending = max(0.0, float(in_flight_usd or 0.0))
+    cap = max(0.0, float(context.get("max_budget_usd") or 0.0))
+    remaining = max(0.0, cap - spent - pending)
+    return {
+        **context,
+        "enforced": True,
+        "actual_job_usd": round(actual, 6),
+        "spent_this_tool_usd": round(spent, 6),
+        "in_flight_usd": round(pending, 6),
+        "remaining_usd": round(remaining, 6),
+    }
+
+
+def enforce_incremental_spend(
+    workspace: Path,
+    next_estimated_usd: Any,
+    *,
+    operation: str,
+    provider: str = "",
+    model: str = "",
+    in_flight_usd: float = 0.0,
+) -> dict[str, Any]:
+    """Fail before each paid dispatch when the approved cap has no room."""
+
+    state = remaining_execution_budget(
+        Path(workspace),
+        in_flight_usd=in_flight_usd,
+    )
+    if not state.get("enforced"):
+        return state
+    try:
+        estimate = max(0.0, float(Decimal(str(next_estimated_usd or 0))))
+    except Exception:
+        estimate = 0.0
+    if estimate > float(state.get("remaining_usd") or 0.0) + 1e-9:
+        raise BudgetExceededError(
+            json.dumps(
+                {
+                    "error": "budget_exceeded_mid_job",
+                    "message": (
+                        f"{operation} needs about ${estimate:.4f}, but only "
+                        f"${float(state.get('remaining_usd') or 0.0):.4f} remains "
+                        "under the approved execution cap."
+                    ),
+                    "provider": str(provider or ""),
+                    "model": str(model or ""),
+                    "next_estimated_usd": round(estimate, 6),
+                    "budget": state,
+                },
+                indent=2,
+            )
+        )
+    return {**state, "next_estimated_usd": round(estimate, 6)}
+
+
+def _policy_normalize_budget_args(args: dict[str, Any]) -> dict[str, Any]:
+    """Quote only provider routes Studio policy can actually execute."""
+    normalized = dict(args or {})
+    for key in ("image_model_id", "image_model", "stills_model"):
+        value = str(normalized.get(key) or "").strip().lower()
+        if value:
+            normalized[key] = _policy_image_model(value)
+    for key in ("video_model", "fallback_video_model"):
+        value = str(normalized.get(key) or "").strip().lower()
+        if value:
+            normalized[key] = _policy_video_model(value)
+    voice = str(normalized.get("voice_provider") or "").strip().lower()
+    if voice and voice not in {"fal", "fal_only", "minimax", "minimax_only"}:
+        normalized["voice_provider"] = "fal"
+    return normalized
+
+
+def _policy_image_model(value: Any) -> str:
+    """Migrate persisted non-FAL image choices before quoting them."""
+    model = str(value or "").strip().lower()
+    if not model:
+        return "seedream_edit"
+    if any(marker in model for marker in ("grok", "xai", "imagen", "google", "modal")):
+        return "seedream_edit"
+    return model
+
+
+def _policy_video_model(value: Any) -> str:
+    """Migrate persisted non-FAL video choices before quoting them."""
+    model = str(value or "").strip().lower()
+    if not model:
+        return "seedance"
+    if any(marker in model for marker in ("grok", "xai", "google", "veo")):
+        return "seedance"
+    return model
+
+
 def estimate_tool_cost(tool_name: str, args: dict[str, Any] | None = None) -> BudgetEstimate:
-    args = dict(args or {})
+    args = _policy_normalize_budget_args(dict(args or {}))
     name = str(tool_name or "")
     explicit_cap = _float(args.get("max_budget_usd"), None)
     max_budget = explicit_cap if explicit_cap is not None else _default_cap(name)
@@ -250,12 +601,20 @@ def estimate_tool_cost(tool_name: str, args: dict[str, Any] | None = None) -> Bu
             "pricing_note": note,
         }
     elif name == "regenerate_longform_thumbnail":
-        image_model = str(args.get("image_model_id") or args.get("image_model") or "seedream_edit")
-        est, note, pricing_key = _seedream_image_estimate(image_model, edit=True, quantity=1)
+        image_model = str(
+            args.get("image_model_id")
+            or args.get("image_model")
+            or "seedream_edit"
+        )
+        est, note, pricing_key = _seedream_image_estimate(
+            image_model,
+            edit=False,
+            quantity=1,
+        )
         breakdown = {
             "thumbnails": 1,
             "image_model_pricing_unit": pricing_key,
-            "image_edit_usd_per_image": est,
+            "image_usd_per_image": est,
             "pricing_note": note,
         }
     elif name == "edit_production_scenes_still":
@@ -274,62 +633,108 @@ def estimate_tool_cost(tool_name: str, args: dict[str, Any] | None = None) -> Bu
             "scope": str(args.get("scope") or "character"),
             "pricing_note": note,
         }
-    elif name in {"edit_production_scene_still", "regenerate_production_scene_still", "regenerate_longform_still"}:
+    elif name in {"edit_production_scene_still", "regenerate_longform_still"}:
         image_model = str(args.get("image_model_id") or args.get("image_model") or "seedream_edit")
         est, note, pricing_key = _seedream_image_estimate(image_model, edit=True, quantity=1)
         breakdown = {"image_model_pricing_unit": pricing_key, "image_edit_count": 1, "image_edit_usd_per_image": est, "pricing_note": note}
-    elif name == "regenerate_production_scene":
+    elif name == "regenerate_production_scene_still":
         image_model = str(args.get("image_model_id") or args.get("image_model") or "seedream_edit")
-        still_est, still_note, pricing_key = _seedream_image_estimate(image_model, edit=True, quantity=1)
-        seconds = _video_seconds(args, count=1, default_per_scene=5.0)
-        video_model = str(args.get("video_model") or args.get("model") or "seedance").strip().lower()
-        video_est, video_rate, video_note = _video_cost(video_model, seconds)
+        est, envelope = _image_retry_envelope(
+            image_model,
+            edit=True,
+            quantity=1,
+            attempts=3,
+        )
+        breakdown = {
+            "image_model_pricing_unit": envelope["pricing_unit"],
+            "image_edit_count": 1,
+            "image_retry_envelope": envelope,
+            "image_edit_usd": round(est, 4),
+            "pricing_note": envelope["pricing_note"],
+        }
+    elif name in {"regenerate_production_scene", "regenerate_production_scenes"}:
+        count = 1 if name == "regenerate_production_scene" else _scene_index_count(args, default=12)
+        image_model = str(args.get("image_model_id") or args.get("image_model") or "seedream_edit")
+        still_est, image_envelope = _image_retry_envelope(
+            image_model,
+            edit=True,
+            quantity=count,
+            attempts=3,
+        )
+        seconds = _video_seconds(args, count=count, default_per_scene=5.0)
+        video_model = _resolve_video_model_for_budget(args)
+        video_est, video_envelope = _video_retry_envelope(
+            video_model,
+            seconds,
+            attempts=2,
+        )
         est = still_est + video_est
         breakdown = {
-            "image_model_pricing_unit": pricing_key,
-            "image_edit_count": 1,
+            "scene_count": count,
+            "image_model_pricing_unit": image_envelope["pricing_unit"],
+            "image_edit_count": count,
             "image_edit_usd": round(still_est, 4),
+            "image_retry_envelope": image_envelope,
             "video_seconds": seconds,
             "video_model": video_model,
-            "video_usd_per_second": video_rate,
+            "video_usd_per_second": video_envelope["primary_usd_per_second"],
             "video_usd": round(video_est, 4),
-            "pricing_note": [still_note, video_note],
+            "video_retry_envelope": video_envelope,
+            "pricing_note": [
+                image_envelope["pricing_note"],
+                video_envelope["pricing_note"],
+            ],
         }
     elif name == "audit_and_repair_production_scenes":
         count = _scene_index_count(args, default=1)
         image_model = str(args.get("image_model_id") or args.get("image_model") or "seedream_edit")
-        still_est, still_note, pricing_key = _seedream_image_estimate(
+        still_est, image_envelope = _image_retry_envelope(
             image_model,
             edit=True,
             quantity=count,
+            attempts=3,
         )
         seconds = _video_seconds(args, count=count, default_per_scene=5.0)
-        video_model = str(args.get("video_model") or args.get("model") or "seedance").strip().lower()
-        video_est, video_rate, video_note = _video_cost(video_model, seconds)
+        video_model = _resolve_video_model_for_budget(args)
+        video_est, video_envelope = _video_retry_envelope(
+            video_model,
+            seconds,
+            attempts=2,
+        )
         est = still_est + video_est
         breakdown = {
             "scene_count": count,
-            "image_model_pricing_unit": pricing_key,
+            "image_model_pricing_unit": image_envelope["pricing_unit"],
             "image_edit_count": count,
             "image_edit_usd": round(still_est, 4),
+            "image_retry_envelope": image_envelope,
             "video_seconds": seconds,
             "video_model": video_model,
-            "video_usd_per_second": video_rate,
+            "video_usd_per_second": video_envelope["primary_usd_per_second"],
             "video_usd": round(video_est, 4),
-            "pricing_note": [still_note, video_note],
+            "video_retry_envelope": video_envelope,
+            "pricing_note": [
+                image_envelope["pricing_note"],
+                video_envelope["pricing_note"],
+            ],
         }
     elif name in {"animate_production_scenes", "repair_production_scene_animation"}:
         count = _scene_index_count(args, default=3)
         seconds = _video_seconds(args, count=count, default_per_scene=5.0)
-        video_model = str(args.get("video_model") or args.get("model") or "seedance").strip().lower()
-        est, video_rate, note = _video_cost(video_model, seconds)
+        video_model = _resolve_video_model_for_budget(args)
+        est, video_envelope = _video_retry_envelope(
+            video_model,
+            seconds,
+            attempts=2,
+        )
         breakdown = {
             "scene_count": count,
             "video_seconds": seconds,
             "video_model": video_model,
-            "video_usd_per_second": video_rate,
+            "video_usd_per_second": video_envelope["primary_usd_per_second"],
             "video_usd": round(est, 4),
-            "pricing_note": note,
+            "video_retry_envelope": video_envelope,
+            "pricing_note": video_envelope["pricing_note"],
         }
     elif name in {"finalize_production", "re_edit_production"}:
         est, breakdown = _estimate_shortform_finalize(args)
@@ -388,6 +793,8 @@ def durable_state_contract(tool_name: str, args: dict[str, Any] | None = None) -
         "edit_production_scene_still",
         "edit_production_scenes_still",
         "regenerate_production_scene_still",
+        "regenerate_production_scene",
+        "regenerate_production_scenes",
         "animate_production_scenes",
         "repair_production_scene_animation",
         "audit_and_repair_production_scenes",
@@ -457,14 +864,9 @@ def _seedream_image_estimate(
     edit: bool,
     quantity: int,
 ) -> tuple[float, str, str]:
-    normalized = normalize_seedream_model_id(model_id) or "seedream_edit"
+    normalized = normalize_seedream_model_id(_policy_image_model(model_id)) or "seedream_edit"
     if seedream_provider(normalized) == "modal":
-        configured = max(0.0, _float(os.getenv("MODAL_SEEDREAM_ESTIMATED_UNIT_USD"), 0.0) or 0.0)
-        return (
-            round(configured * max(0, int(quantity or 0)), 4),
-            "modal:operator_metered_estimate" if configured else "modal:operator_cost_unknown",
-            f"{normalized}_{'edit' if edit else 't2i'}",
-        )
+        normalized = "seedream_edit"
     stem = {
         "seedream_v4": "seedream_v4",
         "seedream_v5_lite": "seedream_v5_lite",
@@ -475,33 +877,85 @@ def _seedream_image_estimate(
     return amount, note, key
 
 
+def _image_retry_envelope(
+    model_id: str,
+    *,
+    edit: bool,
+    quantity: int,
+    attempts: int,
+) -> tuple[float, dict[str, Any]]:
+    model = _policy_image_model(model_id)
+    qty = max(1, int(quantity or 1))
+    tries = max(1, int(attempts or 1))
+    per_attempt, note, pricing_key = _seedream_image_estimate(
+        model, edit=edit, quantity=1
+    )
+    total = round(per_attempt * qty * tries, 4)
+    return total, {
+        "requested_model": model,
+        "pricing_unit": pricing_key,
+        "quantity": qty,
+        "max_attempts": tries,
+        "usd_per_attempt": round(per_attempt, 4),
+        "fallback_included": False,
+        "pricing_note": note,
+    }
+
+
+def _video_retry_envelope(
+    video_model: str,
+    seconds: float,
+    *,
+    attempts: int,
+) -> tuple[float, dict[str, Any]]:
+    model = _policy_video_model(video_model or "ltx_budget")
+    tries = max(1, int(attempts or 1))
+    primary, primary_rate, primary_note = _video_cost(model, seconds)
+    fallback = 0.0
+    fallback_notes: list[str] = []
+    if "seedance" in model:
+        pixverse, _rate, note = _video_cost("pixverse", seconds)
+        fallback = pixverse
+        fallback_notes.append(note)
+    per_attempt = primary + fallback
+    total = round(per_attempt * tries, 4)
+    return total, {
+        "video_model": model,
+        "video_seconds": seconds,
+        "max_attempts": tries,
+        "primary_usd": round(primary, 4),
+        "primary_usd_per_second": primary_rate,
+        "fallback_usd": round(fallback, 4),
+        "usd_per_attempt": round(per_attempt, 4),
+        "pricing_note": [primary_note, *fallback_notes],
+    }
+
+
 def _estimate_shortform_start(args: dict[str, Any]) -> tuple[float, dict[str, Any]]:
     # Every new Short is a one-still proof at this boundary. Remaining scenes
     # have a separate, explicit expansion decision after Scene 1 animation.
     scenes = 1
     full_auto = False
     animate = False
-    image_model = str(args.get("image_model_id") or args.get("image_model") or "").strip().lower()
-    if image_model in {"grok_imagine", "grok_imagine_quality"}:
-        still_rate = 0.10
-        stills = round(still_rate * scenes, 4)
-        still_note = "xai:grok-imagine-image-quality_per_edit_fallback"
-        still_model_note = "grok-imagine-image-quality"
-    elif image_model in {"grok_imagine_standard", "grok-imagine-image"}:
-        still_rate = 0.04
-        stills = round(still_rate * scenes, 4)
-        still_note = "xai:grok-imagine-image_per_edit_fallback"
-        still_model_note = "grok-imagine-image"
-    elif image_model in {"seedream_edit", "seedream_v45_edit", "seedream_v4", "seedream_v5_lite", "seedream_v5_lite_modal"}:
+    image_model = _policy_image_model(args.get("image_model_id") or args.get("image_model"))
+    if image_model in {"seedream_edit", "seedream_v45_edit", "seedream_v4", "seedream_v5_lite"}:
         stills, still_note, still_model_note = _seedream_image_estimate(image_model, edit=True, quantity=scenes)
         still_rate = _unit_rate(stills, scenes)
     else:
         stills, still_note = _priced_unit("seedream_v45_edit", fallback_key="seedream_v45_edit_per_image", quantity=scenes)
         still_rate = _unit_rate(stills, scenes)
         still_model_note = "seedream_v45_edit"
+    stills, image_envelope = _image_retry_envelope(
+        image_model or "seedream_edit",
+        edit=True,
+        quantity=scenes,
+        attempts=2,
+    )
+    still_rate = _unit_rate(stills, scenes)
+    still_note = image_envelope["pricing_note"]
     requested_seconds = _video_seconds(args, count=scenes, default_per_scene=5.0)
     seconds = requested_seconds if animate else 0.0
-    video_model = str(args.get("video_model") or "seedance").strip().lower()
+    video_model = _policy_video_model(args.get("video_model") or "seedance")
     video, video_rate, video_note = _video_cost(video_model, seconds)
     script_chars = max(1000, int(args.get("script_char_count") or len(str(args.get("script") or "")) or scenes * 140))
     if full_auto:
@@ -518,9 +972,10 @@ def _estimate_shortform_start(args: dict[str, Any]) -> tuple[float, dict[str, An
         "image_model": image_model or still_model_note,
         "image_model_pricing_unit": still_model_note,
         "still_usd_per_image": still_rate,
-        "seedream_edit_per_image": _unit_rate(stills, scenes) if not image_model.startswith("grok") else 0.0,
+        "seedream_edit_per_image": _unit_rate(stills, scenes),
         "stills_usd": round(stills, 4),
         "stills_pricing_note": still_note,
+        "image_retry_envelope": image_envelope,
         "video_seconds": seconds,
         "requested_video_seconds": requested_seconds,
         "video_model": video_model,
@@ -547,8 +1002,8 @@ def _estimate_shortform_expand(args: dict[str, Any]) -> tuple[float, dict[str, A
     job_id = str(args.get("job_id") or "").strip()
     target_scene_count = max(2, min(60, int(args.get("scene_count") or 12)))
     existing_scene_count = max(1, min(target_scene_count, int(args.get("existing_scene_count") or 1)))
-    image_model = str(args.get("image_model_id") or args.get("image_model") or "").strip().lower()
-    video_model = str(args.get("video_model") or args.get("model") or "").strip().lower()
+    image_model = _policy_image_model(args.get("image_model_id") or args.get("image_model"))
+    video_model = _policy_video_model(args.get("video_model") or args.get("model"))
     spec_seconds_per_scene: float | None = None
 
     try:
@@ -567,31 +1022,40 @@ def _estimate_shortform_expand(args: dict[str, Any]) -> tuple[float, dict[str, A
             if spec_path.is_file():
                 spec = json.loads(spec_path.read_text(encoding="utf-8"))
                 if isinstance(spec, dict):
-                    image_model = image_model or str(spec.get("image_model_id") or spec.get("image_model") or "").strip().lower()
-                    video_model = video_model or str(spec.get("video_model") or "").strip().lower()
+                    if not args.get("image_model_id") and not args.get("image_model"):
+                        image_model = _policy_image_model(spec.get("image_model_id") or spec.get("image_model"))
+                    if not args.get("video_model") and not args.get("model"):
+                        video_model = _policy_video_model(spec.get("video_model"))
                     spec_seconds_per_scene = _float(spec.get("seconds_per_scene"), None)
     except Exception:
         pass
 
     additional_scene_count = max(0, target_scene_count - existing_scene_count)
-    if image_model in {"grok_imagine", "grok_imagine_quality", "grok-imagine-image-quality"}:
-        still_rate = 0.10
-        stills = round(still_rate * additional_scene_count, 4)
-        still_note = "xai:grok-imagine-image-quality_per_edit_fallback"
-        still_model_note = "grok-imagine-image-quality"
-    elif image_model in {"grok_imagine_standard", "grok-imagine-image"}:
-        still_rate = 0.04
-        stills = round(still_rate * additional_scene_count, 4)
-        still_note = "xai:grok-imagine-image_per_edit_fallback"
-        still_model_note = "grok-imagine-image"
-    else:
-        stills, still_note, priced_model = _seedream_image_estimate(
-            image_model,
+    stills, still_note, priced_model = _seedream_image_estimate(
+        image_model,
+        edit=True,
+        quantity=additional_scene_count,
+    )
+    still_rate = _unit_rate(stills, additional_scene_count)
+    still_model_note = image_model or priced_model
+    if additional_scene_count:
+        stills, image_envelope = _image_retry_envelope(
+            image_model or "seedream_edit",
             edit=True,
             quantity=additional_scene_count,
+            attempts=2,
         )
         still_rate = _unit_rate(stills, additional_scene_count)
-        still_model_note = image_model or priced_model
+        still_note = image_envelope["pricing_note"]
+    else:
+        image_envelope = {
+            "requested_model": image_model or "seedream_edit",
+            "quantity": 0,
+            "max_attempts": 2,
+            "usd_per_attempt": 0.0,
+            "fallback_included": False,
+            "pricing_note": "zero_quantity",
+        }
 
     new_scene_indices = list(range(existing_scene_count, target_scene_count))
     raw_animate_indices = args.get("animate_scene_indices")
@@ -642,6 +1106,7 @@ def _estimate_shortform_expand(args: dict[str, Any]) -> tuple[float, dict[str, A
         "still_usd_per_image": still_rate,
         "stills_usd": round(stills, 4),
         "stills_pricing_note": still_note,
+        "image_retry_envelope": image_envelope,
         "video_model": video_model,
         "seconds_per_animated_scene": round(seconds_per_scene, 4),
         "animated_new_scene_count": len(animate_scene_indices),
@@ -728,9 +1193,10 @@ def _estimate_longform_start(args: dict[str, Any]) -> tuple[float, dict[str, Any
         from studio_agent.tools import _build_outline_from_args
 
         channel = dict(get_channel(str(args.get("channel_key") or "").strip()))
-        selected_image_model = str(args.get("image_model_id") or "").strip()
-        if selected_image_model:
-            channel["image_model_default"] = selected_image_model
+        selected_image_model = _policy_image_model(
+            args.get("image_model_id") or channel.get("image_model_default")
+        )
+        channel["image_model_default"] = selected_image_model
         outline = _build_outline_from_args(args)
         outline["motion_policy"] = str(args.get("motion_policy") or outline.get("motion_policy") or "balanced")
         if args.get("hero_motion_ratio") is not None:
@@ -772,7 +1238,9 @@ def _estimate_longform_expand(args: dict[str, Any]) -> tuple[float, dict[str, An
         state = lf.load_state(job_id) or {}
         outline = state.get("outline") if isinstance(state.get("outline"), dict) else {}
         channel = dict(get_channel(str(state.get("channel_key") or outline.get("channel_key") or "")))
-        image_model = str(outline.get("image_model_id") or channel.get("image_model_default") or "ernie_image").strip()
+        image_model = _policy_image_model(
+            outline.get("image_model_id") or channel.get("image_model_default") or "ernie_image"
+        )
         channel["image_model_default"] = image_model
         chapters_path = lf._chapters_path(job_id) if hasattr(lf, "_chapters_path") else None
         n_chapters = len(outline.get("chapters") or [])
@@ -797,8 +1265,6 @@ def _estimate_longform_expand(args: dict[str, Any]) -> tuple[float, dict[str, An
             scenes_per_chapter_override=scenes_per,
         )
         still_per = float(cost.get("still_usd_per_image") or 0.04)
-        if image_model.lower().startswith("grok"):
-            still_per = 0.05 if "quality" in image_model.lower() else 0.02
         est = still_per * billable_scenes * (1.0 + _cushion_pct())
         return est, {
             "stage": "expand_gallery",
@@ -853,6 +1319,32 @@ def _scene_index_count(args: dict[str, Any], *, default: int) -> int:
     return max(1, min(60, int(args.get("scene_count") or default)))
 
 
+def _resolve_video_model_for_budget(args: dict[str, Any]) -> str:
+    """Prefer explicit args, then job_spec, then a cheap default.
+
+    Missing video_model used to default to Seedance (~$0.30/s), which made
+    LTX-budget UI jobs look like a $4+ animate and trip the $3 hard cap.
+    """
+    explicit = str(args.get("video_model") or args.get("model") or "").strip().lower()
+    if explicit:
+        return _policy_video_model(explicit)
+    job_id = str(args.get("job_id") or "").strip()
+    if job_id:
+        try:
+            from studio_agent.tools import _shortform_workspace
+
+            spec_path = _shortform_workspace(job_id) / "job_spec.json"
+            if spec_path.is_file():
+                spec = json.loads(spec_path.read_text(encoding="utf-8"))
+                if isinstance(spec, dict):
+                    from_job = str(spec.get("video_model") or "").strip().lower()
+                    if from_job:
+                        return _policy_video_model(from_job)
+        except Exception:
+            pass
+    return "ltx_budget"
+
+
 def _video_seconds(args: dict[str, Any], *, count: int, default_per_scene: float) -> float:
     explicit_total = _float(args.get("duration_seconds"), None)
     if explicit_total is not None and explicit_total > 0:
@@ -878,17 +1370,8 @@ def _video_rate(video_model: str) -> float:
 
 
 def _video_cost(video_model: str, seconds: float) -> tuple[float, float, str]:
-    model = str(video_model or "").strip().lower()
+    model = _policy_video_model(video_model)
     qty = max(0.0, seconds)
-    if model == "grok_imagine_video_15_1080p":
-        cost = round(0.25 * qty + (0.01 if qty > 0 else 0.0), 4)
-        return cost, _unit_rate(cost, qty), "xai:grok_imagine_video_15_1080p_per_second"
-    if model == "grok_imagine_video_15":
-        cost = round(0.14 * qty + (0.01 if qty > 0 else 0.0), 4)
-        return cost, _unit_rate(cost, qty), "xai:grok_imagine_video_15_per_second"
-    if model == "grok_imagine_video":
-        cost = round(0.07 * qty + (0.002 if qty > 0 else 0.0), 4)
-        return cost, _unit_rate(cost, qty), "xai:grok_imagine_video_per_second"
     if model == "kling21_master":
         cost = round(0.28 * qty, 4)
         return cost, _unit_rate(cost, qty), "fallback:kling21_master_per_second"
@@ -933,19 +1416,12 @@ def _fallback(key: str) -> float:
 
 
 def _tts_provider() -> str:
-    raw = str(os.getenv("STUDIO_TTS_PROVIDER", "xai") or "xai").strip().lower()
-    if raw in {"fal", "minimax", "fal_only", "minimax_only"}:
-        return "fal"
-    return "xai"
+    return "fal"
 
 
 def _estimate_tts(script_chars: int) -> tuple[float, str, str, str, float]:
     provider = _tts_provider()
     chars = max(1, int(script_chars or 1))
-    if provider == "xai":
-        unit = _fallback("xai_tts_per_1m_chars")
-        amount = round((unit * chars) / 1_000_000.0, 4)
-        return amount, "fallback:xai_tts_per_character", "xai", "char", round(unit / 1_000_000.0, 8)
     units = max(1.0, chars / 1000.0)
     amount, note = _priced_unit("minimax_speech", fallback_key="fal_minimax_per_1k_chars", quantity=units)
     return amount, note, "fal", "1k_chars", _unit_rate(amount, units)

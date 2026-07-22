@@ -8,7 +8,7 @@
  */
 import { useCallback, useContext, useEffect, useRef, useState } from 'react';
 import { Sparkles, Wand2, Image as ImageIcon, Music, Loader2, X, Upload, RefreshCw } from 'lucide-react';
-import { AuthContext } from '../shared';
+import { AuthContext, resolveStudioBackendUrl } from '../shared';
 import { loadImageModelPref, saveImageModelPref } from '../lib/productionModelPrefs';
 import { productionIdempotencyKey } from '../lib/productionIdempotency';
 import NichePickerStrip from '../components/create/NichePickerStrip';
@@ -16,14 +16,10 @@ import type { NicheId } from '../lib/studioProduct';
 
 type Tab = 'script' | 'scenes' | 'audio';
 
-const IMAGE_MODEL_OPTIONS = [
-    { id: 'seedream_edit', label: 'Seedream 4.5 Edit' },
-    { id: 'seedream_v5_lite', label: 'Seedream 5.0 Lite' },
-    { id: 'seedream_v4', label: 'Seedream 4.0' },
-    { id: 'grok_imagine', label: 'Grok Imagine Quality' },
-    { id: 'grok_imagine_standard', label: 'Grok Imagine' },
-    { id: 'ernie_image', label: 'ERNIE-Image' },
-] as const;
+interface ImageModelOption {
+    id: string;
+    label: string;
+}
 
 type VideoModel = 'ltx_budget' | 'seedance' | 'pixverse' | 'kling_pro';
 
@@ -97,11 +93,62 @@ export default function CreatePanel({
     const [captionFont, setCaptionFont] = useState('Komika Axis');
     const [voices, setVoices] = useState<Voice[]>([]);
     const [videoModel, setVideoModel] = useState<VideoModel>(renderTier === 'ship' ? 'kling_pro' : 'seedance');
-    const [imageModel, setImageModel] = useState(() => loadImageModelPref('seedream_edit'));
+    const [imageModel, setImageModel] = useState('');
+    const [imageModelOptions, setImageModelOptions] = useState<ImageModelOption[]>([]);
+    const [imageModelCatalogError, setImageModelCatalogError] = useState('');
 
     useEffect(() => {
         setVideoModel(renderTier === 'ship' ? 'kling_pro' : 'seedance');
     }, [renderTier]);
+
+    useEffect(() => {
+        if (!accessToken) {
+            setImageModelOptions([]);
+            setImageModel('');
+            setImageModelCatalogError('Sign in to load enabled FAL image models.');
+            return;
+        }
+        let cancelled = false;
+        setImageModelCatalogError('');
+        void fetch(resolveStudioBackendUrl('/api/studio-agent/models'), {
+            headers: { Authorization: `Bearer ${accessToken}` },
+        })
+            .then(async (response) => {
+                const data = await response.json().catch(() => ({}));
+                if (!response.ok) throw new Error(`model catalog failed (${response.status})`);
+                const options: ImageModelOption[] = (Array.isArray(data?.image_models) ? data.image_models : [])
+                    .filter((row: Record<string, unknown>) => (
+                        String(row.provider || '').trim().toLowerCase() === 'fal'
+                        && row.enabled !== false
+                    ))
+                    .map((row: Record<string, unknown>): ImageModelOption => ({
+                        id: String(row.id || row.model_id || '').trim(),
+                        label: String(row.label || row.name || row.id || '').trim(),
+                    }))
+                    .filter((row: ImageModelOption) => Boolean(row.id));
+                if (cancelled) return;
+                setImageModelOptions(options);
+                const preferred = loadImageModelPref('seedream_edit');
+                const selected = options.find((row) => row.id === preferred)?.id
+                    || options.find((row) => row.id === 'seedream_edit')?.id
+                    || options[0]?.id
+                    || '';
+                setImageModel(selected);
+                if (selected) saveImageModelPref(selected);
+                setImageModelCatalogError(
+                    options.length ? '' : 'No enabled FAL image model is present in the current server catalog.',
+                );
+            })
+            .catch((error: unknown) => {
+                if (cancelled) return;
+                setImageModelOptions([]);
+                setImageModel('');
+                setImageModelCatalogError(
+                    error instanceof Error ? error.message : 'Could not load the image model catalog.',
+                );
+            });
+        return () => { cancelled = true; };
+    }, [accessToken]);
     const [generating, setGenerating] = useState(false);
     const [generatedVideoUrl, setGeneratedVideoUrl] = useState<string | null>(null);
 
@@ -234,6 +281,10 @@ export default function CreatePanel({
             alert('You must be signed in to generate scenes.');
             return;
         }
+        if (!imageModel || !imageModelOptions.some((row) => row.id === imageModel)) {
+            alert('Choose an enabled FAL image model from the current Studio catalog first.');
+            return;
+        }
         if (!skeletonReference?.payload) {
             alert('Upload your skeleton reference image first — this locks identity like KORPI custom niche creator.');
             return;
@@ -320,7 +371,7 @@ export default function CreatePanel({
             setScenesGenerating(false);
             scenesAbortRef.current = null;
         }
-    }, [script, accessToken, activeCategory, skeletonReference?.payload]);
+    }, [script, accessToken, activeCategory, imageModel, imageModelOptions, skeletonReference?.payload]);
 
     const stopGenerateScenes = useCallback(() => {
         scenesAbortRef.current?.abort();
@@ -334,6 +385,10 @@ export default function CreatePanel({
         }
         if (!accessToken) {
             alert('You must be signed in to generate.');
+            return;
+        }
+        if (!imageModel || !imageModelOptions.some((row) => row.id === imageModel)) {
+            alert('Choose an enabled FAL image model from the current Studio catalog first.');
             return;
         }
         if (!skeletonReference?.payload) {
@@ -398,7 +453,7 @@ export default function CreatePanel({
         } finally {
             setGenerating(false);
         }
-    }, [script, voiceId, voiceSpeed, voicePitch, voiceLang, captionFont, videoModel, accessToken, activeCategory, renderTier, skeletonReference?.payload]);
+    }, [script, voiceId, voiceSpeed, voicePitch, voiceLang, captionFont, videoModel, imageModel, imageModelOptions, accessToken, activeCategory, renderTier, skeletonReference?.payload]);
 
     const tierLabel = renderTier === 'ship' ? 'Ship tier · premium motion' : renderTier === 'documentary' ? 'Documentary lane' : 'Draft tier · fast iteration';
     const scriptHeading = nicheTitle ? `${nicheTitle} script` : 'Narration script';
@@ -465,6 +520,8 @@ export default function CreatePanel({
                     sceneError={sceneError}
                     accessToken={accessToken}
                     imageModel={imageModel}
+                    imageModelOptions={imageModelOptions}
+                    imageModelCatalogError={imageModelCatalogError}
                     setImageModel={(id) => {
                         setImageModel(id);
                         saveImageModelPref(id);
@@ -594,7 +651,7 @@ function ScriptTab({
             />
             {streaming && (
                 <div className="text-xs text-violet-400 flex items-center gap-2">
-                    <Loader2 className="h-3 w-3 animate-spin" /> Streaming from xAI Grok...
+                    <Loader2 className="h-3 w-3 animate-spin" /> Streaming from Studio...
                 </div>
             )}
             <div className="flex justify-end">
@@ -613,7 +670,7 @@ function ScenesTab({
     charCount, duration, estimatedScenes, scriptValid,
     onGenerateScenes, onStopGenerateScenes, onGenerateAndAnimate,
     scenesGenerating, renderedScenes, scenesProgress, sceneError, accessToken,
-    imageModel, setImageModel,
+    imageModel, imageModelOptions, imageModelCatalogError, setImageModel,
     skeletonReference, referenceUploading, onPickReference,
     onClearReference, onUpdateScene, onRegenerateScene,
 }: {
@@ -630,6 +687,8 @@ function ScenesTab({
     sceneError: string;
     accessToken: string;
     imageModel: string;
+    imageModelOptions: ImageModelOption[];
+    imageModelCatalogError: string;
     setImageModel: (id: string) => void;
     skeletonReference: SkeletonReferenceState | null;
     referenceUploading: boolean;
@@ -684,15 +743,22 @@ function ScenesTab({
                 <select
                     value={imageModel}
                     onChange={(e) => setImageModel(e.target.value)}
+                    disabled={imageModelOptions.length === 0}
                     className="mt-2 w-full rounded-md bg-zinc-900 border border-zinc-700 px-3 py-2 text-sm text-white"
                 >
-                    {IMAGE_MODEL_OPTIONS.map((m) => (
+                    {imageModelOptions.length === 0 && (
+                        <option value="">No enabled FAL models</option>
+                    )}
+                    {imageModelOptions.map((m) => (
                         <option key={m.id} value={m.id}>{m.label}</option>
                     ))}
                 </select>
                 <p className="text-[11px] text-zinc-500 mt-2">
-                    Same preference syncs with Studio Agent and Long-form. Pick before generating stills.
+                    Server catalog only. The same preference syncs with Studio Agent and Long-form.
                 </p>
+                {imageModelCatalogError && (
+                    <p className="text-[11px] text-rose-300 mt-1">{imageModelCatalogError}</p>
+                )}
             </div>
 
             <div className="grid grid-cols-3 gap-3">
@@ -712,7 +778,7 @@ function ScenesTab({
                     </button>
                 ) : (
                     <button
-                        disabled={!scriptValid || !skeletonReference}
+                        disabled={!scriptValid || !skeletonReference || !imageModel}
                         onClick={onGenerateScenes}
                         className="w-full rounded-md bg-violet-500 px-4 py-2.5 text-sm font-semibold text-white hover:bg-violet-600 disabled:bg-zinc-800 disabled:text-zinc-500 disabled:cursor-not-allowed flex items-center justify-center gap-2"
                     >
@@ -721,7 +787,7 @@ function ScenesTab({
                     </button>
                 )}
                 <button
-                    disabled={!scriptValid || scenesGenerating}
+                    disabled={!scriptValid || scenesGenerating || !imageModel}
                     onClick={onGenerateAndAnimate}
                     className="w-full rounded-md bg-zinc-900 px-4 py-2.5 text-sm font-semibold text-white border border-zinc-800 hover:bg-zinc-800 disabled:opacity-40 disabled:cursor-not-allowed"
                 >
@@ -1001,7 +1067,7 @@ function AudioTab({
             <h2 className="text-lg font-semibold text-white">Narration Voice</h2>
 
             <div>
-                <label className="text-sm text-zinc-300 block mb-1">ElevenLabs Voice</label>
+                <label className="text-sm text-zinc-300 block mb-1">FAL MiniMax Voice</label>
                 <select
                     value={voiceId}
                     onChange={(e) => setVoiceId(e.target.value)}
@@ -1015,7 +1081,7 @@ function AudioTab({
                     ))}
                 </select>
                 <div className="text-xs text-zinc-500 mt-1">
-                    {voices.length === 0 ? 'No voices loaded — check ELEVENLABS_API_KEY.' : `${voices.length} voices available.`}
+                    {voices.length === 0 ? 'No configured FAL MiniMax voices are available.' : `${voices.length} FAL voices available.`}
                 </div>
             </div>
 
@@ -1175,7 +1241,7 @@ function IdeaModal({
         onStreamStart();
         onScript('');
         try {
-            // Non-streaming: grok-4-fast-reasoning's SSE deltas interleave
+            // Non-streaming fallback: some runner SSE deltas interleave
             // multiple reasoning paths, which produces garbled text mid-stream
             // ("labsserman of vs" etc.). The /script endpoint returns clean
             // {script: "..."} when stream=false, so use that and reveal the

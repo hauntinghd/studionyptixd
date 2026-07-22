@@ -1,10 +1,4 @@
-"""Studio image-to-video catalog with provider-backed pricing.
-
-FAL exposes endpoint prices through its Platform pricing API. The catalog uses
-the same cached snapshot as production preflight so the picker and final quote
-cannot silently disagree. xAI model-list responses do not include rates, so
-their published per-second and input-image rates remain explicit catalog data.
-"""
+"""Studio image-to-video catalog backed exclusively by FAL pricing."""
 from __future__ import annotations
 
 from typing import Any
@@ -13,45 +7,6 @@ from long_form import fal_pricing
 
 
 VIDEO_MODEL_SPECS: tuple[dict[str, Any], ...] = (
-    {
-        "id": "grok_imagine_video",
-        "label": "Grok Imagine Video",
-        "provider": "xai",
-        "tier": "standard",
-        "summary": "Cheapest Grok image-to-video lane at 720p.",
-        "speed": "Fast",
-        "estimated_unit_usd": 0.07,
-        "billing_unit": "second",
-        "input_image_usd": 0.002,
-        "pricing_source": "xai_published",
-        "pricing_assumptions": "720p",
-    },
-    {
-        "id": "grok_imagine_video_15",
-        "label": "Grok Imagine Video 1.5",
-        "provider": "xai",
-        "tier": "premium",
-        "summary": "Higher-quality Grok image-to-video at 720p.",
-        "speed": "Medium",
-        "estimated_unit_usd": 0.14,
-        "billing_unit": "second",
-        "input_image_usd": 0.01,
-        "pricing_source": "xai_published",
-        "pricing_assumptions": "720p",
-    },
-    {
-        "id": "grok_imagine_video_15_1080p",
-        "label": "Grok Imagine Video 1.5 1080p",
-        "provider": "xai",
-        "tier": "premium",
-        "summary": "Full-resolution Grok image-to-video for final renders.",
-        "speed": "Slow",
-        "estimated_unit_usd": 0.25,
-        "billing_unit": "second",
-        "input_image_usd": 0.01,
-        "pricing_source": "xai_published",
-        "pricing_assumptions": "1080p",
-    },
     {
         "id": "seedance",
         "label": "Seedance 2.0",
@@ -141,7 +96,12 @@ def video_model_profiles(
     fal_enabled: bool = True,
     pricing_snapshot: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
-    """Return every runnable I2V model with a concrete unit rate."""
+    """Return every runnable FAL I2V model with a concrete unit rate."""
+
+    # Catalog rows are actionable choices. If FAL is unavailable, returning
+    # disabled ghosts would misrepresent the current production capability.
+    if not fal_enabled:
+        return []
 
     snapshot = pricing_snapshot if pricing_snapshot is not None else fal_pricing.get_pricing_snapshot()
     profiles: list[dict[str, Any]] = []
@@ -149,13 +109,8 @@ def video_model_profiles(
         profile = dict(item)
         profile.pop("fal_pricing_key", None)
         profile.pop("fallback_pricing_key", None)
-        if str(item.get("provider") or "").lower() == "fal":
-            profile.update(_fal_price_profile(item, snapshot))
-            profile["enabled"] = bool(fal_enabled)
-        else:
-            profile["enabled"] = True
-            profile["pricing_live"] = False
-            profile["pricing_fetched_at"] = 0.0
+        profile.update(_fal_price_profile(item, snapshot))
+        profile["enabled"] = True
         profiles.append(profile)
     return profiles
 

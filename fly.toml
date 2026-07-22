@@ -44,7 +44,7 @@ kill_timeout = 120  # match render.yaml maxShutdownDelaySeconds
   # REDIS_URL is stored as a Fly secret; Redis is pay-as-you-go Upstash.
   REDIS_QUEUE_ENABLED = "true"
   REDIS_QUEUE_PREFIX = "studio"
-  # Studio Agent OpenRouter + fal concurrency gate. With Redis enabled this is
+  # Studio Agent direct-Anthropic + FAL concurrency gate. With Redis enabled this is
   # shared across app processes; 500 active users should queue/poll, not launch
   # 500 simultaneous render/tool calls.
   STUDIO_AGENT_QUEUE_ENABLED = "true"
@@ -69,8 +69,8 @@ kill_timeout = 120  # match render.yaml maxShutdownDelaySeconds
   BILLING_SITE_URL = "https://studio.nyptidindustries.com"
   PAYPAL_ENV = "live"
   IMAGE_PROVIDER_ORDER = "fal"
-  # xAI credits are not an implicit safety net. Users can still select an xAI
-  # model explicitly, but FAL production must never spill into xAI on failure.
+  # xAI is hard-disabled for Studio even if a stale secret remains deployed.
+  # FAL production must never spill into xAI on failure.
   XAI_IMAGE_FALLBACK_ENABLED = "false"
   HIDREAM_ENABLED = "false"
   HIDREAM_EDIT_ENABLED = "false"
@@ -94,14 +94,12 @@ kill_timeout = 120  # match render.yaml maxShutdownDelaySeconds
   STUDIO_CATALYST_TICK_INTERVAL_SEC = "600"
   STUDIO_CATALYST_NICHE_WARM_MAX = "6"
   STUDIO_CATALYST_CHANNEL_SYNC_MAX = "8"
-  # Reference video analysis: Anthropic Haiku vision/story, xAI STT, FAL whisper fallback.
-  STUDIO_REFERENCE_VISION_PROVIDER_ORDER = "anthropic,fal,openrouter"
-  STUDIO_REFERENCE_ANALYSIS_PROVIDER_ORDER = "anthropic,fal,openrouter"
-  STUDIO_REFERENCE_STT_PROVIDER_ORDER = "xai,fal"
+  # Reference video analysis: direct Anthropic vision/story and FAL Whisper STT only.
+  STUDIO_REFERENCE_VISION_PROVIDER_ORDER = "anthropic"
+  STUDIO_REFERENCE_ANALYSIS_PROVIDER_ORDER = "anthropic"
+  STUDIO_REFERENCE_STT_PROVIDER_ORDER = "fal"
   STUDIO_REFERENCE_VISION_MODEL = "claude-haiku-4-5-20251001"
   STUDIO_REFERENCE_ANALYSIS_MODEL = "claude-haiku-4-5-20251001"
-  STUDIO_AGENT_VISION_MODEL_FAL = "anthropic/claude-haiku-4.5"
-  STUDIO_AGENT_ANALYSIS_MODEL_FAL = "anthropic/claude-haiku-4.5"
   STUDIO_SHORTS_ONLY = "false"
   # RunPod is intentionally inactive until the endpoint is funded and its
   # strict worker image passes a live canary. Fly continues using the existing

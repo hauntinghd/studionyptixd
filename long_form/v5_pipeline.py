@@ -7,7 +7,7 @@ Channel registry routes EM (Empire Magnates) here via pipeline_kind.
 Mirrors the locked v5 recipe documented in project_v5_pipeline_locked.md:
   - per-scene LTX 13B i2v animation (skeleton_ai.i2v_engine handles the
     LTX → Seedance → Pixverse fallback chain)
-  - per-scene ElevenLabs VO (Brian default; skeleton_ai.voice_elevenlabs)
+  - per-scene FAL MiniMax VO through the shared Studio voice adapter
   - aggressive silence-kill on VO (-30dB / 200ms / 100ms breath)
   - per-scene mmaudio-v2 SFX bed (auto-prompt heuristic from scene visual)
   - VO + SFX mix at 16% duck, then 2-pass loudnorm to -14 LUFS
@@ -39,23 +39,24 @@ from pathlib import Path
 from typing import Any, Callable
 
 import fal_client
+from studio_agent import provider_policy
 
 from long_form.em_yellow_cast_kit import (
     CAST_IDENTITY,
     CAST_SEED,
     LIGHTING_BIBLE,
     NEG as EM_NEG,
-    SEEDREAM_EDIT_URL,
 )
 from long_form.pipeline import (
     LFRenderError,
     LF_OUTPUT_ROOT,
     MMAUDIO_URL,
-    SEEDREAM_URL,
     _chapters_path,
     _chunk_text,
     _download,
     _dispatch_longform_media_revision_aware,
+    _audit_longform_media_candidate,
+    _bounded_provider_prompt,
     _ensure_job_dir,
     _fal_post,
     _ffmpeg_concat_audio,
@@ -63,8 +64,17 @@ from long_form.pipeline import (
     _final_mp4_path,
     _gen_chapter,
     _gen_scene_image,
-    _gen_thumbnails,
     _job_dir,
+    _longform_budget_workspace_for_asset,
+    _longform_media_attempt_estimate,
+    _longform_mmaudio_attempt_estimate,
+    _longform_tts_attempt_estimate,
+    _promote_final_longform_after_qa,
+    _qa_component_passed,
+    _record_longform_provider_attempt,
+    _record_longform_provider_migrations,
+    _safe_longform_image_model,
+    _safe_longform_video_model,
     _slugify,
     _two_pass_loudnorm,
     load_state,
@@ -105,6 +115,7 @@ def _gen_em_still(
     if out_path.exists() and out_path.stat().st_size > 1024:
         return out_path
 
+    model = _safe_longform_image_model(image_model or "seedream_edit")
     cast_rule = (
         f"{CAST_IDENTITY} {LIGHTING_BIBLE} "
         "ABSOLUTE CAST RULE: every human is the SAME yellow-porcelain mannequin "
@@ -112,14 +123,17 @@ def _gen_em_still(
         "ZERO real human faces. NO red porcelain. If the prompt names a real person, "
         "render them AS this yellow-porcelain mannequin."
     )
-    full_prompt = f"{cast_rule}\n\n{prompt}\n\nStyle: {visual_style}".strip()
-    selected_model = str(image_model or "").strip().lower()
-    if selected_model and selected_model not in {
-        "seedream_edit", "seedream_v45_edit", "seedream_4_5_edit", "seedream-4.5-edit"
-    }:
-        return _gen_scene_image(full_prompt, out_path, image_model=selected_model)
+    full_prompt = _bounded_provider_prompt(
+        f"{cast_rule} Scene: {prompt}. Style: {visual_style}",
+        fallback="Cinematic yellow-porcelain documentary scene",
+    )
+    if not model.startswith("seedream"):
+        return _gen_scene_image(full_prompt, out_path, image_model=model)
+
+    from studio_agent.image_model_catalog import seedream_endpoint
 
     refs = _em_cast_ref_paths()
+    budget_workspace = _longform_budget_workspace_for_asset(out_path)
     if refs:
         fal_key = (os.environ.get("FAL_AI_KEY") or os.environ.get("FAL_KEY") or "").strip()
         if not fal_key:
@@ -127,9 +141,9 @@ def _gen_em_still(
         os.environ["FAL_KEY"] = fal_key
         image_urls = [fal_client.upload_file(str(p)) for p in refs]
         data = _fal_post(
-            SEEDREAM_EDIT_URL,
+            f"https://fal.run/{seedream_endpoint(model, edit=True)}",
             {
-                "prompt": full_prompt[:3500],
+                "prompt": full_prompt,
                 "image_urls": image_urls,
                 "negative_prompt": EM_NEG,
                 "image_size": {"width": 1920, "height": 1080},
@@ -137,10 +151,15 @@ def _gen_em_still(
                 "num_images": 1,
             },
             timeout_s=240,
+            budget_workspace=budget_workspace,
+            estimated_attempt_usd=_longform_media_attempt_estimate(
+                "image", model, edit=True
+            ),
+            budget_operation="longform_image_edit_provider_attempt",
         )
     else:
         data = _fal_post(
-            SEEDREAM_URL,
+            f"https://fal.run/{seedream_endpoint(model, edit=False)}",
             {
                 "prompt": full_prompt,
                 "image_size": {"width": 1920, "height": 1080},
@@ -148,6 +167,11 @@ def _gen_em_still(
                 "seed": CAST_SEED,
             },
             timeout_s=240,
+            budget_workspace=budget_workspace,
+            estimated_attempt_usd=_longform_media_attempt_estimate(
+                "image", model, edit=False
+            ),
+            budget_operation="longform_image_provider_attempt",
         )
 
     images = data.get("images") or []
@@ -184,6 +208,8 @@ def _gen_em_thumbnails(outline: dict, thumbs_dir: Path) -> list[Path]:
     import shutil
 
     from long_form.em_yellow_cast_kit import APPROVED_DIR, SEEDREAM_EDIT_URL, CAST_SEED, NEG, CAST_IDENTITY, LIGHTING_BIBLE
+
+    provider_policy.assert_provider_allowed("fal", provider_policy.IMAGE_CAPABILITY)
 
     thumbs_dir.mkdir(parents=True, exist_ok=True)
     approved_map = {
@@ -223,10 +249,11 @@ def _gen_em_thumbnails(outline: dict, thumbs_dir: Path) -> list[Path]:
                         "jungle gold-drill wireframe, small UI badge 6B corner. "
                         "Match approved Bre-X thumb style exactly."
                     )
+                    prompt = _bounded_provider_prompt(prompt)
                     data = _fal_post(
                         SEEDREAM_EDIT_URL,
                         {
-                            "prompt": prompt[:3500],
+                            "prompt": prompt,
                             "image_urls": urls,
                             "negative_prompt": NEG,
                             "image_size": {"width": 1920, "height": 1080},
@@ -234,6 +261,11 @@ def _gen_em_thumbnails(outline: dict, thumbs_dir: Path) -> list[Path]:
                             "num_images": 1,
                         },
                         timeout_s=240,
+                        budget_workspace=_longform_budget_workspace_for_asset(brex_edit),
+                        estimated_attempt_usd=_longform_media_attempt_estimate(
+                            "image", "seedream_edit", edit=True
+                        ),
+                        budget_operation="longform_thumbnail_provider_attempt",
                     )
                     images = data.get("images") or []
                     if images and images[0].get("url"):
@@ -265,19 +297,40 @@ def _gen_em_clip(still_path: Path, motion_prompt: str, out_path: Path,
     if out_path.exists() and out_path.stat().st_size > 1024:
         return out_path
 
+    budget_workspace = _longform_budget_workspace_for_asset(out_path)
     if str(video_model or "").strip():
         from skeleton_ai.i2v_engine import generate as generate_i2v
 
+        model = _safe_longform_video_model(video_model)
+        motion = _bounded_provider_prompt(
+            motion_prompt,
+            fallback="subtle cinematic push-in, slow parallax, gentle ambient motion",
+        )
+
+        def _record_i2v_attempt(endpoint: str, amount: float, attempt: int) -> None:
+            if budget_workspace is None:
+                return
+            _record_longform_provider_attempt(
+                budget_workspace,
+                amount,
+                operation="longform_video_provider_attempt",
+                model=endpoint,
+                metadata={"endpoint_attempt": int(attempt)},
+            )
+
         return generate_i2v(
             still_path,
-            motion_prompt,
+            motion,
             out_path,
-            video_model=str(video_model).strip(),
+            video_model=model,
             duration_sec=clip_sec,
             aspect_ratio="16:9",
             fallback_guard=route_guard,
+            budget_workspace=budget_workspace,
+            budget_attempt_recorder=_record_i2v_attempt if budget_workspace else None,
         )
 
+    provider_policy.assert_provider_allowed("fal", provider_policy.I2V_CAPABILITY)
     # Lazy import — keeps v5_pipeline.py importable on machines without
     # fal_client wheel installed (sleep_doc renders don't need it).
     import fal_client
@@ -290,10 +343,11 @@ def _gen_em_clip(still_path: Path, motion_prompt: str, out_path: Path,
     motion = (motion_prompt or "").strip() or (
         "subtle cinematic push-in, slow parallax, gentle ambient motion"
     )
-    full_prompt = (
+    full_prompt = _bounded_provider_prompt(
         f"{motion}. Documentary cinematography, subtle realistic motion, "
         "no camera wobble, no subject deformation, stable composition, "
-        "photoreal documentary, yellow porcelain mannequin character preserved"
+        "photoreal documentary, yellow porcelain mannequin character preserved",
+        fallback="subtle cinematic push-in, slow parallax, gentle ambient motion",
     )
     neg = (
         "blur, distort, low quality, static noise, face morphing, "
@@ -304,6 +358,14 @@ def _gen_em_clip(still_path: Path, motion_prompt: str, out_path: Path,
     last_err = ""
     for attempt in range(2):
         try:
+            if budget_workspace is not None:
+                _record_longform_provider_attempt(
+                    budget_workspace,
+                    _longform_media_attempt_estimate("video", "ltx_budget"),
+                    operation="longform_video_provider_attempt",
+                    model=LTX_13B_ENDPOINT,
+                    metadata={"endpoint_attempt": attempt + 1},
+                )
             result = fal_client.subscribe(
                 LTX_13B_ENDPOINT,
                 arguments={
@@ -352,6 +414,7 @@ def _gen_em_vo(text: str, out_path: Path, *, voice_id: str = "",
     """
     if out_path.exists() and out_path.stat().st_size > 1024:
         return out_path
+    provider_policy.assert_provider_allowed("fal", provider_policy.TTS_CAPABILITY)
     text = (text or "").strip()
     if not text:
         raise LFRenderError("VO text is empty")
@@ -375,8 +438,16 @@ def _gen_em_vo(text: str, out_path: Path, *, voice_id: str = "",
     }
     # MiniMax has a per-call ~5000-char limit. Long chapters from Grok
     # may exceed that, so chunk + concat.
+    budget_workspace = _longform_budget_workspace_for_asset(out_path)
     if len(text) <= 5000:
-        data = _fal_post(MINIMAX_TTS_URL_EM, payload, timeout_s=300)
+        data = _fal_post(
+            MINIMAX_TTS_URL_EM,
+            payload,
+            timeout_s=300,
+            budget_workspace=budget_workspace,
+            estimated_attempt_usd=_longform_tts_attempt_estimate(text),
+            budget_operation="longform_tts_provider_attempt",
+        )
         url = (data.get("audio") or {}).get("url") or data.get("audio_url")
         if not url:
             raise LFRenderError(f"MiniMax response missing audio url: {data}")
@@ -387,7 +458,14 @@ def _gen_em_vo(text: str, out_path: Path, *, voice_id: str = "",
     part_paths: list[Path] = []
     for i, part in enumerate(parts):
         chunk_payload = dict(payload, text=part)
-        data = _fal_post(MINIMAX_TTS_URL_EM, chunk_payload, timeout_s=300)
+        data = _fal_post(
+            MINIMAX_TTS_URL_EM,
+            chunk_payload,
+            timeout_s=300,
+            budget_workspace=budget_workspace,
+            estimated_attempt_usd=_longform_tts_attempt_estimate(part),
+            budget_operation="longform_tts_provider_attempt",
+        )
         url = (data.get("audio") or {}).get("url") or data.get("audio_url")
         if not url:
             raise LFRenderError(f"MiniMax chunk {i} missing audio url: {data}")
@@ -481,10 +559,17 @@ def _gen_scene_sfx(prompt: str, duration_sec: float, out_path: Path) -> Path:
     ambient — different prompt + matched-to-clip duration."""
     if out_path.exists() and out_path.stat().st_size > 1024:
         return out_path
+    duration = int(max(2, min(30, duration_sec)))
     data = _fal_post(
         MMAUDIO_URL,
-        {"prompt": prompt, "duration": int(max(2, min(30, duration_sec)))},
+        {
+            "prompt": _bounded_provider_prompt(prompt),
+            "duration": duration,
+        },
         timeout_s=180,
+        budget_workspace=_longform_budget_workspace_for_asset(out_path),
+        estimated_attempt_usd=_longform_mmaudio_attempt_estimate(duration),
+        budget_operation="longform_sfx_provider_attempt",
     )
     url = (data.get("audio") or {}).get("url") or data.get("audio_url")
     if not url:
@@ -607,7 +692,11 @@ def _split_chapter_to_scenes(chapter: dict, scenes_per_chapter: int) -> list[dic
     sents = re.split(r"(?<=[\.!?])\s+", narration) if narration else []
     if not sents:
         return [
-            {"scene_prompt": p, "narration": "", "duration_target_sec": 5.0}
+            {
+                "scene_prompt": _bounded_provider_prompt(p),
+                "narration": "",
+                "duration_target_sec": 5.0,
+            }
             for p in prompts
         ]
     n_scenes = len(prompts)
@@ -621,7 +710,11 @@ def _split_chapter_to_scenes(chapter: dict, scenes_per_chapter: int) -> list[dic
         # Estimate duration at ~150 wpm + min 3s + max 10s.
         words = len(text.split()) if text else 8
         target = max(3.0, min(10.0, words / 2.5))
-        out.append({"scene_prompt": p, "narration": text, "duration_target_sec": target})
+        out.append({
+            "scene_prompt": _bounded_provider_prompt(p),
+            "narration": text,
+            "duration_target_sec": target,
+        })
     return out
 
 
@@ -657,8 +750,33 @@ def _process_scene(
     treatment = dict(scene_brief.get("visual_treatment") or {})
     is_motion_graphic = str(treatment.get("kind") or "") == "motion_graphic"
     still = stills / f"scene_{global_idx:04d}.png"
-    if (not is_motion_graphic) and (not still.exists() or still.stat().st_size < 1024):
-        _gen_em_still(scene_brief["scene_prompt"], visual_style, still)
+    cached_still_ok = False
+    if job_id and still.is_file() and still.stat().st_size >= 1024:
+        cached_still_qa = _audit_longform_media_candidate(
+            job_id, "image", global_idx, still, force=True
+        )
+        cached_still_ok = _qa_component_passed(cached_still_qa)
+    if not cached_still_ok and not is_motion_graphic:
+        if job_id:
+            _dispatch_longform_media_revision_aware(
+                job_id,
+                stage="image",
+                scene_index=global_idx,
+                destination=still,
+                dispatch=lambda model, candidate, _guard: _gen_em_still(
+                    scene_brief["scene_prompt"],
+                    visual_style,
+                    candidate,
+                    image_model=model,
+                ),
+                fallback_model="seedream_edit",
+            )
+        else:
+            _gen_em_still(scene_brief["scene_prompt"], visual_style, still)
+    elif is_motion_graphic and not cached_still_ok:
+        raise LFRenderError(
+            f"motion-graphic scene {global_idx} has no current passing preview still"
+        )
 
     # 2. VO first — clip length follows narration for storytelling sync
     vo_raw = vo / f"vo_{sid}_raw.mp3"
@@ -684,33 +802,27 @@ def _process_scene(
 
     # 3. LTX clip — generate at EM_LTX_CLIP_SEC (12s+), trim/slow to VO below
     clip = clips / f"clip_{sid}_{'graphic' if is_motion_graphic else ('i2v' if paid_motion else 'still')}.mp4"
-    if is_motion_graphic:
-        from studio_agent.visual_treatment import render_motion_graphic_clip
-        if not clip.exists() or clip.stat().st_size < 1024:
-            render_motion_graphic_clip(treatment, clip, duration_sec=vo_dur + 0.5, fps=fps)
-    elif paid_motion:
-        motion = (motion_prompt_hint or "").strip() or "slow camera push-in, subtle parallax"
-        if clip.exists() and clip.stat().st_size > 1024:
-            pass
-        elif job_id:
-            _dispatch_longform_media_revision_aware(
-                job_id,
-                stage="video",
-                scene_index=global_idx,
-                destination=clip,
-                dispatch=lambda model, candidate, guard: _gen_em_clip(
-                    still,
-                    motion,
-                    candidate,
-                    duration_sec=EM_LTX_CLIP_SEC,
-                    video_model=model,
-                    route_guard=guard,
-                ),
-                fallback_model="ltx_budget",
+    motion = _bounded_provider_prompt(
+        motion_prompt_hint,
+        fallback="slow camera push-in, subtle parallax",
+    )
+
+    def _render_clip(model: str, candidate: Path, guard: Callable[[], bool]) -> Path:
+        if is_motion_graphic:
+            from studio_agent.visual_treatment import render_motion_graphic_clip
+
+            return render_motion_graphic_clip(
+                treatment, candidate, duration_sec=vo_dur + 0.5, fps=fps
             )
-        else:
-            _gen_em_clip(still, motion, clip, duration_sec=EM_LTX_CLIP_SEC)
-    elif not clip.exists() or clip.stat().st_size < 1024:
+        if paid_motion:
+            return _gen_em_clip(
+                still,
+                motion,
+                candidate,
+                duration_sec=EM_LTX_CLIP_SEC,
+                video_model=model,
+                route_guard=guard,
+            )
         frames = max(1, int((vo_dur + 0.5) * fps))
         cmd = [
             "ffmpeg", "-hide_banner", "-loglevel", "warning", "-y",
@@ -723,11 +835,32 @@ def _process_scene(
             ),
             "-t", f"{vo_dur + 0.5:.3f}",
             "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
-            "-pix_fmt", "yuv420p", "-an", str(clip),
+            "-pix_fmt", "yuv420p", "-an", str(candidate),
         ]
         result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode != 0:
             raise LFRenderError(f"local still motion failed: {result.stderr[-400:]}")
+        return candidate
+
+    cached_clip_ok = False
+    if job_id and clip.is_file() and clip.stat().st_size > 1024:
+        cached_clip_qa = _audit_longform_media_candidate(
+            job_id, "video", global_idx, clip, force=True
+        )
+        cached_clip_ok = _qa_component_passed(cached_clip_qa)
+    if not cached_clip_ok:
+        if job_id:
+            _dispatch_longform_media_revision_aware(
+                job_id,
+                stage="video",
+                scene_index=global_idx,
+                destination=clip,
+                dispatch=_render_clip,
+                fallback_model="ltx_budget" if paid_motion else "seedance",
+                billable=paid_motion,
+            )
+        else:
+            _render_clip("ltx_budget" if paid_motion else "seedance", clip, lambda: True)
 
     # 4. Per-scene SFX
     sfx_path = sfx / f"sfx_{sid}.mp3"
@@ -875,6 +1008,10 @@ async def run_v5_episode_pipeline(
     + mmaudio SFX + 2-pass loudnorm + scene mux → final concat with
     fade-to-black. Cost envelope ~$50.76/episode (Wirecard locked number).
     """
+    channel = dict(channel or {})
+    outline = dict(outline or {})
+    outline.setdefault("visual_style", str(channel.get("visual_style") or ""))
+    migrations = _record_longform_provider_migrations(channel, outline)
     job_dir = _ensure_job_dir(job_id)
     state = load_state(job_id) or {}
     state.update({
@@ -888,6 +1025,8 @@ async def run_v5_episode_pipeline(
         "started_at": time.time(),
         "scenes_per_chapter": scenes_per_chapter,
         "wpm": wpm,
+        "provider_policy_version": provider_policy.POLICY_VERSION,
+        "provider_policy_migrations": migrations,
     })
     save_state(job_id, state)
     update_status(job_id, phase="starting", percent=0)
@@ -902,7 +1041,36 @@ async def run_v5_episode_pipeline(
     save_state(job_id, state)
 
     from long_form.text_client import StudioTextClient
-    grok = StudioTextClient(model=str(outline.get("chat_model") or "").strip() or None)
+
+    requested_runner = str(
+        outline.get("chat_model")
+        or outline.get("runner_model")
+        or outline.get("script_model")
+        or channel.get("runner_model")
+        or channel.get("script_model")
+        or provider_policy.DEFAULT_RUNNER_MODEL
+    ).strip()
+    try:
+        runner_model = provider_policy.assert_runner_model_allowed(requested_runner)
+    except provider_policy.ProviderPolicyDenied:
+        runner_model = provider_policy.DEFAULT_RUNNER_MODEL
+        migration = {
+            "capability": "runner",
+            "requested": requested_runner or "legacy-default",
+            "effective": runner_model,
+            "policy_version": provider_policy.POLICY_VERSION,
+        }
+        migrations.append(migration)
+        migration_rows = outline.get("provider_policy_migrations")
+        if not isinstance(migration_rows, list):
+            migration_rows = []
+        outline["provider_policy_migrations"] = [*migration_rows, migration][-50:]
+    outline["chat_model"] = runner_model
+    outline["runner_model"] = runner_model
+    grok = StudioTextClient(model=runner_model)
+    state["outline"] = outline
+    state["provider_policy_migrations"] = migrations
+    save_state(job_id, state)
 
     chapters_path = _chapters_path(job_id)
     if chapters_path.exists():
@@ -962,7 +1130,7 @@ async def run_v5_episode_pipeline(
 
     # ── Phase 2 — STILLS ONLY (per-scene approval gate, PR #127) ──────────
     # Renders just the seedream still for every scene. The expensive parts
-    # of v5 (LTX i2v + ElevenLabs VO + mmaudio SFX + 2-pass loudnorm + scene
+    # of v5 (LTX i2v + FAL MiniMax VO + mmaudio SFX + 2-pass loudnorm + scene
     # mux + final concat) DON'T run until Casey approves the still gallery
     # and POSTs to /jobs/{id}/finalize. Spends only ~$1-3 fal here vs the
     # ~$48 of the full v5 episode.
@@ -984,41 +1152,52 @@ async def run_v5_episode_pipeline(
     total = len(render_scene_briefs)
     stills_dir = job_dir / "stills"
     stills_dir.mkdir(parents=True, exist_ok=True)
-    selected_image_model = str(
+    selected_image_model = _safe_longform_image_model(
         outline.get("image_model_id") or channel.get("image_model_default") or "seedream_edit"
-    ).strip()
+    )
 
     def _gen_one_still(triple):
         ci, li, gi, sb = triple
         out = stills_dir / f"scene_{gi:04d}.png"
+        if out.is_file() and out.stat().st_size > 1024:
+            cached_qa = _audit_longform_media_candidate(
+                job_id, "image", gi, out, force=True
+            )
+            if _qa_component_passed(cached_qa):
+                return gi
         treatment = dict(sb.get("visual_treatment") or {})
-        if str(treatment.get("kind") or "") == "motion_graphic":
-            from studio_agent.visual_treatment import render_motion_graphic_clip
-            preview = job_dir / "motion_graphics" / f"preview_{gi:04d}.mp4"
-            render_motion_graphic_clip(treatment, preview, duration_sec=4.0, fps=fps)
-            result = subprocess.run(
-                ["ffmpeg", "-hide_banner", "-loglevel", "warning", "-y", "-ss", "2.0", "-i", str(preview), "-frames:v", "1", str(out)],
-                capture_output=True, text=True,
-            )
-            if result.returncode != 0:
-                raise LFRenderError(f"motion-graphic preview extraction failed: {result.stderr[-300:]}")
-        else:
-            def _dispatch(model: str, candidate: Path, _route_guard: Callable[[], bool]) -> Path:
-                return _gen_em_still(
-                    sb["scene_prompt"],
-                    visual_style,
-                    candidate,
-                    image_model=model,
-                )
+        def _render(model: str, candidate: Path, _route_guard: Callable[[], bool]) -> Path:
+            if str(treatment.get("kind") or "") == "motion_graphic":
+                from studio_agent.visual_treatment import render_motion_graphic_clip
 
-            _dispatch_longform_media_revision_aware(
-                job_id,
-                stage="image",
-                scene_index=gi,
-                destination=out,
-                dispatch=_dispatch,
-                fallback_model=selected_image_model,
+                preview = job_dir / "motion_graphics" / f"preview_{gi:04d}.mp4"
+                render_motion_graphic_clip(treatment, preview, duration_sec=4.0, fps=fps)
+                result = subprocess.run(
+                    [
+                        "ffmpeg", "-hide_banner", "-loglevel", "warning", "-y",
+                        "-ss", "2.0", "-i", str(preview), "-frames:v", "1", str(candidate),
+                    ],
+                    capture_output=True,
+                    text=True,
+                )
+                if result.returncode != 0:
+                    raise LFRenderError(
+                        f"motion-graphic preview extraction failed: {result.stderr[-300:]}"
+                    )
+                return candidate
+            return _gen_em_still(
+                sb["scene_prompt"], visual_style, candidate, image_model=model
             )
+
+        _dispatch_longform_media_revision_aware(
+            job_id,
+            stage="image",
+            scene_index=gi,
+            destination=out,
+            dispatch=_render,
+            fallback_model=selected_image_model,
+            billable=str(treatment.get("kind") or "") != "motion_graphic",
+        )
         return gi
 
     # Stills-only concurrency = 6 (each is one seedream call ~5-10s; lower
@@ -1073,12 +1252,20 @@ async def expand_v5_visual_proof_pipeline(job_id: str) -> None:
     from long_form.prompts.channels import get_channel
 
     channel = dict(get_channel(str(state.get("channel_key") or "")))
-    outline = state.get("outline") if isinstance(state.get("outline"), dict) else {}
+    outline = dict(state.get("outline") or {}) if isinstance(state.get("outline"), dict) else {}
+    migrations = _record_longform_provider_migrations(channel, outline)
+    state["outline"] = outline
+    state["provider_policy_version"] = provider_policy.POLICY_VERSION
+    if migrations:
+        prior_migrations = state.get("provider_policy_migrations")
+        if not isinstance(prior_migrations, list):
+            prior_migrations = []
+        state["provider_policy_migrations"] = [*prior_migrations, *migrations][-50:]
     visual_style = str(channel.get("visual_style") or "")
     fps = int(channel.get("fps") or 24)
-    selected_image_model = str(
+    selected_image_model = _safe_longform_image_model(
         outline.get("image_model_id") or channel.get("image_model_default") or "seedream_edit"
-    ).strip()
+    )
     job_dir = _ensure_job_dir(job_id)
     stills_dir = job_dir / "stills"
     stills_dir.mkdir(parents=True, exist_ok=True)
@@ -1093,44 +1280,56 @@ async def expand_v5_visual_proof_pipeline(job_id: str) -> None:
     state["outline"] = outline
     save_state(job_id, state)
 
-    pending = [
-        row for row in records
-        if not (stills_dir / f"scene_{int(row.get('global_idx') or 0):04d}.png").is_file()
-    ]
+    def _needs_generation(row: dict) -> bool:
+        gi = int(row.get("global_idx") or 0)
+        existing = stills_dir / f"scene_{gi:04d}.png"
+        if not existing.is_file() or existing.stat().st_size <= 4096:
+            return True
+        qa = _audit_longform_media_candidate(job_id, "image", gi, existing, force=True)
+        return not _qa_component_passed(qa)
+
+    pending = [row for row in records if _needs_generation(row)]
 
     def _generate(row: dict) -> int:
         gi = int(row.get("global_idx") or 0)
         brief = dict(row.get("brief") or {})
         out = stills_dir / f"scene_{gi:04d}.png"
         treatment = dict(brief.get("visual_treatment") or {})
-        if str(treatment.get("kind") or "") == "motion_graphic":
-            from studio_agent.visual_treatment import render_motion_graphic_clip
-            preview = job_dir / "motion_graphics" / f"preview_{gi:04d}.mp4"
-            render_motion_graphic_clip(treatment, preview, duration_sec=4.0, fps=fps)
-            result = subprocess.run(
-                ["ffmpeg", "-hide_banner", "-loglevel", "warning", "-y", "-ss", "2.0", "-i", str(preview), "-frames:v", "1", str(out)],
-                capture_output=True,
-                text=True,
-            )
-            if result.returncode != 0:
-                raise LFRenderError(f"motion-graphic preview extraction failed: {result.stderr[-300:]}")
-        else:
-            def _dispatch(model: str, candidate: Path, _route_guard: Callable[[], bool]) -> Path:
-                return _gen_em_still(
-                    str(brief.get("scene_prompt") or ""),
-                    visual_style,
-                    candidate,
-                    image_model=model,
-                )
+        def _render(model: str, candidate: Path, _route_guard: Callable[[], bool]) -> Path:
+            if str(treatment.get("kind") or "") == "motion_graphic":
+                from studio_agent.visual_treatment import render_motion_graphic_clip
 
-            _dispatch_longform_media_revision_aware(
-                job_id,
-                stage="image",
-                scene_index=gi,
-                destination=out,
-                dispatch=_dispatch,
-                fallback_model=selected_image_model,
+                preview = job_dir / "motion_graphics" / f"preview_{gi:04d}.mp4"
+                render_motion_graphic_clip(treatment, preview, duration_sec=4.0, fps=fps)
+                result = subprocess.run(
+                    [
+                        "ffmpeg", "-hide_banner", "-loglevel", "warning", "-y",
+                        "-ss", "2.0", "-i", str(preview), "-frames:v", "1", str(candidate),
+                    ],
+                    capture_output=True,
+                    text=True,
+                )
+                if result.returncode != 0:
+                    raise LFRenderError(
+                        f"motion-graphic preview extraction failed: {result.stderr[-300:]}"
+                    )
+                return candidate
+            return _gen_em_still(
+                str(brief.get("scene_prompt") or ""),
+                visual_style,
+                candidate,
+                image_model=model,
             )
+
+        _dispatch_longform_media_revision_aware(
+            job_id,
+            stage="image",
+            scene_index=gi,
+            destination=out,
+            dispatch=_render,
+            fallback_model=selected_image_model,
+            billable=str(treatment.get("kind") or "") != "motion_graphic",
+        )
         if not out.is_file() or out.stat().st_size <= 4096:
             raise LFRenderError(f"v5 still {gi} produced no usable output")
         return gi
@@ -1183,7 +1382,7 @@ async def expand_v5_visual_proof_pipeline(job_id: str) -> None:
 
 
 async def finalize_v5_episode_pipeline(job_id: str) -> None:
-    """Continue a paused v5_episode render: per-scene LTX i2v + ElevenLabs
+    """Continue a paused v5_episode render: per-scene LTX i2v + FAL MiniMax
     VO + silence-kill + mmaudio SFX + 2-pass loudnorm + scene mux + final
     concat with fade-to-black. Loads state + chapters from disk so the
     pipeline survives process restart between approval and finalize."""
@@ -1196,7 +1395,7 @@ async def finalize_v5_episode_pipeline(job_id: str) -> None:
     # which left jobs stuck in scene_assembly with partial output).
     if state.get("phase") not in (
         "awaiting_approval", "scene_assembly", "i2v", "vo", "sfx",
-        "compose", "thumbnails", "failed", "cancelled",
+        "compose", "thumbnails", "final_qa_blocked", "failed", "cancelled",
     ):
         raise LFRenderError(
             f"job {job_id} is in phase {state.get('phase')!r}; "
@@ -1214,7 +1413,16 @@ async def finalize_v5_episode_pipeline(job_id: str) -> None:
 
     from long_form.prompts.channels import get_channel
     channel = dict(get_channel(state["channel_key"]))
-    outline = state.get("outline") or {}
+    outline = dict(state.get("outline") or {})
+    migrations = _record_longform_provider_migrations(channel, outline)
+    state["outline"] = outline
+    state["provider_policy_version"] = provider_policy.POLICY_VERSION
+    if migrations:
+        prior_migrations = state.get("provider_policy_migrations")
+        if not isinstance(prior_migrations, list):
+            prior_migrations = []
+        state["provider_policy_migrations"] = [*prior_migrations, *migrations][-50:]
+    save_state(job_id, state)
     style_lock = str(outline.get("render_style_lock") or "").strip()
     if style_lock:
         channel["visual_style"] = f"{style_lock} {channel.get('visual_style') or ''}".strip()
@@ -1347,11 +1555,14 @@ async def finalize_v5_episode_pipeline(job_id: str) -> None:
 
     title_slug = _slugify(outline.get("title", "longform"))
     out_mp4 = _final_mp4_path(job_id, title_slug)
+    staged_mp4 = out_mp4.with_name(
+        f".{out_mp4.stem}.{time.time_ns()}.candidate{out_mp4.suffix}"
+    )
     await loop.run_in_executor(
         None,
         lambda: _final_concat_v5(
             scene_mp4s,
-            out_mp4,
+            staged_mp4,
             fade_out_sec=3.0,
             fps=fps,
             captions_enabled=bool(outline.get("captions_enabled", True)),
@@ -1360,17 +1571,23 @@ async def finalize_v5_episode_pipeline(job_id: str) -> None:
         ),
     )
 
-    state["mp4_path"] = str(out_mp4.relative_to(LF_OUTPUT_ROOT))
-    state["mp4_duration_sec"] = _ffprobe_dur(out_mp4)
-    state["mp4_size_bytes"] = out_mp4.stat().st_size
+    promoted = await loop.run_in_executor(
+        None,
+        lambda: _promote_final_longform_after_qa(
+            job_id,
+            staged_mp4,
+            out_mp4,
+            require_clips=True,
+        ),
+    )
+    if promoted is None:
+        return
+
+    state = load_state(job_id) or state
     state["captions_enabled"] = bool(outline.get("captions_enabled", True))
     state["caption_mode"] = str(outline.get("caption_mode") or "word") if state["captions_enabled"] else "off"
     state["caption_timing_source"] = "fal_whisper_word" if state["captions_enabled"] else "off"
-    state["phase"] = "done"
-    state["percent"] = 100
-    state["finished_at"] = time.time()
     save_state(job_id, state)
-    update_status(job_id, phase="done", percent=100)
 
 
 def regenerate_v5_still(job_id: str, scene_idx: int,
@@ -1386,29 +1603,30 @@ def regenerate_v5_still(job_id: str, scene_idx: int,
     if not target:
         raise LFRenderError(f"scene_idx {scene_idx} not in scene_briefs")
     brief = target.get("brief") or {}
-    prompt = (new_prompt or brief.get("scene_prompt") or "").strip()
+    prompt = _bounded_provider_prompt(new_prompt or brief.get("scene_prompt") or "")
     if not prompt:
         raise LFRenderError("prompt cannot be empty")
-    if new_prompt and new_prompt != brief.get("scene_prompt"):
-        target["brief"]["scene_prompt"] = new_prompt
+    if new_prompt and prompt != brief.get("scene_prompt"):
+        target["brief"]["scene_prompt"] = prompt
         state["scene_briefs"] = scene_briefs
         save_state(job_id, state)
     from long_form.prompts.channels import get_channel
-    channel = get_channel(state["channel_key"])
+    channel = dict(get_channel(state["channel_key"]))
     visual_style = channel.get("visual_style") or ""
     out = _job_dir(job_id) / "stills" / f"scene_{scene_idx:04d}.png"
-    if out.exists():
-        out.unlink()
-    job_dir = _job_dir(job_id)
-    for folder in (job_dir / "clips", job_dir / "scenes"):
-        if folder.is_dir():
-            for stale in folder.glob(f"*_{scene_idx:04d}*"):
-                if stale.is_file():
-                    stale.unlink(missing_ok=True)
-    outline = state.get("outline") if isinstance(state.get("outline"), dict) else {}
-    selected_image_model = str(
+    outline = dict(state.get("outline") or {}) if isinstance(state.get("outline"), dict) else {}
+    migrations = _record_longform_provider_migrations(channel, outline)
+    state["outline"] = outline
+    state["provider_policy_version"] = provider_policy.POLICY_VERSION
+    if migrations:
+        prior_migrations = state.get("provider_policy_migrations")
+        if not isinstance(prior_migrations, list):
+            prior_migrations = []
+        state["provider_policy_migrations"] = [*prior_migrations, *migrations][-50:]
+    save_state(job_id, state)
+    selected_image_model = _safe_longform_image_model(
         outline.get("image_model_id") or channel.get("image_model_default") or "seedream_edit"
-    ).strip()
+    )
 
     committed, _receipt = _dispatch_longform_media_revision_aware(
         job_id,

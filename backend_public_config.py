@@ -71,7 +71,7 @@ def build_public_config_payload(
             if plan_id in PUBLIC_PLAN_IDS
         }
         public_plan_features = {
-            plan_id: ["studio_agent", "openrouter", "fal_render", "elevenlabs", "competitor_analysis"]
+            plan_id: ["studio_agent", "anthropic_runner", "fal_media", "competitor_analysis"]
             for plan_id in PUBLIC_PLAN_IDS
         }
         public_plan_prices = {

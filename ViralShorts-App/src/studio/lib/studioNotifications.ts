@@ -80,7 +80,7 @@ const BUNDLED_RELEASES: Array<Pick<StudioNotification, 'id' | 'kind' | 'title' |
         kind: 'success',
         title: 'Render costs use your session models',
         body:
-            'Cost quotes now use estimate_shortform_render_cost with your active Grok/Seedream session pickers — no more LTX/Seedream T2I guesses from memory.',
+            'Cost quotes now use estimate_shortform_render_cost with your active FAL media selections — no more route guesses from memory.',
     },
     {
         id: 'release-2026-07-08-channel-winner-predictions',
@@ -164,14 +164,14 @@ const BUNDLED_RELEASES: Array<Pick<StudioNotification, 'id' | 'kind' | 'title' |
         kind: 'success',
         title: 'Dictation unlock + JSON hardening',
         body:
-            'Mic dictation no longer blocks the prompt after xAI transcribes. Reference analysis uses safer JSON parsing and full Fly toolset stays enabled.',
+            'Mic dictation no longer blocks the prompt after FAL transcription. Reference analysis uses safer JSON parsing and the full Fly toolset stays enabled.',
     },
     {
         id: 'release-2026-07-07-studio-agent-research-v4',
         kind: 'success',
-        title: 'Transcript retry + live xAI voice',
+        title: 'Transcript retry + FAL voice',
         body:
-            'Failed transcript stages auto-retry on the saved upload. Mic dictation routes through xAI STT with live streaming. Updates sync on your next message.',
+            'Failed transcript stages auto-retry on the saved upload. Mic dictation routes through the authenticated FAL batch lane. Updates sync on your next message.',
     },
     {
         id: 'release-2026-07-07-studio-agent-research-v3',
@@ -239,7 +239,7 @@ const BUNDLED_RELEASES: Array<Pick<StudioNotification, 'id' | 'kind' | 'title' |
         id: 'release-2026-07-06-fal-voice',
         kind: 'success',
         title: 'Short-form voice uses fal.ai',
-        body: 'Finalize and re-edit narration now runs through fal MiniMax TTS instead of ElevenLabs.',
+        body: 'Finalize and re-edit narration now runs through the effective FAL MiniMax TTS route.',
     },
     {
         id: 'release-2026-07-06-fresh-production-reset',
@@ -281,7 +281,7 @@ const BUNDLED_RELEASES: Array<Pick<StudioNotification, 'id' | 'kind' | 'title' |
         id: 'unified-credits-live',
         kind: 'billing',
         title: 'Unified credits are live',
-        body: 'Plans and top-ups now feed one wallet for OpenRouter, fal.ai, ElevenLabs, and production usage.',
+        body: 'Plans and top-ups now feed one wallet for direct Anthropic, fal.ai, and production usage.',
     },
 ];
 

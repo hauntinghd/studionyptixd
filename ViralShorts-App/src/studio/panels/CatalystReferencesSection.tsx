@@ -5,7 +5,7 @@
  * yt-dlp pulls metadata, the reference is tagged to a Studio channel
  * (Empire Magnates, Lacuna, ZeroTier, etc.) so when the user generates
  * scripts for that channel, the reference titles + descriptions thread
- * into the Grok system prompt as 'mimic these patterns' context.
+ * into the direct Anthropic system prompt as 'mimic these patterns' context.
  *
  * Phase 1 (this component): metadata-only. Add / list / delete / edit notes.
  * Phase 2 (deferred): one-click 'Analyze' → Whisper transcript + keyframe
@@ -163,7 +163,7 @@ export default function CatalystReferencesSection() {
                         Reference Videos
                     </h3>
                     <p className="text-xs text-zinc-400 mt-0.5">
-                        Paste viral YouTube URLs. Studio threads them into Grok prompts so
+                        Paste viral YouTube URLs. Studio threads them into Claude prompts so
                         scripts mimic patterns that already work.
                     </p>
                 </div>

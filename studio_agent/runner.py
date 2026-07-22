@@ -14,7 +14,7 @@ from typing import Any
 
 EventEmitter = Callable[[dict[str, Any]], Awaitable[None] | None]
 
-from studio_agent import openrouter, production_budget, skills
+from studio_agent import openrouter, production_budget, provider_policy, skills
 from studio_agent.anti_hallucination import ToolFire, audit_turn, guard_text
 from studio_agent import memory, store
 from studio_agent import telemetry, training_capture
@@ -137,12 +137,34 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
+SONNET_5_INTRO_PRICE_END_UTC = 1_788_220_800.0  # 2026-09-01T00:00:00Z
+
+
+def _sonnet_5_intro_pricing_active(*, now: float | None = None) -> bool:
+    """Use Anthropic's launch price through August 31, 2026 (inclusive)."""
+
+    current = time.time() if now is None else float(now)
+    return current < SONNET_5_INTRO_PRICE_END_UTC
+
+
 def _llm_pricing_for_provider(provider: str, model: str, fallback_model: str) -> tuple[float | None, float | None, str, str]:
     """Return prompt/completion dollars per million tokens and debit reason."""
-    if provider == "anthropic_fallback":
-        prompt_ppm = _env_float("ANTHROPIC_FALLBACK_PROMPT_USD_PER_M", 1.0)
-        completion_ppm = _env_float("ANTHROPIC_FALLBACK_COMPLETION_USD_PER_M", 5.0)
-        return prompt_ppm, completion_ppm, "studio_agent_anthropic_fallback", fallback_model
+    if provider_policy.normalize_provider(provider) == "anthropic":
+        billed_model = provider_policy.normalize_anthropic_model_id(fallback_model or model)
+        metadata = openrouter.CURATED_META.get(billed_model) or {}
+        default_prompt = float(metadata.get("prompt_price_per_m") or 3.0)
+        default_completion = float(metadata.get("completion_price_per_m") or 15.0)
+        if provider_policy.is_sonnet_5(billed_model) and _sonnet_5_intro_pricing_active():
+            default_prompt, default_completion = 2.0, 10.0
+        prompt_ppm = _env_float(
+            "ANTHROPIC_PROMPT_USD_PER_M",
+            default_prompt,
+        )
+        completion_ppm = _env_float(
+            "ANTHROPIC_COMPLETION_USD_PER_M",
+            default_completion,
+        )
+        return prompt_ppm, completion_ppm, "studio_agent_anthropic_direct", billed_model
     return None, None, "studio_agent_openrouter", model
 
 
@@ -314,12 +336,10 @@ def _is_model_credit_error(exc: Exception) -> bool:
 def _model_credit_recovery_message(exc: Exception) -> str:
     msg = str(exc or "")
     lower = msg.lower()
-    provider = "OpenRouter" if "openrouter" in lower else "the selected model provider"
-    if "anthropic" in lower:
-        provider = "Anthropic fallback"
-    if "anthropic fallback is not configured" in lower or "anthropic_api_key missing" in lower:
+    provider = "Anthropic"
+    if "anthropic_api_key missing" in lower or "anthropic_api_key is not set" in lower:
         return (
-            "Studio Agent hit primary model credit limits and Anthropic fallback is not configured on the backend. "
+            "Studio Agent cannot reach its direct Anthropic runner because ANTHROPIC_API_KEY is not configured on the backend. "
             "Your chat, stills, approvals, and any server-side production job are preserved. "
             "Set ANTHROPIC_API_KEY as a backend secret, redeploy, then press Resume and continue from this point. "
             "This is not an internet drop."
@@ -327,7 +347,7 @@ def _model_credit_recovery_message(exc: Exception) -> str:
     return (
         f"Studio Agent hit {provider} credit limits before it could finish the text response. "
         "Your chat, stills, approvals, and any server-side production job are preserved. "
-        "Add model credits or switch to a cheaper/fallback model, then press Resume and continue from this point. "
+        "Add Anthropic API credits, then press Resume and continue from this point. "
         "This is not an internet drop."
     )
 
@@ -945,7 +965,11 @@ def _prepare_pending_actions(
         row = dict(action)
         if str(row.get("tool") or "") == "start_shortform_generate":
             args = row.get("arguments") if isinstance(row.get("arguments"), dict) else {}
-            row["arguments"] = store._prepare_shortform_execution_args(args, session_messages, session=turn_session)
+            # Pending Approve cards must use multi-scene display args — execution
+            # prepare (scene_count=1) makes desktop UI hide the card as stale.
+            row["arguments"] = store._prepare_shortform_pending_args(
+                args, session_messages, session=turn_session,
+            )
         aligned_actions.append(row)
     kept, _blocked = _filter_stale_pending_actions(aligned_actions, turn_session)
     return store.normalize_pending_actions(kept, session_messages)
@@ -2100,8 +2124,141 @@ def _assistant_stalled_on_channel_data(assistant_text: str) -> bool:
         "people are actively typing",
         "read the returned data",
         "cross-reference them",
+        # False "analytics missing" narrations when tools already returned rows.
+        "pulled your memory but not",
+        "pulled memory but not",
+        "not the actual youtube analytics",
+        "not the actual analytics",
+        "hitting a blocker",
+        "i'm hitting a blocker",
+        "analytics comparison is missing",
+        "don't have the actual youtube analytics",
+        "do not have the actual youtube analytics",
+        "only have memory",
+        "only pulled memory",
     )
     return any(phrase in low for phrase in stall_phrases)
+
+
+def _assistant_asks_user_for_known_analytics(assistant_text: str) -> bool:
+    """True when the model interviews the user for AVD/views already in tool evidence."""
+    low = str(assistant_text or "").lower()
+    if not low:
+        return False
+    asks = any(
+        phrase in low
+        for phrase in (
+            "what i need to know",
+            "i need to know",
+            "can you tell me",
+            "are both of these",
+            "does the skeleton",
+            "are both hitting",
+            "once you tell me",
+            "let me ask you",
+        )
+    )
+    about_metrics = any(
+        phrase in low
+        for phrase in (
+            "retention",
+            "hook",
+            "pacing",
+            "script structure",
+            "length",
+            "avg view",
+            "average view",
+            "views",
+        )
+    )
+    return asks and about_metrics
+
+
+def _latest_shortform_comparison(tool_fires: list[ToolFire]) -> dict[str, Any]:
+    for fire in reversed(tool_fires or []):
+        if str(fire.name or "") != "get_channel_analytics":
+            continue
+        try:
+            data = json.loads(fire.result or "{}")
+        except Exception:
+            continue
+        if not isinstance(data, dict) or data.get("error"):
+            continue
+        compare = data.get("shortform_performance_comparison")
+        if isinstance(compare, dict) and compare:
+            return dict(compare)
+    return {}
+
+
+def _grounded_shortform_comparison_from_tools(
+    tool_fires: list[ToolFire],
+    *,
+    active_label: str = "",
+    user_text: str = "",
+) -> str:
+    """Authoritative Shorts comparison from analytics tool rows — never memory."""
+    compare = _latest_shortform_comparison(tool_fires)
+    brief = str(compare.get("comparison_brief") or "").strip()
+    ready = bool(compare.get("comparison_ready"))
+    title = str(active_label or "selected channel").strip() or "selected channel"
+    if ready and brief:
+        lines = [
+            f"YouTube Analytics comparison for **{title}** (live tool result, not memory):",
+            "",
+            brief,
+        ]
+        low_user = str(user_text or "").lower()
+        if any(k in low_user for k in ("female", "women", "woman", "her side", "for her")):
+            lines.extend(
+                [
+                    "",
+                    "Female-side packaging: keep the same measured structure that the retention "
+                    "winner already proved (direct psychology promise in the title, 30s density, "
+                    "same skeleton identity). Flip only the POV / 'you' framing toward her experience — "
+                    "do not invent a new format until we have a measured female-side winner row.",
+                ]
+            )
+        return "\n".join(lines)
+    # Fall back to channel status if comparison object is empty but analytics ran.
+    return _grounded_channel_status_from_tools(tool_fires, active_label=active_label)
+
+
+def _assistant_claims_tools_unavailable(assistant_text: str) -> bool:
+    """True when the model invents a tool-outage instead of calling production tools."""
+    low = str(assistant_text or "").lower()
+    return any(
+        phrase in low
+        for phrase in (
+            "tool availability",
+            "tools are offline",
+            "tool is offline",
+            "tools offline",
+            "tool offline",
+            "comes back online",
+            "come back online",
+            "when the tool comes back",
+            "once the tool comes back",
+            "until the tool comes back",
+            "until tools return",
+            "until the tools return",
+            "tool comes back online",
+            "tools come back",
+            "tool is unavailable",
+            "tools are unavailable",
+            "tool not available",
+            "tools not available",
+            "can't call the tool",
+            "cannot call the tool",
+            "can't access the production tool",
+            "cannot access the production tool",
+            "production tool is down",
+            "render tool is down",
+            "start_shortform is unavailable",
+            "build your scene blueprint manually",
+            "building your scene blueprint manually",
+            "work around this by building",
+        )
+    )
 
 
 def _assistant_stalled_on_reference_analysis(assistant_text: str) -> bool:
@@ -5663,7 +5820,7 @@ async def _bill_studio_command_compiler(
         requested_model,
         effective_model,
     )
-    if response and provider != "anthropic_fallback":
+    if response and provider_policy.normalize_provider(provider) != "anthropic":
         try:
             prompt_ppm, completion_ppm = await openrouter.model_pricing(requested_model)
             billed_model = requested_model
@@ -5839,7 +5996,10 @@ async def _apply_model_agnostic_studio_command(
         # second one" or "visuals only" must not be discarded by regex.
         or has_pending_repair
     )
-    wants_expand = bool(_wants_expand_visual_proof_short(user_text) and not wants_repair)
+    wants_expand = bool(
+        (_wants_expand_visual_proof_short(user_text) or session.get("short_expansion_intake"))
+        and not wants_repair
+    )
     if not wants_expand and not wants_repair:
         return None
 
@@ -6522,6 +6682,61 @@ def _has_public_demand_tool(tool_fires: list[ToolFire]) -> bool:
     return any(str(fire.name or "") in {"get_public_search_trends", "recommend_video_topics"} for fire in tool_fires or [])
 
 
+def _tool_fire_payload(fire: ToolFire) -> dict[str, Any]:
+    try:
+        payload = json.loads(fire.result or "{}")
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _tool_fire_failed(fire: ToolFire) -> bool:
+    """True when a tool fired but returned a hard failure (import/quota/API)."""
+    payload = _tool_fire_payload(fire)
+    if not payload:
+        text = str(fire.result or "").strip().lower()
+        return text.startswith("error:") or "no module named" in text
+    if payload.get("error"):
+        return True
+    status = str(payload.get("status") or "").strip().lower()
+    if status.startswith("blocked_") or status in {"error", "failed"}:
+        return True
+    return False
+
+
+def _has_successful_public_demand_tool(tool_fires: list[ToolFire]) -> bool:
+    """True only when a public-demand tool ran and returned usable (non-error) evidence."""
+    for fire in tool_fires or []:
+        if str(fire.name or "") not in {"get_public_search_trends", "recommend_video_topics", "search_youtube_public"}:
+            continue
+        if _tool_fire_failed(fire):
+            continue
+        payload = _tool_fire_payload(fire)
+        if payload.get("videos") or payload.get("trending_sample") or payload.get("predicted_topics"):
+            return True
+        summary = payload.get("evidence_summary")
+        if isinstance(summary, dict) and int(summary.get("total_rows") or summary.get("hydrated_rows") or 0) > 0:
+            return True
+        # Successful empty search (quota ok, just no matches) still counts as executed.
+        if payload.get("source") or payload.get("queries") is not None:
+            return True
+    return False
+
+
+def _public_demand_needs_retry(tool_fires: list[ToolFire]) -> bool:
+    """Retry when research tools never ran, or only returned hard errors."""
+    if not _has_public_demand_tool(tool_fires):
+        return True
+    if _has_successful_public_demand_tool(tool_fires):
+        return False
+    # Fired but every attempt failed — retry once more with a clean path.
+    return any(
+        str(fire.name or "") in {"get_public_search_trends", "recommend_video_topics", "search_youtube_public"}
+        and _tool_fire_failed(fire)
+        for fire in tool_fires or []
+    )
+
+
 def _is_channel_status_only_answer(assistant_text: str) -> bool:
     low = str(assistant_text or "").strip().lower()
     return (
@@ -6929,6 +7144,9 @@ def _build_requested_topic_production(
         "use clear visual metaphors for hidden behavior, fast hook pacing, high-contrast captions, "
         "and no unsupported analytics claims in on-screen text."
     )
+    # One-scene visual proof only when the user EXPLICITLY asked for scene 1 / one still.
+    # Never treat bare hard commits ("yes make it", "render that plan") as visual_proof_only —
+    # that set scene_count=1 and the frontend hid the Approve card as "stale".
     one_scene_visual_request = bool(
         re.search(r"\b(?:exactly\s+)?(?:one|1|single)\s+(?:scene|still|image|frame)\b", low)
         or re.search(
@@ -6936,7 +7154,6 @@ def _build_requested_topic_production(
             r"\b(?:make|render|start|build|produce|generate)\s+scene\s*(?:#?\s*1|one)\b",
             low,
         )
-        or store.is_hard_production_commit(user_text)
     )
     visual_proof_only = (
         one_scene_visual_request
@@ -6956,6 +7173,7 @@ def _build_requested_topic_production(
         "render_style": render_style,
         "category_key": category_key,
         "topic": topic,
+        "title": topic[:120],
         "video_model": video_model,
         "visual_brief": visual_brief,
         "animate": False,
@@ -6966,6 +7184,28 @@ def _build_requested_topic_production(
     if visual_proof_only:
         args["scene_count"] = 1
         args["visual_proof_only"] = True
+    else:
+        # Full short: use pending concept / duration so Approve is a real multi-scene plan.
+        pending_concept = session.get("pending_concept") if isinstance(session.get("pending_concept"), dict) else {}
+        try:
+            from studio_agent.concept_plan import parse_duration_sec, scene_count_for_duration
+
+            duration_sec = int(
+                pending_concept.get("duration_sec")
+                or pending_concept.get("target_duration_sec")
+                or parse_duration_sec(user_text, default_format="shortform")
+                or 30
+            )
+            scenes = int(
+                pending_concept.get("scene_count")
+                or scene_count_for_duration(duration_sec, fmt="shortform")
+            )
+        except Exception:
+            duration_sec = 30
+            scenes = 6
+        args["scene_count"] = max(4, min(12, scenes))
+        args["target_duration_sec"] = max(8, min(120, duration_sec))
+        args["visual_proof_only"] = False
     if active_channel_id:
         args["_selected_channel_id"] = active_channel_id
     if active_registry:
@@ -7494,11 +7734,8 @@ def _longform_cost_channel_key(session: dict[str, Any]) -> str:
 def _cost_image_model(user_text: str, session_model: Any) -> str:
     """User's explicit model wording overrides a stale/blank picker for quotes."""
     low = str(user_text or "").lower()
-    if re.search(r"\bgrok imagine\b", low):
-        if re.search(r"\bnot\s+(?:grok\s+)?imagine quality\b|\bstandard\b", low):
-            return "grok_imagine_standard"
-        if "quality" in low:
-            return "grok_imagine"
+    if re.search(r"\bgrok imagine\b|\bxai\b", low):
+        return "seedream_edit"
     normalized = store.normalize_image_model(session_model)
     return normalized or store.DEFAULT_IMAGE_MODEL
 
@@ -7623,8 +7860,8 @@ def _append_late_public_search(
     content_format: str,
     session_id: str,
 ) -> str:
-    """Run public search when the model denied capability but no search tool fired this turn."""
-    if _has_public_demand_tool(tool_fires):
+    """Run public search when research is missing or previous fires only returned hard errors."""
+    if _has_successful_public_demand_tool(tool_fires):
         return _latest_public_search_query(tool_fires)
 
     search_query = _resolve_public_search_query(
@@ -7639,7 +7876,9 @@ def _append_late_public_search(
         return ""
 
     window_days = _public_search_window_days(intent_text or user_text)
-    fresh = _public_search_use_fresh(intent_text or user_text, public_demand=True)
+    # On retry after a failed fire, force fresh so we don't re-serve a poisoned empty cache.
+    force_fresh = _public_demand_needs_retry(tool_fires) and _has_public_demand_tool(tool_fires)
+    fresh = force_fresh or _public_search_use_fresh(intent_text or user_text, public_demand=True)
     trend_args: dict[str, Any] = {
         "query": search_query,
         "days": window_days,
@@ -7788,6 +8027,8 @@ def _grounded_channel_status_from_tools(
         if shortform_compare:
             best_prior = shortform_compare.get("best_prior_short") if isinstance(shortform_compare.get("best_prior_short"), dict) else {}
             latest_short = shortform_compare.get("latest_short") if isinstance(shortform_compare.get("latest_short"), dict) else {}
+            retention_winner = shortform_compare.get("retention_winner") if isinstance(shortform_compare.get("retention_winner"), dict) else {}
+            views_winner = shortform_compare.get("views_winner") if isinstance(shortform_compare.get("views_winner"), dict) else {}
             available_short_metrics = [
                 str(v).strip()
                 for v in list(shortform_compare.get("available_short_metrics") or [])
@@ -7798,15 +8039,26 @@ def _grounded_channel_status_from_tools(
                 for v in list(shortform_compare.get("missing_short_metrics") or [])
                 if str(v).strip()
             ]
-            lines.append(f"- Shorts comparison rows: {int(shortform_compare.get('prior_short_count') or 0)} prior Shorts")
+            lines.append(
+                f"- Shorts comparison ready: {'yes' if shortform_compare.get('comparison_ready') else 'no'} "
+                f"({int(shortform_compare.get('prior_short_count') or 0)} prior Shorts, "
+                f"{int(shortform_compare.get('compared_row_count') or 0)} measured rows)"
+            )
             if latest_short:
                 lines.append(f"- Latest Short baseline: {_metric_row_line(latest_short).lstrip('- ')}")
+            if retention_winner:
+                lines.append(f"- Retention winner: {_metric_row_line(retention_winner).lstrip('- ')}")
+            if views_winner:
+                lines.append(f"- Views leader: {_metric_row_line(views_winner).lstrip('- ')}")
             if best_prior:
                 lines.append(f"- Best prior Short control: {_metric_row_line(best_prior).lstrip('- ')}")
             if available_short_metrics:
                 lines.append(f"- Shorts metrics available: {', '.join(available_short_metrics)}")
             if missing_short_metrics:
                 lines.append(f"- Shorts metrics missing: {', '.join(missing_short_metrics)}")
+            brief = str(shortform_compare.get("comparison_brief") or "").strip()
+            if brief:
+                lines.extend(["", "Authoritative Shorts comparison brief:", brief])
         if limitation:
             lines.extend(["", f"Limitation: {limitation}"])
         lines.append("")
@@ -9134,7 +9386,9 @@ def _prepare_shortform_production_args(
         pass
     if force_fresh or store.is_new_production_request(latest, session):
         merged = _force_fresh_shortform_args(merged)
-    return store._prepare_shortform_execution_args(merged, session_messages, session=session)
+    # Pending/approval path: keep multi-scene counts so the Approve card is not
+    # filtered away by clients that treat scene_count=1 as stale.
+    return store._prepare_shortform_pending_args(merged, session_messages, session=session)
 
 
 def _inject_shortform_live_demand(args: dict[str, Any], session: dict[str, Any]) -> dict[str, Any]:
@@ -9652,7 +9906,7 @@ def _billing_hint(billing_profile: dict[str, Any] | None) -> str:
     bal = int(profile.get("balance") or 0)
     return (
         f"ACCOUNT: Paying subscriber ({plan}) — {bal:,} credits in unified wallet. "
-        "Debit applies to OpenRouter and renders; suggest Wallet top-up if balance is low before expensive jobs."
+        "Debit applies to direct Anthropic usage and FAL renders; suggest Wallet top-up if balance is low before expensive jobs."
     )
 
 
@@ -9758,14 +10012,8 @@ def system_prompt(
     selected_image_model = store.normalize_image_model(image_model)
     image_model_labels = {
         "seedream_edit": "Seedream 4.5 Edit (canonical skeleton lock)",
-        "grok_imagine": "Grok Imagine Quality",
-        "grok_imagine_standard": "Grok Imagine",
-        "ernie_image": "ERNIE-Image",
-        "seedream45": "Seedream 4.5",
-        "imagen4_fast": "Imagen 4 Fast",
-        "imagen4_preview": "Imagen 4 Preview",
-        "imagen4_ultra": "Imagen 4 Ultra",
-        "flux_lora_skeleton": "NYPTID Skeleton LoRA",
+        "seedream_v4": "Seedream 4.0",
+        "seedream_v5_lite": "Seedream 5.0 Lite",
     }
     image_model_hint = (
         "USER IMAGE MODEL (session picker): "
@@ -9780,15 +10028,6 @@ def system_prompt(
         "seedance": "Seedance 2.0 (default balanced motion)",
         "pixverse": "Pixverse V6 (permissive moderation)",
         "kling_pro": "Kling 2.1 Pro (premium motion, highest cost)",
-        "grok_imagine_video": "Grok Imagine Video (low-cost xAI I2V)",
-        "grok_imagine_video_15": "Grok Imagine Video 1.5 (higher-quality xAI I2V)",
-        "grok_imagine_video_15_1080p": "Grok Imagine Video 1.5 1080p (expensive final xAI I2V)",
-        "kling21_standard": "Kling 2.1 Standard",
-        "pixverse_v6": "PixVerse V6",
-        "pixverse_c1": "PixVerse C1",
-        "kling21_pro": "Kling 2.1 Pro",
-        "veo3_fast": "Veo 3 Fast",
-        "kling21_master": "Kling 2.1 Master",
     }
     video_model_hint = (
         "USER IMAGE-TO-VIDEO MODEL (session picker): "
@@ -9905,11 +10144,11 @@ WORLD-CLASS YOUTUBE PRODUCTION STANDARD:
 - Treat long-form and short-form differently: shorts need immediate clarity and visual lockstep; long-form needs durable
   narrative tension, chapter pacing, and frame-accurate timestamps.
 - Short-form analytics rule: when the user asks about a Short's performance, next upload, title, SEO, package, or what
-  will work for a Shorts channel, use `get_channel_analytics` and read `shortform_performance_comparison`. Compare the
-  latest Short against `best_prior_short` using Shorts metrics: views, engaged views when present, stayed-to-watch/swipe
-  signals when present, average percentage viewed, average view duration, and interactions per view. Never substitute
-  long-form CTR/chapter logic for Shorts packaging. If engaged views or swipe/stayed-to-watch are missing from the API,
-  say they are missing and use the measured rows that are present.
+  will work for a Shorts channel, use `get_channel_analytics` and read `shortform_performance_comparison`. If
+  `comparison_ready` is true, treat `comparison_brief` as ground truth — never say the tool only pulled memory, never
+  interview the user for views/retention already listed, and never invent missing engaged-views/swipe metrics. Compare
+  retention_winner / views_winner / best_prior_short using measured Shorts metrics. Never substitute long-form
+  CTR/chapter logic for Shorts packaging.
 - Lexi Manhwa / Lexi Manhua packaging rule: titles should sound like a professional anime/manhwa Shorts SEO strategist:
   character conflict, betrayal, revenge, impossible comeback, secret identity, power reveal, or emotional cliffhanger in
   plain language. Avoid generic labels like "anime edit", "manhwa recap", or broad genre-only titles unless the data
@@ -9970,7 +10209,7 @@ Always explain: what's working, what's not, recommended next 1–3 actions, then
 
 ═══ PREMIUM LONG-FORM (documentaries — Jake Tran / Magnates / MrBeast pacing bar) ═══
 Quality target: feels like a $5k+ edit — NOT "good enough AI."
-- Voice: ElevenLabs on channel config (`voice_provider_default`); never downgrade to cheap TTS unless user insists.
+- Voice: FAL MiniMax on channel config (`voice_provider_default`); never route narration outside the effective FAL TTS policy.
 - Script: `load_skill script-writing` + CHANNEL.md; cold open hook in first 8s; pattern interrupts every 45–90s;
   no dead air; escalate stakes; land a crisp outro CTA.
 - Visuals: photoreal premium stills per channel FLOW; stat cards / motion graphics where channel allows.
@@ -10563,8 +10802,21 @@ async def _run_turn_impl(
             job_id = str(job.get("job_id") or "").strip()
             if str(job.get("kind") or "") == "shortform" and job_id:
                 if not plan_only:
-                    from studio_agent.tools import cancel_shortform_job
-                    cancel_shortform_job(job_id)
+                    cancel_command_id = "ideation-cancel:" + hashlib.sha256(
+                        f"{sid}\0{job_id}\0{intent_text or user_text}".encode("utf-8")
+                    ).hexdigest()[:24]
+                    try:
+                        execute_tool_logged(
+                            "cancel_production_job",
+                            {"job_id": job_id, "command_id": cancel_command_id},
+                            user_id=str(user_id or ""),
+                            content_format=str(content_format or "short"),
+                            session_id=sid,
+                        )
+                    except Exception:
+                        # Keep session cleanup best-effort; the failed durable
+                        # receipt remains available for diagnosis and replay.
+                        pass
                 blocked_ids.append(job_id)
         session = store.update_session(
             sid,
@@ -10601,7 +10853,19 @@ async def _run_turn_impl(
         and isinstance(session.get("pending_scene_repair"), dict)
         and session.get("pending_scene_repair")
     )
-    if not plan_only or pending_command_answer:
+    # Expand / scene-repair commands must run even in Plan mode — "make the rest
+    # of the scenes" is production continuity on an already-started short, not a
+    # planning discussion. Thumbnail create remains the other Plan-mode exception.
+    from studio_agent.command_contract import scene_repair_candidate as _scene_repair_candidate
+
+    allow_command_layer = bool(
+        not plan_only
+        or pending_command_answer
+        or bool(session.get("short_expansion_intake"))
+        or _wants_expand_visual_proof_short(intent_text or user_text)
+        or _scene_repair_candidate(intent_text or user_text)
+    )
+    if allow_command_layer:
         semantic_command = await _apply_model_agnostic_studio_command(
             session=session,
             user_id=user_id,
@@ -10835,35 +11099,6 @@ async def _run_turn_impl(
         ) or session
         await _fire_event(emit, "pending_actions", actions=[])
 
-    # Expand Scene 1 IMMEDIATELY — before next-short / hard-commit / concept recovery
-    # can open a brand-new Approve card for the same title.
-    if not plan_only and (
-        _wants_expand_visual_proof_short(intent_text or user_text)
-        or bool(session.get("short_expansion_intake"))
-        or (
-            _session_has_expandable_proof_job(session, reply_to=reply_to)
-            and re.search(
-                r"\b(?:other|rest|remaining)\s+(?:\d+\s+)?scenes?\b|\banimate\s+them\b|"
-                r"\b(?:like|love)\s+scene\s*(?:1|one)\b",
-                str(intent_text or user_text or "").lower(),
-            )
-        )
-    ):
-        expanded_early = await _apply_expand_visual_proof_short(
-            session=session,
-            user_id=user_id,
-            user_text=intent_text or user_text,
-            content_format=content_format,
-            emit=emit,
-            membership_plan=membership_plan,
-            billing_profile=billing_profile,
-            approval_mode=approval_mode,
-            reasoning_depth=reasoning_depth,
-            reply_to=reply_to,
-        )
-        if expanded_early is not None:
-            return expanded_early
-
     if not reply_to and store.is_context_ingest_request(intent_text or user_text) and not session.get("context_ingested"):
         parent_id = store.resolve_ingest_parent_session(session, user_text, user_id=str(user_id))
         if parent_id:
@@ -10956,21 +11191,6 @@ async def _run_turn_impl(
         })
         session = store.update_session(sid, messages=messages, production_intent=production_intent) or session
 
-    if not plan_only and not reply_to and _may_be_scene_quality_request(intent_text or user_text):
-        if session.get("short_expansion_intake"):
-            session = store.update_session(sid, short_expansion_intake={}) or session
-        audited = await _apply_bulk_artifact_audit(
-            session=session,
-            user_id=user_id,
-            user_text=intent_text or user_text,
-            content_format=content_format,
-            emit=emit,
-            approval_mode=approval_mode,
-            reasoning_depth=reasoning_depth,
-        )
-        if audited is not None:
-            return audited
-
     if not plan_only and not reply_to and _wants_bulk_scene_ship_request(user_text):
         shipped = await _apply_bulk_scene_ship(
             session=session,
@@ -11041,22 +11261,6 @@ async def _run_turn_impl(
         )
         if scene_fixed is not None:
             return scene_fixed
-
-    if not plan_only and (_wants_expand_visual_proof_short(intent_text or user_text) or bool(session.get("short_expansion_intake"))):
-        expanded = await _apply_expand_visual_proof_short(
-            session=session,
-            user_id=user_id,
-            user_text=intent_text or user_text,
-            content_format=content_format,
-            emit=emit,
-            membership_plan=membership_plan,
-            billing_profile=billing_profile,
-            approval_mode=approval_mode,
-            reasoning_depth=reasoning_depth,
-            reply_to=reply_to,
-        )
-        if expanded is not None:
-            return expanded
 
     if not plan_only and not reply_to and _is_continue_production_request(user_text) and not session.get("skip_job_recovery"):
         continued = await _continue_active_production(
@@ -13183,6 +13387,9 @@ async def _run_turn_impl(
     acc_completion_tokens = 0
     model_provider = "openrouter"
     effective_model = model
+    production_tools_allowed = not _blocks_brand_new_production(intent_text or user_text)
+    production_tool_offered = False
+    offered_tool_names: frozenset[str] = frozenset()
 
     if not skip_model_loop:
         tools = tools_for_user(str(user_id or session.get("user_id") or ""))
@@ -13204,11 +13411,13 @@ async def _run_turn_impl(
                 if _plan_mode_blocks_tool(str(t.get("function", {}).get("name") or ""))
             }
         # DEFAULT DENY: hide start_shortform/longform unless user hard-committed.
-        if _blocks_brand_new_production(intent_text or user_text):
+        production_tools_allowed = not _blocks_brand_new_production(intent_text or user_text)
+        if not production_tools_allowed:
             blocked_production_tools |= set(BRAND_NEW_PRODUCTION_TOOLS)
-        # Extra belt: research preflights never expose production tools either.
-        if live_demand_preflight_required or public_search_preflight_required or channel_url_reference_required or competitor_channel_required:
-            blocked_production_tools |= set(BRAND_NEW_PRODUCTION_TOOLS)
+        # Research preflight already ran BEFORE the model loop. Do NOT hide production
+        # tools on hard-commit turns — that made the model invent "tool availability
+        # issue" / "once the tool comes back" while start_shortform was simply unoffered.
+        # Soft research-only turns stay gated by production_tools_allowed above.
         if conversational_turn and not store.should_auto_run_tools(intent_text or user_text):
             blocked_production_tools |= set(CONVERSATIONAL_DATA_TOOLS)
         preflight_reference_complete = bool(
@@ -13226,6 +13435,32 @@ async def _run_turn_impl(
                 if t.get("function", {}).get("name") not in blocked_production_tools
             ]
         offered_tool_names = _offered_model_tool_names(tools)
+        production_tool_offered = bool(
+            offered_tool_names & {"start_shortform_generate", "start_longform_render"}
+        )
+        # Tell the model the truth when production tools are gated so it never invents
+        # "tool availability / offline" excuses for intentional Plan/no-commit gates.
+        if not production_tool_offered and not plan_only:
+            messages.append({
+                "role": "system",
+                "content": (
+                    "[Studio production gate] start_shortform_generate / start_longform_render are "
+                    "intentionally not offered this turn because no hard production commit was detected. "
+                    "Do NOT claim tools are offline, unavailable, or will 'come back online'. "
+                    "Present/refine the concept plan and ask for a hard commit: "
+                    "'yes make it', 'render that plan', 'go ahead and render', or 'make the first scene'."
+                ),
+            })
+        elif production_tool_offered:
+            messages.append({
+                "role": "system",
+                "content": (
+                    "[Studio production tools ONLINE] start_shortform_generate is offered and callable now. "
+                    "Do NOT claim a tool availability issue or build a 'manual blueprint until tools return'. "
+                    "If the user committed to render, call start_shortform_generate with the locked title, "
+                    "duration, scene_count, render_style, image_model_id, and visual_brief."
+                ),
+            })
 
         # Tyler loop: full tools SOP only when this turn plans/calls tools (task-maker).
         # Chat-only turns keep the thin card from system_prompt — no 53-tool dictionary.
@@ -13280,14 +13515,48 @@ async def _run_turn_impl(
         compacted = store.compact_session_if_needed(sid)
         if compacted:
             session = compacted
+        # Never send orphaned/incomplete tool chains to the provider — that freezes
+        # Kimi/OpenRouter/Claude mid-turn and makes tool calling intermittent.
+        messages = store.align_tool_message_boundary(messages)
         model_messages = store.trim_messages_for_model(messages, session=session)
         await _fire_event(emit, "model_round", round=round_idx + 1)
-        must_execute_tool = (
+        # Preflight research must not suppress force_tool_call for a hard production
+        # commit that still needs start_shortform_generate.
+        production_force = bool(
+            production_tool_offered
+            and production_tools_allowed
+            and not ideation_turn
+            and "start_shortform_generate" not in {str(f.name or "") for f in tool_fires}
+            and "start_longform_render" not in {str(f.name or "") for f in tool_fires}
+            and (
+                _allows_brand_new_production_tool(intent_text or user_text)
+                or _wants_production_execution(intent_text or user_text)
+            )
+        )
+        must_execute_tool = production_force or (
             not preflight_tool_fires
             and not tool_fires
             and not ideation_turn
             and _requires_tool_execution(intent_text or user_text)
         )
+        round_tools = tools
+        if production_force:
+            longform_commit = bool(
+                str(content_format or "").lower().startswith("long")
+                or re.search(r"\blong[ -]?form\b|\bfull(?:-length)?\s+video\b", str(intent_text or user_text), re.I)
+            )
+            required_name = "start_longform_render" if longform_commit else "start_shortform_generate"
+            if required_name not in offered_tool_names:
+                alternate = "start_shortform_generate" if required_name == "start_longform_render" else "start_longform_render"
+                required_name = alternate if alternate in offered_tool_names else required_name
+            # A forced production turn offers exactly the required mutation.
+            # The model cannot opportunistically call research or a different
+            # production tool merely because tool_choice is required.
+            round_tools = [
+                tool for tool in tools
+                if str(tool.get("function", {}).get("name") or "") == required_name
+            ]
+        round_offered_tool_names = _offered_model_tool_names(round_tools)
         training_capture.capture_event(
             str(user_id),
             "model_request",
@@ -13295,7 +13564,7 @@ async def _run_turn_impl(
                 "round": round_idx + 1,
                 "model": model,
                 "messages": model_messages,
-                "tools": tools,
+                "tools": round_tools,
                 "reasoning_depth": reasoning_depth,
                 "web_search": web_search,
                 "force_tool_call": must_execute_tool,
@@ -13315,7 +13584,7 @@ async def _run_turn_impl(
             })
         resp = await openrouter.chat_completion(
             messages=model_messages,
-            tools=tools,
+            tools=round_tools,
             model=model,
             reasoning_depth=reasoning_depth,
             web_search=web_search,
@@ -13343,7 +13612,9 @@ async def _run_turn_impl(
         acc_prompt_tokens += int(usage.get("prompt_tokens", 0) or 0)
         acc_completion_tokens += int(usage.get("completion_tokens", 0) or 0)
 
-        tool_calls = msg.get("tool_calls") or []
+        # Normalize again in case a provider path bypassed message_from_response.
+        msg = openrouter.normalize_assistant_message(msg if isinstance(msg, dict) else {})
+        tool_calls = list(msg.get("tool_calls") or [])
         content = msg.get("content") or ""
 
         if tool_calls:
@@ -13363,7 +13634,7 @@ async def _run_turn_impl(
                     args = {}
                 if not isinstance(args, dict):
                     args = {}
-                unoffered_result = _unoffered_model_tool_result(name, offered_tool_names)
+                unoffered_result = _unoffered_model_tool_result(name, round_offered_tool_names)
                 if unoffered_result is not None:
                     tool_fires.append(ToolFire(name, dict(args), unoffered_result))
                     messages.append({
@@ -13647,7 +13918,7 @@ async def _run_turn_impl(
                     result = _execute_offered_model_tool(
                         name,
                         args,
-                        offered_tool_names=offered_tool_names,
+                        offered_tool_names=round_offered_tool_names,
                         user_id=user_id,
                         content_format=content_format,
                         session_id=sid,
@@ -13748,62 +14019,160 @@ async def _run_turn_impl(
                     message="Retrying the required Studio tool call...",
                 )
                 continue
-            if store.is_competitor_channel_reference_request(intent_text or user_text):
-                from studio_agent.turn_plan import competitor_channel_search_query, extract_competitor_channel_label
-
-                competitor_label = extract_competitor_channel_label(intent_text or user_text) or "reference channel"
-                search_query = competitor_channel_search_query(intent_text or user_text)
-                if search_query:
-                    fallback_fires: list[ToolFire] = []
-                    window_days = _public_search_window_days(intent_text or user_text)
-                    fresh = _public_search_use_fresh(intent_text or user_text, public_demand=True)
-                    for pf_name, pf_args in (
-                        (
-                            "get_public_search_trends",
-                            {
-                                "query": search_query,
-                                "days": window_days,
-                                "fresh": fresh,
-                            },
-                        ),
-                    ):
-                        try:
-                            pf_result = execute_tool_logged(
-                                pf_name,
-                                pf_args,
-                                user_id=user_id,
-                                content_format=content_format,
-                                session_id=sid,
-                            )
-                        except Exception as exc:
-                            pf_result = json.dumps({"error": str(exc)}, indent=2)
-                        fallback_fires.append(ToolFire(pf_name, dict(pf_args), pf_result))
-                        messages.append(_tool_observation_message(pf_name, pf_result))
-                    if _has_public_demand_tool(fallback_fires):
-                        tool_fires.extend(fallback_fires)
+            # Deterministic backend recovery — do not depend on the model emitting tools.
+            if (
+                public_search_preflight_required
+                or live_demand_preflight_required
+                or store.is_public_youtube_research_request(intent_text or user_text)
+                or store.is_competitor_channel_reference_request(intent_text or user_text)
+            ):
+                fallback_fires = await _run_public_youtube_research_preflight(
+                    emit=emit,
+                    user_id=str(user_id),
+                    content_format=content_format,
+                    session_id=sid,
+                    messages=messages,
+                    user_text=intent_text or user_text,
+                    session=session,
+                    active_registry=active_registry,
+                    active_channel_id=active_channel_id,
+                )
+                if fallback_fires:
+                    tool_fires.extend(fallback_fires)
+                    if _has_successful_public_demand_tool(tool_fires):
                         assistant_text = sanitize_assistant_text(
-                            "\n\n".join(
-                                section
-                                for section in [
-                                    f"Public reference-channel check for **{competitor_label}**:",
-                                    _grounded_research_summary_from_tools(
-                                        fallback_fires,
-                                        active_label=competitor_label,
-                                        user_text=intent_text or user_text,
-                                        include_channel=False,
-                                        search_query=search_query,
-                                    ),
-                                ]
-                                if section.strip()
+                            _synthesize_turn_from_evidence(
+                                tool_fires,
+                                user_text=user_text,
+                                turn_plan=turn_plan,
+                                session=session,
+                                active_registry=active_registry,
+                                active_channel_id=active_channel_id,
+                                has_reference_upload=bool(reference_context),
+                                messages=messages,
                             )
                         )
                         break
+            # Hard production commit + tools offered, but model still returned text only.
+            if (
+                production_force
+                and production_tool_offered
+                and not any(
+                    str(f.name or "") in {"start_shortform_generate", "start_longform_render"}
+                    for f in tool_fires
+                )
+            ):
+                recovered = _recover_requested_production(session, intent_text or user_text)
+                if not recovered:
+                    recovered = _build_requested_topic_production(
+                        session,
+                        intent_text or user_text,
+                        content_format=content_format,
+                        active_registry=active_registry,
+                        active_channel_id=active_channel_id,
+                        messages=messages,
+                    )
+                if recovered:
+                    name, args = recovered
+                    if name == "start_shortform_generate":
+                        args = _prepare_shortform_production_args(args, session, messages=messages)
+                    args = _channel_guard_tool_args(name, args, active_registry, active_channel_id)
+                    await _fire_tool_start(
+                        emit,
+                        name,
+                        args=args if isinstance(args, dict) else {},
+                        round=round_idx + 1,
+                        awaiting_approval=approval_mode == "confirm" and requires_approval(name),
+                    )
+                    if approval_mode == "confirm" and requires_approval(name):
+                        action_id = f"act_{uuid.uuid4().hex[:12]}"
+                        pending = _upsert_production_pending(pending, {
+                            "id": action_id,
+                            "tool": name,
+                            "arguments": args,
+                            "summary": f"{name}({json.dumps(args)[:200]})",
+                        })
+                        prepared_pending = _prepare_pending_actions(pending, session, messages=messages)
+                        pending = prepared_pending
+                        assistant_text = sanitize_assistant_text(
+                            content
+                            or "I prepared production from your locked concept. Approve to start the render."
+                        )
+                        messages.append({"role": "assistant", "content": assistant_text})
+                        store.update_session(
+                            sid,
+                            messages=messages,
+                            pending_actions=prepared_pending,
+                            last_production={
+                                "tool": name,
+                                "arguments": args,
+                                "updated_at": time.time(),
+                            },
+                        )
+                        await _fire_event(emit, "pending_actions", actions=prepared_pending)
+                        await _fire_event(emit, "tool_end", tool=name, status="awaiting_approval")
+                        break
+                    try:
+                        result = execute_tool_logged(
+                            name,
+                            args,
+                            user_id=user_id,
+                            content_format=content_format,
+                            session_id=sid,
+                        )
+                    except Exception as exc:
+                        result = json.dumps({"error": str(exc)})
+                    tool_fires.append(ToolFire(name, dict(args), result))
+                    messages.append(_tool_observation_message(name, result))
+                    if name in JOB_START_TOOLS:
+                        active_jobs = merge_active_jobs(active_jobs, extract_jobs_from_tool(name, result))
+                        store.update_session(
+                            sid,
+                            active_jobs=active_jobs,
+                            last_production={
+                                "tool": name,
+                                "arguments": args,
+                                "updated_at": time.time(),
+                            },
+                        )
+                        await _fire_event(emit, "active_jobs", jobs=active_jobs)
+                    await _fire_tool_end(emit, name, status="ok", args=args, result=result)
+                    assistant_text = sanitize_assistant_text(
+                        "Production tools are online — I started the render from your locked concept."
+                    )
+                    break
             if not str(assistant_text or "").strip():
                 assistant_text = (
                     "Studio could not execute the required tool after repeated forced attempts. "
                     "No tool result was created, so I will not claim the work ran. Retry once or choose a stronger runner model."
                 )
             break
+        # False "tools offline" narration while production tools were offered this turn.
+        if (
+            production_tool_offered
+            and _assistant_claims_tools_unavailable(content or "")
+            and not any(
+                str(f.name or "") in {"start_shortform_generate", "start_longform_render"}
+                for f in tool_fires
+            )
+            and round_idx + 1 < MAX_TOOL_ROUNDS
+        ):
+            messages.append({
+                "role": "system",
+                "content": (
+                    "[Studio execution contract violation: production tools are ONLINE and offered. "
+                    "You claimed a tool availability issue without calling start_shortform_generate. "
+                    "Call start_shortform_generate now with the locked title/duration/scenes, or if the "
+                    "user has not hard-committed, ask for 'yes make it' / 'render that plan' without "
+                    "claiming tools are offline.]"
+                ),
+            })
+            await _fire_event(
+                emit,
+                "status",
+                message="Production tools are online — retrying the required tool call...",
+            )
+            continue
         assistant_text = sanitize_assistant_text(content or "")
         break
 
@@ -13849,7 +14218,7 @@ async def _run_turn_impl(
         )
         and (preflight_tool_fires or tool_fires or has_reference_upload)
     ):
-        if not _has_public_demand_tool(tool_fires):
+        if _public_demand_needs_retry(tool_fires):
             _append_late_public_search(
                 tool_fires,
                 user_text=user_text,
@@ -13918,9 +14287,22 @@ async def _run_turn_impl(
         elif (
             (active_registry or active_channel_id)
             and _has_channel_analytics_tool(tool_fires)
-            and _assistant_stalled_on_channel_data(assistant_text)
+            and (
+                _assistant_stalled_on_channel_data(assistant_text)
+                or (
+                    bool(_latest_shortform_comparison(tool_fires).get("comparison_ready"))
+                    and _assistant_asks_user_for_known_analytics(assistant_text)
+                )
+            )
         ):
-            if public_search_preflight_required and _has_public_demand_tool(tool_fires):
+            compare = _latest_shortform_comparison(tool_fires)
+            if compare.get("comparison_ready"):
+                assistant_text = _grounded_shortform_comparison_from_tools(
+                    tool_fires,
+                    active_label=active_label,
+                    user_text=user_text,
+                )
+            elif public_search_preflight_required and _has_public_demand_tool(tool_fires):
                 assistant_text = _grounded_research_summary_from_tools(
                     tool_fires,
                     active_label=active_label,
@@ -14257,8 +14639,8 @@ async def _run_turn_impl(
                         production_intent=production_intent,
                     )
                 )
-                # Keep working: if the model narrated research/work without tools, run them now.
-                if research_needed and not _has_public_demand_tool(tool_fires):
+                # Keep working: if research is missing OR previous public tools only hard-failed, re-run.
+                if research_needed and _public_demand_needs_retry(tool_fires):
                     await _fire_event(
                         emit,
                         "status",
@@ -14280,7 +14662,7 @@ async def _run_turn_impl(
                     session = store.get_session(sid) or session
                 if (
                     research_needed
-                    and _has_public_demand_tool(tool_fires)
+                    and _has_successful_public_demand_tool(tool_fires)
                 ):
                     grounded_status = _synthesize_turn_from_evidence(
                         tool_fires,
@@ -14292,14 +14674,14 @@ async def _run_turn_impl(
                         has_reference_upload=has_reference_upload,
                         messages=messages,
                     )
-                elif ideation_turn and _has_public_demand_tool(tool_fires):
+                elif ideation_turn and _has_successful_public_demand_tool(tool_fires):
                     grounded_status = _grounded_ideation_research_from_tools(
                         tool_fires,
                         active_label=active_label,
                         user_text=user_text,
                         has_reference_upload=has_reference_upload,
                     )
-                elif (public_search_preflight_required or research_needed) and _has_public_demand_tool(tool_fires):
+                elif (public_search_preflight_required or research_needed) and _has_successful_public_demand_tool(tool_fires):
                     from studio_agent.conversation import (
                         deterministic_conversational_research_reply,
                         strip_robot_research_artifacts,
@@ -14340,7 +14722,7 @@ async def _run_turn_impl(
                             active_label=active_label,
                         )
             # Never ship internal guard/meta text as the final user answer when research was required.
-            if _is_meta_guard_reply(grounded_status or guarded) and _has_public_demand_tool(tool_fires):
+            if _is_meta_guard_reply(grounded_status or guarded) and _has_successful_public_demand_tool(tool_fires):
                 grounded_status = _synthesize_turn_from_evidence(
                     tool_fires,
                     user_text=user_text,
@@ -14351,12 +14733,181 @@ async def _run_turn_impl(
                     has_reference_upload=has_reference_upload,
                     messages=messages,
                 )
+            # Last-chance recovery: do not leave the creator stuck on a meta guard.
             if _is_meta_guard_reply(grounded_status or guarded) and not grounded_status:
-                grounded_status = (
-                    "I hit a tool-execution guard while researching. "
-                    "Retry with: research what's working in [your niche] — Studio will pull Live Demand automatically."
-                )
+                if research_needed and _public_demand_needs_retry(tool_fires):
+                    await _fire_event(
+                        emit,
+                        "status",
+                        message="Recovering: re-running research tools after a guard block...",
+                    )
+                    recover_fires = await _run_public_youtube_research_preflight(
+                        emit=emit,
+                        user_id=str(user_id),
+                        content_format=content_format,
+                        session_id=sid,
+                        messages=messages,
+                        user_text=intent_text or user_text,
+                        session=session,
+                        active_registry=active_registry,
+                        active_channel_id=active_channel_id,
+                    )
+                    tool_fires.extend(recover_fires)
+                    preflight_tool_fires.extend(recover_fires)
+                    session = store.get_session(sid) or session
+                    if _has_successful_public_demand_tool(tool_fires):
+                        grounded_status = _synthesize_turn_from_evidence(
+                            tool_fires,
+                            user_text=user_text,
+                            turn_plan=turn_plan,
+                            session=session,
+                            active_registry=active_registry,
+                            active_channel_id=active_channel_id,
+                            has_reference_upload=has_reference_upload,
+                            messages=messages,
+                        )
+                if not grounded_status and (active_registry or active_channel_id) and _has_channel_analytics_tool(tool_fires):
+                    grounded_status = _grounded_channel_status_from_tools(
+                        tool_fires,
+                        active_label=active_label,
+                    )
+                if not grounded_status:
+                    # Surface the real tool error instead of a dead-end "retry research" loop.
+                    failed = [
+                        f"{fire.name}: {str(_tool_fire_payload(fire).get('error') or fire.result or 'failed')[:160]}"
+                        for fire in tool_fires
+                        if _tool_fire_failed(fire)
+                    ]
+                    if failed:
+                        grounded_status = (
+                            "Research tools could not complete this turn:\n- "
+                            + "\n- ".join(failed[:3])
+                            + "\n\nI still have this chat context — send your next instruction and I will run the tools again."
+                        )
+                    else:
+                        grounded_status = (
+                            "I could not finish a clean tool-backed research answer in this turn. "
+                            "Your chat and any completed tool results are saved — send a short follow-up "
+                            "(for example: 'pull live demand for dark psychology shorts') and I will run the tools again."
+                        )
             assistant_text = sanitize_assistant_text(grounded_status or guarded)
+        # Hard override: when analytics comparison_ready is true, never ship
+        # "memory only" / interview-for-metrics answers.
+        if (
+            _has_channel_analytics_tool(tool_fires)
+            and bool(_latest_shortform_comparison(tool_fires).get("comparison_ready"))
+            and (
+                _assistant_stalled_on_channel_data(assistant_text)
+                or _assistant_asks_user_for_known_analytics(assistant_text)
+            )
+        ):
+            assistant_text = sanitize_assistant_text(
+                _grounded_shortform_comparison_from_tools(
+                    tool_fires,
+                    active_label=active_label,
+                    user_text=user_text,
+                )
+            )
+        # Never ship "tools offline" when production tools were offered this turn.
+        if (
+            production_tool_offered
+            and _assistant_claims_tools_unavailable(assistant_text)
+            and not any(
+                str(f.name or "") in {"start_shortform_generate", "start_longform_render"}
+                for f in tool_fires
+            )
+        ):
+            if production_tools_allowed:
+                recovered = _recover_requested_production(session, intent_text or user_text)
+                if not recovered:
+                    recovered = _build_requested_topic_production(
+                        session,
+                        intent_text or user_text,
+                        content_format=content_format,
+                        active_registry=active_registry,
+                        active_channel_id=active_channel_id,
+                        messages=messages,
+                    )
+                if recovered:
+                    name, args = recovered
+                    if name == "start_shortform_generate":
+                        args = _prepare_shortform_production_args(args, session, messages=messages)
+                    args = _channel_guard_tool_args(name, args, active_registry, active_channel_id)
+                    await _fire_tool_start(
+                        emit,
+                        name,
+                        args=args if isinstance(args, dict) else {},
+                        round=0,
+                        awaiting_approval=approval_mode == "confirm" and requires_approval(name),
+                    )
+                    if approval_mode == "confirm" and requires_approval(name):
+                        action_id = f"act_{uuid.uuid4().hex[:12]}"
+                        pending = _upsert_production_pending(pending, {
+                            "id": action_id,
+                            "tool": name,
+                            "arguments": args,
+                            "summary": f"{name}({json.dumps(args)[:200]})",
+                        })
+                        prepared_pending = _prepare_pending_actions(pending, session, messages=messages)
+                        pending = prepared_pending
+                        assistant_text = sanitize_assistant_text(
+                            "Production tools are online. I prepared the render from your locked concept — "
+                            "approve to start stills generation."
+                        )
+                        store.update_session(
+                            sid,
+                            pending_actions=prepared_pending,
+                            last_production={
+                                "tool": name,
+                                "arguments": args,
+                                "updated_at": time.time(),
+                            },
+                        )
+                        await _fire_event(emit, "pending_actions", actions=prepared_pending)
+                        await _fire_event(emit, "tool_end", tool=name, status="awaiting_approval")
+                    else:
+                        try:
+                            result = execute_tool_logged(
+                                name,
+                                args,
+                                user_id=user_id,
+                                content_format=content_format,
+                                session_id=sid,
+                            )
+                        except Exception as exc:
+                            result = json.dumps({"error": str(exc)})
+                        tool_fires.append(ToolFire(name, dict(args), result))
+                        if name in JOB_START_TOOLS:
+                            active_jobs = merge_active_jobs(
+                                active_jobs,
+                                extract_jobs_from_tool(name, result),
+                            )
+                            store.update_session(
+                                sid,
+                                active_jobs=active_jobs,
+                                last_production={
+                                    "tool": name,
+                                    "arguments": args,
+                                    "updated_at": time.time(),
+                                },
+                            )
+                            await _fire_event(emit, "active_jobs", jobs=active_jobs)
+                        await _fire_tool_end(emit, name, status="ok", args=args, result=result)
+                        assistant_text = sanitize_assistant_text(
+                            "Production tools are online — I started the render from your locked concept."
+                        )
+                else:
+                    assistant_text = sanitize_assistant_text(
+                        "Production tools are online. Your concept is ready — say **yes make it** or "
+                        "**render that plan** and I will call start_shortform_generate immediately "
+                        "(Confirm mode will show Approve before spend)."
+                    )
+            else:
+                assistant_text = sanitize_assistant_text(
+                    "Production tools are online, but this turn is still in plan mode until you hard-commit. "
+                    "Say **yes make it**, **render that plan**, or **make the first scene** and I will open "
+                    "the production tool path — I will not claim tools are offline."
+                )
         if assistant_text and _assistant_denies_public_research_tool(assistant_text):
             assistant_text = sanitize_assistant_text(
                 _recover_public_search_denial(
@@ -14526,7 +15077,7 @@ async def _run_turn_impl(
         effective_model,
     )
     try:
-        if model_provider != "anthropic_fallback":
+        if provider_policy.normalize_provider(model_provider) != "anthropic":
             prompt_ppm, completion_ppm = await openrouter.model_pricing(model)
             billed_model = model
     except Exception:
@@ -14748,6 +15299,10 @@ async def _approve_action_impl(
             args = _prepare_shortform_production_args(
                 args, fresh, force_fresh=force_fresh, messages=list(fresh.get("messages") or []),
             )
+            # Convert multi-scene Approve payload → Scene 1 proof for real execution.
+            args = store._prepare_shortform_execution_args(
+                args, list(fresh.get("messages") or []), session=fresh,
+            )
             args = _force_production_title_on_args(args, session=fresh, user_text=latest_user or resolved)
             if force_fresh or args.get("_force_fresh"):
                 args = _force_fresh_shortform_args(args)
@@ -14785,7 +15340,18 @@ async def _approve_action_impl(
                         job_id = m_job.group(1)
                         break
             kind = "shortform"
-            reedit_res = re_edit_production(job_id or "unknown", f"[From approved pending during re-edit thread] {args}", kind)
+            reedit_res = execute_tool_logged(
+                "re_edit_production",
+                {
+                    "job_id": job_id or "unknown",
+                    "instruction": f"[From approved pending during re-edit thread] {args}",
+                    "kind": kind,
+                    "command_id": action_id,
+                },
+                user_id=session["user_id"],
+                content_format=session.get("content_format") or "short",
+                session_id=sid,
+            )
             return {"session_id": sid, "assistant_message": "Redirected pending start to surgical re-edit for the replied-to video.", "result": reedit_res}
 
         tool_error = ""

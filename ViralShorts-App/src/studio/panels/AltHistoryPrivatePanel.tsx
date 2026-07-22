@@ -19,7 +19,7 @@
  * Backend reuse:
  *   GET  /api/catalyst/hub?channel_id=...    → channel snapshot + audit
  *   POST /api/catalyst/hub/refresh           → re-sync
- *   POST /api/alt-history-private/generate-topics → Grok topic gen
+ *   POST /api/alt-history-private/generate-topics → direct Anthropic topic gen
  */
 import { useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import {
@@ -510,7 +510,7 @@ export default function AltHistoryPrivatePanel({ onPickNiche }: AltHistoryPrivat
                     className="rounded-md bg-violet-500 hover:bg-violet-600 disabled:bg-zinc-800 disabled:text-zinc-500 px-4 py-2.5 text-sm font-semibold text-white flex items-center justify-center gap-2"
                 >
                     {genLoading ? (
-                        <><Loader2 className="h-4 w-4 animate-spin" /> Grok generating 8 topics…</>
+                        <><Loader2 className="h-4 w-4 animate-spin" /> Claude generating 8 topics…</>
                     ) : (
                         <><Sparkles className="h-4 w-4" /> Generate 8 topic ideas (channel-tuned)</>
                     )}
@@ -583,7 +583,7 @@ export default function AltHistoryPrivatePanel({ onPickNiche }: AltHistoryPrivat
                             );
                         })()}
                         <div className="mt-2 text-[10px] text-zinc-500 italic">
-                            Grok sees this calibration on every topic-gen call — biases toward HIT patterns, avoids MISSED.
+                            Claude sees this calibration on every topic-gen call — biases toward HIT patterns, avoids MISSED.
                         </div>
                     </div>
                 )}
@@ -640,7 +640,7 @@ export default function AltHistoryPrivatePanel({ onPickNiche }: AltHistoryPrivat
                 the topic off to the Alt-History Battles render pipeline, which renders the cast as
                 <strong className="text-violet-300"> porcelain mannequins in period-correct armor on a photoreal world </strong>
                 (PR #145 lock — same cast grammar as Empire Magnates' red porcelain lane, adapted for alt-history).
-                Pipeline: Grok script → seedream stills (mannequin lock) → LTX i2v → ElevenLabs VO → ffmpeg compose.
+                Pipeline: Claude script → FAL Seedream stills (mannequin lock) → FAL LTX i2v → FAL MiniMax VO → ffmpeg compose.
                 <span className="text-zinc-500"> No skeleton-AI anatomical figures, no real human faces, no modern photoreal.</span>
             </div>
         </div>

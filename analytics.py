@@ -33,7 +33,7 @@ _reference_extract_video_metadata = None
 _reference_extract_audio_from_video = None
 _reference_transcribe_audio_with_grok = None
 _reference_audio_max_seconds = CATALYST_REFERENCE_AUDIO_MAX_SECONDS
-_clone_xai_api_key = ""
+_clone_json_completion = None
 _clone_analysis_prompt = ""
 _clone_template_system_prompts: dict[str, str] = {}
 _clone_heuristic_analysis_fn = None
@@ -111,18 +111,20 @@ def configure_reference_video_audit_hooks(
 
 def configure_clone_analysis_hooks(
     *,
-    xai_api_key: str = "",
+    json_completion=None,
     clone_analysis_prompt: str = "",
     template_system_prompts: dict | None = None,
     heuristic_clone_analysis_fn=None,
     clip_text=None,
+    **_legacy_provider_config,
 ) -> None:
-    global _clone_xai_api_key
+    global _clone_json_completion
     global _clone_analysis_prompt
     global _clone_template_system_prompts
     global _clone_heuristic_analysis_fn
     global _clone_clip_text
-    _clone_xai_api_key = str(xai_api_key or "").strip()
+    if callable(json_completion):
+        _clone_json_completion = json_completion
     _clone_analysis_prompt = str(clone_analysis_prompt or "").strip()
     if isinstance(template_system_prompts, dict):
         _clone_template_system_prompts = {
@@ -833,32 +835,18 @@ async def analyze_viral_video(topic: str, video_description: str, transcript_hin
         )
     )
     user_msg = "\n\n".join(user_parts)
-    if not _clone_xai_api_key or not _clone_analysis_prompt:
+    completion = _clone_json_completion
+    if not callable(completion) or not _clone_analysis_prompt:
         return heuristic
     try:
-        async with httpx.AsyncClient(timeout=60) as client:
-            resp = await client.post(
-                "https://api.x.ai/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {_clone_xai_api_key}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": "grok-3-mini-fast",
-                    "messages": [
-                        {"role": "system", "content": _clone_analysis_prompt},
-                        {"role": "user", "content": user_msg},
-                    ],
-                    "temperature": 0.6,
-                },
-            )
-            resp.raise_for_status()
-            content = resp.json()["choices"][0]["message"]["content"]
-            start = content.find("{")
-            end = content.rfind("}") + 1
-            if start == -1 or end == 0:
-                raise ValueError("No JSON in clone analysis response")
-            raw = json.loads(content[start:end])
+        raw = await completion(
+            _clone_analysis_prompt,
+            user_msg,
+            temperature=0.6,
+            timeout_sec=60,
+        )
+        if not isinstance(raw, dict):
+            raise ValueError("Clone analysis completion returned a non-object response")
     except Exception:
         return heuristic
     merged = dict(heuristic)
@@ -917,32 +905,18 @@ async def generate_clone_script(template: str, topic: str, viral_analysis: dict)
         "No yapping. No fluff. Every sentence is a hook or a fact bomb."
     )
     full_prompt = base_prompt + clone_override
-    if not _clone_xai_api_key:
-        raise RuntimeError("XAI clone script generation is not configured")
-
-    async with httpx.AsyncClient(timeout=60) as client:
-        resp = await client.post(
-            "https://api.x.ai/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {_clone_xai_api_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": "grok-3-mini-fast",
-                "messages": [
-                    {"role": "system", "content": full_prompt},
-                    {"role": "user", "content": "Clone this viral formula onto new topic: " + effective_topic},
-                ],
-                "temperature": 0.7,
-            },
-        )
-        resp.raise_for_status()
-        content = resp.json()["choices"][0]["message"]["content"]
-        start = content.find("{")
-        end = content.rfind("}") + 1
-        if start == -1 or end == 0:
-            raise ValueError("No JSON in clone script response")
-        return json.loads(content[start:end])
+    completion = _clone_json_completion
+    if not callable(completion):
+        raise RuntimeError("Anthropic clone script generation is not configured")
+    result = await completion(
+        full_prompt,
+        "Clone this viral formula onto new topic: " + effective_topic,
+        temperature=0.7,
+        timeout_sec=60,
+    )
+    if not isinstance(result, dict):
+        raise ValueError("Clone script completion returned a non-object response")
+    return result
 
 
 async def _extract_reference_preview_frames_from_urls(

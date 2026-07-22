@@ -46,7 +46,7 @@ def _workspace(tmp_path: Path, *, existing_clip: bool = False) -> Path:
                 "animate": True,
                 "approved_for_video": True,
                 "approved_for_animation": True,
-                "video_model": "grok_imagine_video",
+                "video_model": "seedance",
                 "duration_sec": 5.0,
             }
         ]),
@@ -222,23 +222,13 @@ def test_per_scene_animation_failures_accumulate_and_use_human_scene_numbers(tmp
     assert persisted["error"] == "Animation failed for scene(s): [2, 3]"
 
 
-def test_xai_credit_limit_falls_back_to_funded_fal_video_lane(tmp_path, monkeypatch):
+def test_seedance_content_policy_falls_back_to_funded_pixverse_lane(tmp_path, monkeypatch):
     still = tmp_path / "still.png"
     output = tmp_path / "clip.mp4"
     still.write_bytes(b"image")
-    fallback_calls: list[str] = []
+    endpoint_calls: list[str] = []
 
     monkeypatch.setattr(i2v_engine.render_simulation, "enabled", lambda: False)
-    monkeypatch.setattr(
-        i2v_engine,
-        "_xai_i2v_result",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            i2v_engine.I2VError(
-                'grok-imagine-video 403: {"code":"permission-denied",'
-                '"error":"used all available credits or reached its monthly spending limit"}'
-            )
-        ),
-    )
     monkeypatch.setattr(i2v_engine, "_ensure_fal", lambda: "test-fal-key")
     monkeypatch.setattr(
         i2v_engine,
@@ -248,7 +238,9 @@ def test_xai_credit_limit_falls_back_to_funded_fal_video_lane(tmp_path, monkeypa
 
     def fake_queue(endpoint, _args, *, timeout_sec):
         assert timeout_sec > 0
-        fallback_calls.append(endpoint)
+        endpoint_calls.append(endpoint)
+        if endpoint == i2v_engine.SEEDANCE_ENDPOINT:
+            raise i2v_engine.I2VError("content_policy_violation")
         return {
             "video": {"url": "https://example.test/video.mp4"},
             "_fal_endpoint": endpoint,
@@ -258,48 +250,46 @@ def test_xai_credit_limit_falls_back_to_funded_fal_video_lane(tmp_path, monkeypa
     monkeypatch.setattr(i2v_engine, "_queue_result", fake_queue)
     monkeypatch.setattr(i2v_engine, "_download", lambda _url, path: Path(path).write_bytes(b"video"))
     monkeypatch.setattr(compose, "strip_clip_audio", lambda _path: None)
+    monkeypatch.setattr(i2v_engine, "_verify_silent_output", lambda _path: _pass_still())
 
     result = i2v_engine.generate(
         still,
         "SILENT: subtle movement",
         output,
-        video_model="grok_imagine_video",
+        video_model="seedance",
     )
     metadata = json.loads(output.with_suffix(".mp4.fal.json").read_text(encoding="utf-8"))
 
     assert result == output
-    assert fallback_calls == [i2v_engine.SEEDANCE_ENDPOINT]
-    assert metadata["endpoint"] == i2v_engine.SEEDANCE_ENDPOINT
+    assert endpoint_calls == [i2v_engine.SEEDANCE_ENDPOINT, i2v_engine.PIXVERSE_V6_ENDPOINT]
+    assert metadata["endpoint"] == i2v_engine.PIXVERSE_V6_ENDPOINT
+    assert metadata["fallback_from"] == i2v_engine.SEEDANCE_ENDPOINT
 
 
-def test_video_fallback_guard_blocks_stale_fal_generation_request(tmp_path, monkeypatch):
+def test_video_fallback_guard_blocks_stale_secondary_fal_request(tmp_path, monkeypatch):
     still = tmp_path / "still.png"
     still.write_bytes(b"image")
     guard_calls: list[bool] = []
+    endpoint_calls: list[str] = []
 
     monkeypatch.setattr(i2v_engine.render_simulation, "enabled", lambda: False)
+    monkeypatch.setattr(i2v_engine, "_ensure_fal", lambda: "test-fal-key")
     monkeypatch.setattr(
         i2v_engine,
-        "_xai_i2v_result",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            i2v_engine.I2VError(
-                'grok-imagine-video 403: {"error":"used all available credits"}'
-            )
-        ),
+        "fal_client",
+        SimpleNamespace(upload_file=lambda _path: "https://example.test/still.png"),
     )
-    monkeypatch.setattr(
-        i2v_engine,
-        "_ensure_fal",
-        lambda: (_ for _ in ()).throw(
-            AssertionError("stale route must abort before FAL upload or generation")
-        ),
-    )
+
+    def fail_primary(endpoint, *_args, **_kwargs):
+        endpoint_calls.append(endpoint)
+        if endpoint == i2v_engine.SEEDANCE_ENDPOINT:
+            raise i2v_engine.I2VError("content_policy_violation")
+        raise AssertionError("stale route must abort before secondary FAL generation")
+
     monkeypatch.setattr(
         i2v_engine,
         "_queue_result",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("stale route must not spend on FAL generation")
-        ),
+        fail_primary,
     )
 
     def route_guard() -> bool:
@@ -311,29 +301,29 @@ def test_video_fallback_guard_blocks_stale_fal_generation_request(tmp_path, monk
             still,
             "SILENT: subtle movement",
             tmp_path / "clip.mp4",
-            video_model="grok_imagine_video",
+            video_model="seedance",
             fallback_guard=route_guard,
         )
 
     assert guard_calls == [True]
+    assert endpoint_calls == [i2v_engine.SEEDANCE_ENDPOINT]
 
 
-def test_unrelated_xai_forbidden_error_does_not_hide_auth_problem(tmp_path, monkeypatch):
+def test_unrelated_fal_forbidden_error_does_not_hide_auth_problem(tmp_path, monkeypatch):
     still = tmp_path / "still.png"
     still.write_bytes(b"image")
     monkeypatch.setattr(i2v_engine.render_simulation, "enabled", lambda: False)
+    monkeypatch.setattr(i2v_engine, "_ensure_fal", lambda: "test-fal-key")
     monkeypatch.setattr(
         i2v_engine,
-        "_xai_i2v_result",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            i2v_engine.I2VError("grok-imagine-video 403: invalid API entitlement")
-        ),
+        "fal_client",
+        SimpleNamespace(upload_file=lambda _path: "https://example.test/still.png"),
     )
     monkeypatch.setattr(
         i2v_engine,
         "_queue_result",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("non-billing authorization errors must not be masked by fallback")
+            i2v_engine.I2VError("FAL 403: invalid API entitlement")
         ),
     )
 
@@ -342,11 +332,11 @@ def test_unrelated_xai_forbidden_error_does_not_hide_auth_problem(tmp_path, monk
             still,
             "SILENT: subtle movement",
             tmp_path / "clip.mp4",
-            video_model="grok_imagine_video",
+            video_model="seedance",
         )
 
 
-def test_xai_image_credit_limit_falls_back_without_touching_canonical_still(tmp_path, monkeypatch):
+def test_legacy_xai_image_selection_migrates_to_fal_without_touching_canonical_still(tmp_path, monkeypatch):
     workspace = _workspace(tmp_path)
     canonical = workspace / "stills" / "b00.png"
     prior = canonical.read_bytes()
@@ -356,12 +346,6 @@ def test_xai_image_credit_limit_falls_back_without_touching_canonical_still(tmp_
     def fake_generate(_prompt, output, **kwargs):
         model = str(kwargs.get("image_model_id") or "")
         calls.append(model)
-        if model == "grok_imagine":
-            raise StyledStillError(
-                'grok-imagine-image-quality 403: {"code":"permission-denied",'
-                '"error":"used all available credits or reached its monthly spending limit"}',
-                provider="xai",
-            )
         Path(output).write_bytes(b"funded-fal-candidate")
         return {"provider": model}
 
@@ -376,14 +360,15 @@ def test_xai_image_credit_limit_falls_back_without_touching_canonical_still(tmp_
         defer_commit=True,
     )
 
-    assert calls == ["grok_imagine", "seedream_v4"]
+    assert calls == ["seedream_edit"]
     assert canonical.read_bytes() == prior
     assert candidate.read_bytes() == b"funded-fal-candidate"
-    assert result["image_model_id"] == "seedream_v4"
-    assert result["fallback_from"] == "grok_imagine"
+    assert result["image_model_id"] == "seedream_edit"
+    assert result["model_migrated_from"] == "grok_imagine"
+    assert result["fallback_from"] is None
 
 
-def test_image_fallback_guard_blocks_stale_fal_generation_request(tmp_path, monkeypatch):
+def test_fal_image_failure_does_not_dispatch_secondary_or_touch_canonical(tmp_path, monkeypatch):
     workspace = _workspace(tmp_path)
     canonical = workspace / "stills" / "b00.png"
     candidate = workspace / "stills" / ".candidate.png"
@@ -393,33 +378,27 @@ def test_image_fallback_guard_blocks_stale_fal_generation_request(tmp_path, monk
     def fake_generate(_prompt, output, **kwargs):
         model = str(kwargs.get("image_model_id") or "")
         calls.append(model)
-        if model == "grok_imagine":
-            raise StyledStillError(
-                'grok-imagine-image-quality 403: {"error":"used all available credits"}',
-                provider="xai",
-            )
-        Path(output).write_bytes(b"stale-fallback")
-        return {"provider": model}
+        raise StyledStillError("seedream_v4 generation failed: provider unavailable", provider="fal")
 
     monkeypatch.setattr(styled_pipeline, "generate_still_t2i", fake_generate)
 
-    with pytest.raises(styled_pipeline.MediaRouteChangedError, match="before image fallback"):
+    with pytest.raises(StyledStillError, match="provider unavailable"):
         styled_pipeline.regenerate_scene(
             workspace,
             0,
-            image_model_id="grok_imagine",
-            fallback_image_model_id="seedream_v4",
+            image_model_id="seedream_v4",
+            fallback_image_model_id="seedream_edit",
             candidate_path=candidate,
             defer_commit=True,
             fallback_guard=lambda: False,
         )
 
-    assert calls == ["grok_imagine"]
+    assert calls == ["seedream_v4"]
     assert canonical.read_bytes() == prior
     assert not candidate.exists()
 
 
-def test_xai_image_auth_error_does_not_fallback_or_delete_prior_still(tmp_path, monkeypatch):
+def test_fal_image_auth_error_does_not_fallback_or_delete_prior_still(tmp_path, monkeypatch):
     workspace = _workspace(tmp_path)
     canonical = workspace / "stills" / "b00.png"
     prior = canonical.read_bytes()
@@ -428,8 +407,8 @@ def test_xai_image_auth_error_does_not_fallback_or_delete_prior_still(tmp_path, 
     def fail_auth(_prompt, _output, **kwargs):
         calls.append(str(kwargs.get("image_model_id") or ""))
         raise StyledStillError(
-            "grok-imagine-image-quality 403: invalid API entitlement",
-            provider="xai",
+            "seedream_v4 403: invalid API entitlement",
+            provider="fal",
         )
 
     monkeypatch.setattr(styled_pipeline, "generate_still_t2i", fail_auth)
@@ -438,13 +417,13 @@ def test_xai_image_auth_error_does_not_fallback_or_delete_prior_still(tmp_path, 
         styled_pipeline.regenerate_scene(
             workspace,
             0,
-            image_model_id="grok_imagine",
-            fallback_image_model_id="seedream_v4",
+            image_model_id="seedream_v4",
+            fallback_image_model_id="seedream_edit",
             candidate_path=workspace / "stills" / ".candidate.png",
             defer_commit=True,
         )
 
-    assert calls == ["grok_imagine"]
+    assert calls == ["seedream_v4"]
     assert canonical.read_bytes() == prior
 
 
@@ -534,6 +513,7 @@ def test_passing_candidate_commits_even_when_catalyst_strategy_is_regenerate(tmp
 
     monkeypatch.setattr(styled_pipeline, "regenerate_scene_with_catalyst", fake_candidate)
     monkeypatch.setattr(visual_qa, "audit_generic_still", _pass_still)
+    monkeypatch.setattr(visual_qa, "audit_scene_correspondence", _pass_still)
 
     result = json.loads(tools.regenerate_production_scene_still(JOB_ID, 0, image_model_id="seedream_edit"))
 
@@ -565,6 +545,7 @@ def test_candidate_retries_only_after_an_actual_visual_qa_failure(tmp_path, monk
     ])
     monkeypatch.setattr(styled_pipeline, "regenerate_scene_with_catalyst", fake_candidate)
     monkeypatch.setattr(visual_qa, "audit_generic_still", lambda *_args, **_kwargs: next(qa))
+    monkeypatch.setattr(visual_qa, "audit_scene_correspondence", _pass_still)
 
     result = json.loads(tools.regenerate_production_scene_still(JOB_ID, 0, image_model_id="seedream_edit"))
 
@@ -578,9 +559,9 @@ def test_midflight_image_route_change_quarantines_old_result_and_restarts(tmp_pa
     canonical = workspace / "stills" / "b00.png"
     monkeypatch.setattr(tools, "_shortform_workspace", lambda _job_id: workspace)
     snapshots = [
-        {"revision": 1, "image_model_id": "grok_imagine", "video_model": "grok_imagine_video"},
-        {"revision": 1, "image_model_id": "grok_imagine", "video_model": "grok_imagine_video"},
-        {"revision": 1, "image_model_id": "grok_imagine", "video_model": "grok_imagine_video"},
+        {"revision": 1, "image_model_id": "seedream_edit", "video_model": "seedance"},
+        {"revision": 1, "image_model_id": "seedream_edit", "video_model": "seedance"},
+        {"revision": 1, "image_model_id": "seedream_edit", "video_model": "seedance"},
         {"revision": 2, "image_model_id": "seedream_v4", "video_model": "seedance"},
     ]
     latest = {"revision": 2, "image_model_id": "seedream_v4", "video_model": "seedance"}
@@ -610,6 +591,7 @@ def test_midflight_image_route_change_quarantines_old_result_and_restarts(tmp_pa
 
     monkeypatch.setattr(styled_pipeline, "regenerate_scene_with_catalyst", fake_candidate)
     monkeypatch.setattr(visual_qa, "audit_generic_still", _pass_still)
+    monkeypatch.setattr(visual_qa, "audit_scene_correspondence", _pass_still)
 
     result = json.loads(tools.regenerate_production_scene_still(
         JOB_ID,
@@ -628,11 +610,11 @@ def test_midflight_video_route_change_quarantines_old_result(tmp_path, monkeypat
     workspace = _workspace(tmp_path, existing_clip=True)
     calls: list[str] = []
     routes = [
-        {"revision": 1, "video_model": "grok_imagine_video"},
-        {"revision": 1, "video_model": "grok_imagine_video"},
-        {"revision": 2, "video_model": "seedance"},
+        {"revision": 1, "video_model": "seedance"},
+        {"revision": 1, "video_model": "seedance"},
+        {"revision": 2, "video_model": "pixverse"},
     ]
-    latest = {"revision": 2, "video_model": "seedance"}
+    latest = {"revision": 2, "video_model": "pixverse"}
 
     def resolve_route():
         return dict(routes.pop(0) if routes else latest)
@@ -656,7 +638,7 @@ def test_midflight_video_route_change_quarantines_old_result(tmp_path, monkeypat
         route_resolver=resolve_route,
     )
 
-    assert calls == ["grok_imagine_video", "seedance"]
+    assert calls == ["seedance", "pixverse"]
     assert result["failed"] == []
     assert result["route"]["revision"] == 2
     assert result["route_switches"]
@@ -666,11 +648,11 @@ def test_video_fallback_route_change_restarts_before_secondary_provider_spend(tm
     workspace = _workspace(tmp_path, existing_clip=True)
     calls: list[str] = []
     routes = [
-        {"revision": 1, "video_model": "grok_imagine_video"},  # scene route
-        {"revision": 1, "video_model": "grok_imagine_video"},  # first dispatch
-        {"revision": 2, "video_model": "seedance"},  # fallback guard
+        {"revision": 1, "video_model": "seedance"},  # scene route
+        {"revision": 1, "video_model": "seedance"},  # first dispatch
+        {"revision": 2, "video_model": "pixverse"},  # fallback guard
     ]
-    latest = {"revision": 2, "video_model": "seedance"}
+    latest = {"revision": 2, "video_model": "pixverse"}
 
     def resolve_route():
         return dict(routes.pop(0) if routes else latest)
@@ -678,14 +660,14 @@ def test_video_fallback_route_change_restarts_before_secondary_provider_spend(tm
     def fake_clip(_still, _motion, output, **kwargs):
         model = str(kwargs.get("video_model") or "")
         calls.append(model)
-        if model == "grok_imagine_video":
+        if model == "seedance":
             if kwargs["fallback_guard"]() is not True:
                 raise i2v_engine.I2VRouteChanged("route changed before fallback")
             raise AssertionError("stale fallback guard unexpectedly accepted old route")
         output = Path(output)
         output.write_bytes(b"current-route-clip" * 200)
         output.with_suffix(".mp4.fal.json").write_text(
-            json.dumps({"endpoint": "test:seedance", "video_model": model, "duration_sec": 5}),
+            json.dumps({"endpoint": "test:pixverse", "video_model": model, "duration_sec": 5}),
             encoding="utf-8",
         )
 
@@ -698,7 +680,7 @@ def test_video_fallback_route_change_restarts_before_secondary_provider_spend(tm
         route_resolver=resolve_route,
     )
 
-    assert calls == ["grok_imagine_video", "seedance"]
+    assert calls == ["seedance", "pixverse"]
     assert result["failed"] == []
     assert any(row["stage"] == "video_fallback" for row in result["route_switches"])
 
@@ -708,13 +690,13 @@ def test_video_route_change_at_final_commit_restores_previous_clip(tmp_path, mon
     clip = workspace / "clips" / "b00.mp4"
     old_clip = clip.read_bytes()
     routes = [
-        {"revision": 1, "video_model": "grok_imagine_video"},  # scene route
-        {"revision": 1, "video_model": "grok_imagine_video"},  # dispatch
-        {"revision": 1, "video_model": "grok_imagine_video"},  # provider return
-        {"revision": 1, "video_model": "grok_imagine_video"},  # post-QA commit gate
-        {"revision": 2, "video_model": "seedance"},  # final atomic commit gate
+        {"revision": 1, "video_model": "seedance"},  # scene route
+        {"revision": 1, "video_model": "seedance"},  # dispatch
+        {"revision": 1, "video_model": "seedance"},  # provider return
+        {"revision": 1, "video_model": "seedance"},  # post-QA commit gate
+        {"revision": 2, "video_model": "pixverse"},  # final atomic commit gate
     ]
-    latest = {"revision": 2, "video_model": "seedance"}
+    latest = {"revision": 2, "video_model": "pixverse"}
 
     def resolve_route():
         return dict(routes.pop(0) if routes else latest)
@@ -724,7 +706,7 @@ def test_video_route_change_at_final_commit_restores_previous_clip(tmp_path, mon
         output.write_bytes(b"stale-new-clip" * 200)
         output.with_suffix(".mp4.fal.json").write_text(
             json.dumps({
-                "endpoint": "test:grok",
+                "endpoint": "test:seedance",
                 "video_model": kwargs.get("video_model"),
                 "duration_sec": 5,
             }),
