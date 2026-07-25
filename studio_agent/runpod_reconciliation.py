@@ -11,11 +11,21 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import threading
 import time
 import uuid
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
+
+
+_RECONCILIATION_STOP = threading.Event()
+_RECONCILIATION_THREAD: threading.Thread | None = None
+_RECONCILIATION_THREAD_LOCK = threading.RLock()
+_RECONCILIATION_POLL_SECONDS = max(
+    2.0,
+    float(os.getenv("STUDIO_RUNPOD_RECONCILIATION_POLL_SECONDS", "10") or 10),
+)
 
 
 _STATE_KEYS = (
@@ -377,8 +387,10 @@ def project_runpod_job_snapshot(
     job_id: str,
     kind: str,
     local_snapshot: dict[str, Any],
+    *,
+    reconcile: bool = False,
 ) -> dict[str, Any]:
-    """Overlay read-only RunPod progress when this Studio job has a receipt."""
+    """Overlay RunPod progress; side effects require a backend worker."""
 
     result = dict(local_snapshot or {})
     result["job_id"] = str(job_id or "")
@@ -422,7 +434,11 @@ def project_runpod_job_snapshot(
     dispatch_id = str(receipt.get("dispatch_id") or "")
     storage_sync: dict[str, Any] | None = None
     artifacts_local = False
-    if bool(status.get("terminal")) and str(kind or "") in {"shortform", "longform"}:
+    if (
+        reconcile
+        and bool(status.get("terminal"))
+        and str(kind or "") in {"shortform", "longform"}
+    ):
         try:
             from studio_agent import runpod_storage
 
@@ -480,7 +496,18 @@ def project_runpod_job_snapshot(
         for key in _STATE_KEYS:
             if key in status:
                 result[key] = status[key]
-    billing = reconcile_terminal_billing(status, receipt)
+    billing = (
+        reconcile_terminal_billing(status, receipt)
+        if reconcile
+        else {
+            "state": (
+                "background_reconciliation_pending"
+                if bool(status.get("terminal"))
+                else "pending_worker_completion"
+            ),
+            "wallet_mutated": False,
+        }
+    )
     result["runpod_job_id"] = runpod_job_id
     result["execution_backend"] = "runpod_serverless"
     result["runpod_status"] = str(status.get("runpod_status") or "")
@@ -509,9 +536,100 @@ def project_runpod_job_snapshot(
     return result
 
 
+def _background_marker_path(dispatch_id: str) -> Path:
+    digest = hashlib.sha256(str(dispatch_id or "").encode("utf-8")).hexdigest()
+    return reconciliation_ledger_dir() / f"background-{digest}.json"
+
+
+def reconcile_pending_runpod_jobs_once(*, limit: int = 500) -> int:
+    """Reconcile terminal RunPod work outside browser/status requests."""
+
+    if not runpod_production_enabled():
+        return 0
+    from studio_agent import runpod_bridge
+
+    reconciled = 0
+    for receipt in runpod_bridge.list_dispatch_receipts(limit=limit):
+        dispatch_id = str(receipt.get("dispatch_id") or "").strip()
+        job_id = str(receipt.get("studio_job_id") or receipt.get("job_id") or "").strip()
+        runpod_job_id = str(receipt.get("runpod_job_id") or "").strip()
+        if not dispatch_id or not job_id or not runpod_job_id:
+            continue
+        marker = _background_marker_path(dispatch_id)
+        if marker.is_file():
+            continue
+        tool = str(receipt.get("tool") or "").strip().lower()
+        kind = "longform" if "longform" in tool else "shortform"
+        snapshot = project_runpod_job_snapshot(
+            job_id,
+            kind,
+            {
+                "job_id": job_id,
+                "kind": kind,
+                "status": "queued",
+                "stage": "runpod_dispatch",
+                "running": True,
+            },
+            reconcile=True,
+        )
+        if not bool(snapshot.get("runpod_terminal")):
+            continue
+        runpod = snapshot.get("runpod") if isinstance(snapshot.get("runpod"), dict) else {}
+        storage = (
+            runpod.get("workspace_sync")
+            if isinstance(runpod.get("workspace_sync"), dict)
+            else {}
+        )
+        if storage and storage.get("ok") is False:
+            continue
+        _atomic_write(
+            marker,
+            {
+                "dispatch_id": dispatch_id,
+                "job_id": job_id,
+                "kind": kind,
+                "reconciled_at": time.time(),
+                "billing": dict(runpod.get("billing_reconciliation") or {}),
+                "workspace_sync": dict(storage or {}),
+            },
+        )
+        reconciled += 1
+    return reconciled
+
+
+def _reconciliation_monitor() -> None:
+    while not _RECONCILIATION_STOP.is_set():
+        try:
+            reconcile_pending_runpod_jobs_once()
+        except Exception:
+            pass
+        _RECONCILIATION_STOP.wait(_RECONCILIATION_POLL_SECONDS)
+
+
+def start_runpod_reconciliation_service() -> None:
+    global _RECONCILIATION_THREAD
+    with _RECONCILIATION_THREAD_LOCK:
+        if _RECONCILIATION_THREAD is not None and _RECONCILIATION_THREAD.is_alive():
+            return
+        _RECONCILIATION_STOP.clear()
+        _RECONCILIATION_THREAD = threading.Thread(
+            target=_reconciliation_monitor,
+            daemon=True,
+            name="runpod-control-plane-reconciliation",
+        )
+        _RECONCILIATION_THREAD.start()
+
+
+def stop_runpod_reconciliation_service() -> None:
+    _RECONCILIATION_STOP.set()
+
+
 __all__ = [
     "project_runpod_job_snapshot",
+    "reconcile_pending_runpod_jobs_once",
     "reconcile_terminal_billing",
     "reconciliation_ledger_dir",
     "runpod_production_enabled",
+    "start_runpod_reconciliation_service",
+    "stop_runpod_reconciliation_service",
 ]

@@ -85,6 +85,12 @@ jobs:
             tests/test_studio_session_store.py \
             tests/test_studio_command_layer.py \
             tests/test_studio_command_runner.py \
+            tests/test_production_command_authority.py \
+            tests/test_production_command_v2.py \
+            tests/test_production_workflows.py \
+            tests/test_skeleton_command_boundary.py \
+            tests/test_cliplab_command_boundary.py \
+            tests/test_runpod_direct_routes.py \
             tests/test_runpod_standalone_routes.py
 
       - name: Set up Node 20

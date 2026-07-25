@@ -7,8 +7,9 @@ import os
 import threading
 import time
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Literal, Protocol
+from typing import Any, Iterator, Literal, Protocol
 
 from pydantic import Field
 
@@ -94,6 +95,82 @@ class FileExecutionLedger:
     def _claim_path(self, key: str) -> Path:
         return self.root / f"{key}.claim"
 
+    def _claim_lock_path(self, key: str) -> Path:
+        return self.root / f"{key}.claim.lock"
+
+    @contextmanager
+    def _claim_guard(self, key: str) -> Iterator[None]:
+        """Serialize leased-claim comparisons across API worker processes."""
+
+        with self._claim_lock_path(key).open("a+b") as handle:
+            handle.seek(0, 2)
+            if handle.tell() == 0:
+                handle.write(b"\0")
+                handle.flush()
+            handle.seek(0)
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                handle.seek(0)
+                if os.name == "nt":
+                    import msvcrt
+
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+    def _read_claim_unlocked(
+        self,
+        key: str,
+        *,
+        legacy_lease_seconds: float,
+    ) -> dict[str, Any] | None:
+        path = self._claim_path(key)
+        if not path.is_file():
+            return None
+        try:
+            raw = path.read_text(encoding="utf-8").strip()
+        except OSError:
+            return None
+        try:
+            parsed = json.loads(raw)
+        except Exception:
+            parsed = None
+        if isinstance(parsed, dict):
+            return dict(parsed)
+        # Claims written by pre-lease releases contained only the command id.
+        # Their mtime becomes a bounded compatibility lease so an abandoned
+        # file can no longer stall a durable workflow forever.
+        try:
+            claimed_at = float(path.stat().st_mtime)
+        except OSError:
+            claimed_at = 0.0
+        return {
+            "command_id": raw,
+            "owner_token": "",
+            "claimed_at": claimed_at,
+            "expires_at": claimed_at + max(0.1, float(legacy_lease_seconds)),
+        }
+
+    def _write_claim_unlocked(self, key: str, payload: dict[str, Any]) -> None:
+        destination = self._claim_path(key)
+        temporary = self.root / f".{key}.{uuid.uuid4().hex}.claim.tmp"
+        temporary.write_text(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")),
+            encoding="utf-8",
+        )
+        os.replace(temporary, destination)
+
     def get(self, idempotency_key: str) -> ExecutionReceipt | None:
         path = self._receipt_path(idempotency_key)
         if not path.is_file():
@@ -115,11 +192,106 @@ class FileExecutionLedger:
             os.close(descriptor)
         return True
 
-    def save(self, receipt: ExecutionReceipt) -> None:
+    def claim_with_lease(
+        self,
+        idempotency_key: str,
+        command_id: str,
+        *,
+        owner_token: str,
+        lease_seconds: float,
+    ) -> bool:
+        """Acquire an expiring claim that can be recovered after process death."""
+
+        key = str(idempotency_key or "").strip()
+        owner = str(owner_token or "").strip()
+        command = str(command_id or "").strip()
+        if not key or not owner or not command:
+            return False
+        duration = max(0.1, float(lease_seconds))
+        now = time.time()
+        with self._claim_guard(key):
+            if self._receipt_path(key).is_file():
+                return False
+            current = self._read_claim_unlocked(
+                key,
+                legacy_lease_seconds=duration,
+            )
+            current_owner = str((current or {}).get("owner_token") or "")
+            current_expiry = float((current or {}).get("expires_at") or 0.0)
+            if current is not None and current_owner != owner and current_expiry > now:
+                return False
+            self._write_claim_unlocked(
+                key,
+                {
+                    "command_id": command,
+                    "owner_token": owner,
+                    "claimed_at": now,
+                    "expires_at": now + duration,
+                },
+            )
+            return True
+
+    def renew_claim(
+        self,
+        idempotency_key: str,
+        *,
+        owner_token: str,
+        lease_seconds: float,
+    ) -> bool:
+        """Renew only the caller's live claim."""
+
+        key = str(idempotency_key or "").strip()
+        owner = str(owner_token or "").strip()
+        if not key or not owner:
+            return False
+        duration = max(0.1, float(lease_seconds))
+        with self._claim_guard(key):
+            if self._receipt_path(key).is_file():
+                return False
+            current = self._read_claim_unlocked(
+                key,
+                legacy_lease_seconds=duration,
+            )
+            if str((current or {}).get("owner_token") or "") != owner:
+                return False
+            now = time.time()
+            current = dict(current or {})
+            current["expires_at"] = now + duration
+            current["renewed_at"] = now
+            self._write_claim_unlocked(key, current)
+            return True
+
+    def save_if_claim_owner(
+        self,
+        receipt: ExecutionReceipt,
+        *,
+        owner_token: str,
+        lease_seconds: float,
+    ) -> bool:
+        """Persist a leased result only if the caller still owns the claim."""
+
+        key = str(receipt.idempotency_key or "").strip()
+        owner = str(owner_token or "").strip()
+        if not key or not owner:
+            return False
+        with self._claim_guard(key):
+            current = self._read_claim_unlocked(
+                key,
+                legacy_lease_seconds=max(0.1, float(lease_seconds)),
+            )
+            if str((current or {}).get("owner_token") or "") != owner:
+                return False
+            self._save_unlocked(receipt)
+            return True
+
+    def _save_unlocked(self, receipt: ExecutionReceipt) -> None:
         destination = self._receipt_path(receipt.idempotency_key)
         temporary = self.root / f".{receipt.idempotency_key}.{uuid.uuid4().hex}.tmp"
         temporary.write_text(receipt.model_dump_json(indent=2), encoding="utf-8")
         os.replace(temporary, destination)
+
+    def save(self, receipt: ExecutionReceipt) -> None:
+        self._save_unlocked(receipt)
 
 
 def _default_ledger_root() -> Path:

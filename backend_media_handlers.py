@@ -125,7 +125,9 @@ def build_render_chat_story_handler(
         avatar=None,
         background_video=None,
     ):
-        user = await get_current_user_from_request(request)
+        user = getattr(getattr(request, "state", None), "production_command_user", None)
+        if not isinstance(user, dict):
+            user = await get_current_user_from_request(request)
         if not user:
             raise HTTPException(401, "Authentication required")
         if not chat_story_access_for_user(user):

@@ -9,6 +9,7 @@ import long_form_router
 from long_form import pipeline as longform_pipeline
 from studio_agent import jobs as agent_jobs
 from studio_agent import tools
+from studio_agent.execution_context import current_production_command
 
 
 def _client(user_id: str) -> TestClient:
@@ -63,9 +64,11 @@ def test_render_start_stamps_authenticated_owner(monkeypatch) -> None:
     monkeypatch.setattr(tools, "_runpod_production_enabled", lambda: False)
 
     def execute(name, arguments, **context):
+        authority = current_production_command()
         captured["name"] = name
         captured["arguments"] = dict(arguments)
         captured["context"] = dict(context)
+        captured["command_id"] = authority.command_id if authority else ""
         return json.dumps({"job_id": "lf_owner_stamped"})
 
     monkeypatch.setattr(tools, "execute_tool_logged", execute)
@@ -87,5 +90,5 @@ def test_render_start_stamps_authenticated_owner(monkeypatch) -> None:
     assert captured["name"] == "start_longform_render"
     outline = json.loads(captured["arguments"]["chapters_json"])
     assert outline["user_id"] == "creator-owner"
-    assert captured["arguments"]["_runpod_command_id"] == "owner-start-1"
+    assert captured["command_id"] == "owner-start-1"
     assert captured["context"] == {"user_id": "creator-owner", "content_format": "long"}

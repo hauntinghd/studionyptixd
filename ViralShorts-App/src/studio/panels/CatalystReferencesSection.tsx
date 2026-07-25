@@ -15,6 +15,7 @@ import { useCallback, useContext, useEffect, useState } from 'react';
 import {
     BookmarkPlus, Edit3, Eye, Heart, Link2, Loader2, MessageSquare, Plus, Trash2,
 } from 'lucide-react';
+import { acquireProductionCommandLease } from '../lib/productionIdempotency';
 import { AuthContext, resolveStudioBackendUrl } from '../shared';
 
 interface ReferenceRow {
@@ -64,6 +65,25 @@ export default function CatalystReferencesSection() {
     const [busy, setBusy] = useState(false);
     const [error, setError] = useState('');
 
+    const fetchReferenceMutation = useCallback(async (
+        scope: string,
+        stableEntity: string,
+        input: string,
+        init: RequestInit,
+    ): Promise<Response> => {
+        const command = acquireProductionCommandLease(scope, stableEntity);
+        const headers = new Headers(init.headers || undefined);
+        headers.set('X-Idempotency-Key', command.commandId);
+        let receivedResponse = false;
+        try {
+            const response = await fetch(input, { ...init, headers });
+            receivedResponse = true;
+            return response;
+        } finally {
+            if (receivedResponse) command.release();
+        }
+    }, []);
+
     const load = useCallback(async () => {
         if (!accessToken) return;
         setLoading(true);
@@ -90,7 +110,11 @@ export default function CatalystReferencesSection() {
         setBusy(true);
         setError('');
         try {
-            const r = await fetch(resolveStudioBackendUrl('/api/catalyst/references'), {
+            const r = await fetchReferenceMutation(
+                'catalyst-reference-add',
+                `${url.trim()}-${channelKey}`,
+                resolveStudioBackendUrl('/api/catalyst/references'),
+                {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -101,7 +125,8 @@ export default function CatalystReferencesSection() {
                     channel_key: channelKey,
                     notes: notes.trim(),
                 }),
-            });
+                },
+            );
             if (!r.ok) {
                 const txt = await r.text().catch(() => '');
                 throw new Error(`${r.status} ${txt.slice(0, 200)}`);
@@ -114,34 +139,44 @@ export default function CatalystReferencesSection() {
         } finally {
             setBusy(false);
         }
-    }, [url, channelKey, notes, accessToken, load]);
+    }, [url, channelKey, notes, accessToken, fetchReferenceMutation, load]);
 
     const removeRef = useCallback(async (id: string) => {
         if (!accessToken) return;
         if (!window.confirm('Remove this reference?')) return;
         try {
-            const r = await fetch(resolveStudioBackendUrl(`/api/catalyst/references/${id}`), {
-                method: 'DELETE',
-                headers: { Authorization: `Bearer ${accessToken}` },
-            });
+            const r = await fetchReferenceMutation(
+                'catalyst-reference-delete',
+                id,
+                resolveStudioBackendUrl(`/api/catalyst/references/${id}`),
+                {
+                    method: 'DELETE',
+                    headers: { Authorization: `Bearer ${accessToken}` },
+                },
+            );
             if (!r.ok) throw new Error(`HTTP ${r.status}`);
             setRefs((prev) => prev.filter((rf) => rf.id !== id));
         } catch (e) {
             setError(`delete failed: ${(e as Error).message}`);
         }
-    }, [accessToken]);
+    }, [accessToken, fetchReferenceMutation]);
 
     const updateRef = useCallback(async (id: string, patch: { channel_key?: string; notes?: string }) => {
         if (!accessToken) return;
         try {
-            const r = await fetch(resolveStudioBackendUrl(`/api/catalyst/references/${id}`), {
-                method: 'PATCH',
-                headers: {
-                    'Content-Type': 'application/json',
-                    Authorization: `Bearer ${accessToken}`,
+            const r = await fetchReferenceMutation(
+                'catalyst-reference-update',
+                id,
+                resolveStudioBackendUrl(`/api/catalyst/references/${id}`),
+                {
+                    method: 'PATCH',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        Authorization: `Bearer ${accessToken}`,
+                    },
+                    body: JSON.stringify(patch),
                 },
-                body: JSON.stringify(patch),
-            });
+            );
             if (!r.ok) throw new Error(`HTTP ${r.status}`);
             const d = await r.json();
             const updated = d.reference as ReferenceRow;
@@ -149,7 +184,7 @@ export default function CatalystReferencesSection() {
         } catch (e) {
             setError(`update failed: ${(e as Error).message}`);
         }
-    }, [accessToken]);
+    }, [accessToken, fetchReferenceMutation]);
 
     const totalRefs = refs.length;
     const totalViews = refs.reduce((s, r) => s + (r.view_count || 0), 0);

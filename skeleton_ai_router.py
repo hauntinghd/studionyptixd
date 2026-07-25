@@ -15,11 +15,15 @@ Routes:
   GET  /api/skeleton-ai/jobs/{id}           Poll a generation job
 """
 from __future__ import annotations
+import hashlib
 import os
 import uuid
 import json
+import time
+from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 from fastapi import APIRouter, HTTPException, Depends, Request, UploadFile, File
 from fastapi.responses import StreamingResponse, JSONResponse
@@ -105,6 +109,161 @@ def _references_for_skeleton_ai(user: dict) -> str:
 
 OUTPUT_ROOT = Path(os.getenv("SKELETON_AI_OUTPUT_ROOT", "skeleton_ai/output"))
 REFERENCE_ROOT = OUTPUT_ROOT / "_references"
+
+
+@dataclass(frozen=True)
+class _SkeletonCommandClaim:
+    """Durable ownership of one exact public Skeleton production action."""
+
+    ledger_key: str
+    command_id: str
+    mutation_id: str
+    operation: str
+    user_id: str
+    arguments: dict[str, Any]
+    target_job_id: str
+    started_at: float
+    mutation_claim: Any
+
+
+def _command_id(request: Request, user: dict) -> tuple[str, str]:
+    """Validate the browser lease before constructing any provider client."""
+
+    from studio_agent.direct_production import require_idempotency_key
+
+    command_id = require_idempotency_key(request)
+    uid = _user_id(user).strip()
+    if not uid or uid == "anon":
+        raise HTTPException(401, "auth_required")
+    return command_id, uid
+
+
+def _receipt_arguments(value: Any) -> Any:
+    """Bound durable receipts without weakening exact-request comparison."""
+
+    if isinstance(value, dict):
+        return {str(key): _receipt_arguments(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_receipt_arguments(item) for item in value]
+    if isinstance(value, str) and len(value) > 2048:
+        digest = hashlib.sha256(value.encode("utf-8")).hexdigest()
+        return {"sha256": digest, "length": len(value)}
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return str(value)
+
+
+def _begin_skeleton_command(
+    *,
+    command_id: str,
+    user_id: str,
+    operation: str,
+    arguments: dict[str, Any],
+) -> tuple[_SkeletonCommandClaim | None, dict[str, Any] | None]:
+    """Authorize and claim before any provider, credit, or file mutation."""
+
+    from studio_agent import idempotent_mutations
+    from studio_agent.execution_context import (
+        authorize_production_mutation,
+        production_command_scope,
+    )
+
+    public_arguments = _receipt_arguments(dict(arguments or {}))
+    with production_command_scope(
+        command_id,
+        user_id=user_id,
+        session_id="",
+        source="server_workflow",
+        user_text=f"direct:{operation}",
+    ):
+        authorized, mutation = authorize_production_mutation(
+            operation,
+            dict(public_arguments),
+            user_id=user_id,
+            session_id="",
+        )
+    if mutation is None:  # pragma: no cover - strict production mode always issues one
+        raise HTTPException(503, "Skeleton production authority could not be issued.")
+
+    try:
+        mutation_claim, replay = idempotent_mutations.begin(
+            tool_name=operation,
+            arguments=authorized,
+            command_id=command_id,
+            user_id=user_id,
+        )
+    except Exception as exc:
+        raise HTTPException(409, str(exc)[:400]) from exc
+    if replay is not None:
+        return None, replay
+    if mutation_claim is None:
+        raise HTTPException(503, "Skeleton production command could not be claimed.")
+
+    now = time.time()
+    claim = _SkeletonCommandClaim(
+        ledger_key=mutation_claim.key,
+        command_id=command_id,
+        mutation_id=mutation.mutation_id,
+        operation=operation,
+        user_id=user_id,
+        arguments=public_arguments,
+        target_job_id=str(arguments.get("job_id") or ""),
+        started_at=now,
+        mutation_claim=mutation_claim,
+    )
+    return claim, None
+
+
+@contextmanager
+def _skeleton_execution(claim: _SkeletonCommandClaim) -> Iterator[None]:
+    """Rebind and verify the exact authority while provider work executes."""
+
+    from studio_agent.execution_context import (
+        ProductionCommandViolation,
+        authorize_production_mutation,
+        production_command_scope,
+    )
+
+    with production_command_scope(
+        claim.command_id,
+        user_id=claim.user_id,
+        session_id="",
+        source="server_workflow",
+        user_text=f"direct:{claim.operation}",
+    ):
+        _authorized, mutation = authorize_production_mutation(
+            claim.operation,
+            dict(claim.arguments),
+            user_id=claim.user_id,
+            session_id="",
+        )
+        if mutation is None or mutation.mutation_id != claim.mutation_id:
+            raise ProductionCommandViolation(
+                "Skeleton production mutation no longer matches its claimed command."
+            )
+        yield
+
+
+def _complete_skeleton_command(
+    claim: _SkeletonCommandClaim,
+    result: dict[str, Any],
+) -> None:
+    from studio_agent import idempotent_mutations
+
+    idempotent_mutations.complete(claim.mutation_claim, dict(result or {}))
+
+
+def _fail_skeleton_command(claim: _SkeletonCommandClaim, error: Exception) -> None:
+    from studio_agent import idempotent_mutations
+
+    idempotent_mutations.fail(claim.mutation_claim, error)
+
+
+def _stream_replay(replay: dict[str, Any]) -> StreamingResponse | JSONResponse:
+    chunks = replay.get("_sse_chunks")
+    if isinstance(chunks, list) and all(isinstance(chunk, str) for chunk in chunks):
+        return StreamingResponse(iter(chunks), media_type="text/event-stream")
+    return JSONResponse(status_code=202, content=replay)
 
 
 def _write_job_owner(workspace: Path, job_id: str, user: dict) -> None:
@@ -408,9 +567,10 @@ def build_skeleton_ai_router(
     # ──────────────────────────────────────────────────────────────────────
 
     @router.post("/script")
-    async def generate_script(body: ScriptRequest, user: dict = auth_dep):
+    async def generate_script(body: ScriptRequest, request: Request, user: dict = auth_dep):
+        command_id, uid = _command_id(request, user)
         try:
-            cat = get_category(body.category, user_id=_user_id(user) or None)
+            cat = get_category(body.category, user_id=uid)
             grok = GrokClient()
         except ValueError as e:
             raise HTTPException(400, str(e))
@@ -431,24 +591,82 @@ def build_skeleton_ai_router(
             system = cat["system_prompt"]
 
         user_prompt = build_script_prompt(cat["system_prompt"], body.topic)
+        claim, replay = _begin_skeleton_command(
+            command_id=command_id,
+            user_id=uid,
+            operation="skeleton_generate_script",
+            arguments={
+                "category": body.category,
+                "topic": body.topic,
+                "stream": bool(body.stream),
+                "references_sha256": (
+                    hashlib.sha256(refs_block.encode("utf-8")).hexdigest()
+                    if refs_block
+                    else ""
+                ),
+            },
+        )
+        if replay is not None:
+            if body.stream:
+                return _stream_replay(replay)
+            replay.pop("_sse_chunks", None)
+            return replay
+        assert claim is not None
 
         if body.stream:
             def sse_generator():
+                chunks: list[str] = []
+                pieces: list[str] = []
                 try:
-                    for piece in grok.stream(system, user_prompt, max_tokens=1500):
+                    provider_stream = iter(grok.stream(system, user_prompt, max_tokens=1500))
+                    while True:
+                        with _skeleton_execution(claim):
+                            try:
+                                piece = next(provider_stream)
+                            except StopIteration:
+                                break
+                        pieces.append(piece)
                         # Escape newlines so SSE framing isn't broken.
                         safe = piece.replace("\n", "\\n")
-                        yield f"data: {safe}\n\n"
-                    yield "data: [DONE]\n\n"
+                        chunk = f"data: {safe}\n\n"
+                        chunks.append(chunk)
+                        yield chunk
+                    done = "data: [DONE]\n\n"
+                    chunks.append(done)
+                    yield done
+                    _complete_skeleton_command(
+                        claim,
+                        {
+                            "script": "".join(pieces),
+                            "references_used": bool(refs_block),
+                            "_sse_chunks": chunks,
+                        },
+                    )
+                except GeneratorExit as exc:
+                    _fail_skeleton_command(claim, exc)
+                    return
                 except GrokAuthError as e:
+                    _fail_skeleton_command(claim, e)
                     yield f"event: error\ndata: {e}\n\n"
+                except Exception as e:  # pragma: no cover - defensive stream boundary
+                    _fail_skeleton_command(claim, e)
+                    yield f"event: error\ndata: {type(e).__name__}: {e}\n\n"
             return StreamingResponse(sse_generator(), media_type="text/event-stream")
 
-        text = grok.complete(system, user_prompt, max_tokens=1500)
-        return {
+        try:
+            with _skeleton_execution(claim):
+                text = grok.complete(system, user_prompt, max_tokens=1500)
+        except Exception as exc:
+            _fail_skeleton_command(claim, exc)
+            if isinstance(exc, GrokAuthError):
+                raise HTTPException(503, f"upstream_auth: {exc}") from exc
+            raise
+        result = {
             "script": text,
             "references_used": bool(refs_block),
         }
+        _complete_skeleton_command(claim, result)
+        return result
 
     # ──────────────────────────────────────────────────────────────────────
     # Visual planner — preview the locked character + style sheet before
@@ -456,7 +674,8 @@ def build_skeleton_ai_router(
     # ──────────────────────────────────────────────────────────────────────
 
     @router.post("/plan")
-    async def plan_script(body: PlanRequest, _user: dict = auth_dep):
+    async def plan_script(body: PlanRequest, request: Request, _user: dict = auth_dep):
+        command_id, uid = _command_id(request, _user)
         if not body.script or not body.script.strip():
             raise HTTPException(400, "script is required")
         try:
@@ -466,11 +685,27 @@ def build_skeleton_ai_router(
         cat_label = ""
         if body.category:
             try:
-                cat_label = get_category(body.category, user_id=_user_id(_user) or None).get("label", "")
+                cat_label = get_category(body.category, user_id=uid).get("label", "")
             except ValueError:
                 cat_label = ""
-        plan = analyze_script(grok, body.script, category_label=cat_label, topic=body.topic)
-        return {"plan": plan}
+        claim, replay = _begin_skeleton_command(
+            command_id=command_id,
+            user_id=uid,
+            operation="skeleton_plan_script",
+            arguments=body.model_dump(mode="json"),
+        )
+        if replay is not None:
+            return replay
+        assert claim is not None
+        try:
+            with _skeleton_execution(claim):
+                plan = analyze_script(grok, body.script, category_label=cat_label, topic=body.topic)
+        except Exception as exc:
+            _fail_skeleton_command(claim, exc)
+            raise
+        result = {"plan": plan}
+        _complete_skeleton_command(claim, result)
+        return result
 
     # ──────────────────────────────────────────────────────────────────────
     # Stills-only render: script → plan → 12 stills via the user's chosen
@@ -495,13 +730,9 @@ def build_skeleton_ai_router(
           event: complete   data: {job_id, scenes_count}
           event: error      data: {beat_index?, message}    # on failure
         """
-        from studio_agent.direct_production import fail_closed_uncovered, runpod_production_enabled
-
-        if runpod_production_enabled():
-            fail_closed_uncovered(request, "/api/skeleton-ai/scenes")
+        command_id, uid = _command_id(request, user)
         if not body.script or not body.script.strip():
             raise HTTPException(400, "script is required")
-        uid = _user_id(user) or None
         if body.category:
             try:
                 get_category(body.category, user_id=uid)
@@ -525,26 +756,42 @@ def build_skeleton_ai_router(
         if not sentences:
             raise HTTPException(400, "script produced zero beats")
 
-        job_id = uuid.uuid4().hex[:12]
+        endpoint = seedream_endpoint(selected_image_model, edit=True)
+        claim, replay = _begin_skeleton_command(
+            command_id=command_id,
+            user_id=uid,
+            operation="skeleton_generate_scenes",
+            arguments={
+                **body.model_dump(mode="json"),
+                "image_model": selected_image_model,
+                "image_endpoint": endpoint,
+            },
+        )
+        if replay is not None:
+            return _stream_replay(replay)
+        assert claim is not None
+        job_id = claim.ledger_key[:12]
         workspace = OUTPUT_ROOT / job_id
         stills_dir = workspace / "stills"
-        stills_dir.mkdir(parents=True, exist_ok=True)
-        _write_job_owner(workspace, job_id, user)
-        (workspace / "script.txt").write_text(body.script, encoding="utf-8")
-        master_ref = ""
-        if body.reference_image and str(body.reference_image).strip():
-            master_ref = _persist_skeleton_reference(workspace, str(body.reference_image).strip())
-        else:
-            master_ref = _resolve_skeleton_reference(workspace)
-
-        endpoint = seedream_endpoint(selected_image_model, edit=True)
 
         def sse(event: str, data: dict) -> str:
             return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
-        def event_stream():
+        def event_stream_once():
             scenes_out: list[dict] = []
             try:
+                with _skeleton_execution(claim):
+                    stills_dir.mkdir(parents=True, exist_ok=True)
+                    _write_job_owner(workspace, job_id, user)
+                    (workspace / "script.txt").write_text(body.script, encoding="utf-8")
+                    master_ref = ""
+                    if body.reference_image and str(body.reference_image).strip():
+                        master_ref = _persist_skeleton_reference(
+                            workspace,
+                            str(body.reference_image).strip(),
+                        )
+                    else:
+                        master_ref = _resolve_skeleton_reference(workspace)
                 # 1. Meta + plan up front so the UI can show "Generating x/N" immediately.
                 yield sse("meta", {
                     "job_id": job_id,
@@ -554,10 +801,16 @@ def build_skeleton_ai_router(
                     "reference_locked": bool(master_ref),
                     "total": len(sentences),
                 })
-                plan = analyze_script(grok, body.script, category_label=cat_label, topic=body.topic)
-                (workspace / "scene_plan.json").write_text(
-                    json.dumps(plan, indent=2, ensure_ascii=False), encoding="utf-8"
-                )
+                with _skeleton_execution(claim):
+                    plan = analyze_script(
+                        grok,
+                        body.script,
+                        category_label=cat_label,
+                        topic=body.topic,
+                    )
+                    (workspace / "scene_plan.json").write_text(
+                        json.dumps(plan, indent=2, ensure_ascii=False), encoding="utf-8"
+                    )
                 yield sse("plan", {"plan": plan})
 
                 # 2. Per beat: derive visuals + render still + stream the result.
@@ -565,23 +818,24 @@ def build_skeleton_ai_router(
                     sid = f"b{i:02d}"
                     yield sse("scene_start", {"beat_index": i, "narration": narration})
                     try:
-                        outfit, action, motion = derive_beat_visuals(
-                            grok, narration, cat_label, plan=plan
-                        )
-                        motion = str(motion or "")[:300]
-                        out_file = stills_dir / f"{sid}.png"
-                        edit_prompt = build_scene_edit_prompt(
-                            topic=body.topic or cat_label,
-                            visual_description=action,
-                            outfit=outfit,
-                        )
-                        generate_still_edit(
-                            edit_prompt,
-                            out_file,
-                            master_url=master_ref,
-                            seed=420042 + i,
-                            image_model_id=selected_image_model,
-                        )
+                        with _skeleton_execution(claim):
+                            outfit, action, motion = derive_beat_visuals(
+                                grok, narration, cat_label, plan=plan
+                            )
+                            motion = str(motion or "")[:300]
+                            out_file = stills_dir / f"{sid}.png"
+                            edit_prompt = build_scene_edit_prompt(
+                                topic=body.topic or cat_label,
+                                visual_description=action,
+                                outfit=outfit,
+                            )
+                            generate_still_edit(
+                                edit_prompt,
+                                out_file,
+                                master_url=master_ref,
+                                seed=420042 + i,
+                                image_model_id=selected_image_model,
+                            )
                     except CanonicalEditError as e:
                         yield sse("error", {"beat_index": i, "message": str(e)})
                         continue
@@ -601,16 +855,48 @@ def build_skeleton_ai_router(
                     yield sse("scene", scene)
 
                 # 3. Persist final manifest + signal completion.
-                (workspace / "scenes.json").write_text(
-                    json.dumps({"job_id": job_id, "scenes": scenes_out}, indent=2),
-                    encoding="utf-8",
-                )
+                with _skeleton_execution(claim):
+                    (workspace / "scenes.json").write_text(
+                        json.dumps({"job_id": job_id, "scenes": scenes_out}, indent=2),
+                        encoding="utf-8",
+                    )
                 yield sse("complete", {"job_id": job_id, "scenes_count": len(scenes_out)})
             except GeneratorExit:
                 # Client cancelled (Stop button). Don't crash the worker.
+                raise
+            except Exception:  # pragma: no cover
+                raise
+
+        def event_stream():
+            chunks: list[str] = []
+            try:
+                for chunk in event_stream_once():
+                    chunks.append(chunk)
+                    yield chunk
+            except GeneratorExit as exc:
+                _fail_skeleton_command(claim, exc)
                 return
-            except Exception as e:  # pragma: no cover
-                yield sse("error", {"message": f"fatal: {type(e).__name__}: {e}"})
+            except Exception as exc:  # pragma: no cover
+                _fail_skeleton_command(claim, exc)
+                yield sse("error", {"message": f"fatal: {type(exc).__name__}: {exc}"})
+                return
+            scenes_count = 0
+            scenes_path = workspace / "scenes.json"
+            if scenes_path.is_file():
+                try:
+                    scenes_count = len(json.loads(scenes_path.read_text(encoding="utf-8")).get("scenes") or [])
+                except Exception:
+                    scenes_count = 0
+            _complete_skeleton_command(
+                claim,
+                {
+                    "ok": True,
+                    "status": "completed",
+                    "job_id": job_id,
+                    "scenes_count": scenes_count,
+                    "_sse_chunks": chunks,
+                },
+            )
 
         return StreamingResponse(event_stream(), media_type="text/event-stream")
 
@@ -620,10 +906,7 @@ def build_skeleton_ai_router(
         request: Request,
         _user: dict = auth_dep,
     ):
-        from studio_agent.direct_production import fail_closed_uncovered, runpod_production_enabled
-
-        if runpod_production_enabled():
-            fail_closed_uncovered(request, "/api/skeleton-ai/scenes/regenerate")
+        command_id, uid = _command_id(request, _user)
         job_id = str(body.job_id or "").strip()
         if not job_id.replace("_", "").isalnum() or len(job_id) > 32:
             raise HTTPException(400, "bad_job_id")
@@ -631,9 +914,6 @@ def build_skeleton_ai_router(
         if not workspace.is_dir():
             raise HTTPException(404, "job_not_found")
         _require_job_owner(workspace, _user)
-        if body.reference_image and str(body.reference_image).strip():
-            _persist_skeleton_reference(workspace, str(body.reference_image).strip())
-        master_ref = _resolve_skeleton_reference(workspace)
         scenes_path = workspace / "scenes.json"
         scenes_doc: dict[str, Any] = {"job_id": job_id, "scenes": []}
         if scenes_path.is_file():
@@ -654,7 +934,6 @@ def build_skeleton_ai_router(
         )[:300]
         sid = f"b{int(body.beat_index):02d}"
         stills_dir = workspace / "stills"
-        stills_dir.mkdir(parents=True, exist_ok=True)
         out_file = stills_dir / f"{sid}.png"
         edit_prompt = build_scene_edit_prompt(
             topic=str(scene.get("topic") or ""),
@@ -664,24 +943,52 @@ def build_skeleton_ai_router(
         selected_image_model = normalize_fal_image_model_id(
             body.image_model or scene.get("image_model_id") or "seedream_edit"
         )
-        generate_still_edit(
-            edit_prompt,
-            out_file,
-            master_url=master_ref,
-            seed=880000 + int(body.beat_index),
-            image_model_id=selected_image_model,
+        claim, replay = _begin_skeleton_command(
+            command_id=command_id,
+            user_id=uid,
+            operation="skeleton_regenerate_scene",
+            arguments={
+                **body.model_dump(mode="json"),
+                "job_id": job_id,
+                "image_model": selected_image_model,
+                "image_endpoint": seedream_endpoint(selected_image_model, edit=True),
+            },
         )
-        scene.update({
-            "outfit": outfit,
-            "scene_action": action,
-            "motion_prompt": motion,
-            "edit_prompt": edit_prompt,
-            "image_path": f"/api/skeleton-ai/jobs/{job_id}/stills/{sid}.png",
-            "image_model_id": selected_image_model,
-        })
-        scenes_doc["scenes"] = scenes
-        scenes_path.write_text(json.dumps(scenes_doc, indent=2, ensure_ascii=False), encoding="utf-8")
-        return {"ok": True, "scene": scene}
+        if replay is not None:
+            return replay
+        assert claim is not None
+        try:
+            with _skeleton_execution(claim):
+                if body.reference_image and str(body.reference_image).strip():
+                    _persist_skeleton_reference(workspace, str(body.reference_image).strip())
+                master_ref = _resolve_skeleton_reference(workspace)
+                stills_dir.mkdir(parents=True, exist_ok=True)
+                generate_still_edit(
+                    edit_prompt,
+                    out_file,
+                    master_url=master_ref,
+                    seed=880000 + int(body.beat_index),
+                    image_model_id=selected_image_model,
+                )
+                scene.update({
+                    "outfit": outfit,
+                    "scene_action": action,
+                    "motion_prompt": motion,
+                    "edit_prompt": edit_prompt,
+                    "image_path": f"/api/skeleton-ai/jobs/{job_id}/stills/{sid}.png",
+                    "image_model_id": selected_image_model,
+                })
+                scenes_doc["scenes"] = scenes
+                scenes_path.write_text(
+                    json.dumps(scenes_doc, indent=2, ensure_ascii=False),
+                    encoding="utf-8",
+                )
+        except Exception as exc:
+            _fail_skeleton_command(claim, exc)
+            raise
+        result = {"ok": True, "scene": scene}
+        _complete_skeleton_command(claim, result)
+        return result
 
     @router.get("/jobs/{job_id}/stills/{filename}")
     async def serve_still(job_id: str, filename: str, _user: dict = auth_dep):
@@ -705,6 +1012,30 @@ def build_skeleton_ai_router(
     async def generate(body: GenerateRequest, request: Request, user: dict = auth_dep):
         from studio_agent.direct_production import execute_logged_production, runpod_production_enabled
 
+        command_id, uid = _command_id(request, user)
+        if body.tier not in ("standard", "premium"):
+            raise HTTPException(400, "tier must be standard or premium")
+        if body.render_tier == "ship" and body.tier != "premium":
+            body = body.model_copy(update={"tier": "premium"})
+        try:
+            get_category(body.category, user_id=uid)
+            from skeleton_ai.i2v_engine import resolve_video_model_chain
+
+            resolve_video_model_chain(video_model=body.video_model, tier=body.tier)
+            selected_video_model = normalize_fal_video_model_id(
+                body.video_model,
+                tier=body.tier,
+            )
+            selected_image_model = normalize_fal_image_model_id(body.image_model)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        except Exception as e:
+            from skeleton_ai.i2v_engine import I2VError
+
+            if isinstance(e, I2VError):
+                raise HTTPException(400, str(e))
+            raise
+
         if runpod_production_enabled():
             script_text = (body.script_override or body.script or "").strip()
             payload = await execute_logged_production(
@@ -715,9 +1046,9 @@ def build_skeleton_ai_router(
                     "script": script_text,
                     "scene_count": 1,
                     "render_style": "skeleton_host",
-                    "video_model": normalize_fal_video_model_id(body.video_model, tier=body.tier),
+                    "video_model": selected_video_model,
                     "tier": body.tier,
-                    "image_model_id": normalize_fal_image_model_id(body.image_model),
+                    "image_model_id": selected_image_model,
                     "reference_image": str(body.reference_image or "").strip(),
                     "visual_proof_only": True,
                     "animate": False,
@@ -725,20 +1056,30 @@ def build_skeleton_ai_router(
                     "caption_mode": "word",
                 },
                 request=request,
-                user_id=_user_id(user),
+                user_id=uid,
                 content_format="short",
             )
             payload.setdefault("poll_url", f"/api/skeleton-ai/jobs/{payload.get('job_id', '')}")
             payload["legacy_route"] = "/api/skeleton-ai/generate"
             payload["staged_visual_proof"] = True
             return payload
-        if body.tier not in ("standard", "premium"):
-            raise HTTPException(400, "tier must be standard or premium")
-        if body.render_tier == "ship" and body.tier != "premium":
-            body = body.model_copy(update={"tier": "premium"})
         script_text = (body.script_override or body.script or "").strip() or None
 
         ac_required = AC_COST_PREMIUM if body.tier == "premium" else AC_COST_STANDARD
+        claim, replay = _begin_skeleton_command(
+            command_id=command_id,
+            user_id=uid,
+            operation="skeleton_generate",
+            arguments={
+                **body.model_dump(mode="json"),
+                "video_model": selected_video_model,
+                "image_model": selected_image_model,
+                "ac_required": ac_required,
+            },
+        )
+        if replay is not None:
+            return replay
+        assert claim is not None
 
         # Reserve AC up front. Returns (allowed, source, state). Source 'admin'
         # means free (the admin/owner bypass); 'monthly' or 'topup' means we
@@ -748,9 +1089,14 @@ def build_skeleton_ai_router(
             try:
                 allowed, credit_source, state = await reserve_credit(user, ac_cost=ac_required)
             except Exception as e:
+                _fail_skeleton_command(claim, e)
                 raise HTTPException(503, f"billing_check_failed: {e}")
             if not allowed:
                 have = int(state.get("credits_total_remaining", 0) or 0)
+                denied = RuntimeError(
+                    f"insufficient_credits: needed={ac_required}, have={have}"
+                )
+                _fail_skeleton_command(claim, denied)
                 raise HTTPException(
                     402,
                     detail={
@@ -762,51 +1108,50 @@ def build_skeleton_ai_router(
                     },
                 )
 
-        uid = _user_id(user) or None
-        try:
-            get_category(body.category, user_id=uid)
-            from skeleton_ai.i2v_engine import resolve_video_model_chain
-
-            resolve_video_model_chain(video_model=body.video_model, tier=body.tier)
-        except ValueError as e:
-            raise HTTPException(400, str(e))
-        except Exception as e:
-            from skeleton_ai.i2v_engine import I2VError
-
-            if isinstance(e, I2VError):
-                raise HTTPException(400, str(e))
-
-        job_id = uuid.uuid4().hex[:12]
+        job_id = claim.ledger_key[:12]
         workspace = OUTPUT_ROOT / job_id
-        _write_job_owner(workspace, job_id, user)
-        master_ref = ""
-        if body.reference_image and str(body.reference_image).strip():
-            master_ref = _persist_skeleton_reference(workspace, str(body.reference_image).strip())
         try:
-            result = run_pipeline(
-                category_key=body.category,
-                topic=body.topic,
-                workspace=workspace,
-                tier=body.tier,
-                video_model=normalize_fal_video_model_id(body.video_model, tier=body.tier),
-                voice_id=body.voice_id,
-                script_override=script_text,
-                user_id=uid,
-                master_reference_url=master_ref,
-                image_model_id=normalize_fal_image_model_id(body.image_model),
-            )
+            with _skeleton_execution(claim):
+                _write_job_owner(workspace, job_id, user)
+                master_ref = ""
+                if body.reference_image and str(body.reference_image).strip():
+                    master_ref = _persist_skeleton_reference(
+                        workspace,
+                        str(body.reference_image).strip(),
+                    )
+                result = run_pipeline(
+                    category_key=body.category,
+                    topic=body.topic,
+                    workspace=workspace,
+                    tier=body.tier,
+                    video_model=selected_video_model,
+                    voice_id=body.voice_id,
+                    script_override=script_text,
+                    user_id=uid,
+                    master_reference_url=master_ref,
+                    image_model_id=selected_image_model,
+                )
         except ValueError as e:
             await _maybe_refund(refund_credit, user, credit_source, ac_required)
+            _fail_skeleton_command(claim, e)
             raise HTTPException(400, str(e))
         except GrokAuthError as e:
             await _maybe_refund(refund_credit, user, credit_source, ac_required)
+            _fail_skeleton_command(claim, e)
             raise HTTPException(503, f"upstream_auth: {e}")
         except Exception as e:
             await _maybe_refund(refund_credit, user, credit_source, ac_required)
+            _fail_skeleton_command(claim, e)
             raise HTTPException(500, f"pipeline_failed: {e}")
 
-        return {"job_id": job_id, "ac_charged": ac_required if credit_source != "admin" else 0,
-                "credit_source": credit_source, **result}
+        response = {
+            "job_id": job_id,
+            "ac_charged": ac_required if credit_source != "admin" else 0,
+            "credit_source": credit_source,
+            **result,
+        }
+        _complete_skeleton_command(claim, response)
+        return response
 
     @router.get("/jobs/{job_id}")
     async def job_status(job_id: str, _user: dict = auth_dep):

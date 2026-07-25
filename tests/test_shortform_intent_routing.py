@@ -4,7 +4,8 @@ import asyncio
 import json
 from contextlib import asynccontextmanager
 
-from studio_agent import runner, store, tools
+from studio_agent import production_workflows, runner, store, tools
+from studio_agent.execution_context import production_command_scope
 
 
 ONE_SCENE_PROOF_COMMIT = (
@@ -122,6 +123,11 @@ def test_bulk_ship_target_prefers_latest_same_session_multiscene_card(tmp_path, 
     monkeypatch.setattr(tools, "_shortform_workspace", lambda job_id: workspaces[job_id])
     monkeypatch.setattr(runner, "get_job_snapshot", lambda job_id, _kind: dict(snapshots[job_id]))
     monkeypatch.setattr(runner.store, "get_session", lambda _sid, **_kwargs: session)
+    monkeypatch.setattr(
+        runner.store,
+        "claim_production_gate",
+        lambda *_args, **_kwargs: session,
+    )
 
     assert runner._recover_shortform_job_from_session(session) == production_id
     assert runner._recover_poll_target(session) == (production_id, "shortform")
@@ -190,7 +196,7 @@ def test_bulk_ship_rejects_same_user_job_without_same_session_binding(tmp_path, 
     assert runner._verified_bulk_ship_command_target(session, job_id) is False
 
 
-def test_bulk_ship_qa_failure_stops_before_any_animation_or_finalize(monkeypatch) -> None:
+def test_bulk_ship_hands_mutations_to_durable_backend_workflow(monkeypatch) -> None:
     job_id = "production-six"
     session = {
         "session_id": "sa_bulk_gate",
@@ -229,6 +235,27 @@ def test_bulk_ship_qa_failure_stops_before_any_animation_or_finalize(monkeypatch
 
     monkeypatch.setattr(runner, "studio_agent_slot", fake_slot)
     monkeypatch.setattr(runner.store, "get_session", lambda _sid, **_kwargs: session)
+    monkeypatch.setattr(
+        runner.store,
+        "claim_production_gate",
+        lambda *_args, **_kwargs: session,
+    )
+    monkeypatch.setattr(
+        runner.store,
+        "record_production_command_transition",
+        lambda *_args, **_kwargs: {},
+    )
+    enqueued: list[dict] = []
+
+    def enqueue(**kwargs):
+        enqueued.append(kwargs)
+        return {
+            "workflow_id": "ship-workflow-1",
+            "session_id": session["session_id"],
+        }, True
+
+    monkeypatch.setattr(production_workflows, "enqueue_shortform_ship_workflow", enqueue)
+    monkeypatch.setattr(production_workflows, "schedule_production_workflow", lambda _row: True)
 
     def update_session(_sid, **updates):
         session.update(updates)
@@ -236,16 +263,26 @@ def test_bulk_ship_qa_failure_stops_before_any_animation_or_finalize(monkeypatch
 
     monkeypatch.setattr(runner.store, "update_session", update_session)
 
-    result = asyncio.run(runner._apply_bulk_scene_ship(
-        session=session,
+    with production_command_scope(
+        "ship-command-1",
         user_id=session["user_id"],
+        session_id=session["session_id"],
+        source="server_workflow",
         user_text="animate them and make the finished video",
-        content_format="short",
-        emit=None,
-        membership_plan="pro",
-        billing_profile={"unlimited": True},
-    ))
+    ):
+        result = asyncio.run(runner._apply_bulk_scene_ship(
+            session=session,
+            user_id=session["user_id"],
+            user_text="animate them and make the finished video",
+            content_format="short",
+            emit=None,
+            membership_plan="pro",
+            billing_profile={"unlimited": True},
+        ))
 
     assert result is not None
-    assert calls == ["set_production_scenes_animate"]
-    assert "narrative mismatch" in result["assistant_message"]
+    assert calls == []
+    assert len(enqueued) == 1
+    assert enqueued[0]["job_id"] == job_id
+    assert enqueued[0]["animation_scene_indices"] == [2, 3, 4, 5]
+    assert "backend-owned production command" in result["assistant_message"]

@@ -10,7 +10,8 @@ import long_form_router
 import skeleton_ai_router
 from long_form import pipeline as longform_pipeline
 from studio_agent import jobs as agent_jobs
-from studio_agent import openrouter, runpod_bridge, tools
+from studio_agent import idempotent_mutations, openrouter, runpod_bridge, tools
+from studio_agent.execution_context import current_production_command
 
 
 def _client() -> TestClient:
@@ -55,6 +56,7 @@ def _mock_owned_longform_job(monkeypatch, owner_id: str = "user-1") -> None:
 
 def test_runpod_short_generate_uses_logged_contract_once(monkeypatch) -> None:
     calls: list[tuple[str, dict, dict]] = []
+    command_ids: list[str] = []
     monkeypatch.setattr(tools, "_runpod_production_enabled", lambda: True)
     monkeypatch.setattr(
         skeleton_ai_router,
@@ -63,6 +65,8 @@ def test_runpod_short_generate_uses_logged_contract_once(monkeypatch) -> None:
     )
 
     def execute(name, arguments, **context):
+        authority = current_production_command()
+        command_ids.append(authority.command_id if authority else "")
         calls.append((name, dict(arguments), dict(context)))
         return json.dumps({"ok": True, "status": "accepted", "job_id": "sf_123", "runpod_job_id": "rp-1"})
 
@@ -85,7 +89,7 @@ def test_runpod_short_generate_uses_logged_contract_once(monkeypatch) -> None:
     assert len(calls) == 1
     name, arguments, context = calls[0]
     assert name == "start_shortform_generate"
-    assert arguments["_runpod_command_id"] == "short-click-1"
+    assert command_ids == ["short-click-1"]
     assert arguments["reference_image"] == "https://example.test/reference.png"
     assert arguments["visual_proof_only"] is True
     assert context == {"user_id": "user-1", "content_format": "short"}
@@ -113,28 +117,60 @@ def test_runpod_short_generate_requires_key_without_local_fallback(monkeypatch) 
     assert "X-Idempotency-Key is required" in response.text
 
 
-def test_uncovered_skeleton_scenes_fails_closed_when_enabled(monkeypatch) -> None:
+def test_skeleton_scenes_uses_idempotent_backend_command_when_runpod_enabled(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from studio_agent.command_execution import InMemoryExecutionLedger
+
+    provider_calls: list[str] = []
     monkeypatch.setattr(tools, "_runpod_production_enabled", lambda: True)
+    monkeypatch.setattr(idempotent_mutations, "_LEDGER", InMemoryExecutionLedger())
+    monkeypatch.setattr(skeleton_ai_router, "OUTPUT_ROOT", tmp_path)
+    monkeypatch.setattr(skeleton_ai_router, "GrokClient", lambda: object())
+    monkeypatch.setattr(skeleton_ai_router, "analyze_script", lambda *_args, **_kwargs: {"cast": []})
     monkeypatch.setattr(
         skeleton_ai_router,
-        "GrokClient",
-        lambda: (_ for _ in ()).throw(AssertionError("uncovered route must not start local work")),
+        "derive_beat_visuals",
+        lambda *_args, **_kwargs: ("black hoodie", "stands in a lab", "slow push"),
+    )
+    monkeypatch.setattr(
+        skeleton_ai_router,
+        "generate_still_edit",
+        lambda *_args, **_kwargs: provider_calls.append("still"),
+    )
+    monkeypatch.setattr(
+        skeleton_ai_router,
+        "_persist_skeleton_reference",
+        lambda _workspace, reference: reference,
     )
 
-    response = _client().post(
+    client = _client()
+    response = client.post(
+        "/api/skeleton-ai/scenes",
+        headers={"X-Idempotency-Key": "scenes-click-1"},
+        json={"script": "One. Two.", "reference_image": "https://example.test/ref.png"},
+    )
+    replay = client.post(
         "/api/skeleton-ai/scenes",
         headers={"X-Idempotency-Key": "scenes-click-1"},
         json={"script": "One. Two.", "reference_image": "https://example.test/ref.png"},
     )
 
-    assert response.status_code == 503
-    assert "no idempotent RunPod parity" in response.text
+    assert response.status_code == 200, response.text
+    assert replay.status_code == 200, replay.text
+    assert "event: complete" in response.text
+    assert replay.text == response.text
+    assert provider_calls == ["still", "still"]
 
 
 def test_flag_off_short_generate_preserves_local_pipeline(monkeypatch, tmp_path: Path) -> None:
+    from studio_agent.command_execution import InMemoryExecutionLedger
+
     local_calls: list[dict] = []
     monkeypatch.setattr(tools, "_runpod_production_enabled", lambda: False)
     monkeypatch.setattr(skeleton_ai_router, "OUTPUT_ROOT", tmp_path)
+    monkeypatch.setattr(idempotent_mutations, "_LEDGER", InMemoryExecutionLedger())
     monkeypatch.setattr(
         tools,
         "execute_tool_logged",
@@ -148,6 +184,7 @@ def test_flag_off_short_generate_preserves_local_pipeline(monkeypatch, tmp_path:
     monkeypatch.setattr(skeleton_ai_router, "run_pipeline", local_pipeline)
     response = _client().post(
         "/api/skeleton-ai/generate",
+        headers={"X-Idempotency-Key": "local-skeleton-generate-1"},
         json={
             "category": "people_blogs",
             "topic": "Local test",
@@ -187,6 +224,7 @@ def test_global_flag_alone_fails_longform_closed(monkeypatch) -> None:
 
 def test_enabled_longform_start_uses_logged_contract_once(monkeypatch) -> None:
     calls: list[tuple[str, dict, dict]] = []
+    command_ids: list[str] = []
     monkeypatch.setattr(tools, "_runpod_production_enabled", lambda: True)
     monkeypatch.setenv("STUDIO_RUNPOD_LONGFORM_ENABLED", "1")
     monkeypatch.setattr(
@@ -196,6 +234,8 @@ def test_enabled_longform_start_uses_logged_contract_once(monkeypatch) -> None:
     )
 
     def execute(name, arguments, **context):
+        authority = current_production_command()
+        command_ids.append(authority.command_id if authority else "")
         calls.append((name, dict(arguments), dict(context)))
         return json.dumps({"ok": True, "status": "accepted", "job_id": "lf_123", "runpod_job_id": "rp-lf-1"})
 
@@ -211,7 +251,7 @@ def test_enabled_longform_start_uses_logged_contract_once(monkeypatch) -> None:
     assert len(calls) == 1
     name, arguments, context = calls[0]
     assert name == "start_longform_render"
-    assert arguments["_runpod_command_id"] == "long-click-1"
+    assert command_ids == ["long-click-1"]
     assert json.loads(arguments["chapters_json"])["title"] == "A Test Documentary"
     assert context == {"user_id": "user-1", "content_format": "long"}
 
@@ -221,6 +261,7 @@ def test_flag_off_longform_mutations_still_use_logged_credit_contract(
     tmp_path: Path,
 ) -> None:
     calls: list[tuple[str, dict]] = []
+    command_ids: list[str] = []
     _mock_owned_longform_job(monkeypatch)
     monkeypatch.setattr(tools, "_runpod_production_enabled", lambda: False)
 
@@ -239,6 +280,8 @@ def test_flag_off_longform_mutations_still_use_logged_credit_contract(
     )
 
     def execute(name, arguments, **_context):
+        authority = current_production_command()
+        command_ids.append(authority.command_id if authority else "")
         calls.append((name, dict(arguments)))
         job_id = arguments.get("job_id") or "lf_local"
         if name == "regenerate_longform_still":
@@ -279,7 +322,7 @@ def test_flag_off_longform_mutations_still_use_logged_credit_contract(
         "regenerate_longform_still",
         "finalize_longform_render",
     ]
-    assert [row[1]["_runpod_command_id"] for row in calls] == [
+    assert command_ids == [
         "local-start-1",
         "local-regen-1",
         "local-finalize-1",
@@ -288,11 +331,14 @@ def test_flag_off_longform_mutations_still_use_logged_credit_contract(
 
 def test_enabled_longform_scene_and_finalize_use_logged_tools(monkeypatch) -> None:
     calls: list[tuple[str, dict]] = []
+    command_ids: list[str] = []
     _mock_owned_longform_job(monkeypatch)
     monkeypatch.setattr(tools, "_runpod_production_enabled", lambda: True)
     monkeypatch.setenv("STUDIO_RUNPOD_LONGFORM_ENABLED", "true")
 
     def execute(name, arguments, **_context):
+        authority = current_production_command()
+        command_ids.append(authority.command_id if authority else "")
         calls.append((name, dict(arguments)))
         return json.dumps({"ok": True, "status": "accepted", "runpod_job_id": f"rp-{name}"})
 
@@ -311,8 +357,7 @@ def test_enabled_longform_scene_and_finalize_use_logged_tools(monkeypatch) -> No
     assert regenerate.status_code == 200, regenerate.text
     assert finalize.status_code == 200, finalize.text
     assert [row[0] for row in calls] == ["regenerate_longform_still", "finalize_longform_render"]
-    assert calls[0][1]["_runpod_command_id"] == "regen-1"
-    assert calls[1][1]["_runpod_command_id"] == "finalize-lf-123"
+    assert command_ids == ["regen-1", "finalize-lf-123"]
 
 
 def test_thumbnail_regeneration_uses_logged_local_credit_contract(
@@ -322,6 +367,7 @@ def test_thumbnail_regeneration_uses_logged_local_credit_contract(
     monkeypatch.setattr(tools, "_runpod_production_enabled", lambda: True)
     monkeypatch.setenv("STUDIO_RUNPOD_LONGFORM_ENABLED", "1")
     calls: list[tuple[str, dict, dict]] = []
+    command_ids: list[str] = []
     monkeypatch.setattr(
         longform_pipeline,
         "regenerate_thumbnail",
@@ -331,6 +377,8 @@ def test_thumbnail_regeneration_uses_logged_local_credit_contract(
     )
 
     def execute(name, arguments, **context):
+        authority = current_production_command()
+        command_ids.append(authority.command_id if authority else "")
         calls.append((name, dict(arguments), dict(context)))
         return json.dumps({
             "ok": True,
@@ -350,23 +398,27 @@ def test_thumbnail_regeneration_uses_logged_local_credit_contract(
 
     assert response.status_code == 200, response.text
     assert response.json()["custom_prompt_used"] is True
+    assert command_ids == ["thumb-1"]
     assert calls == [(
         "regenerate_longform_thumbnail",
         {
             "job_id": "lf_local",
             "idx": 1,
             "custom_prompt": "brighter",
-            "_runpod_command_id": "thumb-1",
         },
         {"user_id": "user-1", "content_format": "long"},
     )]
 
 
-def test_outline_and_chapter_expansion_are_priced_logged_and_idempotent(monkeypatch) -> None:
+def test_outline_and_chapter_expansion_send_metering_inputs_under_stable_commands(
+    monkeypatch,
+) -> None:
     calls: list[tuple[str, dict]] = []
-    monkeypatch.setattr(openrouter, "model_pricing", lambda _model: _async_value((3.0, 15.0)))
+    command_ids: list[str] = []
 
     def execute(name, arguments, **_context):
+        authority = current_production_command()
+        command_ids.append(authority.command_id if authority else "")
         calls.append((name, dict(arguments)))
         if name == "generate_longform_outline":
             return json.dumps({"outline": {"title": "Metered", "chapters": []}})
@@ -393,30 +445,24 @@ def test_outline_and_chapter_expansion_are_priced_logged_and_idempotent(monkeypa
     assert outline.status_code == 200, outline.text
     assert chapter.status_code == 200, chapter.text
     assert [row[0] for row in calls] == ["generate_longform_outline", "expand_longform_chapter"]
-    assert [row[1]["_runpod_command_id"] for row in calls] == ["outline-1", "chapter-1"]
+    assert command_ids == ["outline-1", "chapter-1"]
     for _, arguments in calls:
-        assert arguments["_billing_prompt_price_per_m"] == 3.0
-        assert arguments["_billing_completion_price_per_m"] == 15.0
+        assert "_billing_prompt_price_per_m" not in arguments
+        assert "_billing_completion_price_per_m" not in arguments
         assert arguments["_billing_input_chars"] > 0
 
 
-async def _async_value(value):
-    return value
-
-
-def test_unpriced_outline_fails_before_tool_or_provider_execution(monkeypatch) -> None:
-    monkeypatch.setattr(openrouter, "model_pricing", lambda _model: _async_value((None, None)))
+def test_outline_requires_command_before_tool_or_pricing_catalog(monkeypatch) -> None:
+    calls: list[str] = []
     monkeypatch.setattr(
-        tools,
-        "execute_tool_logged",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("unpriced outline reached paid execution")
-        ),
+        openrouter,
+        "model_pricing",
+        lambda _model: calls.append("pricing"),
     )
+    monkeypatch.setattr(tools, "execute_tool_logged", lambda *_args, **_kwargs: calls.append("tool"))
 
     response = _client().post(
         "/api/long-form/outline",
-        headers={"X-Idempotency-Key": "unpriced-outline-1"},
         json={
             "channel_key": "history_rewind",
             "topic": "Do not spend",
@@ -424,8 +470,9 @@ def test_unpriced_outline_fails_before_tool_or_provider_execution(monkeypatch) -
         },
     )
 
-    assert response.status_code == 503
-    assert "no provider request was sent" in response.text
+    assert response.status_code == 400
+    assert "X-Idempotency-Key" in response.text
+    assert calls == []
 
 
 def test_runpod_owned_cancel_fails_closed_instead_of_claiming_local_cancel(monkeypatch) -> None:
@@ -445,6 +492,48 @@ def test_runpod_owned_cancel_fails_closed_instead_of_claiming_local_cancel(monke
 
     assert response.status_code == 409
     assert "cannot stop its remote spend" in response.text
+
+
+def test_local_longform_cancel_requires_and_uses_backend_command(monkeypatch) -> None:
+    _mock_owned_longform_job(monkeypatch)
+    command_ids: list[str] = []
+    calls: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        runpod_bridge,
+        "get_dispatch_receipt_by_studio_job_id",
+        lambda _job_id: None,
+    )
+    monkeypatch.setattr(
+        longform_pipeline,
+        "cancel_render",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("cancel route must not bypass execute_tool_logged")
+        ),
+    )
+
+    def execute(name, arguments, **_context):
+        authority = current_production_command()
+        command_ids.append(authority.command_id if authority else "")
+        calls.append((name, dict(arguments)))
+        return json.dumps({
+            "ok": True,
+            "status": "cancelling",
+            "postcondition_verified": True,
+            "job_id": "lf_owned",
+        })
+
+    monkeypatch.setattr(tools, "execute_tool_logged", execute)
+    client = _client()
+    missing = client.post("/api/long-form/jobs/lf_owned/cancel")
+    accepted = client.post(
+        "/api/long-form/jobs/lf_owned/cancel",
+        headers={"X-Idempotency-Key": "cancel-lf-owned-1"},
+    )
+
+    assert missing.status_code == 400
+    assert accepted.status_code == 200, accepted.text
+    assert calls == [("cancel_longform_render", {"job_id": "lf_owned"})]
+    assert command_ids == ["cancel-lf-owned-1"]
 
 
 def test_read_route_stays_local_without_idempotency_header(monkeypatch) -> None:

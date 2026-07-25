@@ -46,7 +46,9 @@ def build_clone_video_handler(
         background_tasks=None,
         request=None,
     ):
-        user = await get_current_user_from_request(request) if request else None
+        user = getattr(getattr(request, "state", None), "production_command_user", None)
+        if not isinstance(user, dict):
+            user = await get_current_user_from_request(request) if request else None
         if not user:
             raise HTTPException(401, "Auth required")
         if not user_has_paid_access(user):

@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from typing import Callable
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from catalyst_references import (
@@ -25,6 +25,7 @@ from catalyst_references import (
     update_reference_notes,
     ReferenceError,
 )
+from studio_agent.direct_production import claim_direct_production
 
 
 class AddReferenceRequest(BaseModel):
@@ -53,19 +54,29 @@ def build_catalyst_references_router(
         return uid
 
     @router.post("")
-    async def add_reference(body: AddReferenceRequest, user: dict = auth_dep):
+    async def add_reference(body: AddReferenceRequest, request: Request, user: dict = auth_dep):
         if not body.url or not body.url.strip():
             raise HTTPException(400, "url is required")
-        try:
-            row = ingest_reference_video(
-                user_id=_user_id(user),
-                url=body.url.strip(),
-                channel_key=(body.channel_key or "").strip(),
-                notes=(body.notes or "").strip(),
-            )
-        except ReferenceError as e:
-            raise HTTPException(400, f"reference_failed: {e}")
-        return {"reference": row}
+        user_id = _user_id(user)
+        arguments = {
+            "url": body.url.strip(),
+            "channel_key": (body.channel_key or "").strip(),
+            "notes": (body.notes or "").strip(),
+        }
+        with claim_direct_production(
+            "catalyst_add_reference",
+            arguments,
+            request=request,
+            user_id=user_id,
+            content_format="catalyst",
+        ) as command:
+            if command.replay is not None:
+                return dict(command.replay)
+            try:
+                row = ingest_reference_video(user_id=user_id, **arguments)
+            except ReferenceError as e:
+                raise HTTPException(400, f"reference_failed: {e}")
+            return command.complete({"reference": row})
 
     @router.get("")
     async def list_references(channel_key: str | None = None, user: dict = auth_dep):
@@ -76,26 +87,53 @@ def build_catalyst_references_router(
         return {"references": rows, "total": len(rows)}
 
     @router.patch("/{ref_id}")
-    async def update_reference(ref_id: str, body: UpdateReferenceRequest, user: dict = auth_dep):
+    async def update_reference(
+        ref_id: str,
+        body: UpdateReferenceRequest,
+        request: Request,
+        user: dict = auth_dep,
+    ):
         if not ref_id or not _safe_id(ref_id):
             raise HTTPException(400, "bad ref_id")
-        updated = update_reference_notes(
-            user_id=_user_id(user), ref_id=ref_id,
-            notes=body.notes or "",
-            channel_key=body.channel_key,
-        )
-        if updated is None:
-            raise HTTPException(404, "not_found")
-        return {"reference": updated}
+        user_id = _user_id(user)
+        arguments = {
+            "ref_id": ref_id,
+            "notes": body.notes or "",
+            "channel_key": body.channel_key,
+        }
+        with claim_direct_production(
+            "catalyst_update_reference",
+            arguments,
+            request=request,
+            user_id=user_id,
+            content_format="catalyst",
+        ) as command:
+            if command.replay is not None:
+                return dict(command.replay)
+            updated = update_reference_notes(user_id=user_id, **arguments)
+            if updated is None:
+                raise HTTPException(404, "not_found")
+            return command.complete({"reference": updated})
 
     @router.delete("/{ref_id}")
-    async def delete_reference(ref_id: str, user: dict = auth_dep):
+    async def delete_reference(ref_id: str, request: Request, user: dict = auth_dep):
         if not ref_id or not _safe_id(ref_id):
             raise HTTPException(400, "bad ref_id")
-        ok = delete_reference_video(user_id=_user_id(user), ref_id=ref_id)
-        if not ok:
-            raise HTTPException(404, "not_found")
-        return {"deleted": True, "id": ref_id}
+        user_id = _user_id(user)
+        arguments = {"ref_id": ref_id}
+        with claim_direct_production(
+            "catalyst_delete_reference",
+            arguments,
+            request=request,
+            user_id=user_id,
+            content_format="catalyst",
+        ) as command:
+            if command.replay is not None:
+                return dict(command.replay)
+            ok = delete_reference_video(user_id=user_id, ref_id=ref_id)
+            if not ok:
+                raise HTTPException(404, "not_found")
+            return command.complete({"deleted": True, "id": ref_id})
 
     return router
 

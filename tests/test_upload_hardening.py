@@ -14,6 +14,8 @@ import cliplab_router
 import skeleton_ai_router
 import studio_agent_router
 import upload_limits
+from studio_agent import idempotent_mutations
+from studio_agent.command_execution import FileExecutionLedger
 
 
 class _Upload:
@@ -315,6 +317,11 @@ def test_dictation_route_returns_413_before_transcription(monkeypatch: pytest.Mo
 def test_cliplab_route_caps_and_removes_partial_video(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(cliplab_router, "MAX_CLIPLAB_VIDEO_BYTES", 4)
     monkeypatch.setattr(cliplab_router, "CLIPLAB_UPLOAD_DIR", tmp_path)
+    monkeypatch.setattr(
+        idempotent_mutations,
+        "_LEDGER",
+        FileExecutionLedger(tmp_path / "command-ledger"),
+    )
     app = FastAPI()
     app.include_router(
         cliplab_router.build_cliplab_router(
@@ -325,6 +332,7 @@ def test_cliplab_route_caps_and_removes_partial_video(tmp_path: Path, monkeypatc
     )
     response = TestClient(app).post(
         "/api/cliplab/ingest/upload",
+        headers={"X-Idempotency-Key": "oversized-cliplab-upload-1"},
         files={"file": ("source.mp4", b"12345", "video/mp4")},
     )
     assert response.status_code == 413

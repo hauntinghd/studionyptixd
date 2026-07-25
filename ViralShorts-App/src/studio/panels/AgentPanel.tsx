@@ -61,6 +61,12 @@ import {
 import { useSpeechDictation } from '../hooks/useSpeechDictation';
 import { ensureStudioFresh } from '../lib/studioClientSync';
 import { loadImageModelPref, saveImageModelPref } from '../lib/productionModelPrefs';
+import {
+    emptyProductionViewStateV1,
+    productionViewV1FromUnknown,
+    reduceProductionViewV1,
+    type ProductionViewStateV1,
+} from '../lib/productionView';
 import { AuthContext, resolveStudioBackendUrl } from '../shared';
 import { loadStudioHubState } from '../lib/studioHubState';
 import AgentModelPicker, { type AgentModelOption } from './AgentModelPicker';
@@ -610,6 +616,39 @@ interface SessionSummary {
     active_runs?: { run_id: string; status: string; last_event?: { data?: { message?: string } } | null }[];
 }
 
+function cachedSessionTitle(entry: SessionUiCache): string {
+    const firstUserMessage = entry.messages.find((message) => message.role === 'user');
+    const userTitle = String(firstUserMessage?.content || '').replace(/\s+/g, ' ').trim();
+    if (userTitle) return userTitle.slice(0, 96);
+    const deliverableTitle = entry.messages
+        .map((message) => String(message.jobDeliverable?.title || '').trim())
+        .find(Boolean);
+    return deliverableTitle?.slice(0, 96) || 'Saved chat';
+}
+
+function cachedSessionHistory(
+    cache: Map<string, SessionUiCache>,
+    preferredSessionId: string,
+): SessionSummary[] {
+    const rows = [...cache.entries()]
+        .filter(([sessionId]) => isPersistedAgentSessionId(sessionId))
+        .map(([sessionId, entry]) => ({
+            session_id: sessionId,
+            title: cachedSessionTitle(entry),
+            message_count: entry.messages.length,
+            pending_count: entry.pending.length,
+            active_runs: [],
+        }));
+    rows.sort((left, right) => (
+        left.session_id === preferredSessionId
+            ? -1
+            : right.session_id === preferredSessionId
+                ? 1
+                : 0
+    ));
+    return rows;
+}
+
 const STARTER_PROMPTS = [
     "I don't know what to film — audit my channel, rank 5 topics, and pick the best short vs long path.",
     'Reference: paste a MrBeast / Magnates URL — analyze pacing, blueprint scenes, then start a render.',
@@ -619,46 +658,6 @@ const STARTER_PROMPTS = [
 
 const CLIPLAB_STARTER_PROMPT =
     'ClipLab: use my uploaded long video, study my channel + public demand, cut the best 9:16 clips with upload packages.';
-
-function mentionsClipLab(text: string) {
-    return /\bcliplab\b/i.test(String(text || '').trim());
-}
-
-function looksLikeIdeation(text: string) {
-    const low = String(text || '').trim().toLowerCase();
-    if (!low) return false;
-    if (/\b(?:render|generate|start|animate|finalize|export)\b.+\b(?:short|video|production)\b/i.test(low)) {
-        return false;
-    }
-    if (/\b(?:make|create|generate|render|produce|build)\b.+\b(?:short|short-form|shortform)\b/i.test(low)) {
-        return false;
-    }
-    const ideationSignals = [
-        'how would i',
-        'how should i',
-        'how could i',
-        'market research',
-        'niche research',
-        'channel strategy',
-        'youtube channel for',
-        'art style',
-        'brainstorm',
-        'ideation',
-        'using this video as reference',
-        'using this as reference',
-        'content like this',
-        'public youtube data',
-        'what niche',
-        'topic ideas',
-        "don't know what to make",
-        "dont know what to make",
-    ];
-    if (ideationSignals.some((phrase) => low.includes(phrase))) return true;
-    if (/\?/.test(low) && /\b(?:channel|niche|topic|style|market|research|audience)\b/i.test(low)) {
-        return true;
-    }
-    return false;
-}
 
 function formatSessionAge(updatedAt?: number) {
     if (!updatedAt) return '';
@@ -1306,25 +1305,53 @@ function shouldSuppressProductionJob(
     return isStaleProductionJob(String(title || ''), messages);
 }
 
-function collectKnownProductionJobIds(
-    messages: Array<{ jobDeliverable?: AgentJobSnapshot }>,
-    tracks: AgentJobTrack[],
-    deliverables: Iterable<string>,
-): string[] {
-    const ids = new Set<string>();
-    for (const track of tracks) {
-        const id = String(track.job_id || '').trim();
-        if (id) ids.add(id);
+function canonicalProductionViewOwnsExactJob(
+    state: ProductionViewStateV1,
+    sessionId: string | null | undefined,
+    jobId: string | null | undefined,
+): boolean {
+    const expectedSessionId = String(sessionId || '').trim();
+    const exactJobId = String(jobId || '').trim();
+    const view = state.view;
+    if (
+        !view
+        || !expectedSessionId
+        || !exactJobId
+        || state.session_id !== expectedSessionId
+        || view.session_id !== expectedSessionId
+    ) {
+        return false;
     }
-    for (const msg of messages) {
-        const id = String(msg.jobDeliverable?.job_id || '').trim();
-        if (id) ids.add(id);
-    }
-    for (const id of deliverables) {
-        const trimmed = String(id || '').trim();
-        if (trimmed) ids.add(trimmed);
-    }
-    return [...ids];
+    return (
+        Object.prototype.hasOwnProperty.call(state.jobs_by_id, exactJobId)
+        || view.cards.some((card) => card.job_id === exactJobId)
+    );
+}
+
+function stripGhostDeliverablesPreservingCanonical(
+    messages: ChatMessage[],
+    state: ProductionViewStateV1,
+    sessionId: string | null | undefined,
+): ChatMessage[] {
+    const stripped = stripGhostJobDeliverables(messages);
+    if (stripped === messages) return messages;
+    let restored = false;
+    const next = stripped.map((row, index) => {
+        const canonicalSnapshot = messages[index]?.jobDeliverable;
+        if (
+            !canonicalSnapshot
+            || !canonicalProductionViewOwnsExactJob(
+                state,
+                sessionId,
+                canonicalSnapshot.job_id,
+            )
+        ) {
+            return row;
+        }
+        restored = true;
+        return { ...row, jobDeliverable: canonicalSnapshot };
+    });
+    return restored ? next : stripped;
 }
 
 function keepSingleProductionPending(actions: PendingAction[], messages: Array<{ role?: string; content?: string }>): PendingAction[] {
@@ -1560,6 +1587,7 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
     const repairSnapshotGuardRef = useRef<Map<string, number>>(new Map());
     const repairingJobIdRef = useRef('');
     const repairActiveRunSeenRef = useRef<Set<string>>(new Set());
+    const productionViewRef = useRef<ProductionViewStateV1>(emptyProductionViewStateV1());
     const dismissedDockJobIdsRef = useRef<Set<string>>(new Set());
     const sessionLoadSeqRef = useRef(0);
     const autoSyncTimerRef = useRef<number | null>(null);
@@ -1704,11 +1732,23 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
     }, []);
 
     useEffect(() => {
-        const hasStale = messages.some((msg) => shouldHideJobDeliverable(msg.jobDeliverable, messages));
-        if (!hasStale) return;
-        setMessages((rows) => stripGhostJobDeliverables(rows));
-        dropGhostShortformTrack();
-    }, [messages, dropGhostShortformTrack]);
+        const staleJobIds = [...new Set(messages.flatMap((msg) => {
+            const snap = msg.jobDeliverable;
+            if (
+                !snap?.job_id
+                || canonicalProductionViewOwnsExactJob(
+                    productionViewRef.current,
+                    sessionId,
+                    snap.job_id,
+                )
+                || !shouldHideJobDeliverable(snap, messages)
+            ) {
+                return [];
+            }
+            return [snap.job_id];
+        }))];
+        for (const jobId of staleJobIds) dropGhostShortformTrack(jobId);
+    }, [messages, dropGhostShortformTrack, sessionId]);
 
     useEffect(() => {
         sessionIdRef.current = sessionId;
@@ -1939,6 +1979,11 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
         options?: { source?: DeliverableSource; pinToLatest?: boolean },
     ) => {
         const source = options?.source || 'action';
+        const canonicalOwnsSnapshot = canonicalProductionViewOwnsExactJob(
+            productionViewRef.current,
+            sessionIdRef.current,
+            snap.job_id,
+        );
         const guardedUntil = repairSnapshotGuardRef.current.get(snap.job_id) || 0;
         if (
             (source === 'poll' || source === 'rehydrate')
@@ -1948,20 +1993,28 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
             return;
         }
         if (absorbThumbnailSnapshot(snap)) return;
-        if (shouldSuppressProductionJob(snap.job_id, snap.title, messagesRef.current, blockedJobIdsRef.current)) {
+        if (
+            !canonicalOwnsSnapshot
+            && shouldSuppressProductionJob(
+                snap.job_id,
+                snap.title,
+                messagesRef.current,
+                blockedJobIdsRef.current,
+            )
+        ) {
             dropGhostShortformTrack(snap.job_id);
             return;
         }
         const ownerSession = jobSessionRef.current.get(snap.job_id);
         if (ownerSession && ownerSession !== sessionIdRef.current) return;
-        if (isGhostJobPollFailure(snap)) {
+        if (!canonicalOwnsSnapshot && isGhostJobPollFailure(snap)) {
             dropGhostShortformTrack(snap.job_id);
             return;
         }
-        if (shouldHideJobDeliverable(snap, messagesRef.current)) {
+        if (!canonicalOwnsSnapshot && shouldHideJobDeliverable(snap, messagesRef.current)) {
             return;
         }
-        if (shouldSuppressProductionJob(
+        if (!canonicalOwnsSnapshot && shouldSuppressProductionJob(
             snap.job_id,
             snap.title,
             messagesRef.current,
@@ -1982,7 +2035,7 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
             }));
             if (snap.status === 'awaiting_approval') setError('');
         }
-        if (isImplicitCancelFailure(snap)) return;
+        if (!canonicalOwnsSnapshot && isImplicitCancelFailure(snap)) return;
         if (snap.kind === 'competitor' && snap.status === 'complete') {
             for (const [id, cached] of [...deliverablesByJobRef.current.entries()]) {
                 if (cached.status === 'failed' && (cached.kind === 'competitor' || cached.kind === 'shortform' || isGhostJobPollFailure(cached))) {
@@ -2230,7 +2283,17 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
         pollResetKey,
         getToken,
         shouldPollJobTrack: (track) => (
-            !shouldSuppressProductionJob(track.job_id, track.title, messagesRef.current, blockedJobIdsRef.current)
+            canonicalProductionViewOwnsExactJob(
+                productionViewRef.current,
+                sessionIdRef.current,
+                track.job_id,
+            )
+            || !shouldSuppressProductionJob(
+                track.job_id,
+                track.title,
+                messagesRef.current,
+                blockedJobIdsRef.current,
+            )
         ),
         shouldAcceptSnapshot: shouldAcceptPolledSnapshot,
         onProgress: upsertProgressLine,
@@ -2471,7 +2534,72 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
 
     const lastSessionKey = lastSessionStorageKey(session?.user?.id);
 
-    const applyProductionLedger = useCallback((raw: Record<string, unknown>) => {
+    const applyProductionProjection = useCallback((raw: unknown): boolean => {
+        const incoming = productionViewV1FromUnknown(raw);
+        const expectedSessionId = String(sessionIdRef.current || '').trim();
+        if (!incoming || !expectedSessionId) return false;
+        const current = productionViewRef.current;
+        const next = reduceProductionViewV1(current, incoming, expectedSessionId);
+        if (next === current) return false;
+
+        productionViewRef.current = next;
+        setAgentMode(incoming.effective_mode);
+
+        const activeStatuses = new Set([
+            'queued',
+            'running',
+            'awaiting_approval',
+            'awaiting_scene_review',
+            'awaiting_animation_review',
+            'scenes_approved',
+            'animate',
+        ]);
+        const supportedKinds = new Set<AgentJobTrack['kind']>([
+            'longform',
+            'shortform',
+            'competitor',
+            'cliplab',
+        ]);
+        const projectedTracks = incoming.jobs
+            .filter((job) => activeStatuses.has(job.status.toLowerCase()))
+            .filter((job) => supportedKinds.has(job.kind as AgentJobTrack['kind']))
+            .map((job) => ({
+                job_id: job.job_id,
+                kind: job.kind as AgentJobTrack['kind'],
+                title: job.title,
+                started_at: Date.now(),
+            }));
+        for (const job of projectedTracks) {
+            jobSessionRef.current.set(job.job_id, incoming.session_id);
+        }
+        setJobTracks(projectedTracks);
+        persistJobs(incoming.session_id, projectedTracks);
+        setDockDismissed(projectedTracks.length === 0);
+
+        const command = incoming.command;
+        if (command?.lifecycle === 'executing' || command?.lifecycle === 'verifying') {
+            setToolActivity(command.active_step || command.action || 'Running production command');
+        } else if (command?.lifecycle === 'failed' && command.error) {
+            setError(command.error);
+        }
+        const latestNotice = incoming.notices[incoming.notices.length - 1];
+        if (latestNotice?.level === 'error') {
+            setError(latestNotice.message);
+        } else if (latestNotice?.message) {
+            setQueueHint(latestNotice.message);
+        }
+        return true;
+    }, []);
+
+    const applyProductionLedger = useCallback((raw: Record<string, unknown>): boolean => {
+        applyProductionProjection(raw);
+        const sid = String(raw.session_id || sessionIdRef.current || '').trim();
+        const hasCanonicalProjection = Boolean(
+            productionViewRef.current.view
+            && productionViewRef.current.session_id === sid,
+        );
+        if (hasCanonicalProjection) return true;
+
         const prevBlocked = [...blockedJobIdsRef.current];
         const prevEpoch = productionEpochRef.current;
         if (Array.isArray(raw.blocked_job_ids)) {
@@ -2481,7 +2609,6 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
         }
         const prodState = raw.production_state as { epoch?: number } | undefined;
         const nextEpoch = Math.max(1, Number(prodState?.epoch || 1));
-        const sid = String(raw.session_id || sessionIdRef.current || '').trim();
         const blockedChanged = blockedJobIdsRef.current.length !== prevBlocked.length
             || blockedJobIdsRef.current.some((id, index) => id !== prevBlocked[index]);
         const epochBumped = nextEpoch > prevEpoch;
@@ -2517,7 +2644,8 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                 return stripped;
             });
         }
-    }, []);
+        return false;
+    }, [applyProductionProjection]);
 
     const applySessionPayload = useCallback((raw: Record<string, unknown>, opts?: { forceServer?: boolean }) => {
         const forceServer = Boolean(opts?.forceServer);
@@ -2531,7 +2659,7 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                 /* ignore */
             }
         }
-        applyProductionLedger(raw);
+        const projectionApplied = applyProductionLedger(raw);
         const rawMessages = raw.messages;
         const hasServerMessages = Array.isArray(rawMessages);
         let effectiveMessages: ChatMessage[] | null = null;
@@ -2558,6 +2686,15 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
             ];
             const preservedDeliverables = new Map<string, AgentJobSnapshot>();
             const shouldPreserveDeliverable = (snap: AgentJobSnapshot) => {
+                if (
+                    canonicalProductionViewOwnsExactJob(
+                        productionViewRef.current,
+                        sid,
+                        snap.job_id,
+                    )
+                ) {
+                    return true;
+                }
                 if (forceServer && snap.status === 'running') return false;
                 if (shouldSuppressProductionJob(
                     snap.job_id,
@@ -2595,15 +2732,28 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                 }
             }
             const transcriptForStale = effectiveMessages || msgs;
+            const reattachedMessages = reattachJobDeliverables(
+                effectiveMessages,
+                preservedDeliverables,
+            );
             effectiveMessages = stripStaleProductionArtifacts(
-                stripGhostJobDeliverables(
-                    reattachJobDeliverables(effectiveMessages, preservedDeliverables),
+                stripGhostDeliverablesPreservingCanonical(
+                    reattachedMessages,
+                    productionViewRef.current,
+                    sid,
                 ),
-                (jobId, title) => shouldSuppressProductionJob(
-                    jobId,
-                    title,
-                    transcriptForStale,
-                    blockedJobIdsRef.current,
+                (jobId, title) => (
+                    !canonicalProductionViewOwnsExactJob(
+                        productionViewRef.current,
+                        sid,
+                        jobId,
+                    )
+                    && shouldSuppressProductionJob(
+                        jobId,
+                        title,
+                        transcriptForStale,
+                        blockedJobIdsRef.current,
+                    )
                 ),
             );
             messagesRef.current = effectiveMessages;
@@ -2715,11 +2865,12 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
             setActivitySteps([]);
             setQueueHint('');
         }
+        return projectionApplied;
     }, [applyProductionLedger, canUseLongform, isAdminUser, lastSessionKey, userCacheKey]);
 
     const resumeSession = useCallback(
         async (raw: Record<string, unknown>, opts?: { rehydrateJobs?: boolean; forceServer?: boolean }) => {
-            applySessionPayload(raw, { forceServer: opts?.forceServer });
+            const hasProductionProjection = applySessionPayload(raw, { forceServer: opts?.forceServer });
             const review = raw.thumbnail_review as ThumbnailReview | null | undefined;
             if (review?.review_id && (review.candidate_urls || []).length) {
                 mergeThumbnailReviewIntoDeliverable(review);
@@ -2750,27 +2901,48 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                     setPollResetKey((key) => key + 1);
                 }
             }
-            const serverJobs = Array.isArray(raw.active_jobs) ? (raw.active_jobs as AgentJobTrack[]) : [];
-            const persisted = opts?.forceServer
+            const projectedJobs = hasProductionProjection
+                ? productionViewRef.current.view?.jobs
+                    .filter((job) => [
+                        'queued',
+                        'running',
+                        'awaiting_approval',
+                        'awaiting_scene_review',
+                        'awaiting_animation_review',
+                        'scenes_approved',
+                        'animate',
+                    ].includes(job.status.toLowerCase()))
+                    .filter((job) => ['longform', 'shortform', 'competitor', 'cliplab'].includes(job.kind))
+                    .map((job) => ({
+                        job_id: job.job_id,
+                        kind: job.kind as AgentJobTrack['kind'],
+                        title: job.title,
+                    }))
+                : null;
+            const serverJobs = projectedJobs
+                || (Array.isArray(raw.active_jobs) ? (raw.active_jobs as AgentJobTrack[]) : []);
+            const persisted = opts?.forceServer || hasProductionProjection
                 ? []
                 : pruneOrphanShortformTracks(loadPersistedJobs(sid), serverJobs);
             const merged = pruneOrphanShortformTracks(
-                opts?.forceServer
+                opts?.forceServer || hasProductionProjection
                     ? mergeJobTracks(serverJobs, collectTracksToRefresh([], messagesRef.current, blockedJobIdsRef.current))
                     : mergeJobTracks(persisted, serverJobs),
                 serverJobs,
             );
-            const tracksForSession = pruneStaleJobTracks(
-                merged.length
+            const tracksForSession = hasProductionProjection
+                ? serverJobs
+                : pruneStaleJobTracks(
+                    merged.length
                     ? merged
                     : collectTracksToRefresh(
                         collectTracksFromTranscript(messagesRef.current),
                         messagesRef.current,
                         blockedJobIdsRef.current,
                     ),
-                messagesRef.current,
-                blockedJobIdsRef.current,
-            );
+                    messagesRef.current,
+                    blockedJobIdsRef.current,
+                );
             for (const job of tracksForSession) {
                 if (job.job_id) jobSessionRef.current.set(job.job_id, sid);
             }
@@ -2806,12 +2978,19 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                 }
                 for (const snap of deliverables) {
                     if (isStaleLongformChapterFailure(snap)) continue;
-                    if (shouldSuppressProductionJob(
+                    if (
+                        !canonicalProductionViewOwnsExactJob(
+                            productionViewRef.current,
+                            sid,
+                            snap.job_id,
+                        )
+                        && shouldSuppressProductionJob(
                         snap.job_id,
                         snap.title,
                         messagesRef.current,
                         blockedJobIdsRef.current,
-                    )) continue;
+                        )
+                    ) continue;
                     if (snap.status === 'failed' && snap.kind === 'longform' && hasThumbnailReview) continue;
                     appendJobDeliverable(snap, { source: 'rehydrate' });
                 }
@@ -3264,58 +3443,88 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
         (async () => {
             setBooting(true);
             setError('');
+            let lastId = '';
+            try {
+                lastId = localStorage.getItem(lastSessionStorageKey(session?.user?.id)) || '';
+            } catch {
+                lastId = '';
+            }
+            const cachedHistory = cachedSessionHistory(sessionUiCacheRef.current, lastId);
+            const cachedSessionId = sessionUiCacheRef.current.has(lastId)
+                ? lastId
+                : cachedHistory[0]?.session_id || '';
+            const cached = cachedSessionId
+                ? sessionUiCacheRef.current.get(cachedSessionId)
+                : undefined;
+            const restoredCachedShell = Boolean(cached && cachedSessionId);
+            if (!cancelled && cachedHistory.length) setHistory(cachedHistory);
+            if (!cancelled && cached && cachedSessionId) {
+                sessionIdRef.current = cachedSessionId;
+                setSessionId(cachedSessionId);
+                messagesRef.current = cached.messages;
+                setMessages(cached.messages);
+                setPending(cached.pending);
+                setJobTracks(cached.jobTracks);
+                setDockDismissed(cached.dockDismissed);
+                for (const track of cached.jobTracks) {
+                    if (track.job_id) jobSessionRef.current.set(track.job_id, cachedSessionId);
+                }
+                setBooting(false);
+            }
             try {
                 // The authenticated Studio endpoint is the only authority for
                 // selectable runner and media models. Never synthesize rows
                 // from local constants or the unauthenticated config endpoint.
                 const modelsRequest = authFetch('/api/studio-agent/models', { timeoutMs: 12_000 });
                 const sessionsRequest = authFetch('/api/studio-agent/sessions?limit=50', { timeoutMs: 45_000, retries: SESSION_LOAD_RETRIES });
-                const [modelData, listData] = await Promise.all([modelsRequest, sessionsRequest]);
-                const catalog = ((modelData?.models as AgentModelOption[]) || [])
-                    .filter(isAllowedServerChatModel);
-                const modelDataImageOptions = ((modelData?.image_models as CreativeModelProfile[]) || [])
-                    .map(creativeModelOption)
-                    .filter((m): m is AgentModelOption => Boolean(m));
-                const modelDataVideoOptions = ((modelData?.video_models as CreativeModelProfile[]) || [])
-                    .map(creativeModelOption)
-                    .filter((m): m is AgentModelOption => Boolean(m));
-                const rec = (modelData?.recommended as string[]) || [];
                 let pickModel = '';
-                if (!cancelled) {
-                    modelCatalogRef.current = catalog;
-                    setModelCatalog(catalog);
+                const [modelsResult, sessionsResult] = await Promise.allSettled([
+                    modelsRequest,
+                    sessionsRequest,
+                ]);
+                if (modelsResult.status === 'fulfilled') {
+                    const modelData = modelsResult.value;
+                    const catalog = ((modelData?.models as AgentModelOption[]) || [])
+                        .filter(isAllowedServerChatModel);
+                    const modelDataImageOptions = ((modelData?.image_models as CreativeModelProfile[]) || [])
+                        .map(creativeModelOption)
+                        .filter((m): m is AgentModelOption => Boolean(m));
+                    const modelDataVideoOptions = ((modelData?.video_models as CreativeModelProfile[]) || [])
+                        .map(creativeModelOption)
+                        .filter((m): m is AgentModelOption => Boolean(m));
+                    const rec = (modelData?.recommended as string[]) || [];
                     pickModel = catalog.find((option) => option.recommended)?.id
                         || catalog.find((option) => rec.includes(option.id))?.id
                         || catalog[0]?.id
                         || '';
-                    setModel(pickModel);
+                    if (!cancelled) {
+                        modelCatalogRef.current = catalog;
+                        setModelCatalog(catalog);
+                        setModel(pickModel);
 
-                    setImageModelCatalog(modelDataImageOptions);
-                    const requestedImageModel = normalizeImageModel(loadImageModelPref(DEFAULT_IMAGE_MODEL));
-                    const nextImageModel = selectCatalogModel(
-                        modelDataImageOptions,
-                        requestedImageModel,
-                        DEFAULT_IMAGE_MODEL,
-                    );
-                    setImageModel(nextImageModel);
-                    saveImageModelPref(nextImageModel);
+                        setImageModelCatalog(modelDataImageOptions);
+                        const requestedImageModel = normalizeImageModel(loadImageModelPref(DEFAULT_IMAGE_MODEL));
+                        const nextImageModel = selectCatalogModel(
+                            modelDataImageOptions,
+                            requestedImageModel,
+                            DEFAULT_IMAGE_MODEL,
+                        );
+                        setImageModel(nextImageModel);
+                        saveImageModelPref(nextImageModel);
 
-                    setVideoModelCatalog(modelDataVideoOptions);
-                    setVideoModel(selectCatalogModel(
-                        modelDataVideoOptions,
-                        DEFAULT_VIDEO_MODEL,
-                        DEFAULT_VIDEO_MODEL,
-                    ));
+                        setVideoModelCatalog(modelDataVideoOptions);
+                        setVideoModel(selectCatalogModel(
+                            modelDataVideoOptions,
+                            DEFAULT_VIDEO_MODEL,
+                            DEFAULT_VIDEO_MODEL,
+                        ));
+                    }
                 }
+                if (sessionsResult.status === 'rejected') throw sessionsResult.reason;
+                const listData = sessionsResult.value;
                 const sessions = (listData?.sessions as SessionSummary[]) || [];
                 if (!cancelled) setHistory(sessions);
 
-                let lastId = '';
-                try {
-                    lastId = localStorage.getItem(lastSessionStorageKey(session?.user?.id)) || '';
-                } catch {
-                    lastId = '';
-                }
                 const resume = sessions.find((s) => s.session_id === lastId) || sessions[0];
                 if (!cancelled && resume?.session_id) {
                     // Show the shell immediately; hydrate transcript in the background.
@@ -3349,7 +3558,14 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                     setHistory([]);
                 }
             } catch (e) {
-                if (!cancelled) setError((e as Error).message);
+                if (!cancelled && restoredCachedShell) {
+                    setError('');
+                    setQueueHint(
+                        'Studio is temporarily offline — showing your saved chat. Your work is preserved; Sync will reconnect it.',
+                    );
+                } else if (!cancelled) {
+                    setError((e as Error).message);
+                }
             } finally {
                 if (!cancelled) setBooting(false);
             }
@@ -3489,18 +3705,12 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
     const buildOutboundMessage = useCallback(
         (text: string) => {
             const trimmed = text.trim();
-            const clipLabTurn = agentMode === 'cliplab' || mentionsClipLab(trimmed);
-            const ideationTurn = !clipLabTurn && looksLikeIdeation(trimmed);
             const hasImages = attachments.some((f) => f.kind === 'image' && attachmentPayload[f.id]?.data_url);
             const hasVideo = attachments.some((f) => f.kind === 'video' && attachmentPayload[f.id]?.server_path);
             const defaultPrompt = hasImages
                 ? 'Please analyze the attached image(s).'
                 : hasVideo
-                    ? (clipLabTurn
-                        ? 'Use the attached video with ClipLab.'
-                        : ideationTurn
-                            ? 'I attached a reference video for planning context.'
-                            : '')
+                    ? 'I attached a video.'
                     : '';
             const parts = [trimmed || defaultPrompt];
             for (const f of attachments) {
@@ -3509,24 +3719,17 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                 if (payload.kind === 'text' && payload.text) {
                     parts.push(`\n\n[Attachment: ${f.name}]\n${payload.text.slice(0, 12000)}`);
                 } else if (payload.kind === 'video' && payload.server_path) {
-                    if (clipLabTurn) {
-                        parts.push(
-                            `\n\n[Video attachment ready for ClipLab: ${f.name}]\n`
-                            + 'Use ingest_cliplab_attachment, then analyze_cliplab_video for the selected channel and render the strongest clips with upload packages.',
-                        );
-                    } else {
-                        parts.push(
-                            `\n\n[Uploaded reference video: ${f.name}]\n`
-                            + `local_path: ${payload.server_path}`,
-                        );
-                    }
+                    parts.push(
+                        `\n\n[Uploaded video: ${f.name}]\n`
+                        + `local_path: ${payload.server_path}`,
+                    );
                 } else if (payload.kind === 'binary') {
                     parts.push(`\n\n[Attachment: ${f.name}]\n[Binary file, ${Math.round(f.size / 1024)}KB. Ask the user for a supported image or text file if visual/text access is required.]`);
                 }
             }
             return parts.join('');
         },
-        [agentMode, attachmentPayload, attachments],
+        [attachmentPayload, attachments],
     );
 
     const buildOutboundAttachments = useCallback((): AgentChatAttachment[] => {
@@ -3551,7 +3754,6 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
             setInput('');
             setAttachments([]);
             setAttachmentPayload({});
-            setPending([]);
             setDictationPreview('');
             markSessionRunning(activeSessionId, 'Thinking...');
             setError('');
@@ -3563,77 +3765,12 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
             const readableAttachments = buildOutboundAttachments();
             const visibleUserText = text.trim()
                 || (readableAttachments.length ? `Please analyze the attached image${readableAttachments.length === 1 ? '' : 's'}.` : '');
-            const existingBulkSceneShip = isExistingBulkSceneShipRequest(visibleUserText);
-            let effectiveMode = modeOverride || agentMode;
-            if (
-                effectiveMode === 'plan'
-                && (
-                    existingBulkSceneShip
-                    || latestUserAllowsProductionPending(visibleUserText)
-                    || userAffirmsAssistantTopic(visibleUserText)
-                )
-            ) {
-                effectiveMode = 'studio';
-                setAgentMode('studio');
-                void patchSession({ agent_mode: 'studio' });
-            }
+            const requestedMode = modeOverride || agentMode;
             setMessages((m) => {
                 const next = [...m, { role: 'user' as const, content: visibleUserText }];
                 messagesRef.current = next;
                 return next;
             });
-            if (
-                !existingBulkSceneShip
-                && (
-                    effectiveMode === 'plan'
-                    || isNewProductionRequest(visibleUserText)
-                    || isResearchOnlyUserText(visibleUserText)
-                    || latestUserAllowsProductionPending(visibleUserText)
-                    || userAffirmsAssistantTopic(visibleUserText)
-                )
-            ) {
-                const optimisticBlocked = collectKnownProductionJobIds(
-                    messagesRef.current,
-                    jobTracks,
-                    deliverablesByJobRef.current.keys(),
-                );
-                if (optimisticBlocked.length) {
-                    blockedJobIdsRef.current = [...new Set([
-                        ...blockedJobIdsRef.current,
-                        ...optimisticBlocked,
-                    ])];
-                }
-                const suppress = (jobId: string, title?: string, status?: string) => (
-                    shouldSuppressProductionJob(
-                        jobId,
-                        title,
-                        messagesRef.current,
-                        blockedJobIdsRef.current,
-                        status,
-                    )
-                );
-                setMessages((rows) => {
-                    const stripped = stripStaleProductionArtifacts(
-                        rows,
-                        (jobId, title) => suppress(jobId, title),
-                    );
-                    messagesRef.current = stripped.map((row) => {
-                        const snap = row.jobDeliverable;
-                        if (!snap?.job_id) return row;
-                        if (!suppress(snap.job_id, snap.title, snap.status)) return row;
-                        const { jobDeliverable: _drop, ...rest } = row;
-                        return rest as ChatMessage;
-                    });
-                    return messagesRef.current;
-                });
-                setJobTracks((prev) => {
-                    const pruned = pruneStaleJobTracks(prev, messagesRef.current, blockedJobIdsRef.current);
-                    if (activeSessionId) persistJobs(activeSessionId, pruned);
-                    if (!pruned.length) setDockDismissed(true);
-                    return pruned;
-                });
-                setPollResetKey((k) => k + 1);
-            }
             let completedCleanly = false;
             let backendRunStillActive = false;
             let latestTurnJobSnapshot: AgentJobSnapshot | undefined;
@@ -3879,28 +4016,62 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                             label: 'Audit final answer before replying',
                             detail: String(ev.message || 'Studio Agent stream error'),
                         });
+                    } else if (ev.event === 'production_view') {
+                        applyProductionProjection(ev);
                     } else if (ev.event === 'session_state') {
-                        applyProductionLedger(ev as Record<string, unknown>);
-                        if (Array.isArray(ev.active_jobs)) {
+                        const hasProductionProjection = applyProductionLedger(ev as Record<string, unknown>);
+                        if (!hasProductionProjection && Array.isArray(ev.active_jobs)) {
                             ingestActiveJobs(ev.active_jobs, activeSessionId);
                         }
                     } else if (ev.event === 'active_jobs' && Array.isArray(ev.jobs)) {
-                        ingestActiveJobs(ev.jobs, activeSessionId);
-                        const jobs = ev.jobs as AgentJobTrack[];
-                        const shouldRehydrate = jobs.length > 0;
-                        scheduleAutoSync({ delayMs: 400, rehydrateJobs: shouldRehydrate });
+                        const hasProductionProjection = Boolean(
+                            productionViewRef.current.view
+                            && productionViewRef.current.session_id === activeSessionId,
+                        );
+                        if (!hasProductionProjection) {
+                            ingestActiveJobs(ev.jobs, activeSessionId);
+                            const jobs = ev.jobs as AgentJobTrack[];
+                            const shouldRehydrate = jobs.length > 0;
+                            scheduleAutoSync({ delayMs: 400, rehydrateJobs: shouldRehydrate });
+                        }
                     } else if (ev.event === 'job_snapshot' && ev.snapshot && typeof ev.snapshot === 'object') {
                         const snap = ev.snapshot as AgentJobSnapshot;
-                        if (!shouldSuppressProductionJob(
-                            snap.job_id,
-                            snap.title,
-                            messagesRef.current,
-                            blockedJobIdsRef.current,
-                        )) {
+                        const canonicalView = productionViewRef.current.session_id === activeSessionId
+                            ? productionViewRef.current.view
+                            : null;
+                        const belongsToCanonicalView = Boolean(
+                            canonicalView
+                            && (
+                                Object.prototype.hasOwnProperty.call(
+                                    productionViewRef.current.jobs_by_id,
+                                    snap.job_id,
+                                )
+                                || canonicalView.cards.some((card) => card.job_id === snap.job_id)
+                            ),
+                        );
+                        if (
+                            belongsToCanonicalView
+                            || (
+                                !canonicalView
+                                && !shouldSuppressProductionJob(
+                                    snap.job_id,
+                                    snap.title,
+                                    messagesRef.current,
+                                    blockedJobIdsRef.current,
+                                )
+                            )
+                        ) {
                             latestTurnJobSnapshot = snap;
                             appendJobDeliverable(snap, {
                                 source: 'stream',
-                                pinToLatest: Boolean(turnRepairJobId && jobIdsMatch(snap.job_id, turnRepairJobId)),
+                                pinToLatest: Boolean(
+                                    turnRepairJobId
+                                    && (
+                                        canonicalView
+                                            ? snap.job_id === turnRepairJobId
+                                            : jobIdsMatch(snap.job_id, turnRepairJobId)
+                                    )
+                                ),
                             });
                         }
                     } else if (ev.event === 'thumbnail_review' && ev.review && typeof ev.review === 'object') {
@@ -3927,7 +4098,7 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                         image_model: imageModel,
                         image_model_id: imageModel,
                         video_model: videoModel,
-                        agent_mode: effectiveMode,
+                        agent_mode: requestedMode,
                         channel: selectedChannel ? {
                             channel_id: selectedChannel.channel_id || '',
                             registry_key: channelRegistryKey(selectedChannel),
@@ -4050,8 +4221,10 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                 } else if (nextPending.length === 0 && !nextConcept && data && 'concept_plan' in data && !data.concept_plan) {
                     // keep existing card unless server cleared it
                 }
-                applyProductionLedger(data);
-                ingestActiveJobs(data?.active_jobs, activeSessionId);
+                const hasProductionProjection = applyProductionLedger(data);
+                if (!hasProductionProjection) {
+                    ingestActiveJobs(data?.active_jobs, activeSessionId);
+                }
                 await refreshHistory();
                 // If Approve is waiting, skip auto-sync so force_sync cannot wipe the card.
                 if (nextPending.length === 0) {
@@ -4121,6 +4294,7 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
             selectedChannel,
             sessionId,
             appendJobDeliverable,
+            applyProductionProjection,
             updateVerificationStep,
         ],
     );
@@ -4365,6 +4539,7 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
         try {
             const data = (await authFetch(`/api/studio-agent/sessions/${sessionId}/retry-production`, {
                 method: 'POST',
+                headers: { 'X-Idempotency-Key': crypto.randomUUID() },
                 timeoutMs: 120000,
             })) as { active_jobs?: unknown[]; assistant_message?: string };
             const list = Array.isArray(data?.active_jobs) ? (data.active_jobs as AgentJobTrack[]) : [];
@@ -5210,20 +5385,33 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                             </div>
                         )}
                         {visibleChatMessages.map((m, i) => {
+                                const canonicalView = productionViewRef.current.session_id === sessionId
+                                    ? productionViewRef.current.view
+                                    : null;
                                 if (m.productionUpdate) {
                                     const update = m.productionUpdate;
-                                    if (
-                                        isImplicitProductionCancel({
-                                            status: 'failed',
-                                            stage_label: update.stage_label,
-                                            stage: update.stage_label,
-                                            error: '',
-                                        })
-                                        || shouldSuppressProductionJob(
+                                    const projectionOwnsUpdate = Boolean(
+                                        canonicalView
+                                        && Object.prototype.hasOwnProperty.call(
+                                            productionViewRef.current.jobs_by_id,
                                             update.job_id,
-                                            update.title,
-                                            messages,
-                                            blockedJobIdsRef.current,
+                                        ),
+                                    );
+                                    if (
+                                        !projectionOwnsUpdate
+                                        && (
+                                            isImplicitProductionCancel({
+                                                status: 'failed',
+                                                stage_label: update.stage_label,
+                                                stage: update.stage_label,
+                                                error: '',
+                                            })
+                                            || shouldSuppressProductionJob(
+                                                update.job_id,
+                                                update.title,
+                                                messages,
+                                                blockedJobIdsRef.current,
+                                            )
                                         )
                                     ) {
                                         return null;
@@ -5239,6 +5427,19 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                                 if (!text.trim() && !m.jobDeliverable) return null;
 
                                 const isUser = m.role === 'user';
+                                const projectionOwnsDeliverable = Boolean(
+                                    canonicalView
+                                    && m.jobDeliverable
+                                    && (
+                                        Object.prototype.hasOwnProperty.call(
+                                            productionViewRef.current.jobs_by_id,
+                                            m.jobDeliverable.job_id,
+                                        )
+                                        || canonicalView.cards.some(
+                                            (card) => card.job_id === m.jobDeliverable?.job_id,
+                                        )
+                                    ),
+                                );
 
                                 return (
                                     <div
@@ -5262,13 +5463,18 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
 
                                             {/* The magic: rich live production card appears right inside the chat thread */}
                                             {m.jobDeliverable
-                                                && !shouldHideJobDeliverable(m.jobDeliverable, messages)
-                                                && !shouldSuppressProductionJob(
-                                                    m.jobDeliverable.job_id,
-                                                    m.jobDeliverable.title,
-                                                    messages,
-                                                    blockedJobIdsRef.current,
-                                                    m.jobDeliverable.status,
+                                                && (
+                                                    projectionOwnsDeliverable
+                                                    || (
+                                                        !shouldHideJobDeliverable(m.jobDeliverable, messages)
+                                                        && !shouldSuppressProductionJob(
+                                                            m.jobDeliverable.job_id,
+                                                            m.jobDeliverable.title,
+                                                            messages,
+                                                            blockedJobIdsRef.current,
+                                                            m.jobDeliverable.status,
+                                                        )
+                                                    )
                                                 )
                                                 && !(agentMode === 'plan'
                                                     && (m.jobDeliverable.kind === 'longform' || m.jobDeliverable.kind === 'shortform')

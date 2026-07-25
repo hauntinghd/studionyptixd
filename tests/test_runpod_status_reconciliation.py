@@ -73,7 +73,7 @@ def _terminal_status(*, failed: bool = False, provider_usd: str = "0.25") -> dic
     }
 
 
-def test_repeated_job_polls_are_get_only_and_commit_once(
+def test_repeated_job_polls_are_pure_and_backend_reconciliation_commits_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("STUDIO_RUNPOD_PRODUCTION_ENABLED", "true")
@@ -119,6 +119,25 @@ def test_repeated_job_polls_are_get_only_and_commit_once(
     second = jobs.get_job_snapshot("studio-short-1", "shortform", lightweight=True)
 
     assert methods == ["GET", "GET"]
+    assert commits == []
+    assert releases == []
+    assert first["runpod"]["billing_reconciliation"]["state"] == "background_reconciliation_pending"
+    assert second["runpod"]["billing_reconciliation"]["state"] == "background_reconciliation_pending"
+
+    maintenance_first = runpod_reconciliation.project_runpod_job_snapshot(
+        "studio-short-1",
+        "shortform",
+        {"job_id": "studio-short-1", "kind": "shortform"},
+        reconcile=True,
+    )
+    maintenance_second = runpod_reconciliation.project_runpod_job_snapshot(
+        "studio-short-1",
+        "shortform",
+        {"job_id": "studio-short-1", "kind": "shortform"},
+        reconcile=True,
+    )
+
+    assert methods == ["GET", "GET", "GET", "GET"]
     assert len(commits) == 1
     assert releases == []
     assert commits[0][0] == ("user-1", "res-control-plane-1")
@@ -129,8 +148,8 @@ def test_repeated_job_polls_are_get_only_and_commit_once(
     assert first["runpod"]["artifacts_local"] is False
     assert "video_url" not in first
     assert first["runpod"]["worker_job_snapshot"]["video_url"].startswith("/api/")
-    assert first["runpod"]["billing_reconciliation"]["state"] == "settled"
-    assert second["runpod"]["billing_reconciliation"]["idempotent_replay"] is True
+    assert maintenance_first["runpod"]["billing_reconciliation"]["state"] == "settled"
+    assert maintenance_second["runpod"]["billing_reconciliation"]["idempotent_replay"] is True
 
 
 def test_terminal_workspace_sync_enables_local_artifact_projection(
@@ -169,7 +188,12 @@ def test_terminal_workspace_sync_enables_local_artifact_projection(
         lambda *_args, **_kwargs: {"state": "committed"},
     )
 
-    result = jobs.get_job_snapshot("studio-short-1", "shortform", lightweight=True)
+    result = runpod_reconciliation.project_runpod_job_snapshot(
+        "studio-short-1",
+        "shortform",
+        {"job_id": "studio-short-1", "kind": "shortform"},
+        reconcile=True,
+    )
 
     assert result["job_id"] == "studio-short-1"
     assert result["runpod"]["artifacts_local"] is True

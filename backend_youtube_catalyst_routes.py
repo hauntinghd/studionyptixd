@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+from typing import Any, Awaitable, Callable
 
 from fastapi import Depends, File, Form, HTTPException, Request, UploadFile
 
@@ -16,11 +17,41 @@ from backend_models import (
     YouTubeOAuthStartRequest,
 )
 from routes import build_youtube_catalyst_router
+from studio_agent.direct_production import (
+    claim_direct_production,
+    require_idempotency_key,
+    upload_content_contract,
+)
 
 log = logging.getLogger("nyptid-studio")
 
 # In-memory state to prevent overlapping auto-tick runs
 _catalyst_auto_tick_running: dict[str, bool] = {}
+
+
+async def _execute_catalyst_command(
+    *,
+    name: str,
+    arguments: dict[str, Any],
+    request: Request,
+    user: dict,
+    operation: Callable[[], Awaitable[dict[str, Any]]],
+    content_format: str = "catalyst",
+) -> dict[str, Any]:
+    """Claim the shared production receipt before any Catalyst side effect."""
+
+    user_id = str((user or {}).get("id") or (user or {}).get("sub") or "").strip()
+    with claim_direct_production(
+        name,
+        dict(arguments or {}),
+        request=request,
+        user_id=user_id,
+        content_format=content_format,
+    ) as command:
+        if command.replay is not None:
+            return dict(command.replay)
+        result = await operation()
+        return command.complete(dict(result or {}))
 
 
 def build_youtube_catalyst_app_router(
@@ -100,28 +131,60 @@ def build_youtube_catalyst_app_router(
 
     async def _catalyst_hub_refresh(
         req: CatalystHubRefreshRequest,
+        request: Request,
         user: dict = Depends(require_auth),
     ):
-        return await catalyst_hub_refresh_for_user(
+        channel_id = str((req or {}).channel_id or "").strip()
+        include_public_benchmarks = bool((req or {}).include_public_benchmarks)
+        refresh_outcomes = bool((req or {}).refresh_outcomes)
+        return await _execute_catalyst_command(
+            name="catalyst_refresh_hub",
+            arguments={
+                "channel_id": channel_id,
+                "include_public_benchmarks": include_public_benchmarks,
+                "refresh_outcomes": refresh_outcomes,
+            },
+            request=request,
             user=user,
-            channel_id=str((req or {}).channel_id or "").strip(),
-            include_public_benchmarks=bool((req or {}).include_public_benchmarks),
-            refresh_outcomes=bool((req or {}).refresh_outcomes),
+            operation=lambda: catalyst_hub_refresh_for_user(
+                user=user,
+                channel_id=channel_id,
+                include_public_benchmarks=include_public_benchmarks,
+                refresh_outcomes=refresh_outcomes,
+            ),
         )
 
     async def _catalyst_hub_reference_video_analysis(
         req: CatalystHubReferenceVideoAnalysisRequest,
+        request: Request,
         user: dict = Depends(require_auth),
     ):
-        return await catalyst_hub_reference_video_analysis_for_user(
+        channel_id = str((req or {}).channel_id or "").strip()
+        workspace_id = str((req or {}).workspace_id or "documentary").strip().lower() or "documentary"
+        video_id = str((req or {}).video_id or "").strip()
+        max_analysis_minutes = float((req or {}).max_analysis_minutes or catalyst_reference_analysis_default_minutes)
+        return await _execute_catalyst_command(
+            name="catalyst_analyze_reference_video",
+            arguments={
+                "channel_id": channel_id,
+                "workspace_id": workspace_id,
+                "video_id": video_id,
+                "max_analysis_minutes": max_analysis_minutes,
+            },
+            request=request,
             user=user,
-            channel_id=str((req or {}).channel_id or "").strip(),
-            workspace_id=str((req or {}).workspace_id or "documentary").strip().lower() or "documentary",
-            video_id=str((req or {}).video_id or "").strip(),
-            max_analysis_minutes=float((req or {}).max_analysis_minutes or catalyst_reference_analysis_default_minutes),
+            operation=lambda: catalyst_hub_reference_video_analysis_for_user(
+                user=user,
+                channel_id=channel_id,
+                workspace_id=workspace_id,
+                video_id=video_id,
+                max_analysis_minutes=max_analysis_minutes,
+            ),
+            content_format="longform",
         )
 
     async def _catalyst_hub_reference_video_analysis_manual(
+        request: Request,
         channel_id: str = Form(""),
         workspace_id: str = Form("documentary"),
         video_id: str = Form(""),
@@ -136,89 +199,163 @@ def build_youtube_catalyst_app_router(
         analytics_images: list[UploadFile] = File([]),
         user: dict = Depends(require_auth),
     ):
-        return await catalyst_hub_reference_video_analysis_manual_for_user(
+        normalized_channel_id = str(channel_id or "").strip()
+        normalized_workspace_id = str(workspace_id or "documentary").strip().lower() or "documentary"
+        normalized_video_id = str(video_id or "").strip()
+        normalized_minutes = float(max_analysis_minutes or catalyst_reference_analysis_default_minutes)
+        image_uploads = list(analytics_images or [])
+        require_idempotency_key(request)
+        reference_video_contract = await upload_content_contract(reference_video)
+        comparison_video_contract = await upload_content_contract(comparison_video)
+        analytics_image_contracts = [
+            await upload_content_contract(upload) for upload in image_uploads
+        ]
+        return await _execute_catalyst_command(
+            name="catalyst_analyze_reference_video_manual",
+            arguments={
+                "channel_id": normalized_channel_id,
+                "workspace_id": normalized_workspace_id,
+                "video_id": normalized_video_id,
+                "max_analysis_minutes": normalized_minutes,
+                "reference_source_url": str(reference_source_url or "").strip(),
+                "reference_title": str(reference_title or "").strip(),
+                "reference_channel": str(reference_channel or "").strip(),
+                "analytics_notes": str(analytics_notes or "").strip(),
+                "transcript_text": str(transcript_text or "").strip(),
+                "reference_video": reference_video_contract,
+                "comparison_video": comparison_video_contract,
+                "analytics_images": analytics_image_contracts,
+            },
+            request=request,
             user=user,
-            channel_id=str(channel_id or "").strip(),
-            workspace_id=str(workspace_id or "documentary").strip().lower() or "documentary",
-            video_id=str(video_id or "").strip(),
-            max_analysis_minutes=float(max_analysis_minutes or catalyst_reference_analysis_default_minutes),
-            reference_source_url=str(reference_source_url or "").strip(),
-            reference_title=str(reference_title or "").strip(),
-            reference_channel=str(reference_channel or "").strip(),
-            analytics_notes=str(analytics_notes or "").strip(),
-            transcript_text=str(transcript_text or "").strip(),
-            reference_video=reference_video,
-            comparison_video=comparison_video,
-            analytics_images=list(analytics_images or []),
-            upload_dir=upload_dir,
+            operation=lambda: catalyst_hub_reference_video_analysis_manual_for_user(
+                user=user,
+                channel_id=normalized_channel_id,
+                workspace_id=normalized_workspace_id,
+                video_id=normalized_video_id,
+                max_analysis_minutes=normalized_minutes,
+                reference_source_url=str(reference_source_url or "").strip(),
+                reference_title=str(reference_title or "").strip(),
+                reference_channel=str(reference_channel or "").strip(),
+                analytics_notes=str(analytics_notes or "").strip(),
+                transcript_text=str(transcript_text or "").strip(),
+                reference_video=reference_video,
+                comparison_video=comparison_video,
+                analytics_images=image_uploads,
+                upload_dir=upload_dir,
+            ),
+            content_format="longform",
         )
 
     async def _catalyst_hub_clear_reference_video_analysis(
         req: CatalystHubReferenceVideoClearRequest,
+        request: Request,
         user: dict = Depends(require_auth),
     ):
-        return await catalyst_hub_clear_reference_video_analysis_for_user(
+        channel_id = str((req or {}).channel_id or "").strip()
+        workspace_id = str((req or {}).workspace_id or "documentary").strip().lower() or "documentary"
+        return await _execute_catalyst_command(
+            name="catalyst_clear_reference_video",
+            arguments={"channel_id": channel_id, "workspace_id": workspace_id},
+            request=request,
             user=user,
-            channel_id=str((req or {}).channel_id or "").strip(),
-            workspace_id=str((req or {}).workspace_id or "documentary").strip().lower() or "documentary",
+            operation=lambda: catalyst_hub_clear_reference_video_analysis_for_user(
+                user=user,
+                channel_id=channel_id,
+                workspace_id=workspace_id,
+            ),
+            content_format="longform",
         )
 
     async def _catalyst_hub_save_instructions(
         req: CatalystHubDirectiveRequest,
+        request: Request,
         user: dict = Depends(require_auth),
     ):
-        return await catalyst_hub_save_instructions_for_user(
+        arguments = {
+            "channel_id": str((req or {}).channel_id or "").strip(),
+            "directive": str((req or {}).directive or "").strip(),
+            "mission": str((req or {}).mission or "").strip(),
+            "guardrails": list((req or {}).guardrails or []),
+            "target_niches": list((req or {}).target_niches or []),
+            "apply_scope": str((req or {}).apply_scope or "all").strip().lower() or "all",
+        }
+        return await _execute_catalyst_command(
+            name="catalyst_save_instructions",
+            arguments=arguments,
+            request=request,
             user=user,
-            channel_id=str((req or {}).channel_id or "").strip(),
-            directive=str((req or {}).directive or "").strip(),
-            mission=str((req or {}).mission or "").strip(),
-            guardrails=list((req or {}).guardrails or []),
-            target_niches=list((req or {}).target_niches or []),
-            apply_scope=str((req or {}).apply_scope or "all").strip().lower() or "all",
+            operation=lambda: catalyst_hub_save_instructions_for_user(user=user, **arguments),
         )
 
     async def _catalyst_hub_launch_longform(
         req: CatalystHubLaunchRequest,
+        request: Request,
         user: dict = Depends(require_auth),
     ):
-        return await catalyst_hub_launch_longform_for_user(
+        arguments = {
+            "channel_id": str((req or {}).channel_id or "").strip(),
+            "workspace_id": str((req or {}).workspace_id or "").strip().lower(),
+            "mission": str((req or {}).mission or "").strip(),
+            "directive": str((req or {}).directive or "").strip(),
+            "guardrails": list((req or {}).guardrails or []),
+            "target_niches": list((req or {}).target_niches or []),
+            "include_public_benchmarks": bool_from_any((req or {}).include_public_benchmarks, True),
+            "refresh_outcomes": bool_from_any((req or {}).refresh_outcomes, True),
+            "target_minutes": float((req or {}).target_minutes or 0.0),
+            "language": str((req or {}).language or "en"),
+            "animation_enabled": bool_from_any((req or {}).animation_enabled, True),
+            "sfx_enabled": bool_from_any((req or {}).sfx_enabled, True),
+            "auto_pipeline": bool_from_any((req or {}).auto_pipeline, True),
+            "topic": str(getattr(req, "topic", "") or "").strip(),
+            "input_title": str(getattr(req, "input_title", "") or "").strip(),
+            "input_description": str(getattr(req, "input_description", "") or "").strip(),
+        }
+        return await _execute_catalyst_command(
+            name="catalyst_launch_longform",
+            arguments=arguments,
+            request=request,
             user=user,
-            channel_id=str((req or {}).channel_id or "").strip(),
-            workspace_id=str((req or {}).workspace_id or "").strip().lower(),
-            mission=str((req or {}).mission or "").strip(),
-            directive=str((req or {}).directive or "").strip(),
-            guardrails=list((req or {}).guardrails or []),
-            target_niches=list((req or {}).target_niches or []),
-            include_public_benchmarks=bool_from_any((req or {}).include_public_benchmarks, True),
-            refresh_outcomes=bool_from_any((req or {}).refresh_outcomes, True),
-            target_minutes=float((req or {}).target_minutes or 0.0),
-            language=str((req or {}).language or "en"),
-            animation_enabled=bool_from_any((req or {}).animation_enabled, True),
-            sfx_enabled=bool_from_any((req or {}).sfx_enabled, True),
-            auto_pipeline=bool_from_any((req or {}).auto_pipeline, True),
-            topic=str(getattr(req, "topic", "") or "").strip(),
-            input_title=str(getattr(req, "input_title", "") or "").strip(),
-            input_description=str(getattr(req, "input_description", "") or "").strip(),
+            operation=lambda: catalyst_hub_launch_longform_for_user(user=user, **arguments),
+            content_format="longform",
         )
 
     async def _catalyst_hub_longform_suggestions(
         body: dict,
+        request: Request,
         user: dict = Depends(require_auth),
     ):
-        return await catalyst_hub_longform_suggestions_for_user(
+        channel_id = str((body or {}).get("channel_id", "") or "").strip()
+        workspace_id = str((body or {}).get("workspace_id", "documentary") or "documentary").strip().lower()
+        return await _execute_catalyst_command(
+            name="catalyst_generate_longform_suggestions",
+            arguments={"channel_id": channel_id, "workspace_id": workspace_id},
+            request=request,
             user=user,
-            channel_id=str((body or {}).get("channel_id", "") or "").strip(),
-            workspace_id=str((body or {}).get("workspace_id", "documentary") or "documentary").strip().lower(),
+            operation=lambda: catalyst_hub_longform_suggestions_for_user(
+                user=user,
+                channel_id=channel_id,
+                workspace_id=workspace_id,
+            ),
+            content_format="longform",
         )
 
     async def _list_connected_youtube_channels(
         request: Request,
-        sync: bool = True,
+        sync: bool = False,
     ):
         user = await get_current_user_from_request(request)
         if not user:
             raise HTTPException(401, "Auth required")
-        return await list_connected_youtube_channels_for_user(user=user, sync=sync)
+        if not sync:
+            return await list_connected_youtube_channels_for_user(user=user, sync=False)
+        return await _execute_catalyst_command(
+            name="catalyst_sync_channels",
+            arguments={"sync": True},
+            request=request,
+            user=user,
+            operation=lambda: list_connected_youtube_channels_for_user(user=user, sync=True),
+        )
 
     async def _select_connected_youtube_channel(
         req: YouTubeChannelSelectRequest,
@@ -236,7 +373,17 @@ def build_youtube_catalyst_app_router(
         user = await get_current_user_from_request(request)
         if not user:
             raise HTTPException(401, "Auth required")
-        return await sync_connected_youtube_channel_for_user(user=user, channel_id=channel_id)
+        normalized_channel_id = str(channel_id or "").strip()
+        return await _execute_catalyst_command(
+            name="catalyst_sync_channel",
+            arguments={"channel_id": normalized_channel_id},
+            request=request,
+            user=user,
+            operation=lambda: sync_connected_youtube_channel_for_user(
+                user=user,
+                channel_id=normalized_channel_id,
+            ),
+        )
 
     async def _sync_connected_youtube_channel_outcomes(
         channel_id: str,
@@ -246,14 +393,23 @@ def build_youtube_catalyst_app_router(
         user = await get_current_user_from_request(request)
         if not user:
             raise HTTPException(401, "Auth required")
-        return await sync_connected_youtube_channel_outcomes_for_user(
+        arguments = {
+            "channel_id": str(channel_id or "").strip(),
+            "session_id": str((req or {}).session_id or "").strip(),
+            "candidate_limit": int((req or {}).candidate_limit or 18),
+            "refresh_existing": bool((req or {}).refresh_existing),
+        }
+        return await _execute_catalyst_command(
+            name="catalyst_sync_channel_outcomes",
+            arguments=arguments,
+            request=request,
             user=user,
-            channel_id=channel_id,
-            session_id=str((req or {}).session_id or "").strip(),
-            candidate_limit=int((req or {}).candidate_limit or 18),
-            refresh_existing=bool((req or {}).refresh_existing),
-            longform_owner_beta_enabled=longform_owner_beta_enabled,
-            harvest_catalyst_outcomes_for_channel=harvest_catalyst_outcomes_for_channel,
+            operation=lambda: sync_connected_youtube_channel_outcomes_for_user(
+                user=user,
+                **arguments,
+                longform_owner_beta_enabled=longform_owner_beta_enabled,
+                harvest_catalyst_outcomes_for_channel=harvest_catalyst_outcomes_for_channel,
+            ),
         )
 
     async def _disconnect_connected_youtube_channel(channel_id: str, request: Request):
@@ -276,11 +432,18 @@ def build_youtube_catalyst_app_router(
             raise HTTPException(401, "Auth required")
         if not youtube_upload_video_for_user:
             raise HTTPException(501, "YouTube upload not configured")
-        return await youtube_upload_video_for_user(
+        arguments = {
+            "session_id": str(session_id).strip(),
+            "channel_id": str(channel_id).strip(),
+            "privacy": str(privacy).strip() or "private",
+        }
+        return await _execute_catalyst_command(
+            name="catalyst_upload_longform",
+            arguments=arguments,
+            request=request,
             user=user,
-            session_id=str(session_id).strip(),
-            channel_id=str(channel_id).strip(),
-            privacy=str(privacy).strip() or "private",
+            operation=lambda: youtube_upload_video_for_user(user=user, **arguments),
+            content_format="longform",
         )
 
     async def _short_upload_video(
@@ -295,11 +458,18 @@ def build_youtube_catalyst_app_router(
             raise HTTPException(401, "Auth required")
         if not youtube_upload_short_for_user:
             raise HTTPException(501, "YouTube upload not configured")
-        return await youtube_upload_short_for_user(
+        arguments = {
+            "job_id": str(job_id).strip(),
+            "channel_id": str(channel_id).strip(),
+            "privacy": str(privacy).strip() or "private",
+        }
+        return await _execute_catalyst_command(
+            name="catalyst_upload_short",
+            arguments=arguments,
+            request=request,
             user=user,
-            job_id=str(job_id).strip(),
-            channel_id=str(channel_id).strip(),
-            privacy=str(privacy).strip() or "private",
+            operation=lambda: youtube_upload_short_for_user(user=user, **arguments),
+            content_format="shortform",
         )
 
     async def _catalyst_velocity(
@@ -331,47 +501,58 @@ def build_youtube_catalyst_app_router(
             raise HTTPException(401, "Auth required")
         user_id = str(user.get("id", user.get("sub", "")) or "unknown")
         tick_key = f"{user_id}:{channel_id}"
+        normalized_workspace = str(workspace or "documentary").strip().lower() or "documentary"
 
-        if _catalyst_auto_tick_running.get(tick_key):
-            return {"status": "already_running", "message": "An autonomous run is already in progress for this channel"}
+        async def run_auto_tick() -> dict[str, Any]:
+            if _catalyst_auto_tick_running.get(tick_key):
+                return {"status": "already_running", "message": "An autonomous run is already in progress for this channel"}
 
-        _catalyst_auto_tick_running[tick_key] = True
-        try:
-            # Step 1: Check velocity / decay
-            velocity_data = {}
-            if youtube_get_velocity_for_user and channel_id:
-                try:
-                    velocity_data = await youtube_get_velocity_for_user(user=user, channel_id=channel_id)
-                except Exception as vel_exc:
-                    log.warning("Auto-tick velocity check failed: %s", str(vel_exc)[:200])
+            _catalyst_auto_tick_running[tick_key] = True
+            try:
+                # Step 1: Check velocity / decay
+                velocity_data = {}
+                if youtube_get_velocity_for_user and channel_id:
+                    try:
+                        velocity_data = await youtube_get_velocity_for_user(user=user, channel_id=channel_id)
+                    except Exception as vel_exc:
+                        log.warning("Auto-tick velocity check failed: %s", str(vel_exc)[:200])
 
-            is_decaying = velocity_data.get("is_decaying", True)  # Default to True if can't check
-            velocity_vph = velocity_data.get("velocity_vph", 0)
+                is_decaying = velocity_data.get("is_decaying", True)  # Default to True if can't check
+                velocity_vph = velocity_data.get("velocity_vph", 0)
 
-            if not is_decaying:
+                if not is_decaying:
+                    return {
+                        "status": "not_decaying",
+                        "velocity_vph": velocity_vph,
+                        "message": f"Latest video still performing ({velocity_vph} views/hr). No new video needed yet.",
+                    }
+
+                # Step 2: Launch new longform pipeline
+                log.info("Auto-tick: decay detected (%.1f vph), launching new longform for channel %s", velocity_vph, channel_id)
+                launch_result = await catalyst_hub_launch_longform_for_user(
+                    user=user,
+                    channel_id=channel_id,
+                    workspace_id=normalized_workspace,
+                    auto_pipeline=True,
+                )
+                session = dict(launch_result.get("session") or {})
                 return {
-                    "status": "not_decaying",
+                    "status": "launched",
                     "velocity_vph": velocity_vph,
-                    "message": f"Latest video still performing ({velocity_vph} views/hr). No new video needed yet.",
+                    "session_id": str(session.get("session_id") or launch_result.get("session_id") or ""),
+                    "message": f"Decay detected ({velocity_vph} vph). New longform pipeline launched.",
                 }
+            finally:
+                _catalyst_auto_tick_running[tick_key] = False
 
-            # Step 2: Launch new longform pipeline
-            log.info("Auto-tick: decay detected (%.1f vph), launching new longform for channel %s", velocity_vph, channel_id)
-            launch_result = await catalyst_hub_launch_longform_for_user(
-                user=user,
-                channel_id=channel_id,
-                workspace=workspace,
-                auto_pipeline=True,
-            )
-
-            return {
-                "status": "launched",
-                "velocity_vph": velocity_vph,
-                "session_id": launch_result.get("session_id", ""),
-                "message": f"Decay detected ({velocity_vph} vph). New longform pipeline launched.",
-            }
-        finally:
-            _catalyst_auto_tick_running[tick_key] = False
+        return await _execute_catalyst_command(
+            name="catalyst_auto_tick",
+            arguments={"channel_id": str(channel_id).strip(), "workspace_id": normalized_workspace},
+            request=request,
+            user=user,
+            operation=run_auto_tick,
+            content_format="longform",
+        )
 
     async def _catalyst_auto_pilot_toggle(
         request: Request,
@@ -384,18 +565,35 @@ def build_youtube_catalyst_app_router(
             raise HTTPException(401, "Auth required")
         user_id = str(user.get("id", user.get("sub", "")) or "unknown")
         key = f"{user_id}:{channel_id}"
-        from backend import _catalyst_auto_pilot_channels
-        _catalyst_auto_pilot_channels[key] = {
-            "enabled": str(enabled).lower() in ("true", "1", "yes"),
-            "interval_hours": max(1, min(24, float(interval_hours or 6))),
-            "last_check": 0,
-            "channel_id": channel_id,
-        }
-        return {
-            "status": "ok",
-            "enabled": _catalyst_auto_pilot_channels[key]["enabled"],
-            "interval_hours": _catalyst_auto_pilot_channels[key]["interval_hours"],
-        }
+        normalized_enabled = str(enabled).lower() in ("true", "1", "yes")
+        normalized_interval = max(1, min(24, float(interval_hours or 6)))
+
+        async def update_auto_pilot() -> dict[str, Any]:
+            from backend import _catalyst_auto_pilot_channels
+
+            _catalyst_auto_pilot_channels[key] = {
+                "enabled": normalized_enabled,
+                "interval_hours": normalized_interval,
+                "last_check": 0,
+                "channel_id": channel_id,
+            }
+            return {
+                "status": "ok",
+                "enabled": _catalyst_auto_pilot_channels[key]["enabled"],
+                "interval_hours": _catalyst_auto_pilot_channels[key]["interval_hours"],
+            }
+
+        return await _execute_catalyst_command(
+            name="catalyst_set_auto_pilot",
+            arguments={
+                "channel_id": str(channel_id).strip(),
+                "enabled": normalized_enabled,
+                "interval_hours": normalized_interval,
+            },
+            request=request,
+            user=user,
+            operation=update_auto_pilot,
+        )
 
     return build_youtube_catalyst_router(
         start_google_youtube_oauth_endpoint=_start_google_youtube_oauth,

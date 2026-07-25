@@ -39,6 +39,7 @@ from studio_agent.dictation import transcribe_audio_bytes
 
 from studio_agent import model_registry, openrouter, provider_policy, skills
 from studio_agent import memory, production_budget, runner, store, training_capture
+from studio_agent.execution_context import production_command_scope
 from studio_agent.image_model_catalog import seedream_model_profiles
 from studio_agent.video_model_catalog import video_model_profiles
 from studio_agent.queue import (
@@ -380,6 +381,55 @@ def build_studio_agent_router(
         # admin-only. A 404 avoids disclosing another creator's job id.
         raise HTTPException(404, "job_not_found")
 
+    def _require_command_session(
+        session_id: str,
+        user: dict,
+        *,
+        job_id: str = "",
+    ) -> dict[str, Any]:
+        """Bind every public mutation to one owned Studio session/job."""
+
+        normalized = str(session_id or "").strip()
+        if not normalized:
+            raise HTTPException(
+                422,
+                "session_id is required for a production command",
+            )
+        session = store.get_session(
+            normalized,
+            user_id=_user_id(user),
+            reconcile_jobs=False,
+            _prune_active_jobs=False,
+        )
+        if not session:
+            raise HTTPException(404, "session_not_found")
+        target = str(job_id or "").strip()
+        if target:
+            tracked = set(store.collect_tracked_production_job_ids(session))
+            for workflow in list(session.get("production_workflows") or []):
+                if isinstance(workflow, dict):
+                    tracked.add(str(workflow.get("job_id") or "").strip())
+            for command in list(session.get("production_commands") or []):
+                if not isinstance(command, dict):
+                    continue
+                envelope = (
+                    command.get("command_envelope")
+                    if isinstance(command.get("command_envelope"), dict)
+                    else {}
+                )
+                command_target = (
+                    envelope.get("target")
+                    if isinstance(envelope.get("target"), dict)
+                    else {}
+                )
+                tracked.add(str(command_target.get("job_id") or "").strip())
+            if target not in tracked:
+                raise HTTPException(
+                    409,
+                    "production job is not attached to this Studio session",
+                )
+        return session
+
     def _require_final_export_access(user: dict) -> None:
         if is_owner(user, is_admin_check):
             return
@@ -634,33 +684,29 @@ def build_studio_agent_router(
     ):
         """Unified poll surface for agent-started renders (longform, shortform, reference)."""
         access = _require_job_access(job_id, kind, user)
-        snap = agent_jobs.get_job_snapshot(job_id, str(access.get("kind") or kind))
-        uid = _user_id(user)
-        if snap.get("status") == "complete":
-            agent_jobs.record_production_complete_telemetry(
-                uid, snap, session_id=session_id or None
-            )
-        if session_id and snap.get("status") in ("complete", "failed"):
-            if not (
-                snap.get("kind") == "longform"
-                and snap.get("status") == "failed"
-                and not agent_jobs.longform_failed_is_terminal(job_id)
-            ):
-                agent_jobs.prune_session_job(session_id, job_id, user_id=uid)
-        return snap
+        # Pure projection only. Polling/refresh may never prune the session,
+        # restart work, write lifecycle, or spend. The owning command worker
+        # performs terminal projection atomically.
+        return agent_jobs.get_job_snapshot(
+            job_id,
+            str(access.get("kind") or kind),
+            lightweight=True,
+        )
 
     @router.post("/jobs/{job_id}/cancel")
     async def cancel_production_job(
         job_id: str,
+        request: Request,
         kind: str = Query("shortform"),
         session_id: str = Query(""),
         user: dict = Depends(_agent_user),
     ):
         """Cancel a locally owned render; RunPod-owned work fails closed."""
         from studio_agent import runpod_bridge
-        from studio_agent.tools import cancel_shortform_job
+        from studio_agent import tools as agent_tools
 
         access = _require_job_access(job_id, kind, user)
+        _require_command_session(session_id, user, job_id=job_id)
         if str(access.get("kind") or kind) != "shortform":
             raise HTTPException(400, "cancel is currently supported for shortform renders only")
         try:
@@ -693,12 +739,34 @@ def build_studio_agent_router(
                     "dispatch_id": str(runpod_receipt.get("dispatch_id") or ""),
                 },
             )
-        ok = cancel_shortform_job(job_id)
-        if not ok:
-            raise HTTPException(404, "job workspace not found (it may have already finished)")
+        command_id = _direct_production_command_id(
+            request,
+            runpod_enabled=agent_tools._runpod_production_enabled(),
+        )
+        try:
+            with production_command_scope(
+                command_id,
+                user_id=_user_id(user),
+                session_id=session_id,
+                source="server_workflow",
+                user_text=f"cancel:{job_id}",
+            ):
+                raw = await run_in_threadpool(
+                    agent_tools.execute_tool_logged,
+                    "cancel_production_job",
+                    {"job_id": job_id},
+                    user_id=_user_id(user),
+                    content_format="short",
+                    session_id=session_id or None,
+                )
+            parsed = _verified_mutation_payload(raw, operation="cancel_production_job")
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(400, f"cancel_failed: {exc}") from exc
         if session_id:
             agent_jobs.prune_session_job(session_id, job_id, user_id=_user_id(user))
-        return {"ok": True, "job_id": job_id, "status": "cancelling"}
+        return {"ok": True, "job_id": job_id, "status": "cancelling", "tool_result": parsed}
 
     @router.get("/jobs/{job_id}/media")
     async def production_job_media(
@@ -810,10 +878,12 @@ def build_studio_agent_router(
         job_id: str,
         scene_idx: int,
         request: Request,
+        session_id: str = Query(""),
         user: dict = Depends(_agent_user),
     ):
         """Catalyst-audited scene regenerate — preserves style, fixes artifacting."""
         access = _require_job_access(job_id, "", user)
+        _require_command_session(session_id, user, job_id=job_id)
         if scene_idx < 0 or scene_idx > 999:
             raise HTTPException(400, "bad_scene_index")
         try:
@@ -832,17 +902,24 @@ def build_studio_agent_router(
                 else "regenerate_production_scene"
             )
             scene_key = "scene_idx" if is_longform else "scene_index"
-            tool_result = await run_in_threadpool(
-                agent_tools.execute_tool_logged,
-                tool_name,
-                {
-                    "job_id": job_id,
-                    scene_key: scene_idx,
-                    "_runpod_command_id": command_id,
-                },
+            with production_command_scope(
+                command_id,
                 user_id=_user_id(user),
-                content_format="long" if is_longform else "short",
-            )
+                session_id=session_id,
+                source="server_workflow",
+                user_text=f"{tool_name}:{job_id}:{scene_idx}",
+            ):
+                tool_result = await run_in_threadpool(
+                    agent_tools.execute_tool_logged,
+                    tool_name,
+                    {
+                        "job_id": job_id,
+                        scene_key: scene_idx,
+                    },
+                    user_id=_user_id(user),
+                    content_format="long" if is_longform else "short",
+                    session_id=session_id or None,
+                )
 
             if is_longform:
                 snapshot = agent_jobs.get_job_snapshot(job_id, "longform")
@@ -866,33 +943,48 @@ def build_studio_agent_router(
         job_id: str,
         scene_idx: int,
         body: ScenePromptRequest,
+        request: Request,
+        session_id: str = Query(""),
         user: dict = Depends(_agent_user),
     ):
         """Persist the creator's exact provider prompt for the next regeneration."""
         access = _require_job_access(job_id, "shortform", user)
+        _require_command_session(session_id, user, job_id=job_id)
         if str(access.get("kind") or "") != "shortform":
             raise HTTPException(404, "job_not_found")
         if scene_idx < 0 or scene_idx > 999:
             raise HTTPException(400, "bad_scene_index")
         try:
-            from skeleton_ai.styled_pipeline import set_scene_prompt_override
-            from studio_agent.tools import _shortform_workspace
+            from studio_agent import tools as agent_tools
 
-            scene = await run_in_threadpool(
-                set_scene_prompt_override, _shortform_workspace(job_id), scene_idx, body.prompt,
+            command_id = _direct_production_command_id(
+                request,
+                runpod_enabled=agent_tools._runpod_production_enabled(),
             )
-            normalized_prompt = " ".join(str(body.prompt or "").split())
-            if not (
-                isinstance(scene, dict)
-                and int(scene.get("index", -1)) == scene_idx
-                and scene.get("prompt_user_override") is True
-                and str(scene.get("prompt") or "") == normalized_prompt
+            with production_command_scope(
+                command_id,
+                user_id=_user_id(user),
+                session_id=session_id,
+                source="server_workflow",
+                user_text=f"set_production_scene_prompt:{job_id}:{scene_idx}",
             ):
-                raise HTTPException(409, {
-                    "code": "mutation_postcondition_failed",
-                    "operation": "set_production_scene_prompt",
-                    "receipt": scene if isinstance(scene, dict) else {"raw": str(scene)},
-                })
+                raw = await run_in_threadpool(
+                    agent_tools.execute_tool_logged,
+                    "set_production_scene_prompt",
+                    {
+                        "job_id": job_id,
+                        "scene_index": scene_idx,
+                        "prompt": body.prompt,
+                    },
+                    user_id=_user_id(user),
+                    content_format="short",
+                    session_id=session_id or None,
+                )
+            parsed = _verified_mutation_payload(
+                raw,
+                operation="set_production_scene_prompt",
+            )
+            scene = parsed.get("scene") if isinstance(parsed.get("scene"), dict) else parsed
             snapshot = agent_jobs.get_job_snapshot(job_id, "shortform")
         except HTTPException:
             raise
@@ -906,11 +998,13 @@ def build_studio_agent_router(
         scene_idx: int,
         body: SceneApprovalRequest,
         request: Request,
+        session_id: str = Query(""),
         user: dict = Depends(_agent_user),
     ):
         import time as _time
 
         access = _require_job_access(job_id, "shortform", user)
+        _require_command_session(session_id, user, job_id=job_id)
         if str(access.get("kind") or "") != "shortform":
             raise HTTPException(404, "job_not_found")
         if scene_idx < 0 or scene_idx > 999:
@@ -923,45 +1017,59 @@ def build_studio_agent_router(
                 request,
                 runpod_enabled=runpod_enabled and bool(body.animate),
             )
-            tool_result = await run_in_threadpool(
-                agent_tools.set_production_scenes_animate,
-                job_id,
-                bool(body.animate),
-                [scene_idx],
-            )
-            approval_parsed = _verified_mutation_payload(
-                tool_result,
-                operation="set_production_scenes_animate",
-            )
-            spawn_parsed = None
-            if body.animate:
-                if runpod_enabled:
-                    raw_spawn = await run_in_threadpool(
-                        agent_tools.execute_tool_logged,
-                        "animate_production_scenes",
-                        {
-                            "job_id": job_id,
-                            "scene_indices": [scene_idx],
-                            "_runpod_command_id": command_id,
-                        },
-                        user_id=_user_id(user),
-                        content_format="short",
-                    )
-                else:
-                    raw_spawn = await run_in_threadpool(
-                        agent_tools.spawn_animate_production_scenes,
-                        job_id,
-                        [scene_idx],
-                        user_id=_user_id(user),
-                        command_id=command_id,
-                    )
-                try:
-                    spawn_parsed = _verified_mutation_payload(
-                        raw_spawn,
-                        operation="animate_production_scenes",
-                    )
-                except HTTPException:
-                    raise
+            with production_command_scope(
+                command_id,
+                user_id=_user_id(user),
+                session_id=session_id,
+                source="server_workflow",
+                user_text=f"approve_scene:{job_id}:{scene_idx}:animate={bool(body.animate)}",
+            ):
+                tool_result = await run_in_threadpool(
+                    agent_tools.execute_tool_logged,
+                    "set_production_scenes_animate",
+                    {
+                        "job_id": job_id,
+                        "animate": bool(body.animate),
+                        "scene_indices": [scene_idx],
+                    },
+                    user_id=_user_id(user),
+                    content_format="short",
+                    session_id=session_id or None,
+                )
+                approval_parsed = _verified_mutation_payload(
+                    tool_result,
+                    operation="set_production_scenes_animate",
+                )
+                spawn_parsed = None
+                if body.animate:
+                    if runpod_enabled:
+                        raw_spawn = await run_in_threadpool(
+                            agent_tools.execute_tool_logged,
+                            "animate_production_scenes",
+                            {
+                                "job_id": job_id,
+                                "scene_indices": [scene_idx],
+                            },
+                            user_id=_user_id(user),
+                            content_format="short",
+                            session_id=session_id or None,
+                        )
+                    else:
+                        raw_spawn = await run_in_threadpool(
+                            agent_tools.spawn_animate_production_scenes,
+                            job_id,
+                            [scene_idx],
+                            user_id=_user_id(user),
+                            session_id=session_id or None,
+                            command_id=command_id,
+                        )
+                    try:
+                        spawn_parsed = _verified_mutation_payload(
+                            raw_spawn,
+                            operation="animate_production_scenes",
+                        )
+                    except HTTPException:
+                        raise
             snapshot = agent_jobs.get_job_snapshot(job_id, "shortform")
         except HTTPException:
             raise
@@ -991,11 +1099,13 @@ def build_studio_agent_router(
         job_id: str,
         body: SceneBulkApprovalRequest,
         request: Request,
+        session_id: str = Query(""),
         user: dict = Depends(_agent_user),
     ):
         import time as _time
 
         access = _require_job_access(job_id, "shortform", user)
+        _require_command_session(session_id, user, job_id=job_id)
         if str(access.get("kind") or "") != "shortform":
             raise HTTPException(404, "job_not_found")
         indices = body.scene_indices
@@ -1009,45 +1119,59 @@ def build_studio_agent_router(
                 request,
                 runpod_enabled=runpod_enabled and bool(body.animate),
             )
-            tool_result = await run_in_threadpool(
-                agent_tools.set_production_scenes_animate,
-                job_id,
-                bool(body.animate),
-                indices,
-            )
-            approval_parsed = _verified_mutation_payload(
-                tool_result,
-                operation="set_production_scenes_animate",
-            )
-            spawn_parsed = None
-            if body.animate:
-                if runpod_enabled:
-                    raw_spawn = await run_in_threadpool(
-                        agent_tools.execute_tool_logged,
-                        "animate_production_scenes",
-                        {
-                            "job_id": job_id,
-                            "scene_indices": indices,
-                            "_runpod_command_id": command_id,
-                        },
-                        user_id=_user_id(user),
-                        content_format="short",
-                    )
-                else:
-                    raw_spawn = await run_in_threadpool(
-                        agent_tools.spawn_animate_production_scenes,
-                        job_id,
-                        indices,
-                        user_id=_user_id(user),
-                        command_id=command_id,
-                    )
-                try:
-                    spawn_parsed = _verified_mutation_payload(
-                        raw_spawn,
-                        operation="animate_production_scenes",
-                    )
-                except HTTPException:
-                    raise
+            with production_command_scope(
+                command_id,
+                user_id=_user_id(user),
+                session_id=session_id,
+                source="server_workflow",
+                user_text=f"approve_scenes:{job_id}:animate={bool(body.animate)}",
+            ):
+                tool_result = await run_in_threadpool(
+                    agent_tools.execute_tool_logged,
+                    "set_production_scenes_animate",
+                    {
+                        "job_id": job_id,
+                        "animate": bool(body.animate),
+                        "scene_indices": indices,
+                    },
+                    user_id=_user_id(user),
+                    content_format="short",
+                    session_id=session_id or None,
+                )
+                approval_parsed = _verified_mutation_payload(
+                    tool_result,
+                    operation="set_production_scenes_animate",
+                )
+                spawn_parsed = None
+                if body.animate:
+                    if runpod_enabled:
+                        raw_spawn = await run_in_threadpool(
+                            agent_tools.execute_tool_logged,
+                            "animate_production_scenes",
+                            {
+                                "job_id": job_id,
+                                "scene_indices": indices,
+                            },
+                            user_id=_user_id(user),
+                            content_format="short",
+                            session_id=session_id or None,
+                        )
+                    else:
+                        raw_spawn = await run_in_threadpool(
+                            agent_tools.spawn_animate_production_scenes,
+                            job_id,
+                            indices,
+                            user_id=_user_id(user),
+                            session_id=session_id or None,
+                            command_id=command_id,
+                        )
+                    try:
+                        spawn_parsed = _verified_mutation_payload(
+                            raw_spawn,
+                            operation="animate_production_scenes",
+                        )
+                    except HTTPException:
+                        raise
             snapshot = agent_jobs.get_job_snapshot(job_id, "shortform")
         except HTTPException:
             raise
@@ -1076,12 +1200,14 @@ def build_studio_agent_router(
     async def production_job_animate(
         job_id: str,
         request: Request,
+        session_id: str = Query(""),
         user: dict = Depends(_agent_user),
     ):
         """Run i2v for short-form scenes that were explicitly approved for animation."""
         import time as _time
 
         access = _require_job_access(job_id, "shortform", user)
+        _require_command_session(session_id, user, job_id=job_id)
         if str(access.get("kind") or "") != "shortform":
             raise HTTPException(404, "job_not_found")
         try:
@@ -1092,23 +1218,29 @@ def build_studio_agent_router(
                 request,
                 runpod_enabled=runpod_enabled,
             )
-            if runpod_enabled:
-                raw = await run_in_threadpool(
-                    agent_tools.execute_tool_logged,
-                    "animate_production_scenes",
-                    {
-                        "job_id": job_id,
-                        "_runpod_command_id": command_id,
-                    },
-                    user_id=_user_id(user),
-                    content_format="short",
-                )
-            else:
-                raw = agent_tools.spawn_animate_production_scenes(
-                    job_id,
-                    user_id=_user_id(user),
-                    command_id=command_id,
-                )
+            with production_command_scope(
+                command_id,
+                user_id=_user_id(user),
+                session_id=session_id,
+                source="server_workflow",
+                user_text=f"animate_scenes:{job_id}",
+            ):
+                if runpod_enabled:
+                    raw = await run_in_threadpool(
+                        agent_tools.execute_tool_logged,
+                        "animate_production_scenes",
+                        {"job_id": job_id},
+                        user_id=_user_id(user),
+                        content_format="short",
+                        session_id=session_id or None,
+                    )
+                else:
+                    raw = agent_tools.spawn_animate_production_scenes(
+                        job_id,
+                        user_id=_user_id(user),
+                        session_id=session_id or None,
+                        command_id=command_id,
+                    )
             parsed = _verified_mutation_payload(raw, operation="animate_production_scenes")
             snapshot = agent_jobs.get_job_snapshot(job_id, "shortform")
         except HTTPException:
@@ -1133,10 +1265,12 @@ def build_studio_agent_router(
     async def production_job_expand_proof(
         job_id: str,
         request: Request,
+        session_id: str = Query(""),
         user: dict = Depends(_agent_user),
     ):
         """Expand an approved one-scene long-form visual proof into the full still gallery."""
         access = _require_job_access(job_id, "longform", user)
+        _require_command_session(session_id, user, job_id=job_id)
         if str(access.get("kind") or "") != "longform":
             raise HTTPException(404, "job_not_found")
         try:
@@ -1149,16 +1283,21 @@ def build_studio_agent_router(
                 request,
                 runpod_enabled=runpod_enabled,
             )
-            raw = await run_in_threadpool(
-                agent_tools.execute_tool_logged,
-                "expand_longform_visual_proof",
-                {
-                    "job_id": job_id,
-                    "_runpod_command_id": command_id,
-                },
+            with production_command_scope(
+                command_id,
                 user_id=_user_id(user),
-                content_format="long",
-            )
+                session_id=session_id,
+                source="server_workflow",
+                user_text=f"expand_longform:{job_id}",
+            ):
+                raw = await run_in_threadpool(
+                    agent_tools.execute_tool_logged,
+                    "expand_longform_visual_proof",
+                    {"job_id": job_id},
+                    user_id=_user_id(user),
+                    content_format="long",
+                    session_id=session_id or None,
+                )
             tool_result = json.loads(raw or "{}")
             snapshot = agent_jobs.get_job_snapshot(job_id, "longform")
         except Exception as exc:
@@ -1175,12 +1314,14 @@ def build_studio_agent_router(
         kind: str = Query("longform"),
         captions_enabled: bool | None = Query(None),
         caption_mode: Literal["word", "off"] | None = Query(None),
+        session_id: str = Query(""),
         user: dict = Depends(_agent_user),
     ):
         """Agent subscribers can finalize approved productions after the relevant review gate."""
         import time as _time
 
         access = _require_job_access(job_id, kind, user)
+        _require_command_session(session_id, user, job_id=job_id)
         normalized_kind = str(access.get("kind") or kind or "longform").strip().lower()
         from studio_agent import tools as agent_tools
 
@@ -1194,27 +1335,35 @@ def build_studio_agent_router(
                 preflight = agent_tools.shortform_finalize_preflight(job_id)
                 if preflight.get("status") != "ready":
                     raise HTTPException(409, preflight)
-                if runpod_enabled:
-                    raw = await run_in_threadpool(
-                        agent_tools.execute_tool_logged,
-                        "finalize_production",
-                        {
-                            "job_id": job_id,
-                            "captions_enabled": captions_enabled,
-                            "caption_mode": caption_mode,
-                            "_runpod_command_id": command_id,
-                        },
-                        user_id=_user_id(user),
-                        content_format="short",
-                    )
-                else:
-                    raw = agent_tools.spawn_finalize_production(
-                        job_id,
-                        captions_enabled=captions_enabled,
-                        caption_mode=caption_mode,
-                        user_id=_user_id(user),
-                        command_id=command_id,
-                    )
+                with production_command_scope(
+                    command_id,
+                    user_id=_user_id(user),
+                    session_id=session_id,
+                    source="server_workflow",
+                    user_text=f"finalize_short:{job_id}",
+                ):
+                    if runpod_enabled:
+                        raw = await run_in_threadpool(
+                            agent_tools.execute_tool_logged,
+                            "finalize_production",
+                            {
+                                "job_id": job_id,
+                                "captions_enabled": captions_enabled,
+                                "caption_mode": caption_mode,
+                            },
+                            user_id=_user_id(user),
+                            content_format="short",
+                            session_id=session_id or None,
+                        )
+                    else:
+                        raw = agent_tools.spawn_finalize_production(
+                            job_id,
+                            captions_enabled=captions_enabled,
+                            caption_mode=caption_mode,
+                            user_id=_user_id(user),
+                            session_id=session_id or None,
+                            command_id=command_id,
+                        )
                 try:
                     parsed = __import__("json").loads(raw or "{}")
                 except Exception:
@@ -1242,16 +1391,21 @@ def build_studio_agent_router(
             }
 
         try:
-            raw = await run_in_threadpool(
-                agent_tools.execute_tool_logged,
-                "finalize_longform_render",
-                {
-                    "job_id": job_id,
-                    "_runpod_command_id": command_id,
-                },
+            with production_command_scope(
+                command_id,
                 user_id=_user_id(user),
-                content_format="long",
-            )
+                session_id=session_id,
+                source="server_workflow",
+                user_text=f"finalize_longform:{job_id}",
+            ):
+                raw = await run_in_threadpool(
+                    agent_tools.execute_tool_logged,
+                    "finalize_longform_render",
+                    {"job_id": job_id},
+                    user_id=_user_id(user),
+                    content_format="long",
+                    session_id=session_id or None,
+                )
             parsed = json.loads(raw or "{}")
             out = {
                 "ok": True,
@@ -1645,11 +1799,16 @@ def build_studio_agent_router(
         user: dict = Depends(_agent_user),
     ):
         uid = _user_id(user)
-        if sync_pending:
-            session = store.force_sync_session(session_id, user_id=uid)
-            session = session or store.get_session(session_id, user_id=uid, reconcile_jobs=False)
-        else:
-            session = store.get_session(session_id, user_id=uid, reconcile_jobs=False)
+        # ``sync_pending`` remains accepted for wire compatibility, but GET is
+        # always a pure projection. The explicit POST /sync route owns any
+        # pruning/reconciliation mutation.
+        _ = sync_pending
+        session = store.get_session(
+            session_id,
+            user_id=uid,
+            reconcile_jobs=False,
+            _prune_active_jobs=False,
+        )
         if not session:
             raise HTTPException(404, "session not found")
         return {"session": _public_session(session, message_tail=message_tail)}
@@ -1777,12 +1936,52 @@ def build_studio_agent_router(
 
     @router.post("/sessions/{session_id}/chat")
     async def chat(session_id: str, body: ChatRequest, user: dict = Depends(_agent_user)):
-        session = store.get_session(session_id, user_id=_user_id(user))
+        user_id = _user_id(user)
+        session = store.get_session(
+            session_id,
+            user_id=user_id,
+            reconcile_jobs=False,
+        )
         if not session:
             raise HTTPException(404, "session not found")
         session = _apply_chat_turn_options(session_id, session, body)
         plan = _membership_plan_for_user(user)
         profile = _require_chat_balance(user)
+        run = store.create_run(
+            session_id,
+            user_text=body.message.strip(),
+            request_id=str(body.request_id or "").strip(),
+        )
+        run_id = str(run["run_id"])
+        if bool(run.get("idempotent_replay")):
+            current = store.get_run(session_id, run_id, user_id=user_id) or run
+            run_status = str(current.get("status") or "running")
+            if run_status == "complete":
+                saved = current.get("result")
+                result = dict(saved) if isinstance(saved, dict) else {}
+                result["run_id"] = run_id
+                result["idempotent_replay"] = True
+                return result
+            if run_status in store.ACTIVE_RUN_STATUSES:
+                raise HTTPException(
+                    409,
+                    detail={
+                        "message": "This backend command is already running.",
+                        "run_id": run_id,
+                        "resume_required": True,
+                    },
+                )
+            raise HTTPException(
+                409,
+                detail={
+                    "message": str(
+                        current.get("error")
+                        or "The original backend command did not complete."
+                    ),
+                    "run_id": run_id,
+                    "run_status": run_status,
+                },
+            )
         try:
             result = await runner.run_turn(
                 session,
@@ -1792,8 +1991,17 @@ def build_studio_agent_router(
                 reply_to=getattr(body, 'reply_to', None),
                 attachments=body.attachments,
                 agent_mode=body.agent_mode,
+                command_id=run_id,
+            )
+            result["run_id"] = run_id
+            store.finish_run(
+                session_id,
+                run_id,
+                status="complete",
+                result=result,
             )
         except (StudioAgentQueueFullError, StudioAgentQueueTimeoutError) as exc:
+            store.finish_run(session_id, run_id, status="failed", error=str(exc))
             snap = await queue_snapshot()
             raise HTTPException(
                 503,
@@ -1801,8 +2009,10 @@ def build_studio_agent_router(
                 headers={"X-Studio-Queue": "full" if isinstance(exc, StudioAgentQueueFullError) else "timeout"},
             ) from exc
         except RuntimeError as exc:
+            store.finish_run(session_id, run_id, status="failed", error=str(exc))
             raise HTTPException(502, str(exc)) from exc
         except Exception as exc:
+            store.finish_run(session_id, run_id, status="failed", error=str(exc))
             raise HTTPException(502, f"Agent turn failed: {exc}") from exc
         return result
 
@@ -1966,17 +2176,23 @@ def build_studio_agent_router(
             raise HTTPException(500, f"Approve failed: {detail}") from exc
 
     @router.post("/sessions/{session_id}/retry-production")
-    async def retry_production(session_id: str, user: dict = Depends(_agent_user)):
+    async def retry_production(
+        session_id: str,
+        request: Request,
+        user: dict = Depends(_agent_user),
+    ):
         session = store.get_session(session_id, user_id=_user_id(user))
         if not session:
             raise HTTPException(404, "session not found")
         plan = _membership_plan_for_user(user)
         profile = _billing_profile(user)
+        command_id = _direct_production_command_id(request, runpod_enabled=False)
         try:
             return await runner.retry_last_production(
                 session,
                 membership_plan=plan,
                 billing_profile=profile,
+                command_id=command_id,
             )
         except KeyError as exc:
             raise HTTPException(404, str(exc)) from exc
@@ -2088,6 +2304,7 @@ def _public_session(session: dict[str, Any], *, message_tail: int = 0) -> dict[s
         "context_ingested": bool(session.get("context_ingested")),
         "skip_job_recovery": bool(session.get("skip_job_recovery")),
     }
+    payload.update(store.production_session_fields(session))
     if tail > 0 and total_messages > tail:
         payload["message_count"] = total_messages
         payload["messages_truncated"] = True

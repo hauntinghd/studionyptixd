@@ -7,7 +7,8 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 import studio_agent_router
-from studio_agent import jobs, runpod_bridge, tools
+from studio_agent import jobs, runpod_bridge, store, tools
+from studio_agent.execution_context import current_production_command
 
 
 @pytest.fixture(autouse=True)
@@ -17,6 +18,25 @@ def _owned_test_jobs(monkeypatch):
         return {"exists": True, "job_id": job_id, "kind": resolved, "owner_id": "user-1"}
 
     monkeypatch.setattr(jobs, "job_access_metadata", metadata)
+    monkeypatch.setattr(
+        store,
+        "get_session",
+        lambda session_id, **_kwargs: {
+            "session_id": session_id,
+            "user_id": "user-1",
+            "active_jobs": [
+                {"job_id": "short-1", "kind": "shortform"},
+                {"job_id": "long-1", "kind": "longform"},
+            ],
+        }
+        if session_id == "session-1"
+        else None,
+    )
+    monkeypatch.setattr(
+        store,
+        "collect_tracked_production_job_ids",
+        lambda _session: ["short-1", "long-1"],
+    )
 
 
 def _client() -> TestClient:
@@ -58,13 +78,16 @@ def test_enabled_direct_animate_dispatches_once_and_never_spawns_local(monkeypat
     )
 
     def dispatch(name, arguments, **context):
+        authority = current_production_command()
+        assert authority is not None
+        assert authority.command_id == "click-animate-1"
         calls.append((name, dict(arguments), dict(context)))
         return json.dumps({"status": "queued", "runpod_job_id": "rp-1"})
 
     monkeypatch.setattr(tools, "execute_tool_logged", dispatch)
 
     response = _client().post(
-        "/api/studio-agent/jobs/short-1/animate",
+        "/api/studio-agent/jobs/short-1/animate?session_id=session-1",
         headers={"X-Idempotency-Key": "click-animate-1"},
     )
 
@@ -72,11 +95,12 @@ def test_enabled_direct_animate_dispatches_once_and_never_spawns_local(monkeypat
     assert len(calls) == 1
     name, arguments, context = calls[0]
     assert name == "animate_production_scenes"
-    assert arguments == {
-        "job_id": "short-1",
-        "_runpod_command_id": "click-animate-1",
+    assert arguments == {"job_id": "short-1"}
+    assert context == {
+        "user_id": "user-1",
+        "content_format": "short",
+        "session_id": "session-1",
     }
-    assert context == {"user_id": "user-1", "content_format": "short"}
 
 
 def test_enabled_direct_animate_without_idempotency_key_fails_closed(monkeypatch) -> None:
@@ -96,7 +120,9 @@ def test_enabled_direct_animate_without_idempotency_key_fails_closed(monkeypatch
         ),
     )
 
-    response = _client().post("/api/studio-agent/jobs/short-1/animate")
+    response = _client().post(
+        "/api/studio-agent/jobs/short-1/animate?session_id=session-1"
+    )
 
     assert response.status_code == 400
     assert "X-Idempotency-Key is required" in response.text
@@ -108,23 +134,32 @@ def test_enabled_scene_approve_animate_sets_state_then_dispatches_once(monkeypat
     monkeypatch.setattr(tools, "_runpod_production_enabled", lambda: True)
     monkeypatch.setattr(jobs, "get_job_snapshot", _snapshot)
 
-    def set_animate(job_id: str, animate: bool, scene_indices: list[int]):
-        assert (job_id, animate, scene_indices) == ("short-1", True, [2])
-        order.append("set_state")
-        return json.dumps({"ok": True})
-
     def dispatch(name, arguments, **context):
-        assert name == "animate_production_scenes"
-        assert arguments == {
-            "job_id": "short-1",
-            "scene_indices": [2],
-            "_runpod_command_id": "click-scene-2",
+        authority = current_production_command()
+        assert authority is not None
+        assert authority.command_id == "click-scene-2"
+        assert context == {
+            "user_id": "user-1",
+            "content_format": "short",
+            "session_id": "session-1",
         }
-        assert context == {"user_id": "user-1", "content_format": "short"}
+        if name == "set_production_scenes_animate":
+            assert arguments == {
+                "job_id": "short-1",
+                "animate": True,
+                "scene_indices": [2],
+            }
+            order.append("set_state")
+            return json.dumps({
+                "ok": True,
+                "status": "complete",
+                "postcondition_verified": True,
+            })
+        assert name == "animate_production_scenes"
+        assert arguments == {"job_id": "short-1", "scene_indices": [2]}
         order.append("dispatch")
         return json.dumps({"status": "queued", "runpod_job_id": "rp-2"})
 
-    monkeypatch.setattr(tools, "set_production_scenes_animate", set_animate)
     monkeypatch.setattr(tools, "execute_tool_logged", dispatch)
     monkeypatch.setattr(
         tools,
@@ -135,7 +170,7 @@ def test_enabled_scene_approve_animate_sets_state_then_dispatches_once(monkeypat
     )
 
     response = _client().post(
-        "/api/studio-agent/jobs/short-1/scene/2/approval",
+        "/api/studio-agent/jobs/short-1/scene/2/approval?session_id=session-1",
         headers={"X-Idempotency-Key": "click-scene-2"},
         json={"animate": True},
     )
@@ -164,7 +199,7 @@ def test_flag_off_direct_animate_preserves_metered_idempotent_local_background_p
     monkeypatch.setattr(tools, "spawn_animate_production_scenes", spawn)
 
     response = _client().post(
-        "/api/studio-agent/jobs/short-1/animate",
+        "/api/studio-agent/jobs/short-1/animate?session_id=session-1",
         headers={"X-Idempotency-Key": "local-animate-1"},
     )
 
@@ -172,7 +207,11 @@ def test_flag_off_direct_animate_preserves_metered_idempotent_local_background_p
     assert local_calls == [
         (
             "short-1",
-            {"user_id": "user-1", "command_id": "local-animate-1"},
+            {
+                "user_id": "user-1",
+            "session_id": "session-1",
+                "command_id": "local-animate-1",
+            },
         )
     ]
 
@@ -193,13 +232,16 @@ def test_enabled_short_scene_regenerate_dispatches_full_still_and_animation(monk
     )
 
     def dispatch(name, arguments, **context):
+        authority = current_production_command()
+        assert authority is not None
+        assert authority.command_id == "click-regen-2"
         calls.append((name, dict(arguments), dict(context)))
         return json.dumps({"status": "queued", "runpod_job_id": "rp-regen"})
 
     monkeypatch.setattr(tools, "execute_tool_logged", dispatch)
 
     response = _client().post(
-        "/api/studio-agent/jobs/short-1/scene/2/regenerate",
+        "/api/studio-agent/jobs/short-1/scene/2/regenerate?session_id=session-1",
         headers={"X-Idempotency-Key": "click-regen-2"},
     )
 
@@ -210,9 +252,12 @@ def test_enabled_short_scene_regenerate_dispatches_full_still_and_animation(monk
             {
                 "job_id": "short-1",
                 "scene_index": 2,
-                "_runpod_command_id": "click-regen-2",
             },
-            {"user_id": "user-1", "content_format": "short"},
+            {
+                "user_id": "user-1",
+                "content_format": "short",
+                "session_id": "session-1",
+            },
         )
     ]
 
@@ -224,6 +269,9 @@ def test_enabled_short_finalize_dispatches_caption_preferences(monkeypatch) -> N
     monkeypatch.setattr(tools, "shortform_finalize_preflight", lambda _job_id: {"status": "ready"})
 
     def dispatch(name, arguments, **context):
+        authority = current_production_command()
+        assert authority is not None
+        assert authority.command_id == "click-finalize-short"
         calls.append((name, dict(arguments), dict(context)))
         return json.dumps({"status": "queued", "runpod_job_id": "rp-finalize"})
 
@@ -231,7 +279,12 @@ def test_enabled_short_finalize_dispatches_caption_preferences(monkeypatch) -> N
 
     response = _client().post(
         "/api/studio-agent/jobs/short-1/finalize",
-        params={"kind": "shortform", "captions_enabled": "false", "caption_mode": "off"},
+        params={
+            "kind": "shortform",
+            "captions_enabled": "false",
+            "caption_mode": "off",
+            "session_id": "session-1",
+        },
         headers={"X-Idempotency-Key": "click-finalize-short"},
     )
 
@@ -243,9 +296,12 @@ def test_enabled_short_finalize_dispatches_caption_preferences(monkeypatch) -> N
                 "job_id": "short-1",
                 "captions_enabled": False,
                 "caption_mode": "off",
-                "_runpod_command_id": "click-finalize-short",
             },
-            {"user_id": "user-1", "content_format": "short"},
+            {
+                "user_id": "user-1",
+                "content_format": "short",
+                "session_id": "session-1",
+            },
         )
     ]
 
@@ -285,13 +341,16 @@ def test_enabled_longform_expand_dispatches_and_never_expands_locally(monkeypatc
     )
 
     def dispatch(name, arguments, **context):
+        authority = current_production_command()
+        assert authority is not None
+        assert authority.command_id == "click-expand-long"
         calls.append((name, dict(arguments), dict(context)))
         return json.dumps({"status": "queued", "runpod_job_id": "rp-expand-long"})
 
     monkeypatch.setattr(tools, "execute_tool_logged", dispatch)
 
     response = _client().post(
-        "/api/studio-agent/jobs/long-1/expand-proof",
+        "/api/studio-agent/jobs/long-1/expand-proof?session_id=session-1",
         headers={"X-Idempotency-Key": "click-expand-long"},
     )
 
@@ -299,8 +358,12 @@ def test_enabled_longform_expand_dispatches_and_never_expands_locally(monkeypatc
     assert calls == [
         (
             "expand_longform_visual_proof",
-            {"job_id": "long-1", "_runpod_command_id": "click-expand-long"},
-            {"user_id": "user-1", "content_format": "long"},
+            {"job_id": "long-1"},
+            {
+                "user_id": "user-1",
+                "content_format": "long",
+                "session_id": "session-1",
+            },
         )
     ]
 
@@ -318,6 +381,9 @@ def test_enabled_longform_finalize_dispatches_and_never_finalizes_locally(monkey
     )
 
     def dispatch(name, arguments, **context):
+        authority = current_production_command()
+        assert authority is not None
+        assert authority.command_id == "click-finalize-long"
         calls.append((name, dict(arguments), dict(context)))
         return json.dumps({"status": "queued", "runpod_job_id": "rp-finalize-long"})
 
@@ -325,7 +391,7 @@ def test_enabled_longform_finalize_dispatches_and_never_finalizes_locally(monkey
 
     response = _client().post(
         "/api/studio-agent/jobs/long-1/finalize",
-        params={"kind": "longform"},
+        params={"kind": "longform", "session_id": "session-1"},
         headers={"X-Idempotency-Key": "click-finalize-long"},
     )
 
@@ -333,8 +399,12 @@ def test_enabled_longform_finalize_dispatches_and_never_finalizes_locally(monkey
     assert calls == [
         (
             "finalize_longform_render",
-            {"job_id": "long-1", "_runpod_command_id": "click-finalize-long"},
-            {"user_id": "user-1", "content_format": "long"},
+            {"job_id": "long-1"},
+            {
+                "user_id": "user-1",
+                "content_format": "long",
+                "session_id": "session-1",
+            },
         )
     ]
 
@@ -357,7 +427,10 @@ def test_runpod_owned_cancel_fails_closed_without_local_cancel(monkeypatch) -> N
         lambda job_id: local_calls.append(job_id) or True,
     )
 
-    response = _client().post("/api/studio-agent/jobs/short-1/cancel", params={"kind": "shortform"})
+    response = _client().post(
+        "/api/studio-agent/jobs/short-1/cancel",
+        params={"kind": "shortform", "session_id": "session-1"},
+    )
 
     assert response.status_code == 409, response.text
     assert local_calls == []

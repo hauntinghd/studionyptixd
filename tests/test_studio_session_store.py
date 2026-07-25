@@ -48,7 +48,11 @@ def test_get_session_prunes_and_persists_terminal_active_job_without_recursion(
     )
     monkeypatch.setattr(jobs, "shortform_job_terminal_fast", lambda _job_id: True)
 
-    reconciled = store.get_session(session_id, reconcile_jobs=False)
+    reconciled = store.get_session(
+        session_id,
+        reconcile_jobs=False,
+        _prune_active_jobs=True,
+    )
 
     assert reconciled is not None
     assert reconciled["active_jobs"] == []
@@ -91,7 +95,7 @@ def test_job_reconciler_can_persist_through_update_session_once(tmp_path, monkey
         lambda _session_id, *, user_id=None, session=None: session,
     )
 
-    reconciled = store.get_session(session["session_id"])
+    reconciled = store.get_session(session["session_id"], reconcile_jobs=True)
 
     assert calls == [session["session_id"]]
     assert reconciled is not None
@@ -122,6 +126,42 @@ def test_sync_endpoint_prunes_terminal_job_instead_of_returning_500(tmp_path, mo
     assert payload["synced"] is True
     assert payload["session"]["active_jobs"] == []
     assert payload["session"]["blocked_job_ids"] == ["terminal-short"]
+
+
+def test_get_session_is_pure_even_when_legacy_sync_query_is_true(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    session = _create_session(tmp_path, monkeypatch)
+    session_id = session["session_id"]
+    store.update_session(
+        session_id,
+        active_jobs=[
+            {
+                "job_id": "still-visible",
+                "kind": "shortform",
+                "title": "Existing production",
+                "status": "running",
+            }
+        ],
+    )
+    path = tmp_path / f"{session_id}.json"
+    before = path.read_bytes()
+    monkeypatch.setattr(
+        store,
+        "force_sync_session",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("GET must not enter force_sync_session")
+        ),
+    )
+
+    response = _test_app(monkeypatch).get(
+        f"/api/studio-agent/sessions/{session_id}?sync_pending=true"
+    )
+
+    assert response.status_code == 200
+    assert response.json()["session"]["active_jobs"][0]["job_id"] == "still-visible"
+    assert path.read_bytes() == before
 
 
 def test_stream_persists_terminal_assistant_result_after_job_prune(tmp_path, monkeypatch) -> None:

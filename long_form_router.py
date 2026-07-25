@@ -199,28 +199,14 @@ def build_long_form_router(
             return
         raise HTTPException(403, "active_studio_plan_required")
 
-    async def _text_metering_args(model: str | None, *, input_chars: int) -> dict[str, Any]:
-        """Resolve model rates before any paid planning inference is sent."""
+    def _text_metering_args(model: str | None, *, input_chars: int) -> dict[str, Any]:
+        """Build non-billable inputs; pricing resolves after the command claim."""
 
         from studio_agent import openrouter
 
         selected = str(model or openrouter.DEFAULT_MODEL).strip() or openrouter.DEFAULT_MODEL
-        try:
-            prompt_ppm, completion_ppm = await openrouter.model_pricing(selected)
-        except Exception as exc:
-            raise HTTPException(
-                503,
-                "Selected text-model pricing is temporarily unavailable; no provider request was sent.",
-            ) from exc
-        if prompt_ppm is None or completion_ppm is None:
-            raise HTTPException(
-                503,
-                "Selected text-model pricing is unavailable; no provider request was sent.",
-            )
         return {
             "model": selected,
-            "_billing_prompt_price_per_m": float(prompt_ppm),
-            "_billing_completion_price_per_m": float(completion_ppm),
             "_billing_input_chars": max(0, int(input_chars or 0)),
         }
 
@@ -405,7 +391,7 @@ def build_long_form_router(
 
         from studio_agent.direct_production import execute_logged_production
 
-        metering = await _text_metering_args(
+        metering = _text_metering_args(
             body.model,
             input_chars=(
                 len(str(channel.get("system_prompt") or ""))
@@ -448,7 +434,7 @@ def build_long_form_router(
         from studio_agent.direct_production import execute_logged_production
 
         chapter_json = json.dumps(body.chapter or {}, ensure_ascii=False, sort_keys=True)
-        metering = await _text_metering_args(
+        metering = _text_metering_args(
             body.model,
             input_chars=(
                 len(str(channel.get("system_prompt") or ""))
@@ -795,7 +781,7 @@ def build_long_form_router(
             raise HTTPException(404, "no such job")
         # Merge in the live status snapshot (phase + percent from registry,
         # in case the on-disk state is stale between phase boundaries).
-        live = lf_pipeline.get_status(job_id) or {}
+        live = lf_pipeline.peek_status(job_id) or {}
         merged = dict(st)
         runpod_snapshot = _runpod_snapshot(job_id)
         if runpod_snapshot is not None:
@@ -849,7 +835,7 @@ def build_long_form_router(
                 job_id, payload, runpod_snapshot
             )
             return projected
-        live = lf_pipeline.get_status(job_id)
+        live = lf_pipeline.peek_status(job_id)
         st = lf_pipeline.load_state(job_id)
         if live is None:
             # Fall back to disk state (process restart).
@@ -1047,7 +1033,7 @@ def build_long_form_router(
         )
 
     @router.post("/jobs/{job_id}/cancel")
-    async def job_cancel_route(job_id: str, user: dict = auth_dep):
+    async def job_cancel_route(job_id: str, request: Request, user: dict = auth_dep):
         """Cancel an in-flight render. Cooperative cancellation — the
         next per-scene boundary picks it up. Already-rendered stills /
         clips / VOs / SFX stay on disk so the user can re-finalize
@@ -1060,11 +1046,15 @@ def build_long_form_router(
                 409,
                 "This job is owned by RunPod. Legacy local cancel cannot stop its remote spend and is disabled.",
             )
-        try:
-            result = lf_pipeline.cancel_render(job_id)
-        except lf_pipeline.LFRenderError as e:
-            raise HTTPException(400, f"cancel_failed: {e}")
-        return {"job_id": job_id, **result}
+        from studio_agent.direct_production import execute_logged_production
+
+        return await execute_logged_production(
+            "cancel_longform_render",
+            {"job_id": job_id},
+            request=request,
+            user_id=_user_id(user),
+            content_format="long",
+        )
 
     @router.get("/jobs/{job_id}/scenes")
     async def job_scenes_route(job_id: str, user: dict = auth_dep):

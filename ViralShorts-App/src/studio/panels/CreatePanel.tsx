@@ -10,7 +10,9 @@ import { useCallback, useContext, useEffect, useRef, useState } from 'react';
 import { Sparkles, Wand2, Image as ImageIcon, Music, Loader2, X, Upload, RefreshCw } from 'lucide-react';
 import { AuthContext, resolveStudioBackendUrl } from '../shared';
 import { loadImageModelPref, saveImageModelPref } from '../lib/productionModelPrefs';
-import { productionIdempotencyKey } from '../lib/productionIdempotency';
+import {
+    acquireProductionCommandLease,
+} from '../lib/productionIdempotency';
 import NichePickerStrip from '../components/create/NichePickerStrip';
 import type { NicheId } from '../lib/studioProduct';
 
@@ -232,14 +234,17 @@ export default function CreatePanel({
         if (!accessToken || !scenesJobId) return;
         setScenesGenerating(true);
         setSceneError('');
+        const command = acquireProductionCommandLease(
+            'skeleton-scene',
+            `${scenesJobId}-${scene.beat_index}`,
+        );
         try {
-            const commandId = productionIdempotencyKey(`skeleton-scene-${scenesJobId}-${scene.beat_index}`);
             const r = await fetch('/api/skeleton-ai/scenes/regenerate', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
                     Authorization: `Bearer ${accessToken}`,
-                    'X-Idempotency-Key': commandId,
+                    'X-Idempotency-Key': command.commandId,
                 },
                 body: JSON.stringify({
                     job_id: scenesJobId,
@@ -251,6 +256,7 @@ export default function CreatePanel({
                 }),
             });
             const d = await r.json().catch(() => ({}));
+            command.release();
             if (!r.ok) {
                 throw new Error(String(d?.detail || d?.error || `regenerate failed: ${r.status}`));
             }
@@ -298,16 +304,20 @@ export default function CreatePanel({
 
         const controller = new AbortController();
         scenesAbortRef.current = controller;
+        const command = acquireProductionCommandLease(
+            'skeleton-scenes',
+            `${activeCategory}-${script.length}-${imageModel}`,
+        );
+        let terminalResponse = false;
 
         try {
-            const commandId = productionIdempotencyKey('skeleton-scenes');
             const r = await fetch('/api/skeleton-ai/scenes', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
                     Accept: 'text/event-stream',
                     Authorization: `Bearer ${accessToken}`,
-                    'X-Idempotency-Key': commandId,
+                    'X-Idempotency-Key': command.commandId,
                 },
                 body: JSON.stringify({
                     script,
@@ -319,6 +329,7 @@ export default function CreatePanel({
             });
             if (!r.ok || !r.body) {
                 const txt = await r.text().catch(() => '');
+                command.release();
                 throw new Error(`scenes failed: ${r.status} ${txt.slice(0, 240)}`);
             }
             // Parse SSE stream: events are 'event: <name>\ndata: <json>\n\n'.
@@ -358,13 +369,17 @@ export default function CreatePanel({
                     } else if (currentEvent === 'error') {
                         setSceneError(String(payload.message || 'render error'));
                     } else if (currentEvent === 'complete') {
+                        terminalResponse = true;
                         break outer;
                     }
                 }
             }
+            if (terminalResponse) command.release();
         } catch (e) {
             const err = e as Error;
-            if (err.name !== 'AbortError') {
+            if (err.name === 'AbortError') {
+                command.release();
+            } else {
                 setSceneError(err.message || String(err));
             }
         } finally {
@@ -396,14 +411,17 @@ export default function CreatePanel({
             return;
         }
         setGenerating(true);
+        const command = acquireProductionCommandLease(
+            'skeleton-generate',
+            `${activeCategory}-${script.length}-${imageModel}-${videoModel}`,
+        );
         try {
-            const commandId = productionIdempotencyKey('skeleton-generate');
             const r = await fetch('/api/skeleton-ai/generate', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
                     Authorization: `Bearer ${accessToken}`,
-                    'X-Idempotency-Key': commandId,
+                    'X-Idempotency-Key': command.commandId,
                 },
                 body: JSON.stringify({
                     category: activeCategory,
@@ -421,6 +439,7 @@ export default function CreatePanel({
                 }),
             });
             const d = await r.json();
+            command.release();
             // 402 insufficient_credits → render a structured Top Up prompt.
             if (r.status === 402) {
                 const detail = d?.detail || {};
@@ -1240,6 +1259,10 @@ function IdeaModal({
         setBusy(true);
         onStreamStart();
         onScript('');
+        const command = acquireProductionCommandLease(
+            'skeleton-script',
+            `${selectedCategory}-${String(topic || '').slice(0, 80)}`,
+        );
         try {
             // Non-streaming fallback: some runner SSE deltas interleave
             // multiple reasoning paths, which produces garbled text mid-stream
@@ -1251,13 +1274,16 @@ function IdeaModal({
                 headers: {
                     'Content-Type': 'application/json',
                     Authorization: `Bearer ${accessToken}`,
+                    'X-Idempotency-Key': command.commandId,
                 },
                 body: JSON.stringify({ category: selectedCategory, topic, stream: false }),
             });
             if (!r.ok) {
                 const txt = await r.text().catch(() => '');
+                command.release();
                 throw new Error(`script gen failed: ${r.status} ${txt.slice(0, 200)}`);
             }
+            command.release();
             const data = await r.json();
             const text = String(data.script || '').trim();
             if (!text) throw new Error('script gen returned empty content');
@@ -1379,8 +1405,8 @@ function IdeaModal({
                                             tagline: newTagline.trim() || undefined,
                                             system_prompt: newPrompt.trim() || undefined,
                                         }),
-                                    });
-                                    const d = await r.json().catch(() => ({}));
+            });
+            const d = await r.json().catch(() => ({}));
                                     if (!r.ok) {
                                         throw new Error(String(d.detail || `HTTP ${r.status}`));
                                     }

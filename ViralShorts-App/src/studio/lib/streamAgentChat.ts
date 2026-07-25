@@ -1,4 +1,5 @@
 import { resolveStudioBackendUrl } from './backend';
+import type { ProductionViewV1 } from './productionView';
 
 export type AgentToolActivitySummary = {
     title?: string;
@@ -41,6 +42,7 @@ export type AgentStreamEvent =
     | { event: 'thumbnail_review'; review?: unknown }
     | { event: 'pending_actions'; actions?: unknown[] }
     | { event: 'concept_plan'; plan?: unknown }
+    | ({ event: 'production_view'; view?: ProductionViewV1 } & Partial<ProductionViewV1>)
     | { event: 'done'; [key: string]: unknown }
     | { event: 'error'; message?: string; queue?: boolean };
 

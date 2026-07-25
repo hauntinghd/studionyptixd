@@ -29,6 +29,44 @@ type Job = {
     clips?: Array<{ index: number; url?: string; filename?: string; error?: string; virality_score?: number }>;
 };
 
+function commandFingerprint(value: string) {
+    let hash = 2166136261;
+    for (let index = 0; index < value.length; index += 1) {
+        hash ^= value.charCodeAt(index);
+        hash = Math.imul(hash, 16777619);
+    }
+    return (hash >>> 0).toString(36);
+}
+
+function acquireProductionCommand(scope: string) {
+    const storageKey = `studio:cliplab:command:${commandFingerprint(scope)}`;
+    let commandId = '';
+    try {
+        commandId = window.sessionStorage.getItem(storageKey) || '';
+    } catch {
+        commandId = '';
+    }
+    if (!commandId) {
+        commandId = globalThis.crypto?.randomUUID?.()
+            || `cliplab_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+        try {
+            window.sessionStorage.setItem(storageKey, commandId);
+        } catch {
+            // The backend still owns idempotency for the lifetime of this call.
+        }
+    }
+    return {
+        commandId,
+        release: () => {
+            try {
+                window.sessionStorage.removeItem(storageKey);
+            } catch {
+                // Storage can be unavailable in privacy-restricted browsers.
+            }
+        },
+    };
+}
+
 export default function ClipLabPanel() {
     const { session } = useContext(AuthContext);
     const token = session?.access_token || '';
@@ -102,6 +140,9 @@ export default function ClipLabPanel() {
 
     const onUpload = async (file: File) => {
         if (!token) return;
+        const command = acquireProductionCommand(
+            `upload:${session?.user?.id || ''}:${file.name}:${file.size}:${file.lastModified}`,
+        );
         setUploading(true);
         setError('');
         try {
@@ -109,14 +150,21 @@ export default function ClipLabPanel() {
             fd.append('file', file);
             const r = await fetch(`${api}/api/cliplab/ingest/upload`, {
                 method: 'POST',
-                headers: { Authorization: `Bearer ${token}` },
+                headers: {
+                    Authorization: `Bearer ${token}`,
+                    'X-Idempotency-Key': command.commandId,
+                },
                 body: fd,
             });
             const data = await r.json();
-            if (!r.ok) throw new Error(data.detail || 'Upload failed');
+            if (!r.ok) {
+                command.release();
+                throw new Error(data.detail || 'Upload failed');
+            }
             setIngestJobId(String(data.job_id || ''));
             setVideoId(String(data.video_id || ''));
             setIngestJob({ status: 'queued', progress: 0 });
+            command.release();
         } catch (e: unknown) {
             setError(e instanceof Error ? e.message : 'Upload failed');
         } finally {
@@ -126,19 +174,30 @@ export default function ClipLabPanel() {
 
     const ingestYoutube = async () => {
         if (!token || !youtubeUrl.trim()) return;
+        const command = acquireProductionCommand(
+            `youtube:${session?.user?.id || ''}:${youtubeUrl.trim()}`,
+        );
         setBusy('ingest');
         setError('');
         try {
             const r = await fetch(`${api}/api/cliplab/ingest/youtube`, {
                 method: 'POST',
-                headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+                headers: {
+                    Authorization: `Bearer ${token}`,
+                    'Content-Type': 'application/json',
+                    'X-Idempotency-Key': command.commandId,
+                },
                 body: JSON.stringify({ youtube_url: youtubeUrl.trim() }),
             });
             const data = await r.json();
-            if (!r.ok) throw new Error(data.detail || 'YouTube ingest failed');
+            if (!r.ok) {
+                command.release();
+                throw new Error(data.detail || 'YouTube ingest failed');
+            }
             setIngestJobId(String(data.job_id || ''));
             setVideoId(String(data.video_id || ''));
             setIngestJob({ status: 'queued', progress: 0 });
+            command.release();
         } catch (e: unknown) {
             setError(e instanceof Error ? e.message : 'Ingest failed');
         } finally {
@@ -151,18 +210,29 @@ export default function ClipLabPanel() {
             setError('Ingest a video first');
             return;
         }
+        const command = acquireProductionCommand(
+            `analyze:${session?.user?.id || ''}:${videoId}:${prompt.trim()}:12`,
+        );
         setBusy('analyze');
         setError('');
         try {
             const r = await fetch(`${api}/api/cliplab/analyze`, {
                 method: 'POST',
-                headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+                headers: {
+                    Authorization: `Bearer ${token}`,
+                    'Content-Type': 'application/json',
+                    'X-Idempotency-Key': command.commandId,
+                },
                 body: JSON.stringify({ video_id: videoId, prompt: prompt.trim(), max_segments: 12 }),
             });
             const data = await r.json();
-            if (!r.ok) throw new Error(data.detail || 'Analyze failed');
+            if (!r.ok) {
+                command.release();
+                throw new Error(data.detail || 'Analyze failed');
+            }
             setAnalyzeJobId(String(data.job_id || ''));
             setAnalyzeJob({ status: 'queued', progress: 0 });
+            command.release();
         } catch (e: unknown) {
             setError(e instanceof Error ? e.message : 'Analyze failed');
         } finally {
@@ -172,23 +242,35 @@ export default function ClipLabPanel() {
 
     const renderSelected = async () => {
         if (!token || !videoId || selected.size === 0) return;
+        const selectedIndices = Array.from(selected).sort((left, right) => left - right);
+        const command = acquireProductionCommand(
+            `render:${session?.user?.id || ''}:${videoId}:${analyzeJobId}:${selectedIndices.join(',')}`,
+        );
         setBusy('render');
         setError('');
         try {
             const r = await fetch(`${api}/api/cliplab/render`, {
                 method: 'POST',
-                headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+                headers: {
+                    Authorization: `Bearer ${token}`,
+                    'Content-Type': 'application/json',
+                    'X-Idempotency-Key': command.commandId,
+                },
                 body: JSON.stringify({
                     video_id: videoId,
                     prompt_run_id: analyzeJobId,
-                    segment_indices: Array.from(selected),
+                    segment_indices: selectedIndices,
                     burn_captions: true,
                 }),
             });
             const data = await r.json();
-            if (!r.ok) throw new Error(data.detail || 'Render failed');
+            if (!r.ok) {
+                command.release();
+                throw new Error(data.detail || 'Render failed');
+            }
             setRenderJobId(String(data.job_id || ''));
             setRenderJob({ status: 'queued', progress: 0 });
+            command.release();
         } catch (e: unknown) {
             setError(e instanceof Error ? e.message : 'Render failed');
         } finally {

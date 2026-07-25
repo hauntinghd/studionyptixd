@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+import time
+
 import pytest
 
 from studio_agent.command_execution import FileExecutionLedger
@@ -72,3 +75,46 @@ def test_local_mutation_pending_claim_fails_closed(tmp_path, monkeypatch):
     assert second is None
     assert replay and replay["status"] == "claim_pending"
     assert replay["idempotent_replay"] is True
+    idempotent_mutations.fail(first, RuntimeError("test cleanup"))
+
+
+def test_local_mutation_reclaims_expired_process_claim_without_stale_overwrite(
+    tmp_path,
+    monkeypatch,
+):
+    ledger = FileExecutionLedger(tmp_path)
+    monkeypatch.setattr(idempotent_mutations, "_LEDGER", ledger)
+    monkeypatch.setattr(idempotent_mutations, "_CLAIM_LEASE_SECONDS", 0.2)
+    first, _ = idempotent_mutations.begin(
+        tool_name="animate_production_scenes",
+        arguments={"job_id": "job-1", "scene_indices": [1, 2]},
+        command_id="restart-key",
+        user_id="user-1",
+    )
+    assert first is not None
+    idempotent_mutations._stop_claim_heartbeat(first)
+    claim_path = ledger._claim_path(first.key)
+    payload = json.loads(claim_path.read_text(encoding="utf-8"))
+    payload["expires_at"] = time.time() - 1
+    claim_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    resumed, replay = idempotent_mutations.begin(
+        tool_name="animate_production_scenes",
+        arguments={"job_id": "job-1", "scene_indices": [1, 2]},
+        command_id="restart-key",
+        user_id="user-1",
+    )
+
+    assert resumed is not None and replay is None
+    assert resumed.owner_token != first.owner_token
+    idempotent_mutations.complete(first, {"ok": True, "worker": "stale"})
+    assert ledger.get(first.key) is None
+    idempotent_mutations.complete(resumed, {"ok": True, "worker": "resumed"})
+    duplicate, result = idempotent_mutations.begin(
+        tool_name="animate_production_scenes",
+        arguments={"job_id": "job-1", "scene_indices": [1, 2]},
+        command_id="restart-key",
+        user_id="user-1",
+    )
+    assert duplicate is None
+    assert result and result["worker"] == "resumed"

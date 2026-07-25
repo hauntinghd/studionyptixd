@@ -63,6 +63,7 @@ def test_skeleton_job_status_stills_and_mutations_require_job_owner(
     assert stranger.get(f"/api/skeleton-ai/jobs/{job_id}/stills/b00.png").status_code == 404
     response = stranger.post(
         "/api/skeleton-ai/scenes/regenerate",
+        headers={"X-Idempotency-Key": "stranger-regenerate-ownedjob123"},
         json={"job_id": job_id, "beat_index": 0},
     )
     assert response.status_code == 404

@@ -848,7 +848,7 @@ function AgentJobDeliverable({
         setExpandingProof(true);
         setExpandProofError('');
         try {
-            const res = await fetch(agentJobExpandProofUrl(snapshot.job_id), {
+            const res = await fetch(agentJobExpandProofUrl(snapshot.job_id, sessionId), {
                 method: 'POST',
                 headers: {
                     Authorization: `Bearer ${tok}`,
@@ -880,6 +880,7 @@ function AgentJobDeliverable({
                 agentJobFinalizeUrl(snapshot.job_id, snapshot.kind, {
                     captions_enabled: captionsEnabled,
                     caption_mode: captionsEnabled ? 'word' : 'off',
+                    session_id: sessionId,
                 }),
                 {
                     method: 'POST',
@@ -917,7 +918,7 @@ function AgentJobDeliverable({
         setAnimating(true);
         setAnimateError('');
         try {
-            const res = await fetch(agentJobAnimateUrl(snapshot.job_id), {
+            const res = await fetch(agentJobAnimateUrl(snapshot.job_id, sessionId), {
                 method: 'POST',
                 headers: {
                     Authorization: `Bearer ${tok}`,
@@ -944,7 +945,7 @@ function AgentJobDeliverable({
         setSceneActionBusy(busyKey);
         setSceneActionError('');
         try {
-            const res = await fetch(agentJobSceneApprovalUrl(snapshot.job_id, sceneIndex), {
+            const res = await fetch(agentJobSceneApprovalUrl(snapshot.job_id, sceneIndex, sessionId), {
                 method: 'POST',
                 headers: {
                     Authorization: `Bearer ${tok}`,
@@ -1022,7 +1023,7 @@ function AgentJobDeliverable({
         setSceneActionBusy(`${sceneIndex}:prompt`);
         setSceneActionError('');
         try {
-            const res = await fetch(agentJobScenePromptUrl(snapshot.job_id, sceneIndex), {
+            const res = await fetch(agentJobScenePromptUrl(snapshot.job_id, sceneIndex, sessionId), {
                 method: 'PUT',
                 headers: {
                     Authorization: `Bearer ${tok}`,
@@ -1048,7 +1049,7 @@ function AgentJobDeliverable({
         setSceneActionBusy(`all:${animate ? 'animate' : 'still'}`);
         setSceneActionError('');
         try {
-            const res = await fetch(agentJobScenesApprovalUrl(snapshot.job_id), {
+            const res = await fetch(agentJobScenesApprovalUrl(snapshot.job_id, sessionId), {
                 method: 'POST',
                 headers: {
                     Authorization: `Bearer ${tok}`,

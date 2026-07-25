@@ -54,6 +54,9 @@ class BudgetEstimate:
 
 
 EXPENSIVE_TOOLS = frozenset({
+    "analyze_reference_video",
+    "analyze_competitor_video",
+    "retry_reference_analysis",
     "generate_longform_outline",
     "expand_longform_chapter",
     "start_shortform_generate",
@@ -74,10 +77,14 @@ EXPENSIVE_TOOLS = frozenset({
     "finalize_production",
     "re_edit_production",
     "regenerate_longform_still",
+    "analyze_cliplab_video",
 })
 
 
 DEFAULT_CAPS_USD = {
+    "analyze_reference_video": 1.0,
+    "analyze_competitor_video": 1.0,
+    "retry_reference_analysis": 1.0,
     "generate_longform_outline": 1.0,
     "expand_longform_chapter": 1.0,
     "start_shortform_generate": 5.0,
@@ -106,6 +113,7 @@ DEFAULT_CAPS_USD = {
     "finalize_production": 1.0,
     "re_edit_production": 1.5,
     "regenerate_longform_still": 0.25,
+    "analyze_cliplab_video": 1.0,
 }
 
 
@@ -151,6 +159,7 @@ APPROVAL_REQUIRED_TOOLS = frozenset({
     "regenerate_longform_still",
     "regenerate_longform_thumbnail",
     "cancel_longform_render",
+    "analyze_cliplab_video",
 })
 
 
@@ -179,10 +188,29 @@ TOOL_LANES = {
     "retry_reference_analysis": "analysis",
     "build_scene_blueprint_from_reference": "analysis",
     "get_channel_analytics": "analysis",
+    "analyze_cliplab_video": "analysis",
 }
 
 
 STAGE_GATES = {
+    "analyze_reference_video": [
+        "pricing_preflight",
+        "credit_hold",
+        "vision_stt_story_analysis",
+        "await_analysis_receipt",
+    ],
+    "analyze_competitor_video": [
+        "pricing_preflight",
+        "credit_hold",
+        "vision_stt_story_analysis",
+        "await_analysis_receipt",
+    ],
+    "retry_reference_analysis": [
+        "owned_analysis_required",
+        "pricing_preflight",
+        "retry_selected_stages",
+        "await_analysis_receipt",
+    ],
     "generate_longform_outline": ["pricing_preflight", "credit_hold", "outline", "settle_actual_tokens"],
     "expand_longform_chapter": ["pricing_preflight", "credit_hold", "expand_chapter", "settle_actual_tokens"],
     "start_shortform_generate": ["cost_preflight", "create_stills", "await_scene_review"],
@@ -214,6 +242,7 @@ STAGE_GATES = {
     "finalize_longform_render": ["chapter_approval_required", "compose", "package"],
     "generate_longform_thumbnails": ["cost_preflight", "thumbnail_variants", "await_packaging_review"],
     "regenerate_longform_thumbnail": ["cost_preflight", "thumbnail_candidate", "await_packaging_review"],
+    "analyze_cliplab_video": ["pricing_preflight", "credit_hold", "analyze", "rank_segments"],
 }
 
 
@@ -738,6 +767,26 @@ def estimate_tool_cost(tool_name: str, args: dict[str, Any] | None = None) -> Bu
         }
     elif name in {"finalize_production", "re_edit_production"}:
         est, breakdown = _estimate_shortform_finalize(args)
+    elif name in {
+        "analyze_reference_video",
+        "analyze_competitor_video",
+        "retry_reference_analysis",
+    }:
+        est = 0.75
+        breakdown = {
+            "analysis_calls": 1,
+            "pricing_mode": "conservative_multimodal_analysis_envelope",
+        }
+    elif name == "analyze_cliplab_video":
+        # ClipLab analysis starts an asynchronous Studio model call. Reserve a
+        # finite conservative envelope before that worker is allowed to start;
+        # the public ClipLab router may separately charge duration/render work.
+        est = 0.25
+        breakdown = {
+            "analysis_calls": 1,
+            "max_segments": max(1, min(int(args.get("max_segments") or 12), 40)),
+            "pricing_mode": "conservative_async_envelope",
+        }
     else:
         est = 0.0
         breakdown = {}
@@ -814,10 +863,10 @@ def _estimate_longform_text_call(
 ) -> tuple[float, dict[str, Any]]:
     """Reserve a conservative upper bound before a paid planning call.
 
-    Provider pricing is resolved by the async HTTP route without buying an
-    inference, then passed into the logged tool as private metering input.  A
-    missing rate is a hard stop: Studio must never call an unpriced model and
-    hope it can charge the creator afterward.
+    Provider pricing is resolved inside the logged tool after its durable
+    idempotency claim and before any inference or credit reservation. A missing
+    rate is a hard stop: Studio must never call an unpriced model and hope it
+    can charge the creator afterward.
     """
 
     prompt_ppm = _float(args.get("_billing_prompt_price_per_m"), None)

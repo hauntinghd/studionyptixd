@@ -1562,6 +1562,17 @@ def get_status(job_id: str) -> dict[str, Any] | None:
     return out
 
 
+def peek_status(job_id: str) -> dict[str, Any] | None:
+    """Return only the current in-memory snapshot without hydrating state."""
+
+    entry = _lf_jobs_status.get(job_id)
+    if entry is None:
+        return None
+    out = dict(entry)
+    out.pop("_task", None)
+    return out
+
+
 def list_recent_jobs(limit: int = 20) -> list[dict[str, Any]]:
     """Return up to N most recent jobs, newest first. Sources state.json on
     disk so survives process restart (memory registry alone wouldn't)."""

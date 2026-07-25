@@ -935,7 +935,13 @@ export default function LongFormPanel() {
                 resolveStudioBackendUrl(`/api/long-form/jobs/${activeJobId}/cancel`),
                 {
                     method: 'POST',
-                    headers: { Authorization: `Bearer ${tok}` },
+                    headers: {
+                        Authorization: `Bearer ${tok}`,
+                        'X-Idempotency-Key': productionIdempotencyKey(
+                            'longform-cancel',
+                            activeJobId,
+                        ),
+                    },
                 },
             );
             if (!ok) throw new Error(data?.detail || 'cancel failed');

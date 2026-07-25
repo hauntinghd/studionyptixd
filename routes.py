@@ -1,8 +1,174 @@
 from __future__ import annotations
 
-from typing import Callable, Optional
+import asyncio
+import inspect
+from functools import wraps
+from pathlib import Path
+from typing import Any, Callable, Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Request, Response, UploadFile
+
+
+def _production_contract_value(value: Any) -> Any:
+    """Return a stable, receipt-safe representation of one HTTP argument."""
+
+    if isinstance(value, UploadFile) or (
+        hasattr(value, "filename")
+        and hasattr(value, "content_type")
+        and hasattr(value, "file")
+    ):
+        raise RuntimeError("Upload arguments must use the async content fingerprint boundary.")
+    if isinstance(value, Path):
+        return str(value)
+    if hasattr(value, "model_dump") and callable(value.model_dump):
+        return _production_contract_value(value.model_dump(mode="json"))
+    if hasattr(value, "dict") and callable(value.dict):
+        return _production_contract_value(value.dict())
+    if isinstance(value, dict):
+        return {
+            str(key): _production_contract_value(item)
+            for key, item in sorted(value.items(), key=lambda row: str(row[0]))
+        }
+    if isinstance(value, (list, tuple)):
+        return [_production_contract_value(item) for item in value]
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return str(value)
+
+
+async def _production_contract_value_async(value: Any) -> Any:
+    if isinstance(value, UploadFile) or (
+        hasattr(value, "filename")
+        and hasattr(value, "content_type")
+        and hasattr(value, "file")
+    ):
+        from studio_agent.direct_production import upload_content_contract
+
+        return await upload_content_contract(value)
+    if isinstance(value, Path):
+        return str(value)
+    if hasattr(value, "model_dump") and callable(value.model_dump):
+        return await _production_contract_value_async(value.model_dump(mode="json"))
+    if hasattr(value, "dict") and callable(value.dict):
+        return await _production_contract_value_async(value.dict())
+    if isinstance(value, dict):
+        keys = sorted(value, key=str)
+        resolved = await asyncio.gather(
+            *(_production_contract_value_async(value[key]) for key in keys)
+        )
+        return {str(key): item for key, item in zip(keys, resolved)}
+    if isinstance(value, (list, tuple)):
+        return list(await asyncio.gather(*(_production_contract_value_async(item) for item in value)))
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return str(value)
+
+
+async def _production_contract_arguments(
+    endpoint,
+    route: str,
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+) -> tuple[Request, dict, dict[str, Any]]:
+    bound = inspect.signature(endpoint).bind_partial(*args, **kwargs)
+    request = next(
+        (
+            value
+            for value in bound.arguments.values()
+            if isinstance(value, Request)
+        ),
+        None,
+    )
+    if request is None:
+        raise HTTPException(500, f"{route} is missing its backend request boundary.")
+    user = bound.arguments.get("user")
+    if not isinstance(user, dict):
+        user = getattr(request.state, "production_command_user", None)
+    if not isinstance(user, dict) or not str(user.get("id", "") or "").strip():
+        raise HTTPException(401, "Authentication required. Please sign in.")
+    included = [
+        (name, value)
+        for name, value in bound.arguments.items()
+        if name not in {"request", "user", "background_tasks"}
+        and not isinstance(value, (Request, BackgroundTasks))
+    ]
+    resolved = await asyncio.gather(
+        *(_production_contract_value_async(value) for _name, value in included)
+    )
+    public_arguments = {
+        name: value for (name, _raw), value in zip(included, resolved)
+    }
+    return request, user, {"legacy_route": route, "payload": public_arguments}
+
+
+def _backend_owned_production_endpoint(
+    endpoint,
+    *,
+    route: str,
+    tool_name: str,
+    content_format: str,
+):
+    """Wrap a legacy route in the shared backend authority/receipt contract."""
+
+    @wraps(endpoint)
+    async def claimed_endpoint(*args, **kwargs):
+        from studio_agent.direct_production import claim_direct_production, require_idempotency_key
+
+        preliminary = inspect.signature(endpoint).bind_partial(*args, **kwargs)
+        preliminary_request = next(
+            (
+                value
+                for value in preliminary.arguments.values()
+                if isinstance(value, Request)
+            ),
+            None,
+        )
+        if preliminary_request is None:
+            raise HTTPException(500, f"{route} is missing its backend request boundary.")
+        require_idempotency_key(preliminary_request)
+
+        request, user, arguments = await _production_contract_arguments(
+            endpoint,
+            route,
+            args,
+            kwargs,
+        )
+        with claim_direct_production(
+            tool_name,
+            arguments,
+            request=request,
+            user_id=str(user.get("id", "") or ""),
+            content_format=content_format,
+        ) as command:
+            if command.replay is not None:
+                return command.replay
+            result = endpoint(*args, **kwargs)
+            if inspect.isawaitable(result):
+                result = await result
+            if not isinstance(result, dict):
+                raise HTTPException(
+                    502,
+                    f"{route} returned an unreceiptable production response.",
+                )
+            return command.complete(result)
+
+    claimed_endpoint.__production_command_contract__ = {
+        "route": route,
+        "tool_name": tool_name,
+        "content_format": content_format,
+    }
+    return claimed_endpoint
+
+
+def _production_auth_dependency(require_auth):
+    async def attach_authenticated_user(
+        request: Request,
+        user: dict = Depends(require_auth),
+    ) -> dict:
+        request.state.production_command_user = user
+        return user
+
+    return attach_authenticated_user
 
 
 def build_core_router(
@@ -281,6 +447,7 @@ def build_media_router(
     list_jobs_handler,
 ):
     router = APIRouter()
+    production_auth = _production_auth_dependency(require_auth)
 
     @router.get("/api/auto/scene-image/{job_id}/{filename}")
     async def auto_scene_image(job_id: str, filename: str, user: dict = Depends(require_auth)):
@@ -292,7 +459,22 @@ def build_media_router(
         request: Request = None,
         user: dict = Depends(require_auth),
     ):
-        return await auto_regenerate_scene_image_handler(body, request, user=user)
+        from studio_agent.direct_production import claim_direct_production
+
+        with claim_direct_production(
+            "regenerate_production_scene_still",
+            {
+                "legacy_route": "/api/auto/regenerate-scene-image",
+                "payload": _production_contract_value(body),
+            },
+            request=request,
+            user_id=str(user.get("id", "") or ""),
+            content_format="shortform",
+        ) as command:
+            if command.replay is not None:
+                return command.replay
+            result = await auto_regenerate_scene_image_handler(body, request, user=user)
+            return command.complete(result)
 
     @router.get("/api/status/{job_id}")
     async def job_status(job_id: str, user: dict = Depends(require_auth)):
@@ -307,16 +489,46 @@ def build_media_router(
     async def download_video(filename: str, user: dict = Depends(require_auth)):
         return await download_video_handler(filename, user=user)
 
-    @router.post("/api/chatstory/render", dependencies=[Depends(require_auth)])
+    @router.post("/api/chatstory/render", dependencies=[Depends(production_auth)])
     async def render_chat_story(
         request: Request,
         payload: str = Form(...),
         avatar: Optional[UploadFile] = File(None),
         background_video: Optional[UploadFile] = File(None),
     ):
-        return await render_chat_story_handler(request, payload, avatar, background_video)
+        from studio_agent.direct_production import claim_direct_production, require_idempotency_key
 
-    @router.post("/api/clone", dependencies=[Depends(require_auth)])
+        user = getattr(request.state, "production_command_user", None)
+        require_idempotency_key(request)
+        avatar_contract, background_video_contract = await asyncio.gather(
+            _production_contract_value_async(avatar),
+            _production_contract_value_async(background_video),
+        )
+        with claim_direct_production(
+            "start_shortform_generate",
+            {
+                "legacy_route": "/api/chatstory/render",
+                "payload": {
+                    "payload": payload,
+                    "avatar": avatar_contract,
+                    "background_video": background_video_contract,
+                },
+            },
+            request=request,
+            user_id=str((user or {}).get("id", "") or ""),
+            content_format="shortform",
+        ) as command:
+            if command.replay is not None:
+                return command.replay
+            result = await render_chat_story_handler(
+                request,
+                payload,
+                avatar,
+                background_video,
+            )
+            return command.complete(result)
+
+    @router.post("/api/clone", dependencies=[Depends(production_auth)])
     async def clone_video(
         topic: str = Form(""),
         resolution: str = Form("720p"),
@@ -326,15 +538,39 @@ def build_media_router(
         background_tasks: BackgroundTasks = None,
         request: Request = None,
     ):
-        return await clone_video_handler(
-            topic,
-            resolution,
-            source_url,
-            analytics_notes,
-            file,
-            background_tasks,
-            request,
-        )
+        from studio_agent.direct_production import claim_direct_production, require_idempotency_key
+
+        user = getattr(request.state, "production_command_user", None)
+        require_idempotency_key(request)
+        file_contract = await _production_contract_value_async(file)
+        with claim_direct_production(
+            "start_shortform_generate",
+            {
+                "legacy_route": "/api/clone",
+                "payload": {
+                    "topic": topic,
+                    "resolution": resolution,
+                    "source_url": source_url,
+                    "analytics_notes": analytics_notes,
+                    "file": file_contract,
+                },
+            },
+            request=request,
+            user_id=str((user or {}).get("id", "") or ""),
+            content_format="shortform",
+        ) as command:
+            if command.replay is not None:
+                return command.replay
+            result = await clone_video_handler(
+                topic,
+                resolution,
+                source_url,
+                analytics_notes,
+                file,
+                background_tasks,
+                request,
+            )
+            return command.complete(result)
 
     @router.get("/api/jobs")
     async def list_jobs(user: dict = Depends(require_auth)):
@@ -486,6 +722,7 @@ def build_youtube_catalyst_router(
 
 def build_longform_creative_router(
     *,
+    require_auth,
     create_longform_session_endpoint,
     create_longform_session_bootstrap_endpoint,
     longform_reference_image_endpoint,
@@ -515,34 +752,235 @@ def build_longform_creative_router(
     creative_finalize_endpoint,
 ):
     router = APIRouter()
-    router.add_api_route("/api/longform/session", create_longform_session_endpoint, methods=["POST"])
-    router.add_api_route("/api/longform/session/bootstrap", create_longform_session_bootstrap_endpoint, methods=["POST"])
-    router.add_api_route("/api/longform/session/{session_id}/reference-image", longform_reference_image_endpoint, methods=["POST"])
-    router.add_api_route("/api/longform/session/{session_id}/character-reference", longform_character_reference_endpoint, methods=["POST"])
-    router.add_api_route("/api/longform/session/{session_id}/scene-assignment", longform_scene_assignment_endpoint, methods=["POST"])
+    production_auth = _production_auth_dependency(require_auth)
+    router.add_api_route(
+        "/api/longform/session",
+        _backend_owned_production_endpoint(
+            create_longform_session_endpoint,
+            route="/api/longform/session",
+            tool_name="start_longform_render",
+            content_format="longform",
+        ),
+        methods=["POST"],
+        dependencies=[Depends(production_auth)],
+    )
+    router.add_api_route(
+        "/api/longform/session/bootstrap",
+        _backend_owned_production_endpoint(
+            create_longform_session_bootstrap_endpoint,
+            route="/api/longform/session/bootstrap",
+            tool_name="start_longform_render",
+            content_format="longform",
+        ),
+        methods=["POST"],
+        dependencies=[Depends(production_auth)],
+    )
+    router.add_api_route(
+        "/api/longform/session/{session_id}/reference-image",
+        _backend_owned_production_endpoint(
+            longform_reference_image_endpoint,
+            route="/api/longform/session/{session_id}/reference-image",
+            tool_name="regenerate_longform_still",
+            content_format="longform",
+        ),
+        methods=["POST"],
+        dependencies=[Depends(production_auth)],
+    )
+    router.add_api_route(
+        "/api/longform/session/{session_id}/character-reference",
+        _backend_owned_production_endpoint(
+            longform_character_reference_endpoint,
+            route="/api/longform/session/{session_id}/character-reference",
+            tool_name="regenerate_longform_still",
+            content_format="longform",
+        ),
+        methods=["POST"],
+        dependencies=[Depends(production_auth)],
+    )
+    router.add_api_route(
+        "/api/longform/session/{session_id}/scene-assignment",
+        _backend_owned_production_endpoint(
+            longform_scene_assignment_endpoint,
+            route="/api/longform/session/{session_id}/scene-assignment",
+            tool_name="set_production_scene_prompt",
+            content_format="longform",
+        ),
+        methods=["POST"],
+        dependencies=[Depends(production_auth)],
+    )
     router.add_api_route("/api/longform/reference-file/{filename}", longform_reference_file_endpoint, methods=["GET"])
     router.add_api_route("/api/longform/session/{session_id}/status", longform_session_status_endpoint, methods=["GET"])
     router.add_api_route("/api/longform/sessions", list_longform_sessions_endpoint, methods=["GET"])
     router.add_api_route("/api/longform/preview/{filename}", longform_preview_file_endpoint, methods=["GET"])
-    router.add_api_route("/api/longform/session/{session_id}/chapter-action", longform_chapter_action_endpoint, methods=["POST"])
-    router.add_api_route("/api/longform/session/{session_id}/resolve-error", longform_resolve_error_endpoint, methods=["POST"])
+    router.add_api_route(
+        "/api/longform/session/{session_id}/chapter-action",
+        _backend_owned_production_endpoint(
+            longform_chapter_action_endpoint,
+            route="/api/longform/session/{session_id}/chapter-action",
+            tool_name="expand_longform_chapter",
+            content_format="longform",
+        ),
+        methods=["POST"],
+        dependencies=[Depends(production_auth)],
+    )
+    router.add_api_route(
+        "/api/longform/session/{session_id}/resolve-error",
+        _backend_owned_production_endpoint(
+            longform_resolve_error_endpoint,
+            route="/api/longform/session/{session_id}/resolve-error",
+            tool_name="expand_longform_chapter",
+            content_format="longform",
+        ),
+        methods=["POST"],
+        dependencies=[Depends(production_auth)],
+    )
     if longform_force_clear_error_endpoint:
-        router.add_api_route("/api/longform/session/{session_id}/force-clear-error", longform_force_clear_error_endpoint, methods=["POST"])
-    router.add_api_route("/api/longform/session/{session_id}/finalize", longform_finalize_endpoint, methods=["POST"])
-    router.add_api_route("/api/longform/session/{session_id}/stop", longform_stop_session_endpoint, methods=["POST"])
-    router.add_api_route("/api/longform/session/{session_id}/outcome", longform_ingest_outcome_endpoint, methods=["POST"])
-    router.add_api_route("/api/longform/session/{session_id}/outcome/auto", longform_auto_ingest_outcome_endpoint, methods=["POST"])
-    router.add_api_route("/api/creative/script", creative_generate_script_endpoint, methods=["POST"])
-    router.add_api_route("/api/creative/ingest-url", creative_ingest_url_endpoint, methods=["POST"])
-    router.add_api_route("/api/creative/session", creative_create_session_endpoint, methods=["POST"])
-    router.add_api_route("/api/creative/reference-image", creative_reference_image_endpoint, methods=["POST"])
+        router.add_api_route(
+            "/api/longform/session/{session_id}/force-clear-error",
+            _backend_owned_production_endpoint(
+                longform_force_clear_error_endpoint,
+                route="/api/longform/session/{session_id}/force-clear-error",
+                tool_name="expand_longform_chapter",
+                content_format="longform",
+            ),
+            methods=["POST"],
+            dependencies=[Depends(production_auth)],
+        )
+    router.add_api_route(
+        "/api/longform/session/{session_id}/finalize",
+        _backend_owned_production_endpoint(
+            longform_finalize_endpoint,
+            route="/api/longform/session/{session_id}/finalize",
+            tool_name="finalize_longform_render",
+            content_format="longform",
+        ),
+        methods=["POST"],
+        dependencies=[Depends(production_auth)],
+    )
+    router.add_api_route(
+        "/api/longform/session/{session_id}/stop",
+        _backend_owned_production_endpoint(
+            longform_stop_session_endpoint,
+            route="/api/longform/session/{session_id}/stop",
+            tool_name="cancel_longform_render",
+            content_format="longform",
+        ),
+        methods=["POST"],
+        dependencies=[Depends(production_auth)],
+    )
+    router.add_api_route(
+        "/api/longform/session/{session_id}/outcome",
+        _backend_owned_production_endpoint(
+            longform_ingest_outcome_endpoint,
+            route="/api/longform/session/{session_id}/outcome",
+            tool_name="analyze_reference_video",
+            content_format="catalyst",
+        ),
+        methods=["POST"],
+        dependencies=[Depends(production_auth)],
+    )
+    router.add_api_route(
+        "/api/longform/session/{session_id}/outcome/auto",
+        _backend_owned_production_endpoint(
+            longform_auto_ingest_outcome_endpoint,
+            route="/api/longform/session/{session_id}/outcome/auto",
+            tool_name="analyze_reference_video",
+            content_format="catalyst",
+        ),
+        methods=["POST"],
+        dependencies=[Depends(production_auth)],
+    )
+    router.add_api_route(
+        "/api/creative/script",
+        _backend_owned_production_endpoint(
+            creative_generate_script_endpoint,
+            route="/api/creative/script",
+            tool_name="start_shortform_generate",
+            content_format="shortform",
+        ),
+        methods=["POST"],
+        dependencies=[Depends(production_auth)],
+    )
+    router.add_api_route(
+        "/api/creative/ingest-url",
+        _backend_owned_production_endpoint(
+            creative_ingest_url_endpoint,
+            route="/api/creative/ingest-url",
+            tool_name="analyze_reference_video",
+            content_format="shortform",
+        ),
+        methods=["POST"],
+        dependencies=[Depends(production_auth)],
+    )
+    router.add_api_route(
+        "/api/creative/session",
+        _backend_owned_production_endpoint(
+            creative_create_session_endpoint,
+            route="/api/creative/session",
+            tool_name="start_shortform_generate",
+            content_format="shortform",
+        ),
+        methods=["POST"],
+        dependencies=[Depends(production_auth)],
+    )
+    router.add_api_route(
+        "/api/creative/reference-image",
+        _backend_owned_production_endpoint(
+            creative_reference_image_endpoint,
+            route="/api/creative/reference-image",
+            tool_name="edit_production_scene_still",
+            content_format="shortform",
+        ),
+        methods=["POST"],
+        dependencies=[Depends(production_auth)],
+    )
     router.add_api_route("/api/creative/reference-file/{filename}", creative_reference_file_endpoint, methods=["GET"])
     router.add_api_route("/api/creative/session/{session_id}/status", creative_session_status_endpoint, methods=["GET"])
     router.add_api_route("/api/creative/session/{session_id}/scene-images", creative_session_scene_images_endpoint, methods=["GET"])
-    router.add_api_route("/api/creative/scene-image", creative_scene_image_endpoint, methods=["POST"])
-    router.add_api_route("/api/creative/scene-feedback", creative_scene_feedback_endpoint, methods=["POST"])
-    router.add_api_route("/api/creative/scene/{session_id}/{scene_index}", creative_update_scene_endpoint, methods=["PUT"])
-    router.add_api_route("/api/creative/finalize", creative_finalize_endpoint, methods=["POST"])
+    router.add_api_route(
+        "/api/creative/scene-image",
+        _backend_owned_production_endpoint(
+            creative_scene_image_endpoint,
+            route="/api/creative/scene-image",
+            tool_name="regenerate_production_scene_still",
+            content_format="shortform",
+        ),
+        methods=["POST"],
+        dependencies=[Depends(production_auth)],
+    )
+    router.add_api_route(
+        "/api/creative/scene-feedback",
+        _backend_owned_production_endpoint(
+            creative_scene_feedback_endpoint,
+            route="/api/creative/scene-feedback",
+            tool_name="edit_production_scene_still",
+            content_format="shortform",
+        ),
+        methods=["POST"],
+        dependencies=[Depends(production_auth)],
+    )
+    router.add_api_route(
+        "/api/creative/scene/{session_id}/{scene_index}",
+        _backend_owned_production_endpoint(
+            creative_update_scene_endpoint,
+            route="/api/creative/scene/{session_id}/{scene_index}",
+            tool_name="set_production_scene_prompt",
+            content_format="shortform",
+        ),
+        methods=["PUT"],
+        dependencies=[Depends(production_auth)],
+    )
+    router.add_api_route(
+        "/api/creative/finalize",
+        _backend_owned_production_endpoint(
+            creative_finalize_endpoint,
+            route="/api/creative/finalize",
+            tool_name="finalize_production",
+            content_format="shortform",
+        ),
+        methods=["POST"],
+        dependencies=[Depends(production_auth)],
+    )
     return router
 
 
@@ -550,7 +988,12 @@ def build_generation_router(*, require_auth, generate_short_endpoint):
     router = APIRouter()
     router.add_api_route(
         "/api/generate",
-        generate_short_endpoint,
+        _backend_owned_production_endpoint(
+            generate_short_endpoint,
+            route="/api/generate",
+            tool_name="start_shortform_generate",
+            content_format="shortform",
+        ),
         methods=["POST"],
         dependencies=[Depends(require_auth)],
     )

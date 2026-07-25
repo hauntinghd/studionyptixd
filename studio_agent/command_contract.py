@@ -10,7 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -20,6 +20,34 @@ CommandAction = Literal[
     "clarify",
     "expand_existing_short",
     "audit_and_repair_scenes",
+]
+ProductionCommandAction = Literal[
+    "generate_longform_outline",
+    "expand_longform_chapter",
+    "start_short",
+    "start_longform",
+    "start_product_ad",
+    "expand_existing_short",
+    "expand_longform",
+    "audit_and_repair_scenes",
+    "approve_scenes",
+    "animate_scenes",
+    "ship_existing_short",
+    "finalize",
+    "cancel",
+    "generate_thumbnail",
+    "start_cliplab",
+    "analyze_cliplab",
+    "render_cliplab",
+    "analyze_reference",
+    "retry_reference_analysis",
+]
+ProductionKind = Literal[
+    "shortform",
+    "longform",
+    "product_ad",
+    "cliplab",
+    "reference_analysis",
 ]
 TargetSource = Literal["none", "reply_to", "active_job", "explicit_job_id", "recent_job"]
 AnimationScope = Literal[
@@ -634,6 +662,292 @@ class StudioCommand(ContractModel):
             raise ValueError("audit_and_repair_scenes requires a repair payload")
         if self.action != "audit_and_repair_scenes" and self.repair is not None:
             raise ValueError("repair payload is only valid for audit_and_repair_scenes")
+        return self
+
+
+class ProductionCommandTargetV2(ContractModel):
+    """Backend-resolved target and ownership binding for a production mutation."""
+
+    source: TargetSource
+    job_id: str = Field(default="", max_length=48)
+    kind: ProductionKind | None = None
+    owner_session_id: str = Field(default="", max_length=128)
+    owner_user_id: str = Field(default="", max_length=256)
+    expected_job_revision: str = Field(default="", max_length=128)
+
+
+class ProductionMediaRouteV2(ContractModel):
+    """Immutable media route selected before a command is made executable."""
+
+    revision: int = Field(ge=0)
+    image_model: str = Field(default="", max_length=128)
+    video_model: str = Field(default="", max_length=128)
+    speech_model: str = Field(default="", max_length=128)
+    route_sha256: str = Field(default="", max_length=64)
+
+
+class ProductionAuthorizationV2(ContractModel):
+    """Literal authorization evidence attached by the trusted compiler."""
+
+    execution_requested: bool
+    execution_quote: str = Field(default="", max_length=300)
+    confirmation_required: bool = False
+    confirmed: bool = False
+    confirmation_id: str = Field(default="", max_length=128)
+
+    @model_validator(mode="after")
+    def _require_evidence_for_execution(self) -> "ProductionAuthorizationV2":
+        if self.execution_requested and not self.execution_quote:
+            raise ValueError("execution_requested requires an execution_quote")
+        if self.confirmed and not self.confirmation_id:
+            raise ValueError("confirmed authorization requires a confirmation_id")
+        return self
+
+
+class ProductionPostconditionV2(ContractModel):
+    """Observable condition that must pass before completion may be reported."""
+
+    kind: Literal[
+        "job_created",
+        "job_updated",
+        "analysis_ready",
+        "reference_analysis_ready",
+        "outline_ready",
+        "chapter_ready",
+        "scene_qa_pass",
+        "scenes_approved",
+        "clips_ready",
+        "artifact_ready",
+        "job_cancelled",
+        "thumbnail_ready",
+    ]
+    scene_numbers: list[int] = Field(default_factory=list, max_length=60)
+    artifact_type: Literal["", "mp4", "thumbnail"] = ""
+    required: bool = True
+
+    @field_validator("scene_numbers")
+    @classmethod
+    def _dedupe_scene_numbers(cls, value: list[int]) -> list[int]:
+        return list(dict.fromkeys(int(item) for item in value if int(item) > 0))
+
+
+class StartShortOperation(ContractModel):
+    action: Literal["start_short"] = "start_short"
+    brief: str = Field(default="", max_length=8_000)
+    scene_count: int | None = Field(default=None, ge=1, le=60)
+    duration_seconds: float | None = Field(default=None, gt=0, le=3_600)
+
+
+class StartLongformOperation(ContractModel):
+    action: Literal["start_longform"] = "start_longform"
+    brief: str = Field(default="", max_length=16_000)
+    target_duration_seconds: float | None = Field(default=None, gt=0, le=43_200)
+
+
+class GenerateLongformOutlineOperation(ContractModel):
+    action: Literal["generate_longform_outline"] = "generate_longform_outline"
+    topic: str = Field(default="", max_length=16_000)
+    channel_key: str = Field(default="", max_length=256)
+    target_minutes: int | None = Field(default=None, ge=1, le=720)
+
+
+class ExpandLongformChapterOperation(ContractModel):
+    action: Literal["expand_longform_chapter"] = "expand_longform_chapter"
+    outline_title: str = Field(default="", max_length=4_000)
+    chapter_index: int = Field(default=0, ge=0, le=1_000)
+
+
+class StartProductAdOperation(ContractModel):
+    action: Literal["start_product_ad"] = "start_product_ad"
+    brief: str = Field(default="", max_length=8_000)
+    product_name: str = Field(default="", max_length=500)
+    duration_seconds: float | None = Field(default=None, gt=0, le=3_600)
+
+
+class ExpandExistingShortOperation(ContractModel):
+    action: Literal["expand_existing_short"] = "expand_existing_short"
+    request: ExpandExistingShortRequest
+
+
+class ExpandLongformOperation(ContractModel):
+    action: Literal["expand_longform"] = "expand_longform"
+    instruction: str = Field(default="", max_length=8_000)
+
+
+class AuditAndRepairScenesOperation(ContractModel):
+    action: Literal["audit_and_repair_scenes"] = "audit_and_repair_scenes"
+    request: SceneRepairRequest
+
+
+class ApproveScenesOperation(ContractModel):
+    action: Literal["approve_scenes"] = "approve_scenes"
+    scene_numbers: list[int] = Field(min_length=1, max_length=60)
+
+    @field_validator("scene_numbers")
+    @classmethod
+    def _dedupe_scene_numbers(cls, value: list[int]) -> list[int]:
+        return list(dict.fromkeys(int(item) for item in value if int(item) > 0))
+
+    @model_validator(mode="after")
+    def _require_scenes(self) -> "ApproveScenesOperation":
+        if not self.scene_numbers:
+            raise ValueError("approve_scenes requires at least one positive scene number")
+        return self
+
+
+class AnimateScenesOperation(ContractModel):
+    action: Literal["animate_scenes"] = "animate_scenes"
+    scene_numbers: list[int] = Field(min_length=1, max_length=60)
+    only_missing: bool = True
+
+    @field_validator("scene_numbers")
+    @classmethod
+    def _dedupe_scene_numbers(cls, value: list[int]) -> list[int]:
+        return list(dict.fromkeys(int(item) for item in value if int(item) > 0))
+
+    @model_validator(mode="after")
+    def _require_scenes(self) -> "AnimateScenesOperation":
+        if not self.scene_numbers:
+            raise ValueError("animate_scenes requires at least one positive scene number")
+        return self
+
+
+class ShipExistingShortOperation(ContractModel):
+    action: Literal["ship_existing_short"] = "ship_existing_short"
+    scene_numbers: list[int] = Field(default_factory=list, max_length=60)
+    preserve_passing_assets: bool = True
+    repair_failed_scenes: bool = True
+    animate_only_missing: bool = True
+    output_format: Literal["mp4"] = "mp4"
+
+    @field_validator("scene_numbers")
+    @classmethod
+    def _dedupe_scene_numbers(cls, value: list[int]) -> list[int]:
+        return list(dict.fromkeys(int(item) for item in value if int(item) > 0))
+
+
+class FinalizeOperation(ContractModel):
+    action: Literal["finalize"] = "finalize"
+    output_format: Literal["mp4"] = "mp4"
+
+
+class CancelOperation(ContractModel):
+    action: Literal["cancel"] = "cancel"
+    reason: str = Field(default="", max_length=1_000)
+
+
+class GenerateThumbnailOperation(ContractModel):
+    action: Literal["generate_thumbnail"] = "generate_thumbnail"
+    prompt: str = Field(default="", max_length=4_000)
+    scene_number: int | None = Field(default=None, ge=1, le=60)
+
+
+class StartClipLabOperation(ContractModel):
+    action: Literal["start_cliplab"] = "start_cliplab"
+    brief: str = Field(default="", max_length=8_000)
+
+
+class AnalyzeClipLabOperation(ContractModel):
+    action: Literal["analyze_cliplab"] = "analyze_cliplab"
+    prompt: str = Field(default="", max_length=16_000)
+    max_segments: int = Field(default=12, ge=1, le=40)
+
+
+class RenderClipLabOperation(ContractModel):
+    action: Literal["render_cliplab"] = "render_cliplab"
+    instruction: str = Field(default="", max_length=8_000)
+
+
+class AnalyzeReferenceOperation(ContractModel):
+    action: Literal["analyze_reference"] = "analyze_reference"
+    source: Literal["upload", "url"]
+    content_format: Literal["short", "long", "both"] = "short"
+
+
+class RetryReferenceAnalysisOperation(ContractModel):
+    action: Literal["retry_reference_analysis"] = "retry_reference_analysis"
+    stages: list[str] = Field(default_factory=list, max_length=12)
+
+
+ProductionOperationV2 = Annotated[
+    GenerateLongformOutlineOperation
+    | ExpandLongformChapterOperation
+    | StartShortOperation
+    | StartLongformOperation
+    | StartProductAdOperation
+    | ExpandExistingShortOperation
+    | ExpandLongformOperation
+    | AuditAndRepairScenesOperation
+    | ApproveScenesOperation
+    | AnimateScenesOperation
+    | ShipExistingShortOperation
+    | FinalizeOperation
+    | CancelOperation
+    | GenerateThumbnailOperation
+    | StartClipLabOperation
+    | AnalyzeClipLabOperation
+    | RenderClipLabOperation
+    | AnalyzeReferenceOperation
+    | RetryReferenceAnalysisOperation,
+    Field(discriminator="action"),
+]
+
+
+class ProductionCommandEnvelopeV2(ContractModel):
+    """Canonical backend-owned envelope for every production mutation.
+
+    The browser and language model may propose intent, but only trusted backend
+    code may populate identity, target ownership, revisions, route locks, and
+    idempotency fields in this envelope.
+    """
+
+    schema_version: Literal["production-command-v2"] = "production-command-v2"
+    command_id: str = Field(min_length=1, max_length=128)
+    turn_id: str = Field(min_length=1, max_length=128)
+    session_id: str = Field(min_length=1, max_length=128)
+    user_id: str = Field(min_length=1, max_length=256)
+    state_revision: str = Field(min_length=1, max_length=128)
+    action: ProductionCommandAction
+    target: ProductionCommandTargetV2
+    operation: ProductionOperationV2
+    authorization: ProductionAuthorizationV2
+    media_route: ProductionMediaRouteV2 | None = None
+    expected_postconditions: list[ProductionPostconditionV2] = Field(
+        default_factory=list,
+        max_length=100,
+    )
+    idempotency_key: str = Field(min_length=1, max_length=128)
+    source_text_sha256: str = Field(default="", max_length=64)
+    created_at: float = Field(default=0.0, ge=0)
+
+    @model_validator(mode="after")
+    def _validate_backend_bindings(self) -> "ProductionCommandEnvelopeV2":
+        if self.action != self.operation.action:
+            raise ValueError("envelope action must match operation action")
+        start_actions = {
+            "start_short",
+            "start_longform",
+            "start_product_ad",
+            "start_cliplab",
+        }
+        targetless_actions = {
+            "generate_longform_outline",
+            "expand_longform_chapter",
+            "analyze_reference",
+        }
+        creates_new_target = self.action in start_actions | targetless_actions or (
+            self.action == "generate_thumbnail" and not self.target.job_id
+        )
+        if creates_new_target:
+            if self.target.job_id:
+                raise ValueError("start commands cannot target an existing job")
+        else:
+            if not self.target.job_id:
+                raise ValueError(f"{self.action} requires an exact target job_id")
+            if self.target.owner_session_id != self.session_id:
+                raise ValueError("target owner_session_id must match the command session_id")
+            if self.target.owner_user_id != self.user_id:
+                raise ValueError("target owner_user_id must match the command user_id")
         return self
 
 

@@ -8,6 +8,7 @@ import pytest
 
 from skeleton_ai import styled_pipeline
 from studio_agent import production_budget, tools
+from studio_agent.execution_context import production_command_scope
 from studio_agent.visual_fix_contract import harden_planned_scenes_for_expand
 
 
@@ -301,8 +302,13 @@ def test_expand_claim_lock_serializes_separate_processes(tmp_path):
     assert second_acquired >= first_released - 0.02
 
 
-def test_conflicting_expand_releases_credit_reservation_without_charge_and_raises(monkeypatch):
+def test_conflicting_expand_releases_credit_reservation_without_charge_and_raises(
+    tmp_path,
+    monkeypatch,
+):
     import unified_credits as uc
+    from studio_agent import idempotent_mutations
+    from studio_agent.command_execution import FileExecutionLedger
 
     estimate = production_budget.BudgetEstimate(
         tool="expand_visual_proof_shortform",
@@ -317,6 +323,11 @@ def test_conflicting_expand_releases_credit_reservation_without_charge_and_raise
         "unlimited": False,
     }
     released = []
+    monkeypatch.setattr(
+        idempotent_mutations,
+        "_LEDGER",
+        FileExecutionLedger(tmp_path / "local_mutations"),
+    )
     monkeypatch.setattr(production_budget, "enforce_budget", lambda *_args, **_kwargs: estimate)
     monkeypatch.setattr(tools, "_public_provider_block_message", lambda *_args, **_kwargs: "")
     monkeypatch.setattr(
@@ -344,17 +355,23 @@ def test_conflicting_expand_releases_credit_reservation_without_charge_and_raise
     )
     monkeypatch.setattr(tools.telemetry, "record_tool_call", lambda *_args, **_kwargs: None)
 
-    with pytest.raises(
-        RuntimeError,
-        match="did not reach a verified durable postcondition: different expansion already in progress",
+    with production_command_scope(
+        "conflict-expand-command",
+        user_id="user-1",
+        session_id="sa-conflict",
+        source="test",
     ):
-        tools.execute_tool_logged(
-            "expand_visual_proof_shortform",
-            {"job_id": "proof-job", "scene_count": 8, "existing_scene_count": 1},
-            user_id="user-1",
-            content_format="short",
-            session_id="sa-conflict",
-        )
+        with pytest.raises(
+            RuntimeError,
+            match="did not reach a verified durable postcondition: different expansion already in progress",
+        ):
+            tools.execute_tool_logged(
+                "expand_visual_proof_shortform",
+                {"job_id": "proof-job", "scene_count": 8, "existing_scene_count": 1},
+                user_id="user-1",
+                content_format="short",
+                session_id="sa-conflict",
+            )
     assert released == [
         (
             "user-1",

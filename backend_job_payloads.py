@@ -35,21 +35,16 @@ def build_job_status_payload(
     admin_emails: set[str],
 ):
     async def job_status_payload(job_id: str, *, user: dict):
-        prune_in_memory_jobs()
         persisted = await get_persisted_job_state(job_id)
         if isinstance(persisted, dict):
             if not job_access_allowed(persisted, user, admin_emails):
                 raise HTTPException(404, "Job not found")
-            record_kpi_for_job(job_id, persisted)
-            if persisted.get("kpi_recorded"):
-                await persist_job_state(job_id, persisted)
             return persisted
         if job_id not in jobs_ref:
             raise HTTPException(404, "Job not found")
         job = jobs_ref[job_id]
         if not job_access_allowed(job, user, admin_emails):
             raise HTTPException(404, "Job not found")
-        record_kpi_for_job(job_id, job)
         return job
 
     return job_status_payload

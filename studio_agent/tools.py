@@ -15,6 +15,7 @@ import threading
 import time
 import uuid
 from contextlib import contextmanager
+from contextvars import copy_context
 from pathlib import Path
 from typing import Any
 
@@ -23,7 +24,12 @@ from studio_agent.fs_paths import skeleton_output_root
 from studio_agent.production_slots import production_slot
 from studio_agent import skills as skill_loader
 from studio_agent import telemetry
-from studio_agent.execution_context import current_production_command_id
+from studio_agent.execution_context import (
+    authorize_production_mutation,
+    current_production_command,
+    current_production_command_id,
+    validate_production_command_authority,
+)
 from studio_agent.runpod_contract import (
     RUNPOD_PRODUCTION_TOOL_ALLOWLIST,
     runpod_longform_enabled,
@@ -49,6 +55,7 @@ LONGFORM_TEXT_METERED_TOOLS = frozenset({
 # Tools that mutate state or spend money â€” require confirm mode approval.
 APPROVAL_REQUIRED = frozenset(set(production_budget.APPROVAL_REQUIRED_TOOLS) | {
     "ingest_cliplab_attachment",
+    "analyze_cliplab_video",
     "render_cliplab_segments",
     "remix_cliplab_short",
 })
@@ -77,6 +84,9 @@ OWNER_ONLY_AGENT_TOOLS = frozenset({
 # Mutation / spend tools: runner paths call execute_tool_logged directly.
 # The LLM must not invent these — hide from tool schemas offered to the model.
 RUNNER_ONLY_AGENT_TOOLS = frozenset({
+    "analyze_reference_video",
+    "analyze_competitor_video",
+    "retry_reference_analysis",
     "generate_longform_outline",
     "expand_longform_chapter",
     "start_shortform_generate",
@@ -101,6 +111,16 @@ RUNNER_ONLY_AGENT_TOOLS = frozenset({
     "regenerate_longform_thumbnail",
     "cancel_longform_render",
 })
+
+# One fail-closed boundary for every Studio operation that mutates durable
+# production state or may reserve provider spend. Model-visible read tools stay
+# outside this set; runner-only tools and confirmation-required tools cannot run
+# without a backend-issued production command.
+PRODUCTION_COMMAND_PROTECTED_TOOLS = frozenset(
+    set(RUNNER_ONLY_AGENT_TOOLS)
+    | set(APPROVAL_REQUIRED)
+    | set(LONGFORM_TEXT_METERED_TOOLS)
+)
 
 # Retired generic code-mutation/subprocess escape hatches. Keep the names so
 # persisted pending actions fail closed with a policy receipt instead of ever
@@ -5832,7 +5852,15 @@ def _spawn_shortform_background_stage(
                 pass
 
     try:
-        threading.Thread(target=_run, daemon=False, name=f"{stage}-{job_id}").start()
+        # ``ContextVar`` values do not cross raw ``threading.Thread`` starts.
+        # Capture the backend production-command authority so the detached
+        # stage cannot execute as an unauthorised orphan.
+        command_context = copy_context()
+        threading.Thread(
+            target=lambda: command_context.run(_run),
+            daemon=False,
+            name=f"{stage}-{job_id}",
+        ).start()
     except BaseException:
         marker.unlink(missing_ok=True)
         raise
@@ -7232,6 +7260,38 @@ def _longform_text_billing(client: Any, args: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _resolve_longform_text_pricing(args: dict[str, Any]) -> dict[str, Any]:
+    """Resolve live rates only after the durable mutation claim is owned."""
+
+    resolved = dict(args or {})
+    if (
+        resolved.get("_billing_prompt_price_per_m") is not None
+        and resolved.get("_billing_completion_price_per_m") is not None
+    ):
+        return resolved
+    from studio_agent import openrouter
+
+    selected = (
+        str(resolved.get("model") or openrouter.DEFAULT_MODEL).strip()
+        or openrouter.DEFAULT_MODEL
+    )
+    try:
+        prompt_ppm, completion_ppm = _run_async(openrouter.model_pricing(selected))
+    except Exception as exc:
+        raise RuntimeError(
+            "Selected text-model pricing is temporarily unavailable; "
+            "no inference request was sent."
+        ) from exc
+    if prompt_ppm is None or completion_ppm is None:
+        raise RuntimeError(
+            "Selected text-model pricing is unavailable; no inference request was sent."
+        )
+    resolved["model"] = selected
+    resolved["_billing_prompt_price_per_m"] = float(prompt_ppm)
+    resolved["_billing_completion_price_per_m"] = float(completion_ppm)
+    return resolved
+
+
 def generate_longform_outline_logged(args: dict[str, Any]) -> str:
     """Run one outline pass after the logged boundary has held credits."""
 
@@ -7548,15 +7608,6 @@ def _reclaim_orphaned_shortform_jobs() -> int:
         return reclaimed
     except Exception:
         return 0
-
-
-# Run reclaim on import of this module (i.e. when the backend process that mounts studio-agent starts).
-# This is best-effort; it will pick up jobs left behind by a previous worker crash/restart as long as
-# the SKELETON_AI_OUTPUT_ROOT volume preserved the workspaces.
-try:
-    _reclaim_orphaned_shortform_jobs()
-except Exception:
-    pass
 
 
 def cancel_shortform_job(job_id: str) -> bool:
@@ -10020,6 +10071,72 @@ def execute_tool_logged(
     session_id: str | None = None,
 ) -> str:
     """Run a tool with telemetry, budget enforcement, and atomic credit hold."""
+    authorized_mutation = None
+    authorized_mutation_payload: dict[str, Any] | None = None
+    command_authority = None
+    if str(name or "").strip() in PRODUCTION_COMMAND_PROTECTED_TOOLS:
+        # Validate the authenticated principal before even resolving implicit
+        # scene scope. Some legacy status readers can reconcile stale jobs, so
+        # authorization must precede every read as well as every spend.
+        validate_production_command_authority(
+            name,
+            user_id=user_id,
+            session_id=session_id,
+        )
+        _enforce_tool_job_ownership(name, dict(arguments or {}), user_id)
+        arguments = _bind_authoritative_media_route(
+            name,
+            arguments,
+            session_id=session_id,
+        )
+        arguments = _bind_backend_scene_scope(name, arguments)
+        # This is deliberately the first executable boundary. No entitlement
+        # lookup, budget estimate, credit reservation, workspace staging, or
+        # provider request may happen before exact command authorization.
+        arguments, authorized_mutation = authorize_production_mutation(
+            name,
+            arguments,
+            user_id=user_id,
+            session_id=session_id,
+        )
+        command_authority = current_production_command()
+        if authorized_mutation is not None:
+            authorized_mutation_payload = authorized_mutation.as_dict()
+        if (
+            authorized_mutation_payload is not None
+            and command_authority is not None
+            and session_id
+            and command_authority.source != "test"
+        ):
+            exact_session = store.get_session(
+                str(session_id),
+                user_id=str(user_id or ""),
+                reconcile_jobs=False,
+                _prune_active_jobs=False,
+            )
+            if not exact_session:
+                raise RuntimeError(
+                    f"{name} rejected: production command session ownership could not be verified"
+                )
+            from studio_agent.production_command_service import compile_authorized_mutation
+
+            envelope = compile_authorized_mutation(
+                authority=command_authority.as_dict(),
+                mutation=authorized_mutation_payload,
+                arguments=dict(arguments or {}),
+                session=exact_session,
+            )
+            authorized_mutation_payload["command_envelope"] = envelope.model_dump(
+                mode="json",
+                exclude_none=True,
+            )
+        if authorized_mutation is not None and command_authority is not None and session_id:
+            store.record_production_command_transition(
+                str(session_id),
+                authority=command_authority.as_dict(),
+                mutation=authorized_mutation_payload or authorized_mutation.as_dict(),
+                transition="authorized",
+            )
     if name in {
         "generate_longform_outline",
         "expand_longform_chapter",
@@ -10040,43 +10157,6 @@ def execute_tool_logged(
 
             channel = dict(get_channel(str((arguments or {}).get("channel_key") or "").strip()))
             lf_pipeline.validate_channel_pipeline(channel)
-    if session_id and name in {
-        "expand_visual_proof_shortform",
-        "regenerate_production_scene_still",
-        "regenerate_production_scene",
-        "regenerate_production_scenes",
-        "animate_production_scenes",
-        "repair_production_scene_animation",
-        "audit_and_repair_production_scenes",
-    }:
-        # Picker state is binding execution input, not an LLM-authored hint.
-        # Capture it before idempotency/budget/RunPod routing, while local repair
-        # loops continue re-reading the same session before each provider call.
-        route = _repair_route_snapshot(session_id)
-        arguments = dict(arguments or {})
-        arguments["image_model_id"] = route.get("image_model_id")
-        session_video = str(route.get("video_model") or "").strip()
-        job_video = ""
-        job_id_for_route = str(arguments.get("job_id") or "").strip()
-        if job_id_for_route and name in {
-            "regenerate_production_scenes",
-            "animate_production_scenes",
-            "repair_production_scene_animation",
-            "audit_and_repair_production_scenes",
-            "expand_visual_proof_shortform",
-        }:
-            # Job production lock wins over a stale session default (e.g. Seedance).
-            # Otherwise budget preflight prices Seedance while the card shows LTX.
-            try:
-                spec_path = _shortform_workspace(job_id_for_route) / "job_spec.json"
-                if spec_path.is_file():
-                    spec = json.loads(spec_path.read_text(encoding="utf-8"))
-                    if isinstance(spec, dict):
-                        job_video = str(spec.get("video_model") or "").strip()
-            except Exception:
-                job_video = ""
-        arguments["video_model"] = job_video or session_video
-        arguments["_media_route_revision"] = int(route.get("revision") or 1)
     budget_estimate = None
     credit_reservation: dict[str, Any] | None = None
     billed_with_actuals = False
@@ -10122,6 +10202,14 @@ def execute_tool_logged(
                 user_id=str(user_id or ""),
             )
             if replay is not None:
+                if authorized_mutation is not None and command_authority is not None and session_id:
+                    store.record_production_command_transition(
+                        str(session_id),
+                        authority=command_authority.as_dict(),
+                        mutation=authorized_mutation_payload or authorized_mutation.as_dict(),
+                        transition="completed",
+                        result_status=str(replay.get("status") or "idempotent_replay"),
+                    )
                 return json.dumps(replay, indent=2, ensure_ascii=False)
         if runpod_route and _runpod_workspace_kind(name) == "longform" and not runpod_longform_enabled():
             raise RuntimeError(
@@ -10200,6 +10288,11 @@ def execute_tool_logged(
                     "kind": workspace_kind,
                     "files_uploaded": 0,
                 }
+        if name in LONGFORM_TEXT_METERED_TOOLS:
+            # Pricing discovery may contact a provider catalog. It therefore
+            # belongs inside the claimed command, before budget reservation but
+            # never before backend authority/idempotency.
+            arguments = _resolve_longform_text_pricing(dict(arguments or {}))
         budget_estimate = production_budget.enforce_budget(name, arguments)
         provider_block = _public_provider_block_message(name, arguments, budget_estimate, user_id)
         if provider_block:
@@ -10626,6 +10719,19 @@ def execute_tool_logged(
             )
         except Exception:
             pass
+        if authorized_mutation is not None and command_authority is not None and session_id:
+            try:
+                store.record_production_command_transition(
+                    str(session_id),
+                    authority=command_authority.as_dict(),
+                    mutation=authorized_mutation_payload or authorized_mutation.as_dict(),
+                    transition="failed",
+                    error=str(exc),
+                )
+            except Exception:
+                # Never replace the original provider/budget/postcondition
+                # failure with a secondary audit-ledger write failure.
+                pass
         raise
     if local_mutation_claim is not None:
         from studio_agent import idempotent_mutations
@@ -10655,7 +10761,155 @@ def execute_tool_logged(
         )
     except Exception:
         pass
+    if authorized_mutation is not None and command_authority is not None and session_id:
+        try:
+            parsed_status = ""
+            try:
+                parsed_receipt = json.loads(result or "{}")
+                if isinstance(parsed_receipt, dict):
+                    parsed_status = str(parsed_receipt.get("status") or "")
+            except Exception:
+                parsed_status = ""
+            normalized_status = parsed_status.strip().lower()
+            transition = (
+                "accepted"
+                if normalized_status
+                in {
+                    "accepted",
+                    "queued",
+                    "running",
+                    "started",
+                    "claim_pending",
+                    "awaiting_approval",
+                    "awaiting_scene_review",
+                    "awaiting_animation_review",
+                }
+                else "completed"
+            )
+            store.record_production_command_transition(
+                str(session_id),
+                authority=command_authority.as_dict(),
+                mutation=authorized_mutation_payload or authorized_mutation.as_dict(),
+                transition=transition,
+                result_status=normalized_status or transition,
+            )
+        except Exception:
+            # Provider work and its primary durable receipt succeeded. Surface
+            # the result; reconciliation can rebuild the projection from the
+            # mutation ledger instead of charging again.
+            pass
     return result
+
+
+def _bind_authoritative_media_route(
+    name: str,
+    arguments: dict[str, Any] | None,
+    *,
+    session_id: str | None,
+) -> dict[str, Any]:
+    """Freeze the exact runtime media route before mutation authorization.
+
+    The route participates in the mutation hash and V2 envelope. Provider
+    selection may therefore never drift between contract compilation, budget
+    preflight, and execution. The caller validates command ownership before
+    invoking this helper, so its session/job reads cannot be triggered by an
+    unauthenticated status request.
+    """
+
+    args = dict(arguments or {})
+    tool_name = str(name or "").strip()
+    if not session_id or tool_name not in {
+        "expand_visual_proof_shortform",
+        "regenerate_production_scene_still",
+        "regenerate_production_scene",
+        "regenerate_production_scenes",
+        "animate_production_scenes",
+        "repair_production_scene_animation",
+        "audit_and_repair_production_scenes",
+    }:
+        return args
+
+    route = _repair_route_snapshot(session_id)
+    args["image_model_id"] = route.get("image_model_id")
+    session_video = str(route.get("video_model") or "").strip()
+    job_video = ""
+    job_id = str(args.get("job_id") or "").strip()
+    if job_id and tool_name in {
+        "regenerate_production_scenes",
+        "animate_production_scenes",
+        "repair_production_scene_animation",
+        "audit_and_repair_production_scenes",
+        "expand_visual_proof_shortform",
+    }:
+        # An existing production's locked route outranks a later picker
+        # change. This exact value is hashed below and copied into V2.
+        try:
+            spec_path = _shortform_workspace(job_id) / "job_spec.json"
+            if spec_path.is_file():
+                spec = json.loads(spec_path.read_text(encoding="utf-8"))
+                if isinstance(spec, dict):
+                    job_video = str(spec.get("video_model") or "").strip()
+        except Exception:
+            job_video = ""
+    args["video_model"] = job_video or session_video
+    args["_media_route_revision"] = int(route.get("revision") or 1)
+    return args
+
+
+def _bind_backend_scene_scope(
+    name: str,
+    arguments: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Resolve implicit "all/approved scenes" into exact zero-based indices.
+
+    This is a read-only contract compilation step. Provider code never receives
+    an unbounded pronoun-like target such as "them" or an implicit all-scenes
+    flag from a browser.
+    """
+
+    args = dict(arguments or {})
+    tool_name = str(name or "").strip()
+    if tool_name not in {
+        "set_production_scenes_animate",
+        "animate_production_scenes",
+        "repair_production_scene_animation",
+        "audit_and_repair_production_scenes",
+    }:
+        return args
+    if isinstance(args.get("scene_indices"), list):
+        return args
+    job_id = str(args.get("job_id") or "").strip()
+    if not job_id:
+        return args
+    try:
+        # Read the durable scene manifest directly. ``get_job_snapshot`` is a
+        # control-plane reconciler and may resume stale work; contract
+        # compilation must remain side-effect free.
+        from skeleton_ai.styled_pipeline import load_scenes
+
+        rows = load_scenes(_shortform_workspace(job_id))
+    except Exception:
+        return args
+    if not isinstance(rows, list):
+        return args
+    indices: list[int] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        try:
+            index = int(row.get("index"))
+        except (TypeError, ValueError):
+            continue
+        if index < 0:
+            continue
+        if tool_name == "animate_production_scenes" and not bool(
+            row.get("approved_for_animation") or row.get("animate")
+        ):
+            continue
+        indices.append(index)
+    if indices:
+        args["scene_indices"] = sorted(set(indices))
+    return args
 
 
 def _validate_mutation_result(name: str, result: str) -> str:

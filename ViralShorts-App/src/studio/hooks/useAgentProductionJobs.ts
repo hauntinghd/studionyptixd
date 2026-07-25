@@ -231,8 +231,17 @@ export function useAgentProductionJobs({
                     autoFinalizeRef.current.add(track.job_id);
                     void (async () => {
                         try {
+                            const commandSessionId = config.sessionId;
+                            if (!commandSessionId) {
+                                autoFinalizeRef.current.delete(track.job_id);
+                                return;
+                            }
                             const tok = await configRef.current.getToken();
-                            const out = await finalizeLongformJob(track.job_id, tok);
+                            const out = await finalizeLongformJob(
+                                track.job_id,
+                                tok,
+                                commandSessionId,
+                            );
                             configRef.current.onAutoFinalizeStarted?.(track.job_id, out.active_jobs);
                         } catch {
                             autoFinalizeRef.current.delete(track.job_id);

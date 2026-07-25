@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 
 import pytest
 
@@ -12,7 +13,7 @@ from studio_agent import (
     tools,
     training_capture,
 )
-from studio_agent.execution_context import production_command_scope
+from studio_agent.execution_context import current_production_command, production_command_scope
 
 
 @pytest.fixture(autouse=True)
@@ -52,13 +53,25 @@ def _quiet_execution_side_effects(monkeypatch):
 
 
 def _call(name: str, arguments: dict) -> str:
-    return tools.execute_tool_logged(
-        name,
-        arguments,
+    def execute() -> str:
+        return tools.execute_tool_logged(
+            name,
+            arguments,
+            user_id="user-1",
+            content_format="shortform",
+            session_id="session-1",
+        )
+
+    if current_production_command() is not None:
+        return execute()
+    supplied = str(arguments.get("command_id") or "").strip()
+    with production_command_scope(
+        supplied or f"test_{uuid.uuid4().hex}",
         user_id="user-1",
-        content_format="shortform",
         session_id="session-1",
-    )
+        source="test",
+    ):
+        return execute()
 
 
 def test_flag_off_keeps_allowlisted_production_local(monkeypatch):
@@ -112,7 +125,8 @@ def test_flag_on_dispatches_once_and_never_executes_locally(monkeypatch):
     )
 
     assert len(dispatch_calls) == 1
-    assert dispatch_calls[0][2]["command_id"] == "command-1"
+    assert dispatch_calls[0][2]["command_id"].startswith("mut_")
+    assert dispatch_calls[0][1]["_production_command_id"] == "command-1"
     assert result["job_id"] == "studio-job-1"
     assert result["studio_job_id"] == "studio-job-1"
     assert result["runpod_job_id"] == "runpod-1"
@@ -261,7 +275,7 @@ def test_every_enabled_flag_token_preserves_runpod_poll_ownership(
     assert runpod_reconciliation.runpod_production_enabled() is True
 
 
-def test_enabled_production_without_stable_id_fails_closed(monkeypatch):
+def test_enabled_production_without_backend_command_authority_fails_closed(monkeypatch):
     monkeypatch.setenv("STUDIO_RUNPOD_PRODUCTION_ENABLED", "yes")
     monkeypatch.setattr(
         runpod_bridge,
@@ -274,8 +288,14 @@ def test_enabled_production_without_stable_id_fails_closed(monkeypatch):
         lambda *_args, **_kwargs: pytest.fail("missing identity fell back locally"),
     )
 
-    with pytest.raises(RuntimeError, match="stable command_id"):
-        _call("expand_visual_proof_shortform", {"job_id": "studio-job-1"})
+    with pytest.raises(RuntimeError, match="no backend production command authority"):
+        tools.execute_tool_logged(
+            "expand_visual_proof_shortform",
+            {"job_id": "studio-job-1"},
+            user_id="user-1",
+            content_format="shortform",
+            session_id="session-1",
+        )
 
 
 @pytest.mark.parametrize(
@@ -330,7 +350,9 @@ def test_stream_context_supplies_stable_command_identity(monkeypatch):
     monkeypatch.setattr(
         runpod_bridge,
         "dispatch_production_tool",
-        lambda _name, _arguments, **kwargs: seen.append(kwargs["command_id"])
+        lambda _name, _arguments, **kwargs: seen.append(
+            (kwargs["command_id"], _arguments.get("_production_command_id"))
+        )
         or {"ok": True, "status": "accepted", "runpod_job_id": "runpod-ctx"},
     )
     monkeypatch.setattr(
@@ -339,10 +361,17 @@ def test_stream_context_supplies_stable_command_identity(monkeypatch):
         lambda *_args, **_kwargs: pytest.fail("context-routed production executed locally"),
     )
 
-    with production_command_scope("stream-run-123"):
+    with production_command_scope(
+        "stream-run-123",
+        user_id="user-1",
+        session_id="session-1",
+        source="test",
+    ):
         _call("expand_visual_proof_shortform", {"job_id": "studio-job-1"})
 
-    assert seen == ["stream-run-123"]
+    assert len(seen) == 1
+    assert seen[0][0].startswith("mut_")
+    assert seen[0][1] == "stream-run-123"
 
 
 def test_runpod_preflight_failure_releases_credit_hold(monkeypatch):

@@ -12,6 +12,7 @@ from long_form import pipeline as longform_pipeline
 from studio_agent import jobs as agent_jobs
 from studio_agent import runpod_bridge
 from studio_agent import tools
+from studio_agent.execution_context import current_production_command
 
 
 def _client() -> TestClient:
@@ -253,6 +254,7 @@ def test_local_scene_regenerate_and_finalize_require_logged_idempotent_envelope(
     still = tmp_path / "scene.png"
     still.write_bytes(b"new candidate")
     calls: list[tuple[str, dict, dict]] = []
+    command_ids: list[str] = []
     monkeypatch.setattr(tools, "_runpod_production_enabled", lambda: False)
     monkeypatch.setattr(
         agent_jobs,
@@ -281,6 +283,8 @@ def test_local_scene_regenerate_and_finalize_require_logged_idempotent_envelope(
     monkeypatch.setattr(longform_pipeline, "job_still_path", lambda *_args: still)
 
     def execute(name, arguments, **context):
+        authority = current_production_command()
+        command_ids.append(authority.command_id if authority else "")
         calls.append((name, dict(arguments), dict(context)))
         if name == "regenerate_longform_still":
             return json.dumps({"ok": True, "postcondition_verified": True})
@@ -315,8 +319,7 @@ def test_local_scene_regenerate_and_finalize_require_logged_idempotent_envelope(
         "regenerate_longform_still",
         "finalize_longform_render",
     ]
-    assert calls[0][1]["_runpod_command_id"] == "regen-local-1"
-    assert calls[1][1]["_runpod_command_id"] == "final-local-1"
+    assert command_ids == ["regen-local-1", "final-local-1"]
 
 
 def test_unverifiable_logged_mutation_is_not_reported_as_success(

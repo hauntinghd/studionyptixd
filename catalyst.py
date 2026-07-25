@@ -1324,12 +1324,42 @@ def _catalyst_recent_learning_records_for_channel(channel_id: str, *, limit: int
     return rows[: max(1, min(int(limit or 12), 24))]
 
 
+def _cached_catalyst_channel_context(channel_id: str, record: dict | None) -> dict:
+    """Project stored YouTube state without refreshing tokens or inventory."""
+
+    cached = dict(record or {})
+    analytics_snapshot = dict(cached.get("analytics_snapshot") or {})
+    if not cached:
+        return {}
+    return {
+        "channel_id": str(channel_id or cached.get("channel_id", "") or "").strip(),
+        "channel_title": str(cached.get("title", "") or "").strip(),
+        "channel_handle": str(cached.get("channel_handle", "") or "").strip(),
+        "channel_url": str(cached.get("channel_url", "") or "").strip(),
+        "summary": str(analytics_snapshot.get("channel_summary", "") or "").strip(),
+        "channel_video_count": int(analytics_snapshot.get("channel_video_count", 0) or 0),
+        "recent_upload_titles": list(analytics_snapshot.get("recent_upload_titles") or []),
+        "uploaded_videos": list(analytics_snapshot.get("uploaded_videos") or []),
+        "top_video_titles": list(analytics_snapshot.get("top_video_titles") or []),
+        "top_videos": list(analytics_snapshot.get("top_videos") or []),
+        "title_pattern_hints": list(analytics_snapshot.get("title_pattern_hints") or []),
+        "packaging_learnings": list(analytics_snapshot.get("packaging_learnings") or []),
+        "retention_learnings": list(analytics_snapshot.get("retention_learnings") or []),
+        "series_clusters": list(analytics_snapshot.get("series_clusters") or []),
+        "series_cluster_playbook": dict(analytics_snapshot.get("series_cluster_playbook") or {}),
+        "historical_compare": dict(analytics_snapshot.get("historical_compare") or {}),
+        "channel_audit": dict(analytics_snapshot.get("channel_audit") or {}),
+        "last_sync_error": str(cached.get("last_sync_error", "") or "").strip(),
+    }
+
+
 async def _build_catalyst_hub_payload(
     *,
     user: dict,
     channel_id: str = "",
     include_public_benchmarks: bool = False,
     refresh_outcomes: bool = False,
+    allow_side_effects: bool = True,
 ) -> dict:
     user_id = str(user.get("id", "") or "").strip()
     selected_channel_id = str(channel_id or "").strip()
@@ -1344,7 +1374,7 @@ async def _build_catalyst_hub_payload(
         selected_channel_id = default_channel_id
     if selected_channel_id and selected_channel_id not in channels_map:
         selected_channel_id = default_channel_id
-    if selected_channel_id and selected_channel_id in channels_map:
+    if allow_side_effects and selected_channel_id and selected_channel_id in channels_map:
         try:
             channels_map[selected_channel_id] = await _youtube_sync_and_persist_for_user(user_id, selected_channel_id)
         except Exception as e:
@@ -1357,7 +1387,7 @@ async def _build_catalyst_hub_payload(
     ]
     public_channels.sort(key=lambda row: (0 if str(row.get("channel_id", "") or "").strip() == selected_channel_id else 1, str(row.get("title", "") or "").lower()))
     selected_channel = next((dict(row) for row in public_channels if str(row.get("channel_id", "") or "").strip() == selected_channel_id), {})
-    if refresh_outcomes and selected_channel_id and _longform_owner_beta_enabled(user):
+    if allow_side_effects and refresh_outcomes and selected_channel_id and _longform_owner_beta_enabled(user):
         try:
             await _harvest_catalyst_outcomes_for_channel(
                 user_id=user_id,
@@ -1371,11 +1401,17 @@ async def _build_catalyst_hub_payload(
             selected_channel = refreshed
     channel_context = {}
     if selected_channel_id:
-        try:
-            channel_context = await _youtube_selected_channel_context(user, selected_channel_id)
-        except Exception:
-            channel_context = {}
-    if selected_channel_id and channel_context:
+        if allow_side_effects:
+            try:
+                channel_context = await _youtube_selected_channel_context(user, selected_channel_id)
+            except Exception:
+                channel_context = {}
+        else:
+            channel_context = _cached_catalyst_channel_context(
+                selected_channel_id,
+                channels_map.get(selected_channel_id),
+            )
+    if allow_side_effects and selected_channel_id and channel_context:
         try:
             access_token, token_record = await _youtube_connected_channel_access_token(user, selected_channel_id)
             public_page_rows = await _youtube_fetch_public_channel_page_videos(
@@ -1470,7 +1506,7 @@ async def _build_catalyst_hub_payload(
         memory_bucket = dict(memory_store.get(memory_key) or {})
         playbook: dict = {}
         selected_cluster: dict = {}
-        if selected_channel_id and include_public_benchmarks:
+        if allow_side_effects and selected_channel_id and include_public_benchmarks:
             try:
                 persisted = await _persist_public_shorts_playbook_memory(
                     user=user,
@@ -1516,6 +1552,8 @@ async def _build_catalyst_hub_payload(
             or ""
         ).strip()
         if (
+            allow_side_effects
+            and
             workspace_id == "documentary"
             and selected_channel_id
             and reference_video_id
@@ -1596,8 +1634,11 @@ async def _catalyst_hub_snapshot_for_user(
         return await _build_catalyst_hub_payload(
             user=user,
             channel_id=str(channel_id or "").strip(),
-            include_public_benchmarks=bool(refresh),
+            # GET is a cached projection only. Historical ``refresh=true``
+            # callers must use POST /api/catalyst/hub/refresh instead.
+            include_public_benchmarks=False,
             refresh_outcomes=False,
+            allow_side_effects=False,
         )
     except Exception as e:
         log.exception("Catalyst hub snapshot failed")

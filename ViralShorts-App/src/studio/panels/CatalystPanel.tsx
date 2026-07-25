@@ -1,6 +1,7 @@
 import { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { AlertTriangle, Bot, BrainCircuit, Download, Loader2, RefreshCw, Save, Sparkles, Target, Youtube } from 'lucide-react';
 import { API, AuthContext, PROD_API_BASE_URL, resolveStudioBackendUrl, startYouTubeBrowserConnect } from '../shared';
+import { acquireProductionCommandLease } from '../lib/productionIdempotency';
 import CatalystReferencesSection from './CatalystReferencesSection';
 
 type CatalystChannel = {
@@ -416,6 +417,55 @@ export default function CatalystPanel() {
         [supabase, withAuthInit]
     );
 
+    const fetchCatalystProductionJson = useCallback(
+        async (
+            scope: string,
+            stableEntity: string,
+            input: string,
+            init: RequestInit = {},
+            timeoutMs = CATALYST_FETCH_TIMEOUT_MS,
+        ): Promise<{ res: Response; data: any }> => {
+            const command = acquireProductionCommandLease(scope, stableEntity);
+            const headers = new Headers(init.headers || undefined);
+            headers.set('X-Idempotency-Key', command.commandId);
+            let receivedResponse = false;
+            try {
+                const result = await fetchJsonWithAuthRetry<any>(
+                    input,
+                    { ...init, headers },
+                    timeoutMs,
+                );
+                receivedResponse = true;
+                return result;
+            } finally {
+                if (receivedResponse) command.release();
+            }
+        },
+        [fetchJsonWithAuthRetry]
+    );
+
+    const fetchCatalystProductionResponse = useCallback(
+        async (
+            scope: string,
+            stableEntity: string,
+            input: string,
+            init: RequestInit = {},
+        ): Promise<Response> => {
+            const command = acquireProductionCommandLease(scope, stableEntity);
+            const headers = new Headers(init.headers || undefined);
+            headers.set('X-Idempotency-Key', command.commandId);
+            let receivedResponse = false;
+            try {
+                const response = await fetchWithAuthRetry(input, { ...init, headers });
+                receivedResponse = true;
+                return response;
+            } finally {
+                if (receivedResponse) command.release();
+            }
+        },
+        [fetchWithAuthRetry]
+    );
+
     const downloadProtectedOutput = useCallback(async (url: string, filename: string) => {
         setError('');
         try {
@@ -466,7 +516,6 @@ export default function CatalystPanel() {
         try {
             const url = new URL(`${API}/api/catalyst/hub`);
             if (channelId) url.searchParams.set('channel_id', channelId);
-            if (refresh) url.searchParams.set('refresh', 'true');
             const { res, data } = await fetchJsonWithAuthRetry<CatalystHubPayload>(
                 url.toString(),
                 {},
@@ -682,7 +731,11 @@ export default function CatalystPanel() {
         if (refreshOutcomes) setSyncingOutcomes(true);
         else setRefreshing(true);
         try {
-            const { res, data } = await fetchJsonWithAuthRetry<any>(`${API}/api/catalyst/hub/refresh`, {
+            const { res, data } = await fetchCatalystProductionJson(
+                'catalyst-refresh',
+                `${activeChannelId}-${refreshOutcomes ? 'outcomes' : 'hub'}`,
+                `${API}/api/catalyst/hub/refresh`,
+                {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -690,7 +743,8 @@ export default function CatalystPanel() {
                     include_public_benchmarks: true,
                     refresh_outcomes: refreshOutcomes,
                 }),
-            });
+                },
+            );
             if (!res.ok) throw new Error(String(data?.detail || data?.error || 'Failed to refresh Catalyst hub'));
             setPayload(data as CatalystHubPayload);
         } catch (e: any) {
@@ -707,7 +761,11 @@ export default function CatalystPanel() {
         setSaving(true);
         setError('');
         try {
-            const { res, data } = await fetchJsonWithAuthRetry<any>(`${API}/api/catalyst/hub/instructions`, {
+            const { res, data } = await fetchCatalystProductionJson(
+                'catalyst-save-instructions',
+                `${activeChannelId}-${applyScope === 'current' ? selectedWorkspaceId : applyScope}`,
+                `${API}/api/catalyst/hub/instructions`,
+                {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -718,7 +776,8 @@ export default function CatalystPanel() {
                     target_niches: splitLines(targetNiches),
                     apply_scope: applyScope === 'current' ? selectedWorkspaceId : applyScope,
                 }),
-            });
+                },
+            );
             if (!res.ok) throw new Error(String(data?.detail || data?.error || 'Failed to save Catalyst instructions'));
             setPayload(data as CatalystHubPayload);
         } catch (e: any) {
@@ -738,7 +797,11 @@ export default function CatalystPanel() {
         setLaunching(true);
         setError('');
         try {
-            const { res, data } = await fetchJsonWithAuthRetry<any>(`${API}/api/catalyst/hub/launch`, {
+            const { res, data } = await fetchCatalystProductionJson(
+                'catalyst-launch-longform',
+                `${activeChannelId}-${selectedWorkspaceId}`,
+                `${API}/api/catalyst/hub/launch`,
+                {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -755,7 +818,8 @@ export default function CatalystPanel() {
                     include_public_benchmarks: true,
                     refresh_outcomes: true,
                 }),
-            });
+                },
+            );
             if (!res.ok) throw new Error(String(data?.detail || data?.error || 'Failed to launch Catalyst long-form run'));
             const sessionId = String(data?.session?.session_id || '').trim();
             if (!sessionId) throw new Error('Catalyst launch returned no session id');
@@ -782,11 +846,16 @@ export default function CatalystPanel() {
         setLongformSuggestions([]);
         setError('');
         try {
-            const { res, data } = await fetchJsonWithAuthRetry<any>(`${API}/api/catalyst/hub/longform-suggestions`, {
+            const { res, data } = await fetchCatalystProductionJson(
+                'catalyst-longform-suggestions',
+                `${activeChannelId}-${selectedWorkspaceId}`,
+                `${API}/api/catalyst/hub/longform-suggestions`,
+                {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ channel_id: activeChannelId, workspace_id: selectedWorkspaceId }),
-            });
+                },
+            );
             if (!res.ok) throw new Error(String(data?.detail || 'Failed to generate suggestions'));
             setLongformSuggestions(data?.suggestions || []);
         } catch (e: any) {
@@ -803,7 +872,11 @@ export default function CatalystPanel() {
         setApprovingSuggestionIdx(idx);
         setError('');
         try {
-            const { res, data } = await fetchJsonWithAuthRetry<any>(`${API}/api/catalyst/hub/launch`, {
+            const { res, data } = await fetchCatalystProductionJson(
+                'catalyst-launch-suggestion',
+                `${activeChannelId}-${selectedWorkspaceId}-${idx}`,
+                `${API}/api/catalyst/hub/launch`,
+                {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -819,7 +892,8 @@ export default function CatalystPanel() {
                     include_public_benchmarks: true,
                     refresh_outcomes: false,
                 }),
-            });
+                },
+            );
             if (!res.ok) throw new Error(String(data?.detail || 'Failed to launch'));
             const sessionId = String(data?.session?.session_id || '').trim();
             if (sessionId) {
@@ -864,10 +938,15 @@ export default function CatalystPanel() {
             const body = new FormData();
             body.append('channel_id', cid);
             body.append('workspace', selectedWorkspaceId || 'documentary');
-            const { res, data } = await fetchJsonWithAuthRetry<any>(`${API}/api/catalyst/hub/auto-tick`, {
+            const { res, data } = await fetchCatalystProductionJson(
+                'catalyst-auto-tick',
+                `${cid}-${selectedWorkspaceId || 'documentary'}`,
+                `${API}/api/catalyst/hub/auto-tick`,
+                {
                 method: 'POST',
                 body,
-            });
+                },
+            );
             if (!res.ok) throw new Error(String(data?.detail || 'Auto-tick failed'));
             setAutoTickResult(String(data?.message || data?.status || 'Done'));
             if (data?.status === 'launched') {
@@ -892,10 +971,15 @@ export default function CatalystPanel() {
             body.append('channel_id', cid);
             body.append('enabled', newEnabled ? 'true' : 'false');
             body.append('interval_hours', autoPilotInterval);
-            const { res, data } = await fetchJsonWithAuthRetry<any>(`${API}/api/catalyst/hub/auto-pilot`, {
+            const { res, data } = await fetchCatalystProductionJson(
+                'catalyst-auto-pilot',
+                cid,
+                `${API}/api/catalyst/hub/auto-pilot`,
+                {
                 method: 'POST',
                 body,
-            });
+                },
+            );
             if (!res.ok) throw new Error(String(data?.detail || 'Failed to toggle auto-pilot'));
             setAutoPilotEnabled(Boolean(data?.enabled));
             setAutoPilotLastCheck(new Date().toLocaleTimeString());
@@ -916,10 +1000,15 @@ export default function CatalystPanel() {
                 body.append('channel_id', cid);
                 body.append('enabled', 'true');
                 body.append('interval_hours', newInterval);
-                await fetchJsonWithAuthRetry<any>(`${API}/api/catalyst/hub/auto-pilot`, {
+                await fetchCatalystProductionJson(
+                    'catalyst-auto-pilot',
+                    cid,
+                    `${API}/api/catalyst/hub/auto-pilot`,
+                    {
                     method: 'POST',
                     body,
-                });
+                    },
+                );
             } catch { /* ignore */ }
         }
     };
@@ -930,28 +1019,34 @@ export default function CatalystPanel() {
         setRefreshingChannels(true);
         setError('');
         try {
-            const { res, data } = await fetchJsonWithAuthRetry<any>(resolveStudioBackendUrl('/api/youtube/channels?sync=true'), {});
+            const { res, data } = await fetchCatalystProductionJson(
+                'catalyst-refresh-channels',
+                currentChannelId || 'default',
+                `${API}/api/catalyst/hub/refresh`,
+                {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        channel_id: currentChannelId,
+                        include_public_benchmarks: false,
+                        refresh_outcomes: false,
+                    }),
+                },
+            );
             if (!res.ok) throw new Error(String(data?.detail || data?.error || `Failed to refresh channels (${res.status})`));
-            const rows = Array.isArray(data?.channels) ? data.channels as CatalystChannel[] : [];
+            const nextPayload = data as CatalystHubPayload;
+            const rows = Array.isArray(nextPayload?.channels) ? nextPayload.channels as CatalystChannel[] : [];
             const nextChannelId = pickCatalystChannelId(
                 rows,
                 currentChannelId,
-                data?.default_channel_id,
+                nextPayload?.default_channel_id,
             );
             setSelectedChannelId(nextChannelId);
-            setPayload((prev) => {
-                if (!prev) return prev;
-                return {
-                    ...prev,
-                    channels: rows,
-                    default_channel_id: String(data?.default_channel_id || prev.default_channel_id || '').trim(),
-                    selected_channel_id: nextChannelId || prev.selected_channel_id,
-                    selected_channel: rows.find((row) => String(row.channel_id || '').trim() === nextChannelId) || prev.selected_channel,
-                };
-            });
             if (nextChannelId) {
-                await loadHub(nextChannelId, false);
+                nextPayload.selected_channel_id = nextChannelId;
+                nextPayload.selected_channel = rows.find((row) => String(row.channel_id || '').trim() === nextChannelId) || nextPayload.selected_channel;
             }
+            setPayload(nextPayload);
         } catch (e: any) {
             setError(String(e?.message || e || 'Failed to refresh channels'));
         } finally {
@@ -998,21 +1093,31 @@ export default function CatalystPanel() {
                     if (referenceAnalyticsNotes.trim()) formData.append('analytics_notes', referenceAnalyticsNotes.trim());
                     if (referenceTranscriptText.trim()) formData.append('transcript_text', referenceTranscriptText.trim());
                     referenceAnalyticsImages.forEach((file) => formData.append('analytics_images', file));
-                    return fetchWithAuthRetry(`${directApiBase}/api/catalyst/hub/reference-video-analysis/manual`, {
-                        method: 'POST',
-                        body: formData,
-                    });
+                    return fetchCatalystProductionResponse(
+                        'catalyst-reference-analysis-manual',
+                        `${channelIdForAnalysis}-${selectedWorkspaceId}`,
+                        `${directApiBase}/api/catalyst/hub/reference-video-analysis/manual`,
+                        {
+                            method: 'POST',
+                            body: formData,
+                        },
+                    );
                 })()
-                : await fetchWithAuthRetry(`${API}/api/catalyst/hub/reference-video-analysis`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        channel_id: channelIdForAnalysis,
-                        workspace_id: selectedWorkspaceId,
-                        video_id: selectedReferenceVideoId || '',
-                        max_analysis_minutes: 20.0,
-                    }),
-                });
+                : await fetchCatalystProductionResponse(
+                    'catalyst-reference-analysis',
+                    `${channelIdForAnalysis}-${selectedWorkspaceId}`,
+                    `${API}/api/catalyst/hub/reference-video-analysis`,
+                    {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            channel_id: channelIdForAnalysis,
+                            workspace_id: selectedWorkspaceId,
+                            video_id: selectedReferenceVideoId || '',
+                            max_analysis_minutes: 20.0,
+                        }),
+                    },
+                );
             const data = await readJsonResponse<any>(res);
             if (!res.ok) throw new Error(String(data?.detail || data?.error || `Failed to analyze the channel reference video (${res.status})`));
             if (data?.payload) setPayload(data.payload as CatalystHubPayload);
@@ -1031,14 +1136,19 @@ export default function CatalystPanel() {
         setClearingReference(true);
         setError('');
         try {
-            const res = await fetchWithAuthRetry(`${API}/api/catalyst/hub/reference-video-analysis/clear`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    channel_id: channelIdForAnalysis,
-                    workspace_id: selectedWorkspaceId,
-                }),
-            });
+            const res = await fetchCatalystProductionResponse(
+                'catalyst-reference-clear',
+                `${channelIdForAnalysis}-${selectedWorkspaceId}`,
+                `${API}/api/catalyst/hub/reference-video-analysis/clear`,
+                {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        channel_id: channelIdForAnalysis,
+                        workspace_id: selectedWorkspaceId,
+                    }),
+                },
+            );
             const data = await readJsonResponse<any>(res);
             if (!res.ok) throw new Error(String(data?.detail || data?.error || 'Failed to clear the channel reference video'));
             if (data?.payload) setPayload(data.payload as CatalystHubPayload);
@@ -1060,10 +1170,15 @@ export default function CatalystPanel() {
         setStoppingSessionId(busyLongformSessionId);
         setError('');
         try {
-            const res = await fetchWithAuthRetry(`${API}/api/longform/session/${busyLongformSessionId}/stop`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-            });
+            const res = await fetchCatalystProductionResponse(
+                'catalyst-stop-longform',
+                busyLongformSessionId,
+                `${API}/api/longform/session/${busyLongformSessionId}/stop`,
+                {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                },
+            );
             const data = await readJsonResponse<any>(res);
             if (!res.ok) throw new Error(String(data?.detail || data?.error || 'Failed to stop active long-form session'));
             await loadHub(String(selectedChannelIdRef.current || '').trim(), false);

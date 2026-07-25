@@ -18,7 +18,10 @@ from studio_agent import openrouter, production_budget, provider_policy, skills
 from studio_agent.anti_hallucination import ToolFire, audit_turn, guard_text
 from studio_agent import memory, store
 from studio_agent import telemetry, training_capture
-from studio_agent.execution_context import production_command_scope
+from studio_agent.execution_context import (
+    current_production_command,
+    production_command_scope,
+)
 from studio_agent.tone import (
     CONTENT_TYPE_ROUTING_BLOCK,
     PRODUCT_AD_ROUTING_BLOCK,
@@ -4577,91 +4580,149 @@ async def _apply_bulk_scene_ship(
         return None
 
     sid = str(session.get("session_id") or "")
-    messages = list((store.get_session(sid) or session).get("messages") or [])
+    authority = current_production_command()
+    if authority is None:
+        raise RuntimeError("Ship command rejected: backend production command authority is required.")
+    from studio_agent.production_command_service import (
+        compile_ship_existing_short_workflow,
+    )
+    from studio_agent.production_workflows import (
+        enqueue_shortform_ship_workflow,
+        schedule_production_workflow,
+    )
+
+    fresh_for_contract = store.get_session(
+        sid,
+        user_id=str(user_id or ""),
+        reconcile_jobs=False,
+        _prune_active_jobs=False,
+    )
+    if not fresh_for_contract:
+        raise RuntimeError("Ship command rejected: Studio session ownership could not be verified.")
+    scene_rows = snapshot.get("scenes") if isinstance(snapshot.get("scenes"), list) else []
+    scene_numbers = [
+        int(row.get("index")) + 1
+        for row in scene_rows
+        if (
+            isinstance(row, dict)
+            and row.get("index") is not None
+            and str(row.get("index")).lstrip("-").isdigit()
+            and int(row.get("index")) >= 0
+        )
+    ]
+    if not scene_numbers:
+        scene_numbers = list(range(1, int(snapshot.get("total_scenes") or 0) + 1))
+    command = compile_ship_existing_short_workflow(
+        authority=authority.as_dict(),
+        session=fresh_for_contract,
+        job_id=job_id,
+        scene_numbers=scene_numbers,
+        animate=animate_all,
+    )
+    command_payload = command.model_dump(mode="json", exclude_none=True)
+    root_mutation = {
+        "schema": "studio.production-mutation.v2",
+        "mutation_id": f"workflow_{authority.command_id}",
+        "action": "ship_existing_short",
+        "tool_name": "production_workflow",
+        "target_kind": "shortform",
+        "target_id": job_id,
+        "scene_indices": [number - 1 for number in scene_numbers],
+        "arguments_sha256": hashlib.sha256(
+            json.dumps(command_payload, sort_keys=True).encode("utf-8")
+        ).hexdigest(),
+        "authorized_at": time.time(),
+        "command_envelope": command_payload,
+    }
+    claimed_session = store.claim_production_gate(
+        sid,
+        command_id=authority.command_id,
+        job_id=job_id,
+    )
+    if not claimed_session:
+        raise RuntimeError(
+            "Another backend production command is already changing this Studio session."
+        )
+    try:
+        store.record_production_command_transition(
+            sid,
+            authority=authority.as_dict(),
+            mutation=root_mutation,
+            transition="authorized",
+        )
+        animation_indices: list[int] = []
+        for tool_name, arguments in plan:
+            if tool_name == "animate_production_scenes":
+                animation_indices = [
+                    int(value)
+                    for value in list(arguments.get("scene_indices") or [])
+                    if str(value).lstrip("-").isdigit() and int(value) >= 0
+                ]
+        workflow_row, workflow_created = enqueue_shortform_ship_workflow(
+            session_id=sid,
+            authority=authority.as_dict(),
+            root_mutation=root_mutation,
+            job_id=job_id,
+            scene_indices=[number - 1 for number in scene_numbers],
+            animation_scene_indices=animation_indices,
+            animate=animate_all,
+            schedule=False,
+        )
+    except Exception:
+        store.close_production_gate(sid, command_id=authority.command_id)
+        raise
+
+    latest = store.get_session(
+        sid,
+        user_id=str(user_id or ""),
+        reconcile_jobs=False,
+        _prune_active_jobs=False,
+    ) or session
+    messages = list(latest.get("messages") or [])
     active_jobs = merge_active_jobs(
-        list(session.get("active_jobs") or []),
+        list(latest.get("active_jobs") or []),
         [{
             "job_id": job_id,
             "kind": "shortform",
             "title": str(snapshot.get("title") or "Short-form video"),
+            "status": "running",
+            "stage": "approve",
             "started_at": time.time(),
         }],
     )
-    await _fire_event(emit, "active_jobs", jobs=active_jobs)
-
-    profile = billing_profile or {}
-    last_result: dict[str, Any] = {}
-    async with studio_agent_slot(
-        user_id=user_id,
-        plan=membership_plan,
-        operation="bulk_scene_ship",
-        unlimited=bool(profile.get("unlimited")),
+    assistant_text = (
+        "Studio accepted one backend-owned production command. It will approve the exact "
+        + ("scenes, verify every requested animation, " if animate_all else "scenes, ")
+        + "then finalize only after the durable preflight passes. You can leave or reload this chat; "
+        "the finished MP4 card or an exact failure will be added here automatically."
+    )
+    workflow_id = str(workflow_row.get("workflow_id") or "")
+    if not any(
+        isinstance(message, dict)
+        and str(message.get("productionWorkflowStartedId") or "") == workflow_id
+        for message in messages
     ):
-        for tool_name, args in plan:
-            await _fire_event(
-                emit,
-                "tool_start",
-                tool=tool_name,
-                round=0,
-                awaiting_approval=False,
-                deterministic_bulk_ship=True,
-            )
-            try:
-                result = execute_tool_logged(
-                    tool_name,
-                    args,
-                    user_id=user_id,
-                    content_format=content_format,
-                    session_id=sid,
-                )
-                messages.append(_tool_observation_message(tool_name, result))
-                try:
-                    parsed = json.loads(result or "{}")
-                except Exception:
-                    parsed = {}
-                last_result = parsed if isinstance(parsed, dict) else {}
-                if _production_result_failed(last_result):
-                    await _fire_event(emit, "tool_end", tool=tool_name, status="error", error=str(last_result.get("error") or "")[:160])
-                    break
-                await _fire_event(emit, "tool_end", tool=tool_name, status="ok")
-                active_jobs = merge_active_jobs(active_jobs, extract_jobs_from_tool(tool_name, result))
-                await _fire_event(emit, "active_jobs", jobs=active_jobs)
-            except Exception as exc:
-                last_result = {"error": str(exc), "status": "failed"}
-                await _fire_event(emit, "tool_end", tool=tool_name, status="error", error=str(exc)[:160])
-                break
-
-    final_snapshot = get_job_snapshot(job_id, "shortform")
-    if str(final_snapshot.get("status") or "").lower() == "complete":
-        active_jobs = [j for j in active_jobs if str(j.get("job_id") or "") != job_id]
-    if _production_result_failed(last_result):
-        assistant_text = (
-            f"I tried to approve and ship every scene, but the next step failed: "
-            f"{str(last_result.get('error') or last_result)[:500]}"
-        )
-    elif _production_result_complete(last_result) or final_snapshot.get("status") == "complete":
-        if animate_all:
-            assistant_text = (
-                "I approved every scene, animated them all, and finished the MP4. "
-                "The production card has the download and upload package."
-            )
-        else:
-            assistant_text = (
-                "I approved every scene and finished the MP4. "
-                "The production card has the download and upload package."
-            )
-    else:
-        assistant_text = _format_polled_job_status(json.dumps(final_snapshot))
-    messages.append({"role": "assistant", "content": assistant_text})
-    store.update_session(sid, messages=messages, active_jobs=active_jobs)
+        messages.append({
+            "role": "assistant",
+            "content": assistant_text,
+            "productionWorkflowStartedId": workflow_id,
+            "productionCommandId": authority.command_id,
+        })
+    store.update_session(
+        sid,
+        messages=messages,
+        active_jobs=active_jobs,
+        interaction_state="production",
+    )
+    schedule_production_workflow(workflow_row)
     await _fire_event(emit, "active_jobs", jobs=active_jobs)
-    try:
-        await _fire_event(emit, "job_snapshot", snapshot=final_snapshot)
-    except Exception:
-        pass
     return {
         "session_id": sid,
-        "assistant_message": assistant_text,
+        "assistant_message": (
+            assistant_text
+            if workflow_created
+            else "That exact backend production command is already running; Studio did not start a duplicate."
+        ),
         "pending_actions": [],
         "active_jobs": active_jobs,
         "approval_mode": str(session.get("approval_mode") or "confirm"),
@@ -10632,9 +10693,12 @@ async def run_turn(
     reply_to: dict | None = None,
     attachments: list[dict[str, Any]] | None = None,
     agent_mode: str = "studio",
+    command_id: str | None = None,
 ) -> dict[str, Any]:
     """Process one user message; may queue pending_actions in confirm mode."""
     user_id = str(session.get("user_id") or "")
+    session_id = str(session.get("session_id") or "")
+    effective_command_id = str(command_id or "").strip() or f"cmd_{uuid.uuid4().hex}"
     profile = billing_profile or {}
     async with studio_agent_slot(
         user_id=user_id,
@@ -10642,15 +10706,23 @@ async def run_turn(
         operation="chat",
         unlimited=bool(profile.get("unlimited")),
     ) as admission:
-        result = await _run_turn_impl(
-            session,
-            user_text,
-            membership_plan=membership_plan,
-            billing_profile=billing_profile,
-            reply_to=reply_to,
-            attachments=attachments,
-            agent_mode=agent_mode,
-        )
+        with production_command_scope(
+            effective_command_id,
+            user_id=user_id,
+            session_id=session_id,
+            source="chat",
+            user_text=user_text,
+            state_revision=int(session.get("production_command_revision") or 0),
+        ):
+            result = await _run_turn_impl(
+                session,
+                user_text,
+                membership_plan=membership_plan,
+                billing_profile=billing_profile,
+                reply_to=reply_to,
+                attachments=attachments,
+                agent_mode=agent_mode,
+            )
         if admission.mode != "disabled":
             result["queue"] = admission.as_dict()
         return result
@@ -10699,7 +10771,14 @@ async def stream_turn(
                 operation="chat",
                 unlimited=bool(profile.get("unlimited")),
             ) as admission:
-                with production_command_scope(run_id):
+                with production_command_scope(
+                    run_id or f"cmd_{uuid.uuid4().hex}",
+                    user_id=user_id,
+                    session_id=str(session.get("session_id") or ""),
+                    source="chat_stream",
+                    user_text=user_text,
+                    state_revision=int(session.get("production_command_revision") or 0),
+                ):
                     result = await _run_turn_impl(
                         session,
                         user_text,
@@ -15391,12 +15470,20 @@ async def approve_action(
         operation="approve",
         unlimited=bool(profile.get("unlimited")),
     ) as admission:
-        result = await _approve_action_impl(
-            session,
-            action_id,
-            membership_plan=membership_plan,
-            billing_profile=billing_profile,
-        )
+        with production_command_scope(
+            str(action_id or ""),
+            user_id=user_id,
+            session_id=str(session.get("session_id") or ""),
+            source="approval",
+            user_text=f"approve:{action_id}",
+            state_revision=int(session.get("production_command_revision") or 0),
+        ):
+            result = await _approve_action_impl(
+                session,
+                action_id,
+                membership_plan=membership_plan,
+                billing_profile=billing_profile,
+            )
         if admission.mode != "disabled":
             result["queue"] = admission.as_dict()
         return result
@@ -15731,6 +15818,7 @@ async def retry_last_production(
     *,
     membership_plan: str = "",
     billing_profile: dict[str, Any] | None = None,
+    command_id: str = "",
 ) -> dict[str, Any]:
     """Re-run the last approved/auto production tool (shortform/longform spawn)."""
     sid = session["session_id"]
@@ -15793,13 +15881,22 @@ async def retry_last_production(
         unlimited=bool(profile.get("unlimited")),
     ):
         try:
-            result = execute_tool_logged(
-                name,
-                args,
-                user_id=session["user_id"],
-                content_format=session.get("content_format") or "both",
+            stable_command_id = str(command_id or "").strip() or f"retry_{uuid.uuid4().hex}"
+            with production_command_scope(
+                stable_command_id,
+                user_id=user_id,
                 session_id=sid,
-            )
+                source="retry",
+                user_text=f"retry:{name}",
+                state_revision=int(fresh.get("production_command_revision") or 0),
+            ):
+                result = execute_tool_logged(
+                    name,
+                    args,
+                    user_id=session["user_id"],
+                    content_format=session.get("content_format") or "both",
+                    session_id=sid,
+                )
         except Exception as exc:
             raise RuntimeError(str(exc)) from exc
 

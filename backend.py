@@ -14962,120 +14962,24 @@ async def _longform_session_status(session_id: str, request: Request = None):
         raise HTTPException(401, "Auth required")
     if not _longform_owner_beta_enabled(user):
         raise HTTPException(403, "Legacy long-form workspace is owner-only")
-    should_resume = False
-    should_try_finalize = False
-    now = time.time()
     async with _longform_sessions_lock:
         _load_longform_sessions()
-        session = _longform_sessions.get(session_id)
-        if isinstance(session, dict):
-            session_status = str(session.get("status", "") or "")
-            chapters = list(session.get("chapters") or [])
-            in_progress_idx = -1
-            in_progress_status = ""
-            for idx, chapter in enumerate(chapters):
-                status = str((chapter or {}).get("status", "") or "")
-                if status in {"draft_generating", "draft_generating_images"}:
-                    in_progress_idx = idx
-                    in_progress_status = status
-                    break
-
-            stalled_sec = max(0.0, now - float(session.get("updated_at", 0) or 0))
-            if in_progress_idx >= 0:
-                chapter_live = dict(chapters[in_progress_idx] or {})
-                chapter_scenes = list(chapter_live.get("scenes") or [])
-                scene_count = len(chapter_scenes)
-                # Recover from crash/restart if a generation task died before scripts/scenes were persisted.
-                if in_progress_status == "draft_generating" and scene_count <= 0 and stalled_sec > 180.0:
-                    chapter_live["status"] = "awaiting_previous_approval"
-                    chapter_live["last_error"] = "Recovered from stalled generation task; chapter resumed."
-                    chapters[in_progress_idx] = chapter_live
-                    session["chapters"] = chapters
-                    session["status"] = "draft_review"
-                    progress = dict(session.get("draft_progress") or {})
-                    progress["stage"] = "auto_resume_after_stall"
-                    progress["preview_scene_generated"] = 0
-                    session["draft_progress"] = progress
-                    session["updated_at"] = now
-                    _save_longform_sessions()
-                    should_resume = True
-                # Recover from stalled preview-image generation so owner can approve/regenerate and continue.
-                elif in_progress_status == "draft_generating_images" and scene_count > 0 and stalled_sec > 180.0:
-                    ready_count = 0
-                    auto_pipeline = _bool_from_any(session.get("auto_pipeline"), False)
-                    for idx, raw_scene in enumerate(chapter_scenes):
-                        scene = dict(raw_scene or {})
-                        has_img = bool(str(scene.get("image_url", "") or "").strip())
-                        if has_img:
-                            ready_count += 1
-                        else:
-                            status = str(scene.get("image_status", "") or "")
-                            if status != "error":
-                                scene["image_status"] = "error"
-                                scene["image_error"] = "Preview generation stalled; regenerate chapter to refresh this scene."
-                            chapter_scenes[idx] = scene
-
-                    missing_count = max(0, scene_count - ready_count)
-                    chapter_live["scenes"] = chapter_scenes
-                    chapter_live["status"] = "approved" if (auto_pipeline and missing_count == 0) else "pending_review"
-                    chapter_live["last_error"] = (
-                        f"Recovered from stalled preview generation ({ready_count}/{scene_count} ready). "
-                        f"{missing_count} previews missing; regenerate chapter if needed."
-                        if missing_count > 0
-                        else "Recovered from stalled preview generation; chapter moved to review."
-                    )
-                    chapters[in_progress_idx] = chapter_live
-                    session["chapters"] = chapters
-                    session["status"] = "draft_review"
-                    progress = dict(session.get("draft_progress") or {})
-                    progress["stage"] = "auto_resume_after_preview_stall"
-                    progress["preview_scene_total"] = int(scene_count)
-                    progress["preview_scene_generated"] = int(ready_count)
-                    progress["generated_chapters"] = int(_longform_generated_chapter_count(chapters))
-                    progress["approved_chapters"] = int(_longform_approved_chapter_count(chapters))
-                    session["draft_progress"] = progress
-                    session["updated_at"] = now
-                    _save_longform_sessions()
-                    should_resume = bool(auto_pipeline and missing_count == 0)
-            elif session_status != "bootstrapping" and any(str((c or {}).get("status", "") or "") == "awaiting_previous_approval" for c in chapters):
-                should_resume = True
-            progress_stage = str((dict(session.get("draft_progress") or {})).get("stage", "") or "").strip().lower()
-            if progress_stage == "waiting_for_shortform_capacity":
-                should_resume = True
-            if progress_stage == "awaiting_render_capacity" and _longform_review_state(session).get("all_approved", False):
-                should_try_finalize = True
+        raw_session = _longform_sessions.get(session_id)
+        session = (
+            json.loads(json.dumps(raw_session))
+            if isinstance(raw_session, dict)
+            else None
+        )
     if not session:
         raise HTTPException(404, "Long-form session not found")
     if str(session.get("user_id", "") or "") != str(user.get("id", "") or ""):
         raise HTTPException(403, "Forbidden")
-    if should_resume:
-        await _queue_next_longform_chapter_if_ready(session_id)
-        async with _longform_sessions_lock:
-            _load_longform_sessions()
-            session = _longform_sessions.get(session_id) or session
-    if should_try_finalize:
-        await _auto_finalize_longform_session(session_id)
-        async with _longform_sessions_lock:
-            _load_longform_sessions()
-            session = _longform_sessions.get(session_id) or session
     job_id = str(session.get("job_id", "") or "")
-    job = jobs.get(job_id, {}) if job_id else {}
+    job = dict(jobs.get(job_id, {}) or {}) if job_id else {}
     if job_id:
         persisted = await get_persisted_job_state(job_id)
         if isinstance(persisted, dict) and persisted:
-            jobs[job_id] = persisted
-            job = persisted
-        # If worker failed before it could write session state, prevent a
-        # permanently stuck "rendering" session in the UI.
-        if str((job or {}).get("status", "") or "") == "error":
-            async with _longform_sessions_lock:
-                _load_longform_sessions()
-                session_live = _longform_sessions.get(session_id)
-                if isinstance(session_live, dict) and str(session_live.get("status", "") or "") == "rendering":
-                    session_live["status"] = "error"
-                    session_live["updated_at"] = time.time()
-                    _save_longform_sessions()
-                    session = session_live
+            job = dict(persisted)
     return {"session": _longform_public_session(session), "job": job}
 
 
@@ -15779,6 +15683,20 @@ async def _longform_auto_ingest_outcome(session_id: str, req: CatalystAutoOutcom
     }
 
 
+async def _legacy_production_route_user(request: Request | None) -> dict | None:
+    """Reuse the router-authenticated principal at the claimed route boundary."""
+
+    if request is not None:
+        user = getattr(
+            getattr(request, "state", None),
+            "production_command_user",
+            None,
+        )
+        if isinstance(user, dict) and str(user.get("id", "") or "").strip():
+            return user
+    return await get_current_user_from_request(request) if request else None
+
+
 async def _creative_ingest_url(body: dict, request: Request = None):
     """
     Remix Script: pull a transcript from a TikTok/YouTube/Instagram URL so the user
@@ -15789,7 +15707,7 @@ async def _creative_ingest_url(body: dict, request: Request = None):
     Returns: {ok, transcript, title, source, duration_sec, warning} on success
              {ok: false, error: "..."} on failure (always 4xx, never 5xx except bugs)
     """
-    user = await get_current_user_from_request(request) if request else None
+    user = await _legacy_production_route_user(request)
     if not user:
         raise HTTPException(401, "Auth required")
     url = str((body or {}).get("url", "") or "").strip()
@@ -15807,7 +15725,7 @@ async def _creative_ingest_url(body: dict, request: Request = None):
 
 async def _creative_generate_script(req: GenerateRequest, request: Request = None):
     """Phase 1: Generate script + scenes for user review. Returns editable scene list."""
-    user = await get_current_user_from_request(request) if request else None
+    user = await _legacy_production_route_user(request)
     if not user:
         raise HTTPException(401, "Auth required")
     if not _user_has_paid_access(user):
@@ -16075,7 +15993,7 @@ async def _creative_generate_script(req: GenerateRequest, request: Request = Non
 
 async def _creative_create_session(body: dict, request: Request = None):
     """Create an empty creative session (no script generation). User builds scenes manually."""
-    user = await get_current_user_from_request(request) if request else None
+    user = await _legacy_production_route_user(request)
     if not user:
         raise HTTPException(401, "Auth required")
     if not _user_has_paid_access(user):
@@ -16243,7 +16161,7 @@ async def _creative_reference_image(
     request: Request = None,
 ):
     """Upload optional creative reference style image and persist it for all scene generations."""
-    user = await get_current_user_from_request(request) if request else None
+    user = await _legacy_production_route_user(request)
     if not user:
         raise HTTPException(401, "Auth required")
     session = await _get_creative_session(session_id)
@@ -16418,7 +16336,7 @@ async def _creative_session_scene_images(session_id: str, request: Request = Non
 
 async def _creative_scene_image(req: SceneImageRequest, request: Request = None):
     """Generate (or regenerate) an image for a specific scene. Unlimited regenerations."""
-    user = await get_current_user_from_request(request) if request else None
+    user = await _legacy_production_route_user(request)
     if not user:
         raise HTTPException(401, "Auth required")
     if not _user_has_paid_access(user):
@@ -16798,7 +16716,7 @@ async def _creative_scene_image(req: SceneImageRequest, request: Request = None)
 
 async def _creative_scene_feedback(body: dict, request: Request = None):
     """Mark a generated image as accepted (user moved on) or rejected (user regenerated)."""
-    user = await get_current_user_from_request(request) if request else None
+    user = await _legacy_production_route_user(request)
     if not user:
         raise HTTPException(401, "Auth required")
     gen_id = body.get("generation_id", "")
@@ -16810,7 +16728,7 @@ async def _creative_scene_feedback(body: dict, request: Request = None):
 
 async def _creative_update_scene(session_id: str, scene_index: int, body: dict, request: Request = None):
     """Update a scene's narration or visual description."""
-    user = await get_current_user_from_request(request) if request else None
+    user = await _legacy_production_route_user(request)
     if not user:
         raise HTTPException(401, "Auth required")
     session = await _get_creative_session(session_id)
@@ -16840,7 +16758,7 @@ async def _creative_update_scene(session_id: str, scene_index: int, body: dict, 
 
 async def _creative_finalize(req: FinalizeRequest, background_tasks: BackgroundTasks, request: Request = None):
     """Phase 3: Run the full pipeline using the user's scenes + images."""
-    user = await get_current_user_from_request(request) if request else None
+    user = await _legacy_production_route_user(request)
     if not user:
         raise HTTPException(401, "Auth required")
     _assert_not_waitlist_only_for_non_owner(user)
@@ -17431,6 +17349,7 @@ async def _run_creative_pipeline(
 mount_router(
     app,
     build_longform_creative_router(
+        require_auth=require_auth,
         create_longform_session_endpoint=_create_longform_session,
         create_longform_session_bootstrap_endpoint=_create_longform_session_bootstrap,
         longform_reference_image_endpoint=_longform_reference_image,

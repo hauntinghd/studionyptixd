@@ -283,7 +283,7 @@ def _longform_still_count(job_id: str) -> int:
     try:
         from long_form import pipeline as lf_pipeline
 
-        stills_dir = lf_pipeline._ensure_job_dir(job_id) / "stills"
+        stills_dir = lf_pipeline._job_dir(job_id) / "stills"
         return len(lf_pipeline._list_scenes_sorted(stills_dir))
     except Exception:
         return 0
@@ -298,7 +298,7 @@ _LONGFORM_RESUME_PHASES = frozenset({
 def _longform_live_phase(job_id: str) -> tuple[str, dict[str, Any], dict[str, Any]]:
     from long_form import pipeline as lf_pipeline
 
-    live = lf_pipeline.get_status(job_id) or {}
+    live = lf_pipeline.peek_status(job_id) or {}
     st = lf_pipeline.load_state(job_id) or {}
     disk_phase = str(st.get("phase") or "unknown")
     live_phase = str(live.get("phase") or "")
@@ -315,7 +315,7 @@ def _longform_live_phase(job_id: str) -> tuple[str, dict[str, Any], dict[str, An
     if disk_phase == "failed" and live_phase in _LONGFORM_RESUME_PHASES:
         phase = live_phase
     elif disk_phase == "failed" and not live_phase:
-        narration = lf_pipeline._ensure_job_dir(job_id) / "audio" / "narration.mp3"
+        narration = lf_pipeline._job_dir(job_id) / "audio" / "narration.mp3"
         if narration.is_file() and narration.stat().st_size > 8192:
             phase = "finalizing"
     return phase, live, st
@@ -325,7 +325,7 @@ def _longform_thumbnail_count(job_id: str) -> int:
     try:
         from long_form import pipeline as lf_pipeline
 
-        thumb_dir = lf_pipeline._ensure_job_dir(job_id) / "thumbnails"
+        thumb_dir = lf_pipeline._job_dir(job_id) / "thumbnails"
         if not thumb_dir.is_dir():
             return 0
         return len([
@@ -348,7 +348,7 @@ def _longform_output_mp4_ready(job_id: str, st: dict[str, Any]) -> bool:
         except Exception:
             pass
     try:
-        job_dir = lf_pipeline._ensure_job_dir(job_id)
+        job_dir = lf_pipeline._job_dir(job_id)
         for folder in (job_dir / "output", job_dir):
             if not folder.is_dir():
                 continue
@@ -378,7 +378,7 @@ def _longform_idle_has_artifacts(job_id: str, st: dict[str, Any]) -> bool:
     try:
         from long_form import pipeline as lf_pipeline
 
-        narration = lf_pipeline._ensure_job_dir(job_id) / "audio" / "narration.mp3"
+        narration = lf_pipeline._job_dir(job_id) / "audio" / "narration.mp3"
         if narration.is_file() and narration.stat().st_size > 8192:
             return True
     except Exception:
@@ -1128,41 +1128,31 @@ def _shortform_status(job_id: str) -> dict[str, Any]:
                 last_touch = max(last_touch, p.stat().st_mtime)
         age = time.time() - last_touch if last_touch else 0.0
         if last_touch and age > SHORTFORM_RECLAIM_SEC and spec_path.is_file():
-            if _start_shortform_reclaim_job(workspace, job_id):
-                snap = {
-                    "job_id": job_id,
-                    "kind": "shortform",
-                    "status": "running",
-                    "progress": 22,
-                    "stage": "restarting",
-                    "stage_label": "Restarting",
-                    "stage_detail": "The worker was interrupted, likely by a deploy/restart. Resuming from the saved job spec.",
-                    "running": True,
-                    "title": _shortform_job_title(workspace) or "Short-form video",
-                }
-                scene_snapshots = _shortform_scene_snapshots(job_id, workspace)
-                scene_count = len(scene_snapshots) or _shortform_scene_count(workspace)
-                expected_scene_count = max(scene_count, _shortform_planned_scene_count(workspace))
-                if scene_count > 0:
-                    snap["current_scene"] = scene_count
-                    snap["total_scenes"] = expected_scene_count
-                    snap["still_count"] = scene_count
-                    snap["scenes"] = scene_snapshots
-                    snap["still_preview_urls"] = [
-                        str(scene.get("still_preview_url"))
-                        for scene in scene_snapshots[:12]
-                        if scene.get("still_preview_url")
-                    ] or [
-                        _still_preview_url(job_id, i)
-                        for i in range(min(scene_count, 12))
-                    ]
-                _attach_cost(snap)
-                return _attach_production_control(
-                    snap,
-                    "start_shortform_generate",
-                    job_id=job_id,
-                    next_action="Resuming the interrupted production from saved stills.",
-                )
+            # Status is a pure projection. Refresh/poll must never reclaim
+            # provider work or mutate a workspace. A claimed Resume/Retry
+            # command owns any continuation.
+            snap = {
+                "job_id": job_id,
+                "kind": "shortform",
+                "status": "interrupted",
+                "progress": 22,
+                "stage": "resume_required",
+                "stage_label": "Resume required",
+                "stage_detail": (
+                    "The prior worker stopped. Issue one explicit Resume/Retry "
+                    "command to continue from the saved workspace."
+                ),
+                "running": False,
+                "resume_required": True,
+                "title": _shortform_job_title(workspace) or "Short-form video",
+            }
+            _attach_cost(snap)
+            return _attach_production_control(
+                snap,
+                "start_shortform_generate",
+                job_id=job_id,
+                next_action="Issue one explicit Resume/Retry command.",
+            )
         if last_touch and age > SHORTFORM_STALE_SEC:
             active_stage = ""
             if progress_path.is_file():
@@ -1180,18 +1170,22 @@ def _shortform_status(job_id: str) -> dict[str, Any]:
             }:
                 pass
             else:
-                # Include diagnostic info so user (and future training data) can see why it looked dead.
-                ages = {}
-                for p in (progress_path, spec_path, workspace / "script.txt", workspace / "heartbeat.txt"):
-                    if p.is_file():
-                        ages[p.name] = int(time.time() - p.stat().st_mtime)
-                err = (
-                    f"No progress for {max(1, SHORTFORM_STALE_SEC // 60)}+ minutes - "
-                    "production timed out. Tap Retry to run again."
-                    f" (last file ages: {ages})"
-                )
-                _write_shortform_result(workspace, status="failed", error=err, job_id=job_id)
-                return _attach_cost(_shortform_failed_snap(job_id, err))
+                return _attach_cost({
+                    "job_id": job_id,
+                    "kind": "shortform",
+                    "status": "interrupted",
+                    "progress": 0,
+                    "stage": "resume_required",
+                    "stage_label": "Resume required",
+                    "stage_detail": (
+                        f"No durable progress for {max(1, SHORTFORM_STALE_SEC // 60)}+ "
+                        "minutes. Issue one explicit Resume/Retry command."
+                    ),
+                    "error": None,
+                    "running": False,
+                    "resume_required": True,
+                    "title": _shortform_job_title(workspace) or "Short-form video",
+                })
         progress = 12
         stage = "pipeline"
         stage_label = "Building short"
@@ -1267,21 +1261,6 @@ def _shortform_status(job_id: str) -> dict[str, Any]:
         data["status"] = "complete"
         data["video_path"] = str(video_path)
         data.pop("error", None)
-        try:
-            result_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
-            progress_path.write_text(
-                json.dumps(
-                    {
-                        "stage": "complete",
-                        "progress": 100,
-                        "detail": "Final MP4 ready.",
-                    },
-                    indent=2,
-                ),
-                encoding="utf-8",
-            )
-        except Exception:
-            pass
     if st == "cancelled":
         # If a re-edit/retry reused the workspace, a stale cancelled result can
         # briefly coexist with a finished MP4. Prefer the actual deliverable.
@@ -1827,7 +1806,7 @@ def _thumbnail_files_mtime(job_id: str) -> float:
     try:
         from long_form import pipeline as lf_pipeline
 
-        thumb_dir = lf_pipeline._ensure_job_dir(job_id) / "thumbnails"
+        thumb_dir = lf_pipeline._job_dir(job_id) / "thumbnails"
         if not thumb_dir.is_dir():
             return 0.0
         mtimes = [p.stat().st_mtime for p in thumb_dir.iterdir() if p.is_file()]

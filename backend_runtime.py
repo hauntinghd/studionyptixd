@@ -157,6 +157,8 @@ async def _start_persistent_background_maintenance() -> None:
     import youtube as youtube_module
     from studio_agent import training_capture
     from studio_agent import catalyst_runtime
+    from studio_agent import production_workflows
+    from studio_agent import runpod_reconciliation
 
     if _acquire_maintenance_singleton():
         _log.info("Studio background-maintenance singleton acquired")
@@ -164,14 +166,10 @@ async def _start_persistent_background_maintenance() -> None:
         catalyst_runtime.start_studio_catalyst_loop()
         youtube_module.start_youtube_token_maintenance()
         training_capture.start_compiler_loop()
-        try:
-            from long_form import pipeline as lf_pipeline
-
-            resumed = lf_pipeline.resume_stalled_jobs()
-            if resumed:
-                _log.info("Resumed stalled long-form jobs: %s", ", ".join(resumed))
-        except Exception:
-            pass
+        # Only already-authorized, persisted command workflows are resumed.
+        # Workspace phase files alone never grant permission to spend.
+        production_workflows.start_production_workflow_service()
+        runpod_reconciliation.start_runpod_reconciliation_service()
         try:
             studio_release_notes.announce_pending_catalog_releases()
         except Exception:
@@ -185,12 +183,16 @@ async def _stop_persistent_background_maintenance() -> None:
     import youtube as youtube_module
     from studio_agent import training_capture
     from studio_agent import catalyst_runtime
+    from studio_agent import production_workflows
+    from studio_agent import runpod_reconciliation
 
     if _maintenance_lock_fd is not None:
         catalyst_backfill.stop_auto_loop()
         catalyst_runtime.stop_studio_catalyst_loop()
         youtube_module.stop_youtube_token_maintenance()
         training_capture.stop_compiler_loop()
+        production_workflows.stop_production_workflow_service()
+        runpod_reconciliation.stop_runpod_reconciliation_service()
         _release_maintenance_singleton()
 
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse
 from fastapi.testclient import TestClient
 
@@ -80,10 +80,22 @@ def test_retired_waitlist_route_cannot_create_a_checkout() -> None:
     assert calls == 0
 
 
-def test_generate_auth_runs_before_handler() -> None:
+def test_generate_auth_runs_before_handler(monkeypatch, tmp_path: Path) -> None:
+    from studio_agent import idempotent_mutations
+    from studio_agent.command_execution import FileExecutionLedger
+
+    monkeypatch.setattr(
+        idempotent_mutations,
+        "_LEDGER",
+        FileExecutionLedger(tmp_path / "public-auth-receipts"),
+    )
     calls: list[dict] = []
 
-    async def generate(payload: dict):
+    async def generate(
+        payload: dict,
+        request: Request,
+        user: dict = Depends(require_test_auth),
+    ):
         calls.append(payload)
         return {"status": "accepted"}
 
@@ -95,7 +107,11 @@ def test_generate_auth_runs_before_handler() -> None:
 
     assert response.status_code == 401
     assert calls == []
-    assert client.post("/api/generate", json={"prompt": "private"}, headers=auth("user-a")).status_code == 200
+    assert client.post(
+        "/api/generate",
+        json={"prompt": "private"},
+        headers={**auth("user-a"), "X-Idempotency-Key": "public-auth-generate"},
+    ).status_code == 200
     assert calls == [{"prompt": "private"}]
 
 

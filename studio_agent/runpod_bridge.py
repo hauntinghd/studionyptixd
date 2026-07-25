@@ -421,6 +421,23 @@ def get_dispatch_receipt_by_studio_job_id(studio_job_id: str) -> dict[str, Any] 
     return dict(newest[3]) if newest is not None else None
 
 
+def list_dispatch_receipts(*, limit: int = 500) -> list[dict[str, Any]]:
+    """List durable dispatch receipts for backend maintenance workers."""
+
+    rows: list[tuple[float, str, dict[str, Any]]] = []
+    for path in dispatch_ledger_dir().glob("rpd_*.receipt.json"):
+        receipt = _read_json_file(path)
+        if not receipt:
+            continue
+        try:
+            submitted_at = float(receipt.get("submitted_at") or path.stat().st_mtime)
+        except (OSError, TypeError, ValueError):
+            submitted_at = 0.0
+        rows.append((submitted_at, path.name, dict(receipt)))
+    rows.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    return [item[2] for item in rows[: max(1, int(limit or 1))]]
+
+
 def _studio_job_id_from_envelope(envelope: dict[str, Any]) -> str:
     arguments = envelope.get("arguments")
     if not isinstance(arguments, dict):
@@ -978,6 +995,7 @@ __all__ = [
     "dispatch_production_tool",
     "get_dispatch_receipt",
     "get_dispatch_receipt_by_studio_job_id",
+    "list_dispatch_receipts",
     "get_runpod_job_status",
     "preflight_runpod_endpoint",
     "release_production_lease",

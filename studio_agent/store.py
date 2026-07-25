@@ -2779,11 +2779,22 @@ def filter_active_jobs_for_session(session: dict[str, Any] | None) -> list[dict[
 def production_session_fields(session: dict[str, Any] | None) -> dict[str, Any]:
     """Fields every chat/sync response must include for the UI ledger."""
     session = session or {}
-    return {
+    payload = {
         "blocked_job_ids": list(session.get("blocked_job_ids") or []),
         "production_state": get_production_state(session),
         "active_jobs": filter_active_jobs_for_session(session),
     }
+    try:
+        from studio_agent.production_command_state import build_session_production_view
+
+        payload["production_view"] = build_session_production_view(session).model_dump(
+            mode="json"
+        )
+    except Exception:
+        # Old/malformed sessions still load through the legacy fields while the
+        # migration layer repairs them; never emit a partial canonical view.
+        pass
+    return payload
 
 
 def _align_shortform_topic_args(
@@ -3650,6 +3661,15 @@ def _terminal_run_owns_production_gate(session: dict[str, Any], command_id: str)
     normalized = str(command_id or "").strip()
     if not normalized:
         return False
+    for workflow in list(session.get("production_workflows") or []):
+        if not isinstance(workflow, dict):
+            continue
+        if str(workflow.get("command_id") or "").strip() != normalized:
+            continue
+        if str(workflow.get("status") or "") not in _PRODUCTION_WORKFLOW_TERMINAL:
+            # The HTTP/chat run may be terminal because it only admitted the
+            # work. Its durable workflow still owns the production lease.
+            return False
     for run in reversed(_normalize_runs(session)):
         if _run_command_id(run) != normalized:
             continue
@@ -3735,6 +3755,678 @@ def create_run(
         session["runs"] = runs[-80:]
         _write_session_unlocked(session)
         return {**run, "idempotent_replay": False}
+
+
+def record_production_command_transition(
+    session_id: str,
+    *,
+    authority: dict[str, Any],
+    mutation: dict[str, Any],
+    transition: str,
+    result_status: str = "",
+    error: str = "",
+) -> dict[str, Any] | None:
+    """Persist the revisioned backend command ledger under the session lock.
+
+    This ledger is intentionally control-plane only: it stores opaque ids,
+    exact target/scene scope, hashes, and lifecycle state, never raw prompts,
+    provider credentials, or private runtime arguments.
+    """
+
+    normalized_session = str(session_id or "").strip()
+    command_id = str((authority or {}).get("command_id") or "").strip()
+    mutation_id = str((mutation or {}).get("mutation_id") or "").strip()
+    if not normalized_session or not command_id or not mutation_id:
+        return None
+    lifecycle = str(transition or "").strip().lower()
+    if lifecycle not in {"authorized", "executing", "accepted", "completed", "failed", "rejected"}:
+        raise ValueError(f"unsupported production command transition: {transition}")
+
+    with _session_write_lock(normalized_session), _session_write_file_lock(normalized_session):
+        session = _read_session_file(_session_path(normalized_session))
+        if not session:
+            return None
+        now = _now()
+        revision = max(0, int(session.get("production_command_revision") or 0)) + 1
+        rows = [
+            dict(row)
+            for row in list(session.get("production_commands") or [])
+            if isinstance(row, dict) and str(row.get("command_id") or "").strip()
+        ]
+        command = next(
+            (row for row in rows if str(row.get("command_id") or "") == command_id),
+            None,
+        )
+        if command is None:
+            root_envelope = (
+                dict((mutation or {}).get("command_envelope") or {})
+                if isinstance((mutation or {}).get("command_envelope"), dict)
+                else {}
+            )
+            command = {
+                "schema": str((authority or {}).get("schema") or "studio.production-command.v2"),
+                "command_id": command_id,
+                "user_id": str((authority or {}).get("user_id") or ""),
+                "session_id": normalized_session,
+                "source": str((authority or {}).get("source") or "server_workflow"),
+                "request_sha256": str((authority or {}).get("request_sha256") or ""),
+                "state_revision": int((authority or {}).get("state_revision") or 0),
+                "status": "authorized",
+                "created_at": float((authority or {}).get("issued_at") or now),
+                "updated_at": now,
+                "revision": revision,
+                "steps": [],
+            }
+            if root_envelope:
+                command["command_envelope"] = root_envelope
+                command["action"] = str(root_envelope.get("action") or mutation.get("action") or "")
+            rows.append(command)
+        elif (
+            str(command.get("user_id") or "") != str((authority or {}).get("user_id") or "")
+            or str(command.get("session_id") or "") != normalized_session
+        ):
+            # A command id is immutable and cannot be rebound across principals.
+            raise RuntimeError("production command identity is already bound to another owner")
+
+        steps = [
+            dict(step)
+            for step in list(command.get("steps") or [])
+            if isinstance(step, dict) and str(step.get("mutation_id") or "").strip()
+        ]
+        step = next(
+            (row for row in steps if str(row.get("mutation_id") or "") == mutation_id),
+            None,
+        )
+        if step is None:
+            step = {
+                "schema": str((mutation or {}).get("schema") or "studio.production-mutation.v2"),
+                "mutation_id": mutation_id,
+                "action": str((mutation or {}).get("action") or ""),
+                "tool_name": str((mutation or {}).get("tool_name") or ""),
+                "target_kind": str((mutation or {}).get("target_kind") or ""),
+                "target_id": str((mutation or {}).get("target_id") or ""),
+                "scene_indices": list((mutation or {}).get("scene_indices") or []),
+                "arguments_sha256": str((mutation or {}).get("arguments_sha256") or ""),
+                "status": "authorized",
+                "created_at": float((mutation or {}).get("authorized_at") or now),
+            }
+            if isinstance((mutation or {}).get("command_envelope"), dict):
+                step["command_envelope"] = dict((mutation or {}).get("command_envelope") or {})
+            steps.append(step)
+        else:
+            immutable = {
+                "action": str((mutation or {}).get("action") or ""),
+                "tool_name": str((mutation or {}).get("tool_name") or ""),
+                "target_kind": str((mutation or {}).get("target_kind") or ""),
+                "target_id": str((mutation or {}).get("target_id") or ""),
+                "arguments_sha256": str((mutation or {}).get("arguments_sha256") or ""),
+            }
+            if any(str(step.get(key) or "") != value for key, value in immutable.items()):
+                raise RuntimeError("production mutation identity was reused for a different contract")
+
+        step["status"] = lifecycle
+        step["updated_at"] = now
+        step["revision"] = revision
+        if result_status:
+            step["result_status"] = str(result_status)[:120]
+        if error:
+            step["error"] = str(error)[:1000]
+        elif lifecycle not in {"failed", "rejected"}:
+            step.pop("error", None)
+
+        command["steps"] = steps[-80:]
+        command["updated_at"] = now
+        command["revision"] = revision
+        is_ship_workflow = str(command.get("action") or "") == "ship_existing_short"
+        is_ship_root_step = bool(
+            str((mutation or {}).get("action") or "") == "ship_existing_short"
+            and str((mutation or {}).get("tool_name") or "") == "production_workflow"
+        )
+        if is_ship_workflow and not is_ship_root_step:
+            # Child mutation receipts are evidence beneath the root workflow;
+            # they cannot declare the creator's multi-step command terminal.
+            command["status"] = "running"
+        elif lifecycle in {"failed", "rejected"}:
+            command["status"] = lifecycle
+            command["error"] = str(error or result_status or lifecycle)[:1000]
+        elif lifecycle in {"accepted", "completed"}:
+            command["status"] = lifecycle
+            command.pop("error", None)
+        else:
+            command["status"] = "running"
+        rows = rows[-80:]
+        session["production_commands"] = rows
+        session["production_command_revision"] = revision
+        session["latest_production_command"] = command
+        _write_session_unlocked(session)
+        return json.loads(json.dumps(command, default=str))
+
+
+_PRODUCTION_WORKFLOW_TERMINAL = frozenset({"completed", "failed", "cancelled"})
+
+
+def _finish_workflow_root_command_unlocked(
+    session: dict[str, Any],
+    workflow: dict[str, Any],
+    *,
+    succeeded: bool,
+    error: str,
+    now: float,
+    promote_latest: bool = True,
+) -> dict[str, Any]:
+    """Make a workflow's terminal root transition in the same session write."""
+
+    authority = (
+        dict(workflow.get("authority") or {})
+        if isinstance(workflow.get("authority"), dict)
+        else {}
+    )
+    mutation = (
+        dict(workflow.get("root_mutation") or {})
+        if isinstance(workflow.get("root_mutation"), dict)
+        else {}
+    )
+    command_id = str(workflow.get("command_id") or authority.get("command_id") or "").strip()
+    mutation_id = str(mutation.get("mutation_id") or "").strip()
+    if not command_id or not mutation_id:
+        raise RuntimeError("terminal workflow is missing its immutable root command identity")
+
+    rows = [
+        dict(row)
+        for row in list(session.get("production_commands") or [])
+        if isinstance(row, dict) and str(row.get("command_id") or "").strip()
+    ]
+    command = next(
+        (row for row in rows if str(row.get("command_id") or "") == command_id),
+        None,
+    )
+    revision = max(0, int(session.get("production_command_revision") or 0)) + 1
+    if command is None:
+        root_envelope = (
+            dict(mutation.get("command_envelope") or {})
+            if isinstance(mutation.get("command_envelope"), dict)
+            else {}
+        )
+        command = {
+            "schema": str(authority.get("schema") or "studio.production-command.v2"),
+            "command_id": command_id,
+            "user_id": str(authority.get("user_id") or workflow.get("user_id") or ""),
+            "session_id": str(workflow.get("session_id") or session.get("session_id") or ""),
+            "source": str(authority.get("source") or "server_workflow"),
+            "request_sha256": str(authority.get("request_sha256") or ""),
+            "state_revision": int(authority.get("state_revision") or 0),
+            "status": "authorized",
+            "created_at": float(authority.get("issued_at") or workflow.get("created_at") or now),
+            "updated_at": now,
+            "revision": revision,
+            "steps": [],
+        }
+        if root_envelope:
+            command["command_envelope"] = root_envelope
+            command["action"] = str(
+                root_envelope.get("action") or mutation.get("action") or ""
+            )
+        rows.append(command)
+    elif (
+        str(command.get("user_id") or "")
+        != str(authority.get("user_id") or workflow.get("user_id") or "")
+        or str(command.get("session_id") or "")
+        != str(workflow.get("session_id") or session.get("session_id") or "")
+    ):
+        raise RuntimeError("terminal workflow root command owner no longer matches")
+
+    steps = [
+        dict(step)
+        for step in list(command.get("steps") or [])
+        if isinstance(step, dict) and str(step.get("mutation_id") or "").strip()
+    ]
+    step = next(
+        (candidate for candidate in steps if str(candidate.get("mutation_id") or "") == mutation_id),
+        None,
+    )
+    if step is None:
+        step = {
+            "schema": str(mutation.get("schema") or "studio.production-mutation.v2"),
+            "mutation_id": mutation_id,
+            "action": str(mutation.get("action") or "ship_existing_short"),
+            "tool_name": str(mutation.get("tool_name") or "production_workflow"),
+            "target_kind": str(mutation.get("target_kind") or "shortform"),
+            "target_id": str(mutation.get("target_id") or workflow.get("job_id") or ""),
+            "scene_indices": list(mutation.get("scene_indices") or []),
+            "arguments_sha256": str(mutation.get("arguments_sha256") or ""),
+            "created_at": float(mutation.get("authorized_at") or workflow.get("created_at") or now),
+        }
+        steps.append(step)
+    else:
+        immutable = {
+            "action": str(mutation.get("action") or ""),
+            "tool_name": str(mutation.get("tool_name") or ""),
+            "target_kind": str(mutation.get("target_kind") or ""),
+            "target_id": str(mutation.get("target_id") or ""),
+            "arguments_sha256": str(mutation.get("arguments_sha256") or ""),
+        }
+        if any(str(step.get(key) or "") != value for key, value in immutable.items()):
+            raise RuntimeError("terminal workflow root mutation identity changed")
+
+    terminal_status = "completed" if succeeded else "failed"
+    expected_error = str(error or "production workflow failed")[:1000]
+    already_terminal = bool(
+        str(command.get("status") or "") == terminal_status
+        and str(step.get("status") or "") == terminal_status
+        and (
+            succeeded
+            or (
+                str(command.get("error") or "") == expected_error
+                and str(step.get("error") or "") == expected_error
+            )
+        )
+    )
+    if already_terminal:
+        latest = session.get("latest_production_command")
+        latest_id = str(latest.get("command_id") or "") if isinstance(latest, dict) else ""
+        if promote_latest or not latest_id or latest_id == command_id:
+            session["latest_production_command"] = command
+        return command
+
+    step["status"] = terminal_status
+    step["result_status"] = "complete" if succeeded else "failed"
+    step["updated_at"] = now
+    step["revision"] = revision
+    if succeeded:
+        step.pop("error", None)
+    else:
+        step["error"] = expected_error
+    command["steps"] = steps[-80:]
+    command["status"] = terminal_status
+    command["updated_at"] = now
+    command["revision"] = revision
+    if succeeded:
+        command.pop("error", None)
+    else:
+        command["error"] = expected_error
+    session["production_commands"] = rows[-80:]
+    session["production_command_revision"] = revision
+    latest = session.get("latest_production_command")
+    latest_id = str(latest.get("command_id") or "") if isinstance(latest, dict) else ""
+    if promote_latest or not latest_id or latest_id == command_id:
+        session["latest_production_command"] = command
+    return command
+
+
+def create_shortform_ship_workflow(
+    session_id: str,
+    *,
+    authority: dict[str, Any],
+    root_mutation: dict[str, Any],
+    job_id: str,
+    scene_indices: list[int],
+    animation_scene_indices: list[int],
+    animate: bool,
+) -> tuple[dict[str, Any], bool]:
+    """Persist one idempotent backend-owned ship workflow.
+
+    The browser is deliberately absent from this contract. The immutable
+    command/job pair owns every later approval, animation, and finalization
+    step, including recovery after a process restart.
+    """
+
+    normalized_session = str(session_id or "").strip()
+    normalized_command = str((authority or {}).get("command_id") or "").strip()
+    normalized_user = str((authority or {}).get("user_id") or "").strip()
+    normalized_job = str(job_id or "").strip()
+    if not all((normalized_session, normalized_command, normalized_user, normalized_job)):
+        raise ValueError("shortform ship workflow requires session, command, user, and job")
+    workflow_id = f"ship_{hashlib.sha256(
+        f'{normalized_command}:{normalized_job}'.encode('utf-8')
+    ).hexdigest()[:32]}"
+    exact_scenes = sorted({int(value) for value in scene_indices if int(value) >= 0})
+    exact_animation_scenes = sorted({
+        int(value) for value in animation_scene_indices if int(value) >= 0
+    })
+
+    with _session_write_lock(normalized_session), _session_write_file_lock(normalized_session):
+        session = _read_session_file(_session_path(normalized_session))
+        if not session:
+            raise KeyError(normalized_session)
+        if str(session.get("user_id") or "").strip() != normalized_user:
+            raise RuntimeError("shortform ship workflow owner does not match session owner")
+        rows = [
+            dict(row)
+            for row in list(session.get("production_workflows") or [])
+            if isinstance(row, dict) and str(row.get("workflow_id") or "").strip()
+        ]
+        existing = next(
+            (row for row in rows if str(row.get("workflow_id") or "") == workflow_id),
+            None,
+        )
+        if existing is not None:
+            immutable_matches = bool(
+                str(existing.get("user_id") or "") == normalized_user
+                and str(existing.get("job_id") or "") == normalized_job
+                and bool(existing.get("animate")) is bool(animate)
+                and list(existing.get("scene_indices") or []) == exact_scenes
+                and list(existing.get("animation_scene_indices") or [])
+                == exact_animation_scenes
+                and str(
+                    (existing.get("root_mutation") or {}).get("arguments_sha256")
+                    if isinstance(existing.get("root_mutation"), dict)
+                    else ""
+                )
+                == str((root_mutation or {}).get("arguments_sha256") or "")
+            )
+            if not immutable_matches:
+                raise RuntimeError(
+                    "production command identity was reused for a different ship workflow"
+                )
+            return json.loads(json.dumps(existing, default=str)), False
+        conflicting = next(
+            (
+                row
+                for row in rows
+                if str(row.get("job_id") or "") == normalized_job
+                and str(row.get("status") or "") not in _PRODUCTION_WORKFLOW_TERMINAL
+            ),
+            None,
+        )
+        if conflicting is not None:
+            raise RuntimeError(
+                "another backend production command already owns this short-form ship workflow"
+            )
+        now = _now()
+        workflow = {
+            "schema": "studio.production-workflow.v1",
+            "workflow_id": workflow_id,
+            "workflow_kind": "ship_existing_short",
+            "command_id": normalized_command,
+            "session_id": normalized_session,
+            "user_id": normalized_user,
+            "job_id": normalized_job,
+            "animate": bool(animate),
+            "scene_indices": exact_scenes,
+            "animation_scene_indices": exact_animation_scenes,
+            "status": "queued",
+            "stage": "approve",
+            "revision": 1,
+            "created_at": now,
+            "updated_at": now,
+            "next_attempt_at": now,
+            "authority": {
+                key: value
+                for key, value in dict(authority or {}).items()
+                if key
+                in {
+                    "schema",
+                    "command_id",
+                    "user_id",
+                    "session_id",
+                    "source",
+                    "request_sha256",
+                    "execution_quote",
+                    "state_revision",
+                    "issued_at",
+                }
+            },
+            "root_mutation": dict(root_mutation or {}),
+            "step_receipts": {},
+        }
+        rows.append(workflow)
+        session["production_workflows"] = rows[-80:]
+        _write_session_unlocked(session)
+        return json.loads(json.dumps(workflow, default=str)), True
+
+
+def get_production_workflow(
+    session_id: str,
+    workflow_id: str,
+) -> dict[str, Any] | None:
+    session = get_session(
+        str(session_id or ""),
+        reconcile_jobs=False,
+        _prune_active_jobs=False,
+    )
+    if not session:
+        return None
+    wanted = str(workflow_id or "").strip()
+    for row in list(session.get("production_workflows") or []):
+        if isinstance(row, dict) and str(row.get("workflow_id") or "") == wanted:
+            return json.loads(json.dumps(row, default=str))
+    return None
+
+
+def list_pending_production_workflows(*, limit: int = 200) -> list[dict[str, Any]]:
+    """Return resumable workflows across sessions without reconciling jobs."""
+
+    SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+    rows: list[dict[str, Any]] = []
+    for path in sorted(
+        SESSIONS_DIR.glob("sa_*.json"),
+        key=lambda candidate: candidate.stat().st_mtime,
+        reverse=True,
+    ):
+        if len(rows) >= max(1, int(limit)):
+            break
+        try:
+            session = _read_session_file(path)
+        except Exception:
+            continue
+        if not session or session.get("deleted_at"):
+            continue
+        for raw in list(session.get("production_workflows") or []):
+            if not isinstance(raw, dict):
+                continue
+            if str(raw.get("status") or "") in _PRODUCTION_WORKFLOW_TERMINAL:
+                continue
+            row = dict(raw)
+            row.setdefault("session_id", str(session.get("session_id") or ""))
+            rows.append(json.loads(json.dumps(row, default=str)))
+            if len(rows) >= max(1, int(limit)):
+                break
+    return rows
+
+
+def claim_production_workflow(
+    session_id: str,
+    workflow_id: str,
+    *,
+    lease_owner: str,
+    lease_seconds: float = 45.0,
+) -> dict[str, Any] | None:
+    """Acquire or renew the cross-process workflow lease."""
+
+    normalized_session = str(session_id or "").strip()
+    wanted = str(workflow_id or "").strip()
+    owner = str(lease_owner or "").strip()
+    if not normalized_session or not wanted or not owner:
+        return None
+    with _session_write_lock(normalized_session), _session_write_file_lock(normalized_session):
+        session = _read_session_file(_session_path(normalized_session))
+        if not session:
+            return None
+        now = _now()
+        rows = list(session.get("production_workflows") or [])
+        for index, raw in enumerate(rows):
+            if not isinstance(raw, dict) or str(raw.get("workflow_id") or "") != wanted:
+                continue
+            row = dict(raw)
+            if str(row.get("status") or "") in _PRODUCTION_WORKFLOW_TERMINAL:
+                return None
+            current_owner = str(row.get("lease_owner") or "").strip()
+            lease_expires_at = float(row.get("lease_expires_at") or 0.0)
+            if current_owner and current_owner != owner and lease_expires_at > now:
+                return None
+            row["lease_owner"] = owner
+            row["lease_expires_at"] = now + max(10.0, float(lease_seconds))
+            row["heartbeat_at"] = now
+            row["updated_at"] = now
+            rows[index] = row
+            session["production_workflows"] = rows
+            _write_session_unlocked(session)
+            return json.loads(json.dumps(row, default=str))
+    return None
+
+
+def update_production_workflow(
+    session_id: str,
+    workflow_id: str,
+    *,
+    lease_owner: str,
+    fields: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Advance a workflow only while the caller owns its durable lease."""
+
+    normalized_session = str(session_id or "").strip()
+    wanted = str(workflow_id or "").strip()
+    owner = str(lease_owner or "").strip()
+    allowed = {
+        "status",
+        "stage",
+        "last_error",
+        "last_snapshot",
+        "step_receipts",
+        "next_attempt_at",
+        "completed_at",
+        "failed_at",
+        "lease_expires_at",
+        "heartbeat_at",
+    }
+    patch = {key: value for key, value in dict(fields or {}).items() if key in allowed}
+    with _session_write_lock(normalized_session), _session_write_file_lock(normalized_session):
+        session = _read_session_file(_session_path(normalized_session))
+        if not session:
+            return None
+        rows = list(session.get("production_workflows") or [])
+        for index, raw in enumerate(rows):
+            if not isinstance(raw, dict) or str(raw.get("workflow_id") or "") != wanted:
+                continue
+            row = dict(raw)
+            if str(row.get("lease_owner") or "").strip() != owner:
+                return None
+            row.update(patch)
+            row["revision"] = max(0, int(row.get("revision") or 0)) + 1
+            row["updated_at"] = _now()
+            rows[index] = row
+            session["production_workflows"] = rows
+            _write_session_unlocked(session)
+            return json.loads(json.dumps(row, default=str))
+    return None
+
+
+def finish_production_workflow(
+    session_id: str,
+    workflow_id: str,
+    *,
+    lease_owner: str,
+    succeeded: bool,
+    assistant_text: str,
+    snapshot: dict[str, Any],
+    error: str = "",
+) -> dict[str, Any] | None:
+    """Atomically finish the workflow and append its transcript card once."""
+
+    normalized_session = str(session_id or "").strip()
+    wanted = str(workflow_id or "").strip()
+    owner = str(lease_owner or "").strip()
+    with _session_write_lock(normalized_session), _session_write_file_lock(normalized_session):
+        session = _read_session_file(_session_path(normalized_session))
+        if not session:
+            return None
+        rows = list(session.get("production_workflows") or [])
+        found: dict[str, Any] | None = None
+        now = _now()
+        for index, raw in enumerate(rows):
+            if not isinstance(raw, dict) or str(raw.get("workflow_id") or "") != wanted:
+                continue
+            row = dict(raw)
+            if str(row.get("status") or "") in _PRODUCTION_WORKFLOW_TERMINAL:
+                # Terminal receipts are immutable. A late/stale worker may
+                # observe the winner, but it can never flip success to failure
+                # (or vice versa) after its lease expired.
+                terminal_succeeded = str(row.get("status") or "") == "completed"
+                _finish_workflow_root_command_unlocked(
+                    session,
+                    row,
+                    succeeded=terminal_succeeded,
+                    error=str(row.get("last_error") or ""),
+                    now=now,
+                    promote_latest=False,
+                )
+                _write_session_unlocked(session)
+                return json.loads(json.dumps(row, default=str))
+            if str(row.get("lease_owner") or "").strip() != owner:
+                return None
+            row.update({
+                "status": "completed" if succeeded else "failed",
+                "stage": "completed" if succeeded else "failed",
+                "last_snapshot": dict(snapshot or {}),
+                "last_error": str(error or "")[:1000],
+                "completed_at" if succeeded else "failed_at": now,
+                "lease_expires_at": 0.0,
+                "revision": max(0, int(row.get("revision") or 0)) + 1,
+                "updated_at": now,
+            })
+            _finish_workflow_root_command_unlocked(
+                session,
+                row,
+                succeeded=succeeded,
+                error=str(error or ""),
+                now=now,
+            )
+            messages = list(session.get("messages") or [])
+            already_written = any(
+                isinstance(message, dict)
+                and str(message.get("productionWorkflowId") or "") == wanted
+                for message in messages
+            )
+            if not already_written:
+                message: dict[str, Any] = {
+                    "role": "assistant",
+                    "content": str(assistant_text or ""),
+                    "productionWorkflowId": wanted,
+                    "productionCommandId": str(row.get("command_id") or ""),
+                }
+                if snapshot:
+                    message["jobDeliverable"] = dict(snapshot)
+                messages.append(message)
+                session["messages"] = messages
+            row["completion_message_written"] = True
+            rows[index] = row
+            found = row
+            command_id = str(row.get("command_id") or "")
+            if str(session.get("active_command_id") or "") == command_id:
+                session.update({
+                    "interaction_state": "verification",
+                    "production_gate_open": False,
+                    "active_command_id": "",
+                    "active_command_job_id": "",
+                })
+            job_id = str(row.get("job_id") or "")
+            active_jobs = [
+                dict(job)
+                for job in list(session.get("active_jobs") or [])
+                if isinstance(job, dict)
+                and not (
+                    succeeded
+                    and str(job.get("job_id") or "") == job_id
+                )
+            ]
+            if not succeeded and job_id and not any(
+                str(job.get("job_id") or "") == job_id for job in active_jobs
+            ):
+                active_jobs.append({
+                    "job_id": job_id,
+                    "kind": "shortform",
+                    "title": str((snapshot or {}).get("title") or "Short-form video"),
+                    "status": str((snapshot or {}).get("status") or "failed"),
+                    "stage": str((snapshot or {}).get("stage") or "failed"),
+                    "started_at": float(row.get("created_at") or now),
+                })
+            session["active_jobs"] = active_jobs
+            break
+        if found is None:
+            return None
+        session["production_workflows"] = rows
+        _write_session_unlocked(session)
+        return json.loads(json.dumps(found, default=str))
 
 
 def get_run(session_id: str, run_id: str, *, user_id: str | None = None) -> dict[str, Any] | None:
@@ -3825,9 +4517,15 @@ def get_session(
     session_id: str,
     *,
     user_id: str | None = None,
-    reconcile_jobs: bool = True,
-    _prune_active_jobs: bool = True,
+    reconcile_jobs: bool = False,
+    _prune_active_jobs: bool = False,
 ) -> dict[str, Any] | None:
+    """Read a Studio session without starting or reclaiming production.
+
+    Reconciliation is opt-in for legacy maintenance callers only. Browser
+    refresh, history, chat bootstrap, and status reads must remain pure; a
+    durable backend command/worker owns every production continuation.
+    """
     path = _session_path(session_id)
     if not path.exists():
         return None
@@ -3836,9 +4534,14 @@ def get_session(
         return None
     if user_id and session.get("user_id") != user_id:
         return None
-    if _migrate_session_provider_policy(session):
-        _save(session)
-    session = _reconcile_session_concept(_sanitize_session_pending(session))
+    # Reads may project compatibility migrations, but only explicit mutation
+    # paths persist them. Browser refresh must never advance revisions or
+    # rewrite pending/production state.
+    _migrate_session_provider_policy(session)
+    session = _reconcile_session_concept(
+        _sanitize_session_pending(session, persist=False),
+        persist=False,
+    )
     if _prune_active_jobs:
         session = prune_stale_active_jobs(session, persist=True)
     if not reconcile_jobs:
@@ -3866,7 +4569,11 @@ def get_session(
     return session
 
 
-def _reconcile_session_concept(session: dict[str, Any]) -> dict[str, Any]:
+def _reconcile_session_concept(
+    session: dict[str, Any],
+    *,
+    persist: bool = True,
+) -> dict[str, Any]:
     """Repair a stale stored long-form concept every time a session is read.
 
     Concept fixes (channel-aware beats/hooks, cross-format title guards) only
@@ -3883,7 +4590,8 @@ def _reconcile_session_concept(session: dict[str, Any]) -> dict[str, Any]:
         fixed = concept_plan_mod.reconcile_longform_plan(dict(plan), session=session)
         if json.dumps(fixed, sort_keys=True, default=str) != before:
             session["pending_concept"] = fixed
-            _save(session)
+            if persist:
+                _save(session)
     except Exception:
         pass
     return session
@@ -3966,7 +4674,11 @@ def _align_pending_picker_state(session: dict[str, Any]) -> bool:
     return changed
 
 
-def _sanitize_session_pending(session: dict[str, Any]) -> dict[str, Any]:
+def _sanitize_session_pending(
+    session: dict[str, Any],
+    *,
+    persist: bool = True,
+) -> dict[str, Any]:
     """Normalize and prune stale pending approvals every time a session is read."""
     messages = list(session.get("messages") or [])
     pending = list(session.get("pending_actions") or [])
@@ -3974,7 +4686,7 @@ def _sanitize_session_pending(session: dict[str, Any]) -> dict[str, Any]:
     if picker_changed:
         pending = list(session.get("pending_actions") or [])
     if not pending:
-        if picker_changed:
+        if picker_changed and persist:
             _save(session)
         return session
     aligned_pending: list[dict[str, Any]] = []
@@ -4029,7 +4741,8 @@ def _sanitize_session_pending(session: dict[str, Any]) -> dict[str, Any]:
         )
         if dropped_prod:
             session["last_production"] = {}
-        _save(session)
+        if persist:
+            _save(session)
     return session
 
 
@@ -4037,6 +4750,13 @@ def _write_session_unlocked(session: dict[str, Any]) -> None:
     """Atomically replace one session while its process and file locks are held."""
 
     _migrate_session_provider_policy(session)
+    # Every persisted control-plane change advances the single frontend
+    # projection revision. Messages, confirmations, picker locks, command
+    # lifecycle, jobs, and cancellation therefore share one total order.
+    session["production_view_revision"] = max(
+        0,
+        int(session.get("production_view_revision") or 0),
+    ) + 1
     destination = _session_path(str(session["session_id"]))
     destination.parent.mkdir(parents=True, exist_ok=True)
     session["updated_at"] = _now()
@@ -4060,6 +4780,10 @@ def _save(session: dict[str, Any]) -> None:
         existing = _read_session_file(destination) if destination.is_file() else None
         if isinstance(existing, dict):
             _migrate_session_provider_policy(existing)
+            session["production_view_revision"] = max(
+                int(session.get("production_view_revision") or 0),
+                int(existing.get("production_view_revision") or 0),
+            )
             existing_route = media_route_snapshot(existing)
             incoming_route = media_route_snapshot(session)
             existing_is_newer = (

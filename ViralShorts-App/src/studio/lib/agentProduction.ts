@@ -209,8 +209,9 @@ export type ProductionProgressUpdate = {
     title?: string;
 };
 
-export function agentJobExpandProofUrl(jobId: string) {
-    return agentApi(`/api/studio-agent/jobs/${jobId}/expand-proof`);
+export function agentJobExpandProofUrl(jobId: string, sessionId?: string | null) {
+    const qs = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : '';
+    return agentApi(`/api/studio-agent/jobs/${jobId}/expand-proof${qs}`);
 }
 
 export function agentJobStillUrl(jobId: string, sceneIdx: number) {
@@ -221,8 +222,13 @@ export function agentJobClipUrl(jobId: string, sceneIdx: number) {
     return agentApi(`/api/studio-agent/jobs/${jobId}/clip/${sceneIdx}`);
 }
 
-export function agentJobSceneApprovalUrl(jobId: string, sceneIdx: number) {
-    return agentApi(`/api/studio-agent/jobs/${jobId}/scene/${sceneIdx}/approval`);
+export function agentJobSceneApprovalUrl(
+    jobId: string,
+    sceneIdx: number,
+    sessionId?: string | null,
+) {
+    const qs = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : '';
+    return agentApi(`/api/studio-agent/jobs/${jobId}/scene/${sceneIdx}/approval${qs}`);
 }
 
 export function agentJobSceneRegenerateUrl(
@@ -236,22 +242,33 @@ export function agentJobSceneRegenerateUrl(
     return agentApi(`/api/studio-agent/jobs/${jobId}/scene/${sceneIdx}/regenerate${qs}`);
 }
 
-export function agentJobScenePromptUrl(jobId: string, sceneIdx: number) {
-    return agentApi(`/api/studio-agent/jobs/${jobId}/scene/${sceneIdx}/prompt`);
+export function agentJobScenePromptUrl(
+    jobId: string,
+    sceneIdx: number,
+    sessionId?: string | null,
+) {
+    const qs = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : '';
+    return agentApi(`/api/studio-agent/jobs/${jobId}/scene/${sceneIdx}/prompt${qs}`);
 }
 
-export function agentJobScenesApprovalUrl(jobId: string) {
-    return agentApi(`/api/studio-agent/jobs/${jobId}/scenes/approval`);
+export function agentJobScenesApprovalUrl(jobId: string, sessionId?: string | null) {
+    const qs = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : '';
+    return agentApi(`/api/studio-agent/jobs/${jobId}/scenes/approval${qs}`);
 }
 
-export function agentJobAnimateUrl(jobId: string) {
-    return agentApi(`/api/studio-agent/jobs/${jobId}/animate`);
+export function agentJobAnimateUrl(jobId: string, sessionId?: string | null) {
+    const qs = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : '';
+    return agentApi(`/api/studio-agent/jobs/${jobId}/animate${qs}`);
 }
 
 export function agentJobFinalizeUrl(
     jobId: string,
     kind: AgentJobKind = 'longform',
-    opts?: { captions_enabled?: boolean; caption_mode?: 'word' | 'off' },
+    opts?: {
+        captions_enabled?: boolean;
+        caption_mode?: 'word' | 'off';
+        session_id?: string | null;
+    },
 ) {
     const qs = new URLSearchParams({ kind });
     if (typeof opts?.captions_enabled === 'boolean') {
@@ -260,15 +277,21 @@ export function agentJobFinalizeUrl(
     if (opts?.caption_mode) {
         qs.set('caption_mode', opts.caption_mode);
     }
+    if (opts?.session_id) {
+        qs.set('session_id', opts.session_id);
+    }
     return agentApi(`/api/studio-agent/jobs/${jobId}/finalize?${qs.toString()}`);
 }
 
 export async function finalizeLongformJob(
     jobId: string,
     accessToken: string,
+    sessionId: string,
 ): Promise<{ active_jobs?: unknown[] }> {
-    const idempotencyKey = crypto.randomUUID();
-    const res = await fetch(agentJobFinalizeUrl(jobId, 'longform'), {
+    const idempotencyKey = `auto-finalize:${sessionId}:${jobId}`;
+    const res = await fetch(agentJobFinalizeUrl(jobId, 'longform', {
+        session_id: sessionId,
+    }), {
         method: 'POST',
         headers: {
             Authorization: `Bearer ${accessToken}`,
@@ -292,7 +315,10 @@ export async function cancelJob(
     if (sessionId) qs.set('session_id', sessionId);
     const res = await fetch(agentApi(`/api/studio-agent/jobs/${jobId}/cancel?${qs.toString()}`), {
         method: 'POST',
-        headers: { Authorization: `Bearer ${accessToken}` },
+        headers: {
+            Authorization: `Bearer ${accessToken}`,
+            'X-Idempotency-Key': crypto.randomUUID(),
+        },
     });
     if (!res.ok) {
         const data = (await res.json().catch(() => ({}))) as { detail?: string };
