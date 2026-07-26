@@ -159,5 +159,34 @@ def send_exception(
     )
 
 
+def send_release(
+    title: str,
+    description: str = "",
+    *,
+    version: str = "",
+    release_id: str = "",
+) -> None:
+    """Announce one persisted Studio release without blocking startup.
+
+    ``studio_release_notes`` calls this from the singleton startup-maintenance
+    path. Keep it as a small wrapper around ``send_alert`` so an unset webhook
+    remains a zero-cost no-op and release metadata is bounded by the same
+    Discord field limits as every other alert.
+    """
+    context: dict[str, str] = {}
+    normalized_version = str(version or "").strip()
+    normalized_release_id = str(release_id or "").strip()
+    if normalized_version:
+        context["version"] = normalized_version[:40]
+    if normalized_release_id:
+        context["release_id"] = normalized_release_id[:160]
+    send_alert(
+        "success",
+        str(title or "Studio update"),
+        str(description or ""),
+        context=context or None,
+    )
+
+
 def is_configured() -> bool:
     return bool(_WEBHOOK_URL)

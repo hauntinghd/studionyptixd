@@ -546,6 +546,7 @@ def _wallet_for_user(user_id: str) -> dict:
     wallet.setdefault("monthly_usage", {})
     wallet.setdefault("monthly_usage_non_animated", {})
     wallet.setdefault("processed_mutations", {})
+    wallet.setdefault("pending_generation_operations", {})
     wallet.setdefault("updated_at", time.time())
     return wallet
 
@@ -561,6 +562,40 @@ def _remember_wallet_mutation(wallet: dict, key: str, record: dict) -> None:
     records = _processed_wallet_mutations(wallet)
     records[key] = {**record, "recorded_at": time.time()}
     wallet["processed_mutations"] = dict(list(records.items())[-1000:])
+
+
+def _pending_generation_operations(wallet: dict) -> dict:
+    records = wallet.get("pending_generation_operations")
+    return dict(records) if isinstance(records, dict) else {}
+
+
+def _record_pending_generation_operation(
+    wallet: dict,
+    *,
+    operation_id: str,
+    source: str,
+    month_key: str,
+    credits: int,
+    context: dict | None = None,
+) -> None:
+    if not operation_id:
+        return
+    records = _pending_generation_operations(wallet)
+    if operation_id in records:
+        return
+    if len(records) >= 256:
+        raise RuntimeError(
+            "Too many generation operations are awaiting settlement; retry shortly"
+        )
+    records[operation_id] = {
+        "operation_id": operation_id,
+        "source": str(source or ""),
+        "month_key": str(month_key or ""),
+        "credits": max(1, int(credits or 1)),
+        "context": dict(context or {}),
+        "created_at": time.time(),
+    }
+    wallet["pending_generation_operations"] = records
 
 
 def _plan_monthly_animated_limit(plan: str) -> int:
@@ -631,61 +666,297 @@ async def _reserve_generation_credit(
     is_admin: bool = False,
     usage_kind: str = "animated",
     credits_needed: int = 1,
+    operation_id: str = "",
+    operation_context: dict | None = None,
 ) -> tuple[bool, str, dict]:
     if is_admin:
         return True, "admin", _credit_state_for_user(user, effective_plan, billing_active, is_admin=True)
     user_id = str(user.get("id", "") or "")
     required_credits = max(1, int(credits_needed or 1))
+    normalized_operation_id = str(operation_id or "").strip()
+    if normalized_operation_id and (
+        len(normalized_operation_id) < 8
+        or len(normalized_operation_id) > 128
+        or not all(char.isalnum() or char in "._:-" for char in normalized_operation_id)
+    ):
+        raise ValueError("Invalid generation operation id")
     async with _topup_wallet_lock:
         wallet = _wallet_for_user(user_id)
         state = _credit_state_for_user(user, effective_plan, billing_active, is_admin=False)
         mk = state["month_key"]
+        if normalized_operation_id:
+            pending_operations = _pending_generation_operations(wallet)
+            existing_operation = pending_operations.get(normalized_operation_id)
+            if isinstance(existing_operation, dict):
+                state["credits_needed"] = int(
+                    existing_operation.get("credits", required_credits)
+                    or required_credits
+                )
+                state["reservation_replayed"] = True
+                state["reservation_operation_id"] = normalized_operation_id
+                return (
+                    True,
+                    str(existing_operation.get("source", "") or ""),
+                    state,
+                )
+            if len(pending_operations) >= 256:
+                raise RuntimeError(
+                    "Too many generation operations are awaiting settlement; "
+                    "retry shortly"
+                )
         if usage_kind == "non_animated":
+            remaining = int(state.get("non_animated_monthly_remaining", 0) or 0)
+            state["credits_needed"] = required_credits
+            if remaining < required_credits:
+                return False, "non_animated_limit", state
             usage = dict(wallet.get("monthly_usage_non_animated", {}) or {})
-            usage[mk] = int(usage.get(mk, 0) or 0) + 1
+            usage[mk] = int(usage.get(mk, 0) or 0) + required_credits
             wallet["monthly_usage_non_animated"] = usage
+            _record_pending_generation_operation(
+                wallet,
+                operation_id=normalized_operation_id,
+                source="non_animated_free",
+                month_key=mk,
+                credits=required_credits,
+                context=operation_context,
+            )
             wallet["updated_at"] = time.time()
             _save_topup_wallets()
-            return True, "non_animated_free", _credit_state_for_user(user, effective_plan, billing_active, is_admin=False)
+            refreshed = _credit_state_for_user(
+                user,
+                effective_plan,
+                billing_active,
+                is_admin=False,
+            )
+            refreshed["credits_needed"] = required_credits
+            if normalized_operation_id:
+                refreshed["reservation_operation_id"] = normalized_operation_id
+            return True, "non_animated_free", refreshed
         monthly_remaining = int(state.get("animated_monthly_remaining", 0) or 0)
         if monthly_remaining >= required_credits:
             usage = dict(wallet.get("monthly_usage", {}) or {})
             usage[mk] = int(usage.get(mk, 0) or 0) + required_credits
             wallet["monthly_usage"] = usage
+            _record_pending_generation_operation(
+                wallet,
+                operation_id=normalized_operation_id,
+                source="monthly",
+                month_key=mk,
+                credits=required_credits,
+                context=operation_context,
+            )
             wallet["updated_at"] = time.time()
             _save_topup_wallets()
             refreshed = _credit_state_for_user(user, effective_plan, billing_active, is_admin=False)
             refreshed["credits_needed"] = required_credits
+            if normalized_operation_id:
+                refreshed["reservation_operation_id"] = normalized_operation_id
             return True, "monthly", refreshed
         topup = int(wallet.get("animated_topup_credits", wallet.get("topup_credits", 0)) or 0)
         if topup >= required_credits:
             wallet["animated_topup_credits"] = topup - required_credits
             wallet["topup_credits"] = wallet["animated_topup_credits"]
+            _record_pending_generation_operation(
+                wallet,
+                operation_id=normalized_operation_id,
+                source="topup",
+                month_key=mk,
+                credits=required_credits,
+                context=operation_context,
+            )
             wallet["updated_at"] = time.time()
             _save_topup_wallets()
             refreshed = _credit_state_for_user(user, effective_plan, billing_active, is_admin=False)
             refreshed["credits_needed"] = required_credits
+            if normalized_operation_id:
+                refreshed["reservation_operation_id"] = normalized_operation_id
             return True, "topup", refreshed
         state["credits_needed"] = required_credits
         return False, "topup_required", state
 
 
-async def _refund_generation_credit(user_id: str, source: str, month_key: str = "", credits: int = 1) -> None:
-    if not user_id or source not in {"monthly", "topup"}:
-        return
+async def _refund_generation_credit(
+    user_id: str,
+    source: str,
+    month_key: str = "",
+    credits: int = 1,
+    idempotency_key: str = "",
+) -> bool:
+    """Durably restore one generation charge, at most once per mutation key.
+
+    The mutation record and restored balance are written in the same atomic
+    wallet snapshot. A caller may therefore retry after a process or job-state
+    persistence failure without granting the refund twice.
+    """
+    if not user_id or source not in {"monthly", "topup", "non_animated_free"}:
+        return False
     credit_amount = max(1, int(credits or 1))
+    mutation_key = str(idempotency_key or "").strip()
     async with _topup_wallet_lock:
         wallet = _wallet_for_user(user_id)
+        if mutation_key and mutation_key in _processed_wallet_mutations(wallet):
+            return False
         if source == "topup":
             wallet["animated_topup_credits"] = int(wallet.get("animated_topup_credits", wallet.get("topup_credits", 0)) or 0) + credit_amount
             wallet["topup_credits"] = wallet["animated_topup_credits"]
+        elif source == "non_animated_free":
+            mk = month_key or _month_key()
+            usage = dict(wallet.get("monthly_usage_non_animated", {}) or {})
+            usage[mk] = max(0, int(usage.get(mk, 0) or 0) - credit_amount)
+            wallet["monthly_usage_non_animated"] = usage
         else:
             mk = month_key or _month_key()
             usage = dict(wallet.get("monthly_usage", {}) or {})
             usage[mk] = max(0, int(usage.get(mk, 0) or 0) - credit_amount)
             wallet["monthly_usage"] = usage
+        _remember_wallet_mutation(
+            wallet,
+            mutation_key,
+            {
+                "operation": "generation_refund",
+                "source": source,
+                "month_key": month_key,
+                "credits": credit_amount,
+            },
+        )
         wallet["updated_at"] = time.time()
         _save_topup_wallets()
+    _append_usage_ledger({
+        "type": "generation_refund",
+        "user_id": user_id,
+        "source": source,
+        "month_key": month_key,
+        "credits": credit_amount,
+        "idempotency_key": mutation_key,
+        "ts": time.time(),
+    })
+    return True
+
+
+async def _settle_generation_credit_operation(
+    user_id: str,
+    operation_id: str,
+    *,
+    outcome: str,
+    reason: str = "",
+) -> bool:
+    """Commit or refund one wallet-journaled generation operation atomically.
+
+    A charged interactive provider call is recorded in the same durable wallet
+    snapshot as its debit. A crash can therefore leave either no debit or a
+    discoverable pending operation, never an invisible charge.
+    """
+
+    normalized_user_id = str(user_id or "").strip()
+    normalized_operation_id = str(operation_id or "").strip()
+    normalized_outcome = str(outcome or "").strip().lower()
+    if (
+        not normalized_user_id
+        or not normalized_operation_id
+        or normalized_outcome not in {"commit", "refund"}
+    ):
+        return False
+
+    ledger_event: dict | None = None
+    async with _topup_wallet_lock:
+        wallet = _wallet_for_user(normalized_user_id)
+        records = _pending_generation_operations(wallet)
+        operation = records.get(normalized_operation_id)
+        mutation_key = (
+            f"generation_{normalized_outcome}:{normalized_operation_id}"
+        )
+        if not isinstance(operation, dict):
+            return mutation_key in _processed_wallet_mutations(wallet)
+
+        source = str(operation.get("source", "") or "").strip().lower()
+        month_key = str(operation.get("month_key", "") or "")
+        credits = max(1, int(operation.get("credits", 1) or 1))
+        if source not in {"monthly", "topup", "non_animated_free"}:
+            raise ValueError("Pending generation operation has an invalid source")
+
+        if normalized_outcome == "refund":
+            if source == "topup":
+                wallet["animated_topup_credits"] = int(
+                    wallet.get(
+                        "animated_topup_credits",
+                        wallet.get("topup_credits", 0),
+                    )
+                    or 0
+                ) + credits
+                wallet["topup_credits"] = wallet["animated_topup_credits"]
+            elif source == "non_animated_free":
+                mk = month_key or _month_key()
+                usage = dict(wallet.get("monthly_usage_non_animated", {}) or {})
+                usage[mk] = max(0, int(usage.get(mk, 0) or 0) - credits)
+                wallet["monthly_usage_non_animated"] = usage
+            else:
+                mk = month_key or _month_key()
+                usage = dict(wallet.get("monthly_usage", {}) or {})
+                usage[mk] = max(0, int(usage.get(mk, 0) or 0) - credits)
+                wallet["monthly_usage"] = usage
+            ledger_event = {
+                "type": "generation_refund",
+                "user_id": normalized_user_id,
+                "source": source,
+                "month_key": month_key,
+                "credits": credits,
+                "idempotency_key": mutation_key,
+                "operation_id": normalized_operation_id,
+                "reason": str(reason or "")[:300],
+                "ts": time.time(),
+            }
+
+        records.pop(normalized_operation_id, None)
+        wallet["pending_generation_operations"] = records
+        _remember_wallet_mutation(
+            wallet,
+            mutation_key,
+            {
+                "operation": f"generation_{normalized_outcome}",
+                "source": source,
+                "month_key": month_key,
+                "credits": credits,
+                "reason": str(reason or "")[:300],
+            },
+        )
+        wallet["updated_at"] = time.time()
+        _save_topup_wallets()
+
+    if ledger_event is not None:
+        _append_usage_ledger(ledger_event)
+    return True
+
+
+async def _list_stale_generation_credit_operations(
+    *,
+    older_than: float,
+) -> list[dict]:
+    """Return wallet-journaled operations eligible for crash recovery."""
+
+    rows: list[dict] = []
+    async with _topup_wallet_lock:
+        for user_id, raw_wallet in list(_topup_wallets.items()):
+            if not isinstance(raw_wallet, dict):
+                continue
+            for operation_id, raw_operation in _pending_generation_operations(
+                raw_wallet
+            ).items():
+                if not isinstance(raw_operation, dict):
+                    continue
+                try:
+                    created_at = float(raw_operation.get("created_at", 0) or 0)
+                except (TypeError, ValueError):
+                    created_at = 0.0
+                if created_at > float(older_than):
+                    continue
+                rows.append(
+                    {
+                        **dict(raw_operation),
+                        "user_id": str(user_id or ""),
+                        "operation_id": str(operation_id or ""),
+                    }
+                )
+    return rows
 
 
 def _append_usage_ledger(event: dict) -> None:

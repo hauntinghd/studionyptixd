@@ -4,6 +4,8 @@ node_modules/
 runpod-serverless/.runpod.env
 ops/contabo/caddy.env
 ops/contabo/caddy.*.env
+ops/contabo/restic-s3.env
+ops/contabo/restic-password
 temp_assets/
 generated_videos/
 demo_uploads/

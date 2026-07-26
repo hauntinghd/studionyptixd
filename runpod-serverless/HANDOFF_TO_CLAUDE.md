@@ -17,7 +17,5 @@ Canonical endpoints:
 - API: `https://api-studio.nyptidindustries.com`
 - Google callback:
   `https://api-studio.nyptidindustries.com/api/oauth/google/youtube/callback`
-- PayPal webhook:
-  `https://api-studio.nyptidindustries.com/api/paypal/webhook`
 
 Fly is rollback-only. RunPod is not a Studio backend rollback target.

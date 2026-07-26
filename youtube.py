@@ -20,6 +20,9 @@ from urllib.parse import parse_qs, quote, urlencode, urlparse
 import httpx
 from fastapi import HTTPException
 from fastapi.responses import RedirectResponse, Response
+from nacl.exceptions import CryptoError
+from nacl.secret import SecretBox
+from nacl.utils import random as nacl_random
 
 import youtube_cache
 import youtube_quota
@@ -310,9 +313,270 @@ def _youtube_title_keywords(title: str, max_items: int = 6) -> list[str]:
 
 
 _youtube_connections_hydrated_from_supabase = False
+_YOUTUBE_TOKEN_CIPHERTEXT_PREFIX = "sbx1:"
+_youtube_token_box_cache: (
+    tuple[tuple[str, str], tuple[SecretBox, ...]] | None
+) = None
 
 
-def _load_youtube_connections() -> None:
+def _decode_youtube_token_key(raw: str, *, variable_name: str) -> bytes:
+    key: bytes
+    try:
+        key = bytes.fromhex(raw) if re.fullmatch(r"[0-9a-fA-F]{64}", raw) else b""
+    except ValueError:
+        key = b""
+    if not key:
+        try:
+            key = base64.b64decode(
+                raw + ("=" * (-len(raw) % 4)),
+                altchars=b"-_",
+                validate=True,
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                f"{variable_name} must be 32-byte hex or URL-safe base64"
+            ) from exc
+    if len(key) != SecretBox.KEY_SIZE:
+        raise RuntimeError(
+            f"{variable_name} must decode to exactly 32 bytes"
+        )
+    return key
+
+
+def _youtube_token_boxes() -> tuple[SecretBox, ...]:
+    """Load the primary token key and an optional rolling-rotation key."""
+
+    global _youtube_token_box_cache
+    primary_raw = str(
+        os.getenv("YOUTUBE_TOKEN_ENCRYPTION_KEY", "") or ""
+    ).strip()
+    previous_raw = str(
+        os.getenv("YOUTUBE_TOKEN_ENCRYPTION_KEY_PREVIOUS", "") or ""
+    ).strip()
+    if not primary_raw:
+        raise RuntimeError(
+            "YOUTUBE_TOKEN_ENCRYPTION_KEY is required to persist YouTube OAuth tokens"
+        )
+    cache_key = (primary_raw, previous_raw)
+    if _youtube_token_box_cache and _youtube_token_box_cache[0] == cache_key:
+        return _youtube_token_box_cache[1]
+    primary = _decode_youtube_token_key(
+        primary_raw,
+        variable_name="YOUTUBE_TOKEN_ENCRYPTION_KEY",
+    )
+    keys = [primary]
+    if previous_raw:
+        previous = _decode_youtube_token_key(
+            previous_raw,
+            variable_name="YOUTUBE_TOKEN_ENCRYPTION_KEY_PREVIOUS",
+        )
+        if previous != primary:
+            keys.append(previous)
+    boxes = tuple(SecretBox(key) for key in keys)
+    _youtube_token_box_cache = (cache_key, boxes)
+    return boxes
+
+
+def _youtube_token_box() -> SecretBox:
+    return _youtube_token_boxes()[0]
+
+
+def _youtube_encrypt_token(value: str) -> str:
+    token = str(value or "")
+    if not token or token.startswith(_YOUTUBE_TOKEN_CIPHERTEXT_PREFIX):
+        return token
+    encrypted = _youtube_token_box().encrypt(
+        token.encode("utf-8"),
+        nacl_random(SecretBox.NONCE_SIZE),
+    )
+    encoded = base64.urlsafe_b64encode(bytes(encrypted)).decode("ascii")
+    return f"{_YOUTUBE_TOKEN_CIPHERTEXT_PREFIX}{encoded}"
+
+
+def _youtube_decrypt_token(value: str) -> str:
+    token = str(value or "")
+    if not token or not token.startswith(_YOUTUBE_TOKEN_CIPHERTEXT_PREFIX):
+        # Legacy plaintext is accepted only in memory so a configured key can
+        # migrate it on the next save; serializers never write it back.
+        return token
+    encoded = token[len(_YOUTUBE_TOKEN_CIPHERTEXT_PREFIX) :]
+    try:
+        payload = base64.urlsafe_b64decode(
+            encoded + ("=" * (-len(encoded) % 4))
+        )
+    except (ValueError, TypeError) as exc:
+        raise RuntimeError("Stored YouTube OAuth token is malformed") from exc
+    last_error: Exception | None = None
+    for box in _youtube_token_boxes():
+        try:
+            return box.decrypt(payload).decode("utf-8")
+        except (CryptoError, UnicodeDecodeError) as exc:
+            last_error = exc
+    raise RuntimeError(
+        "Stored YouTube OAuth token could not be decrypted"
+    ) from last_error
+
+
+def _youtube_connections_for_storage(connections: dict) -> dict:
+    serialized = json.loads(json.dumps(connections or {}, ensure_ascii=True))
+    for bucket in serialized.values():
+        if not isinstance(bucket, dict):
+            continue
+        channels = bucket.get("channels")
+        if not isinstance(channels, dict):
+            continue
+        for record in channels.values():
+            if not isinstance(record, dict):
+                continue
+            for field in ("access_token", "refresh_token"):
+                value = str(record.get(field, "") or "")
+                if value:
+                    record[field] = _youtube_encrypt_token(value)
+    return serialized
+
+
+def _youtube_connections_for_memory(connections: dict) -> dict:
+    hydrated = json.loads(json.dumps(connections or {}, ensure_ascii=True))
+    for bucket in hydrated.values():
+        if not isinstance(bucket, dict):
+            continue
+        channels = bucket.get("channels")
+        if not isinstance(channels, dict):
+            continue
+        for record in channels.values():
+            if not isinstance(record, dict):
+                continue
+            for field in ("access_token", "refresh_token"):
+                value = str(record.get(field, "") or "")
+                if value:
+                    record[field] = _youtube_decrypt_token(value)
+    return hydrated
+
+
+def _youtube_connections_have_plaintext_tokens(connections: dict) -> bool:
+    for bucket in (connections or {}).values():
+        channels = bucket.get("channels") if isinstance(bucket, dict) else {}
+        for record in (channels or {}).values():
+            if not isinstance(record, dict):
+                continue
+            for field in ("access_token", "refresh_token"):
+                value = str(record.get(field, "") or "")
+                if value and not value.startswith(_YOUTUBE_TOKEN_CIPHERTEXT_PREFIX):
+                    return True
+    return False
+
+
+def _youtube_connections_require_reencryption(connections: dict) -> bool:
+    """Validate every token and detect plaintext or previous-key ciphertext."""
+
+    boxes = _youtube_token_boxes()
+    for bucket in (connections or {}).values():
+        channels = bucket.get("channels") if isinstance(bucket, dict) else {}
+        for record in (channels or {}).values():
+            if not isinstance(record, dict):
+                continue
+            for field in ("access_token", "refresh_token"):
+                value = str(record.get(field, "") or "")
+                if not value:
+                    continue
+                if not value.startswith(_YOUTUBE_TOKEN_CIPHERTEXT_PREFIX):
+                    return True
+                encoded = value[len(_YOUTUBE_TOKEN_CIPHERTEXT_PREFIX) :]
+                try:
+                    payload = base64.b64decode(
+                        encoded + ("=" * (-len(encoded) % 4)),
+                        altchars=b"-_",
+                        validate=True,
+                    )
+                except Exception as exc:
+                    raise RuntimeError(
+                        "Stored YouTube OAuth token is malformed"
+                    ) from exc
+                try:
+                    boxes[0].decrypt(payload).decode("utf-8")
+                    continue
+                except (CryptoError, UnicodeDecodeError):
+                    pass
+                for previous_box in boxes[1:]:
+                    try:
+                        previous_box.decrypt(payload).decode("utf-8")
+                        return True
+                    except (CryptoError, UnicodeDecodeError):
+                        continue
+                raise RuntimeError(
+                    "Stored YouTube OAuth token could not be decrypted"
+                )
+    return False
+
+
+def _write_youtube_connections_cache(payload: dict) -> None:
+    YOUTUBE_CONNECTIONS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    temporary = YOUTUBE_CONNECTIONS_FILE.with_name(
+        f".{YOUTUBE_CONNECTIONS_FILE.name}.{os.getpid()}.{secrets.token_hex(6)}.tmp"
+    )
+    try:
+        with temporary.open("w", encoding="utf-8", newline="\n") as handle:
+            json.dump(payload, handle, ensure_ascii=True, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, YOUTUBE_CONNECTIONS_FILE)
+        try:
+            YOUTUBE_CONNECTIONS_FILE.chmod(0o600)
+        except OSError:
+            pass
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _upsert_youtube_connections_store(payload: dict) -> bool:
+    """Best-effort write of an already encrypted connection snapshot."""
+
+    import youtube_connections_store as _yc_store
+
+    if not _yc_store.configured():
+        return False
+    succeeded = True
+    for user_id, bucket in (payload or {}).items():
+        if not isinstance(bucket, dict):
+            continue
+        default_channel = str(bucket.get("default_channel_id", "") or "")
+        channels = bucket.get("channels") or {}
+        if not isinstance(channels, dict):
+            continue
+        for channel_id, record in channels.items():
+            if not isinstance(record, dict):
+                continue
+            if not _yc_store.upsert(
+                str(user_id),
+                str(channel_id),
+                record,
+                is_default=(channel_id == default_channel),
+            ):
+                succeeded = False
+        if default_channel and not _yc_store.clear_default_except(
+            str(user_id), default_channel
+        ):
+            succeeded = False
+    return succeeded
+
+
+def _prepare_youtube_connections_payload(
+    payload: dict,
+) -> tuple[dict, dict, bool]:
+    """Return plaintext memory state plus canonical encrypted persistence state."""
+
+    migration_required = _youtube_connections_require_reencryption(payload)
+    in_memory = _youtube_connections_for_memory(payload)
+    serialized = (
+        _youtube_connections_for_storage(in_memory)
+        if migration_required
+        else json.loads(json.dumps(payload or {}, ensure_ascii=True))
+    )
+    return in_memory, serialized, migration_required
+
+
+def _load_youtube_connections(*, strict_store: bool = False) -> None:
     """Rebuild the in-memory `_youtube_connections` dict.
 
     Priority:
@@ -324,80 +588,87 @@ def _load_youtube_connections() -> None:
     every request, just on first load per worker.
     """
     global _youtube_connections, _youtube_connections_hydrated_from_supabase
-    try:
-        import youtube_connections_store as _yc_store
-        if _yc_store.configured() and not _youtube_connections_hydrated_from_supabase:
-            hydrated = _yc_store.hydrate()
-            if hydrated:
-                _youtube_connections = hydrated
+    import youtube_connections_store as _yc_store
+
+    store_configured = _yc_store.configured()
+    if store_configured and not _youtube_connections_hydrated_from_supabase:
+        hydrated = (
+            _yc_store.hydrate(strict=True)
+            if strict_store
+            else _yc_store.hydrate()
+        )
+        if hydrated:
+            in_memory, serialized, migration_required = (
+                _prepare_youtube_connections_payload(hydrated)
+            )
+            if migration_required and not _upsert_youtube_connections_store(
+                serialized
+            ):
+                raise RuntimeError(
+                    "YouTube OAuth token encryption migration did not reach "
+                    "the authoritative store"
+                )
+            _write_youtube_connections_cache(serialized)
+            _youtube_connections = in_memory
+            _youtube_connections_hydrated_from_supabase = True
+            return
+        if strict_store:
+            _youtube_connections_hydrated_from_supabase = True
+        # Supabase returned empty: either no rows yet or a transient store
+        # failure. Fall through to the durable local cache without clearing
+        # any already-loaded in-memory channels.
+
+    if YOUTUBE_CONNECTIONS_FILE.exists():
+        data = json.loads(YOUTUBE_CONNECTIONS_FILE.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            raise RuntimeError("YouTube connection cache is not a JSON object")
+        in_memory, serialized, migration_required = (
+            _prepare_youtube_connections_payload(data)
+        )
+        if migration_required:
+            _write_youtube_connections_cache(serialized)
+        if (
+            store_configured
+            and not _youtube_connections_hydrated_from_supabase
+            and data
+        ):
+            migrated = _upsert_youtube_connections_store(serialized)
+            if migration_required and not migrated:
+                raise RuntimeError(
+                    "YouTube OAuth token encryption migration did not reach "
+                    "the authoritative store"
+                )
+            if migrated:
                 _youtube_connections_hydrated_from_supabase = True
-                # Warm the disk cache so subsequent reads in this worker are fast.
-                try:
-                    YOUTUBE_CONNECTIONS_FILE.parent.mkdir(parents=True, exist_ok=True)
-                    YOUTUBE_CONNECTIONS_FILE.write_text(
-                        json.dumps(_youtube_connections, ensure_ascii=True, indent=2),
-                        encoding="utf-8",
-                    )
-                except Exception:
-                    pass
-                return
-            # Supabase returned empty → either no rows yet or network error.
-            # Fall through to disk so we don't wipe cached state on transient failure.
-    except Exception:
-        pass
-    try:
-        if YOUTUBE_CONNECTIONS_FILE.exists():
-            data = json.loads(YOUTUBE_CONNECTIONS_FILE.read_text(encoding="utf-8"))
-            if isinstance(data, dict):
-                _youtube_connections = data
-                # First-deploy migration: Supabase empty + disk has data → push to Supabase.
-                # Prevents forcing a reconnect on the deploy that first introduces Supabase.
-                try:
-                    import youtube_connections_store as _yc_store
-                    if _yc_store.configured() and not _youtube_connections_hydrated_from_supabase and data:
-                        for uid, bucket in data.items():
-                            if not isinstance(bucket, dict):
-                                continue
-                            default_ch = str(bucket.get("default_channel_id", "") or "")
-                            channels = bucket.get("channels") or {}
-                            if not isinstance(channels, dict):
-                                continue
-                            for ch_id, rec in channels.items():
-                                if isinstance(rec, dict):
-                                    _yc_store.upsert(str(uid), str(ch_id), rec, is_default=(ch_id == default_ch))
-                        _youtube_connections_hydrated_from_supabase = True
-                except Exception:
-                    pass
-                return
-    except Exception:
-        pass
-    _youtube_connections = {}
+        _youtube_connections = in_memory
+        return
+
+    if not _youtube_connections:
+        _youtube_connections = {}
 
 
 def _reload_youtube_connections_from_supabase() -> bool:
     """Force-refresh the in-memory YouTube connection cache from Supabase."""
     global _youtube_connections, _youtube_connections_hydrated_from_supabase
-    try:
-        import youtube_connections_store as _yc_store
+    import youtube_connections_store as _yc_store
 
-        if not _yc_store.configured():
-            return False
-        hydrated = _yc_store.hydrate()
-        if not hydrated:
-            return False
-        _youtube_connections = hydrated
-        _youtube_connections_hydrated_from_supabase = True
-        try:
-            YOUTUBE_CONNECTIONS_FILE.parent.mkdir(parents=True, exist_ok=True)
-            YOUTUBE_CONNECTIONS_FILE.write_text(
-                json.dumps(_youtube_connections, ensure_ascii=True, indent=2),
-                encoding="utf-8",
-            )
-        except Exception:
-            pass
-        return True
-    except Exception:
+    if not _yc_store.configured():
         return False
+    hydrated = _yc_store.hydrate(strict=True)
+    if not hydrated:
+        return False
+    in_memory, serialized, migration_required = (
+        _prepare_youtube_connections_payload(hydrated)
+    )
+    if migration_required and not _upsert_youtube_connections_store(serialized):
+        raise RuntimeError(
+            "YouTube OAuth token encryption migration did not reach "
+            "the authoritative store"
+        )
+    _write_youtube_connections_cache(serialized)
+    _youtube_connections = in_memory
+    _youtube_connections_hydrated_from_supabase = True
+    return True
 
 
 def _save_youtube_connections() -> None:
@@ -406,40 +677,84 @@ def _save_youtube_connections() -> None:
     Always writes disk (hot cache). Additionally upserts to Supabase if
     configured — Supabase becomes authoritative and survives worker cycles.
     """
+    serialized = _youtube_connections_for_storage(_youtube_connections)
+    disk_saved = False
     try:
-        YOUTUBE_CONNECTIONS_FILE.parent.mkdir(parents=True, exist_ok=True)
-        YOUTUBE_CONNECTIONS_FILE.write_text(
-            json.dumps(_youtube_connections, ensure_ascii=True, indent=2),
-            encoding="utf-8",
-        )
+        _write_youtube_connections_cache(serialized)
+        disk_saved = True
     except Exception:
-        pass
+        disk_saved = False
+    store_configured = False
+    store_saved = False
     try:
         import youtube_connections_store as _yc_store
-        if not _yc_store.configured():
-            return
-        for user_id, bucket in (_youtube_connections or {}).items():
-            if not isinstance(bucket, dict):
-                continue
-            default_channel = str(bucket.get("default_channel_id", "") or "")
-            channels = bucket.get("channels") or {}
-            if not isinstance(channels, dict):
-                continue
-            for channel_id, record in channels.items():
-                if not isinstance(record, dict):
-                    continue
-                _yc_store.upsert(
-                    str(user_id),
-                    str(channel_id),
-                    record,
-                    is_default=(channel_id == default_channel),
-                )
-            if default_channel:
-                _yc_store.clear_default_except(str(user_id), default_channel)
+
+        store_configured = _yc_store.configured()
+        if store_configured:
+            store_saved = _upsert_youtube_connections_store(serialized)
     except Exception:
-        # Never let Supabase failures break the request path — disk is a valid
-        # fallback that the next deploy's Supabase hydrate will re-source from.
-        pass
+        store_saved = False
+    if store_configured:
+        if store_saved:
+            return
+        raise RuntimeError(
+            "YouTube OAuth connection did not reach the authoritative store"
+        )
+    if disk_saved:
+        return
+    raise RuntimeError("YouTube OAuth connection could not be persisted securely")
+
+
+def _youtube_token_storage_readiness(*, require_key: bool = False) -> dict:
+    """Validate the production key, authoritative store, and cached ciphertext."""
+
+    primary = str(
+        os.getenv("YOUTUBE_TOKEN_ENCRYPTION_KEY", "") or ""
+    ).strip()
+    if not primary and not require_key:
+        return {
+            "ready": True,
+            "configured": False,
+            "previous_key_configured": False,
+            "error": "",
+        }
+    try:
+        _youtube_token_boxes()
+        _load_youtube_connections(strict_store=require_key)
+    except Exception as exc:
+        message = str(exc or "").lower()
+        if "is required" in message:
+            error = "key_missing"
+        elif "must decode" in message or "must be 32-byte" in message:
+            error = "key_invalid"
+        elif "could not be decrypted" in message or "malformed" in message:
+            error = "decrypt_failed"
+        elif "authoritative" in message and "unavailable" in message:
+            error = "store_unavailable"
+        elif "migration" in message:
+            error = "migration_failed"
+        else:
+            error = "storage_error"
+        return {
+            "ready": False,
+            "configured": bool(primary),
+            "previous_key_configured": bool(
+                str(
+                    os.getenv(
+                        "YOUTUBE_TOKEN_ENCRYPTION_KEY_PREVIOUS",
+                        "",
+                    )
+                    or ""
+                ).strip()
+            ),
+            "error": error,
+        }
+    return {
+        "ready": True,
+        "configured": True,
+        "previous_key_configured": len(_youtube_token_boxes()) > 1,
+        "error": "",
+    }
 
 
 def _prune_youtube_oauth_states() -> None:

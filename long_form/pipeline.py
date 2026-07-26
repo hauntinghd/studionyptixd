@@ -1069,8 +1069,15 @@ def _longform_qa_context_fingerprint(
     stage: str,
     scene_index: int,
 ) -> str:
+    from studio_agent import visual_qa
+
     context = _longform_scene_context(job_id, scene_index)
     parts = [
+        f"visual_qa={visual_qa.VISUAL_QA_VERSION}",
+        f"semantic_qa={visual_qa.SEMANTIC_QA_VERSION}",
+        f"still_semantic_qa={visual_qa.STILL_SEMANTIC_QA_VERSION}",
+        f"product_semantic_qa={visual_qa.PRODUCT_SEMANTIC_QA_VERSION}",
+        f"scene_visual_qa={visual_qa.SCENE_VISUAL_QA_VERSION}",
         str(stage).lower(),
         str(context.get("scene_contract") or ""),
         str(context.get("motion_brief") or ""),

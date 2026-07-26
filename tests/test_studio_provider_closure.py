@@ -257,18 +257,23 @@ def test_generic_clip_requires_silence_and_motion_brief(tmp_path, monkeypatch) -
     frames = []
     frame_dir = clip.parent / ".vq_frames_b00"
     frame_dir.mkdir()
-    for index in range(7):
+    for index in range(9):
         frame = frame_dir / f"f{index:02d}.jpg"
         frame.write_bytes(b"frame")
         frames.append(frame)
     prompts: list[str] = []
+    requested_frame_counts: list[int] = []
 
     monkeypatch.setattr(
         visual_qa,
         "_audio_silence_report",
         lambda _path: {"status": "pass", "pass": True, "summary": "silent"},
     )
-    monkeypatch.setattr(visual_qa, "_extract_clip_frames", lambda *_args, **_kwargs: list(frames))
+    def fake_extract(_path: Path, *, count: int) -> list[Path]:
+        requested_frame_counts.append(count)
+        return list(frames)
+
+    monkeypatch.setattr(visual_qa, "_extract_clip_frames", fake_extract)
 
     def fake_vision(_paths: list[str], *, prompt: str) -> dict:
         prompts.append(prompt)
@@ -292,6 +297,8 @@ def test_generic_clip_requires_silence_and_motion_brief(tmp_path, monkeypatch) -
     )
     assert report["status"] == "pass"
     assert report["audio_silence"]["pass"] is True
+    assert report["frames_reviewed"] == 9
+    assert requested_frame_counts == [9]
     assert "two-step recoil" in prompts[0]
 
 

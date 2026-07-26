@@ -260,23 +260,57 @@ validate_studio_secrets() {
   local key value
   secret_file="$(env_value "${candidate}" STUDIO_ENV_FILE)" || die "candidate lacks STUDIO_ENV_FILE"
   assert_private_file "${secret_file}"
+  if grep -Eq '^[[:space:]]*(export[[:space:]]+)?PAYPAL_[A-Za-z0-9_]*[[:space:]]*=' "${secret_file}"; then
+    die "legacy PAYPAL_* entries must be removed from the Stripe-only Studio secret file"
+  fi
   for key in \
     ANTHROPIC_API_KEY \
     FAL_AI_KEY \
     YOUTUBE_API_KEY \
     GOOGLE_CLIENT_ID \
     GOOGLE_CLIENT_SECRET \
+    YOUTUBE_TOKEN_ENCRYPTION_KEY \
     GOOGLE_REDIRECT_URI \
     SUPABASE_URL \
     SUPABASE_ANON_KEY \
     SUPABASE_JWT_SECRET \
     SUPABASE_SERVICE_KEY \
     STRIPE_SECRET_KEY \
-    STRIPE_WEBHOOK_SECRET \
-    PAYPAL_CLIENT_ID \
-    PAYPAL_CLIENT_SECRET \
-    PAYPAL_WEBHOOK_ID; do
+    STRIPE_WEBHOOK_SECRET; do
     value="$(env_value "${secret_file}" "${key}" 2>/dev/null || true)"
     [[ -n "${value}" && "${value}" != *"<PASTE_"* ]] || die "required Studio secret/config is empty: ${key}"
+  done
+  for key in \
+    YOUTUBE_TOKEN_ENCRYPTION_KEY \
+    YOUTUBE_TOKEN_ENCRYPTION_KEY_PREVIOUS; do
+    value="$(env_value "${secret_file}" "${key}" 2>/dev/null || true)"
+    if [[ "${key}" == "YOUTUBE_TOKEN_ENCRYPTION_KEY_PREVIOUS" && -z "${value}" ]]; then
+      continue
+    fi
+    if ! YOUTUBE_KEY_CANDIDATE="${value}" python3 - "${key}" <<'PY'
+import base64
+import os
+import re
+import sys
+
+name = sys.argv[1]
+raw = os.environ.get("YOUTUBE_KEY_CANDIDATE", "").strip()
+try:
+    if re.fullmatch(r"[0-9a-fA-F]{64}", raw):
+        decoded = bytes.fromhex(raw)
+    else:
+        decoded = base64.b64decode(
+            raw + ("=" * (-len(raw) % 4)),
+            altchars=b"-_",
+            validate=True,
+        )
+except Exception:
+    raise SystemExit(1)
+if len(decoded) != 32:
+    raise SystemExit(1)
+PY
+    then
+      die "${key} must be exactly 32-byte hexadecimal or URL-safe base64"
+    fi
   done
 }

@@ -48,8 +48,6 @@ services:
         value: "false"
       - key: SITE_URL
         value: https://studio.nyptidindustries.com
-      - key: PAYPAL_ENV
-        value: live
       - key: IMAGE_PROVIDER_ORDER
         value: fal
       - key: XAI_IMAGE_FALLBACK_ENABLED
@@ -84,6 +82,10 @@ services:
         sync: false
       - key: GOOGLE_CLIENT_SECRET
         sync: false
+      - key: YOUTUBE_TOKEN_ENCRYPTION_KEY
+        sync: false
+      - key: YOUTUBE_TOKEN_ENCRYPTION_KEY_PREVIOUS
+        sync: false
       - key: GOOGLE_REDIRECT_URI
         sync: false
       - key: ELEVENLABS_API_KEY
@@ -113,12 +115,6 @@ services:
       - key: STRIPE_SECRET_KEY
         sync: false
       - key: STRIPE_WEBHOOK_SECRET
-        sync: false
-      - key: PAYPAL_CLIENT_ID
-        sync: false
-      - key: PAYPAL_CLIENT_SECRET
-        sync: false
-      - key: PAYPAL_WEBHOOK_ID
         sync: false
       - key: COMFYUI_URL
         sync: false

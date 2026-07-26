@@ -88,7 +88,7 @@ class ProductionBudgetControlTests(unittest.TestCase):
         self.assertEqual(budget["breakdown"]["image_edit_count"], 3)
         self.assertTrue(budget["breakdown"]["image_model_pricing_unit"])
         self.assertEqual(control["lane"], "render")
-        self.assertFalse(control["requires_approval"])
+        self.assertTrue(control["requires_approval"])
         self.assertIn("await_scene_review", control["stage_gates"])
         self.assertEqual(control["durable_state"]["job_id"], "shortform-test")
         self.assertTrue(control["durable_state"]["must_persist"])
@@ -190,12 +190,13 @@ class ProductionBudgetControlTests(unittest.TestCase):
             result = json.loads((workspace / "result.json").read_text(encoding="utf-8"))
             progress = json.loads((workspace / "progress.json").read_text(encoding="utf-8"))
 
-            self.assertEqual(snap["status"], "complete")
-            self.assertEqual(snap["progress"], 100)
+            self.assertEqual(snap["status"], "final_qa_blocked")
+            self.assertEqual(snap["progress"], 99)
             self.assertFalse(snap["running"])
-            self.assertIn("/api/studio-agent/jobs/", snap["mp4_url"])
-            self.assertEqual(result["status"], "complete")
-            self.assertEqual(progress["stage"], "complete")
+            self.assertNotIn("mp4_url", snap)
+            self.assertFalse(snap["ready_to_post"])
+            self.assertEqual(result["status"], "scenes_approved")
+            self.assertEqual(progress["stage"], "scenes_approved")
         finally:
             shutil.rmtree(workspace, ignore_errors=True)
 
@@ -219,7 +220,7 @@ class ProductionBudgetControlTests(unittest.TestCase):
         finally:
             shutil.rmtree(workspace, ignore_errors=True)
 
-    def test_stale_shortform_snapshot_reclaims_from_durable_job_spec(self):
+    def test_stale_shortform_snapshot_requires_explicit_backend_owned_resume(self):
         job_id = f"test{uuid.uuid4().hex[:12]}"
         workspace = (jobs.ROOT / jobs.SKELETON_OUTPUT / job_id).resolve()
         try:
@@ -244,12 +245,12 @@ class ProductionBudgetControlTests(unittest.TestCase):
             ):
                 snap = jobs.get_job_snapshot(job_id, "shortform")
 
-            reclaim.assert_called_once_with(workspace, job_id)
-            self.assertEqual(snap["status"], "running")
-            self.assertEqual(snap["stage"], "restarting")
-            self.assertEqual(snap["stage_label"], "Restarting")
+            reclaim.assert_not_called()
+            self.assertEqual(snap["status"], "interrupted")
+            self.assertEqual(snap["stage"], "resume_required")
+            self.assertEqual(snap["stage_label"], "Resume required")
             self.assertGreaterEqual(snap["progress"], 22)
-            self.assertIn("Resuming from the saved job spec", snap["stage_detail"])
+            self.assertIn("explicit Resume/Retry", snap["stage_detail"])
         finally:
             shutil.rmtree(workspace, ignore_errors=True)
 

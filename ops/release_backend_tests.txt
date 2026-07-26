@@ -1,0 +1,27 @@
+# One release-critical backend test manifest, consumed by CI and the local
+# Contabo deploy wrapper. The tests directory is mandatory as a unit, followed
+# by the supported root-level production contract suites. Legacy exploratory
+# scripts test_sdk.py and test_watcher.py are intentionally not release tests.
+tests
+test_render_simulation_guards.py
+test_search_v2.py
+test_skeleton_artifact_guard.py
+test_skeleton_prompt_integrity.py
+test_studio_agent_anti_hallucination.py
+test_studio_agent_channel_guard.py
+test_studio_agent_memory_learning.py
+test_studio_agent_production_budget.py
+test_studio_agent_production_budget_control.py
+test_studio_agent_production_costs.py
+test_studio_agent_production_slots.py
+test_studio_agent_provider_auth.py
+test_studio_agent_public_search_routing.py
+test_studio_agent_queue.py
+test_studio_agent_reference_orchestration.py
+test_studio_agent_render_qa.py
+test_studio_agent_router_control.py
+test_studio_agent_training_capture.py
+test_studio_product_reference.py
+test_styled_pipeline_llm_fallback.py
+test_unified_credits.py
+test_youtube_token_reconnect.py

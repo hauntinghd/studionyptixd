@@ -43,7 +43,7 @@ Important env groups:
 
 - OpenRouter / model routing keys for Studio Agent.
 - YouTube Data API keys and Google OAuth client values for Catalyst and connected-channel intelligence.
-- Stripe and PayPal credentials for billing.
+- Stripe credentials and webhook signing secret for billing.
 - Supabase credentials for durable user/channel state.
 - RunPod, fal.ai, ComfyUI, and render-worker credentials for generation pipelines.
 

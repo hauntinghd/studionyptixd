@@ -62,47 +62,36 @@ if (-not $repoUrl.EndsWith(".git", [StringComparison]::OrdinalIgnoreCase)) {
 }
 
 if (-not $SkipTests) {
-    $python = Find-CommandPath "py"
-    if (-not $python) { throw "Python launcher (py) is required for release tests" }
+    $uv = Find-CommandPath "uv" @(
+        "$env:LOCALAPPDATA\hermes\bin\uv.exe",
+        "$env:USERPROFILE\.local\bin\uv.exe"
+    )
+    if (-not $uv) {
+        throw "uv is required to run release tests on production Python 3.11"
+    }
+    $testManifest = Join-Path $Root "ops\release_backend_tests.txt"
+    if (-not (Test-Path -LiteralPath $testManifest -PathType Leaf)) {
+        throw "Release test manifest is missing: $testManifest"
+    }
     $tests = @(
-        "test_unified_credits.py",
-        "tests/test_studio_command_layer.py",
-        "tests/test_studio_command_runner.py",
-        "tests/test_production_command_authority.py",
-        "tests/test_production_command_v2.py",
-        "tests/test_production_workflows.py",
-        "tests/test_skeleton_command_boundary.py",
-        "tests/test_cliplab_command_boundary.py",
-        "tests/test_catalyst_command_boundary.py",
-        "tests/test_legacy_production_command_boundary.py",
-        "tests/test_channel_data_natural_language.py",
-        "tests/test_longform_release_contract.py",
-        "tests/test_longform_billing_boundary.py",
-        "tests/test_caption_alignment.py",
-        "tests/test_longform_media_revision.py",
-        "tests/test_long_form_router_job_ownership.py",
-        "tests/test_media_file_ownership.py",
-        "tests/test_private_media_auth.py",
-        "tests/test_runpod_standalone_routes.py",
-        "tests/test_runpod_direct_routes.py",
-        "tests/test_runpod_execution_routing.py",
-        "tests/test_studio_agent_job_ownership.py",
-        "tests/test_studio_paid_access.py",
-        "tests/test_public_api_authorization.py",
-        "tests/test_contabo_release_contract.py",
-        "tests/test_embedded_generation_queue.py",
-        "tests/test_frontend_static.py",
-        "tests/test_desktop_release_channel.py",
-        "tests/test_billing_webhook_idempotency.py",
-        "tests/test_unified_credits_settlement.py",
-        "tests/test_short_caption_sync.py"
-    ) | Where-Object { Test-Path $_ }
+        Get-Content -LiteralPath $testManifest -Encoding utf8 |
+            ForEach-Object { $_.Trim() } |
+            Where-Object { $_ -and -not $_.StartsWith("#") }
+    )
+    if ($tests.Count -eq 0) {
+        throw "Release test manifest is empty"
+    }
+    foreach ($testPath in $tests) {
+        if (-not (Test-Path -LiteralPath (Join-Path $Root $testPath))) {
+            throw "Mandatory release test is missing: $testPath"
+        }
+    }
     $env:PYTHONDONTWRITEBYTECODE = "1"
     $env:STUDIO_RUNPOD_PRODUCTION_ENABLED = "0"
     $env:FAL_AI_KEY = ""
     $env:FAL_KEY = ""
     $env:XAI_API_KEY = ""
-    & $python -3.12 -m pytest -q @tests
+    & $uv run --python 3.11 python -m pytest -q @tests
     Assert-NativeSuccess "provider-free release tests"
 
     Push-Location (Join-Path $Root "ViralShorts-App")

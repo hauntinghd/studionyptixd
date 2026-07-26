@@ -34,6 +34,7 @@ _SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip().rstrip("/")
 _SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "").strip() or os.getenv("SUPABASE_ANON_KEY", "").strip()
 _TABLE = "youtube_channel_connections"
 _REQUEST_TIMEOUT = 10.0
+_TOKEN_CIPHERTEXT_PREFIX = "sbx1:"
 
 # Columns explicitly modeled in the table; anything else on the record goes
 # into the `extra` jsonb column. Keep in sync with migrations/*.sql.
@@ -69,6 +70,14 @@ def _split_record(record: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any
         # user_id and channel_id are on the row itself, not "extra"
         if key in ("user_id", "channel_id"):
             continue
+        if (
+            key in {"access_token", "refresh_token"}
+            and str(value or "")
+            and not str(value).startswith(_TOKEN_CIPHERTEXT_PREFIX)
+        ):
+            raise ValueError(
+                f"{key} must use the encrypted {_TOKEN_CIPHERTEXT_PREFIX} envelope"
+            )
         if key in _KNOWN_COLUMNS:
             known[key] = value
         else:
@@ -91,7 +100,7 @@ def _merge_row_to_record(row: dict[str, Any]) -> dict[str, Any]:
     return record
 
 
-def hydrate() -> dict[str, Any]:
+def hydrate(*, strict: bool = False) -> dict[str, Any]:
     """Fetch all rows and return them in the canonical
     `{user_id: {default_channel_id, channels: {...}}}` shape.
 
@@ -110,6 +119,10 @@ def hydrate() -> dict[str, Any]:
             rows = resp.json()
     except Exception as exc:
         log.warning("supabase hydrate failed: %s", str(exc)[:200])
+        if strict:
+            raise RuntimeError(
+                "Authoritative YouTube connection store is unavailable"
+            ) from exc
         return {}
 
     out: dict[str, Any] = {}

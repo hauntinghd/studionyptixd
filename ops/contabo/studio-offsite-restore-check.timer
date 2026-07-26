@@ -1,0 +1,11 @@
+[Unit]
+Description=Monthly NYPTID Studio encrypted off-host restore verification
+
+[Timer]
+OnCalendar=*-*-01 03:15:00 UTC
+RandomizedDelaySec=30m
+Persistent=true
+Unit=studio-offsite-restore-check.service
+
+[Install]
+WantedBy=timers.target

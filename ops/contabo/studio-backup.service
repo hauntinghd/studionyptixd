@@ -4,6 +4,8 @@ Requires=docker.service
 After=docker.service network-online.target
 ConditionPathExists=/opt/studio/shared/active.env
 ConditionPathExists=!/opt/studio/shared/consumer.disabled
+StartLimitIntervalSec=12h
+StartLimitBurst=24
 
 [Service]
 Type=oneshot
@@ -16,3 +18,5 @@ IOSchedulingClass=best-effort
 IOSchedulingPriority=7
 UMask=0077
 TimeoutStartSec=6h
+Restart=on-failure
+RestartSec=15m

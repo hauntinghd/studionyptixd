@@ -5,10 +5,11 @@
     "type": "module",
     "scripts": {
         "dev": "vite",
-        "build": "tsc -b && vite build",
+        "build": "npm run test:studio-bootstrap && tsc -b && vite build",
         "tauri": "tauri",
         "tauri:dev": "tauri dev",
         "tauri:build": "tauri build",
+        "test:studio-bootstrap": "tsc src/studio/lib/studioBootstrap.ts --target ES2020 --module NodeNext --moduleResolution NodeNext --skipLibCheck --outDir node_modules/.cache/studio-bootstrap-tests && node --test tests/studioBootstrap.test.mjs",
         "lint": "eslint .",
         "preview": "vite preview"
     },
@@ -21,8 +22,7 @@
         "@tauri-apps/plugin-updater": "^2.10.1",
         "lucide-react": "^0.474.0",
         "react": "^18.3.1",
-        "react-dom": "^18.3.1",
-        "react-router-dom": "^6.26.0"
+        "react-dom": "^18.3.1"
     },
     "devDependencies": {
         "@tauri-apps/cli": "^2.11.4",

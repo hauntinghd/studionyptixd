@@ -97,7 +97,7 @@ export default function WaitlistPanel() {
             <div className="flex flex-wrap items-center justify-between gap-3">
                 <div>
                     <h1 className="text-2xl font-bold text-white">Open-Beta Waitlist</h1>
-                    <p className="text-sm text-gray-500">Reservations from studio.nyptidindustries.com/waitlist — paid first-month deposits via Stripe or PayPal.</p>
+                    <p className="text-sm text-gray-500">Historical reservations from the retired waitlist. New public subscriptions are processed through Stripe.</p>
                 </div>
                 <button
                     type="button"

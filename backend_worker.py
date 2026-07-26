@@ -6,6 +6,7 @@ from backend_queue import (
     embedded_worker_enabled,
     init_queue_runtime,
     run_generation_consumer,
+    set_terminal_job_reconciler,
 )
 
 
@@ -19,6 +20,7 @@ async def _run_worker_loop():
             "Standalone worker refused: RUN_EMBEDDED_WORKER enables the API-owned consumer"
         )
     init_queue_runtime(backend.jobs, backend.log)
+    set_terminal_job_reconciler(backend._reconcile_terminal_generation_job)
     task_map = {
         "run_generation_pipeline": backend.run_generation_pipeline,
         "_run_creative_pipeline": backend._run_creative_pipeline,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+import os
 import sys
 import types
 from pathlib import Path
@@ -24,10 +25,17 @@ class UnifiedCreditsTests(unittest.TestCase):
         root = Path(self.temp.name)
         credits.WALLETS_PATH = root / "wallets.json"
         credits.LEDGER_PATH = root / "ledger.jsonl"
+        credits.PENDING_GRANTS_PATH = root / "pending_grants.json"
+        self.worker_mode = patch.dict(
+            os.environ,
+            {"STUDIO_RUNPOD_WORKER_MODE": "0"},
+        )
+        self.worker_mode.start()
         credits._wallets.clear()
         credits._loaded = False
 
     def tearDown(self) -> None:
+        self.worker_mode.stop()
         self.temp.cleanup()
 
     def test_owner_is_never_debited_or_blocked(self) -> None:

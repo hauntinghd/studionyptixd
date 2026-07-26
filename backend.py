@@ -135,7 +135,6 @@ from backend_settings import (
     STRIPE_SECRET_KEY,
     STRIPE_WEBHOOK_SECRET,
     STRIPE_TOPUP_PUBLIC_ENABLED,
-    BILLING_STRIPE_PRIMARY,
     PAYPAL_CLIENT_ID,
     PAYPAL_CLIENT_SECRET,
     PAYPAL_ENV,
@@ -383,6 +382,7 @@ from billing import (
     _load_paypal_subscriptions,
     _load_paypal_webhook_events,
     _load_topup_wallets,
+    _list_stale_generation_credit_operations,
     _month_key,
     _paypal_orders,
     _paypal_orders_lock,
@@ -397,6 +397,7 @@ from billing import (
     _run_ordered_billing_effect,
     _refund_generation_credit,
     _reserve_generation_credit,
+    _settle_generation_credit_operation,
     _save_kpi_metrics,
     _save_paypal_orders,
     _save_paypal_subscriptions,
@@ -433,6 +434,7 @@ from youtube import (
     _youtube_oauth_states_lock,
     _load_youtube_connections,
     _save_youtube_connections,
+    _youtube_token_storage_readiness,
     _prune_youtube_oauth_states,
     _load_youtube_oauth_states,
     _save_youtube_oauth_states,
@@ -650,15 +652,18 @@ from backend_state import (
 from backend_queue import (
     QueueFullError,
     enqueue_generation_job,
+    generation_job_is_admitted,
     get_queue_depth,
     get_queue_max_depth,
     get_queue_runtime_health,
     get_queue_workers,
     get_persisted_job_state,
     init_queue_runtime,
+    list_pending_refund_job_states,
     persist_job_state,
     persist_job_state_awaited,
     schedule_persist_job_state,
+    set_terminal_job_reconciler,
     start_embedded_generation_worker,
     stop_embedded_generation_worker,
 )
@@ -950,7 +955,9 @@ security, get_current_user, get_current_user_from_request, require_auth = build_
     supabase_jwt_secret=SUPABASE_JWT_SECRET,
     supabase_service_key=SUPABASE_SERVICE_KEY,
     hardcoded_plans=HARDCODED_PLANS,
-    paypal_snapshot_for_user=lambda user: _paypal_subscription_snapshot_for_user(user),
+    # Auth may still read historical profile data, but retired PayPal records
+    # can no longer override the authenticated user's effective plan.
+    paypal_snapshot_for_user=lambda _user: {"billing_active": False},
 )
 init_queue_runtime(jobs, log)
 AUTO_SCENE_IMAGE_ROOT = Path(TRAINING_DATA_DIR) / "auto_scene_images"
@@ -4448,7 +4455,9 @@ _load_billing_effect_versions()
 _load_landing_notifications()
 _load_longform_sessions()
 _load_catalyst_memory()
-_load_youtube_connections()
+# YouTube connections are deliberately lazy-loaded under the connection lock
+# or by the production health readiness gate. Importing backend must never
+# contact or migrate the authoritative OAuth-token store during test discovery.
 _load_youtube_oauth_states()
 
 
@@ -4501,9 +4510,21 @@ def _credit_wallet_balance_for_user(user: Optional[dict]) -> int:
     return int(wallet.get("animated_topup_credits", wallet.get("topup_credits", 0)) or 0)
 
 
+def _authenticated_studio_lane_access_for_user(user: Optional[dict]) -> bool:
+    """Pure local authorization for public Studio Agent and owned exports.
+
+    Authentication and job ownership are sufficient for these public lanes;
+    model/tool spend is enforced by the unified wallet. This helper must never
+    perform billing discovery, so Stripe latency or an outage cannot block
+    bootstrap, chat, dictation, or retrieval of an owned final video.
+    """
+
+    return bool(user)
+
+
 def _public_lane_access_for_user(user: Optional[dict], access_snapshot: Optional[dict] = None) -> dict[str, bool]:
     is_admin = _is_admin_user(user)
-    authenticated = bool(user)
+    authenticated = _authenticated_studio_lane_access_for_user(user)
     snapshot = access_snapshot or _paid_access_snapshot_for_user(user)
     public_live = authenticated
     membership_plan = _membership_plan_for_user(user, snapshot)
@@ -4649,20 +4670,10 @@ def _paid_access_snapshot_for_user(user: Optional[dict]) -> dict:
             }
         )
         return out
+    # Legacy PayPal records remain loaded for historical/audit purposes, but
+    # only Stripe may confer paid access after the Stripe-only cutover.
     manual_snapshot = _paypal_subscription_snapshot_for_user(user)
     out["manual_record_present"] = bool(manual_snapshot.get("known"))
-    if manual_snapshot.get("billing_active"):
-        out.update(
-            {
-                "billing_active": True,
-                "plan": str(manual_snapshot.get("plan", "none") or "none"),
-                "source": str(manual_snapshot.get("provider", "paypal_manual") or "paypal_manual"),
-                "next_renewal_unix": int(manual_snapshot.get("next_renewal_unix", 0) or 0),
-                "next_renewal_source": str(manual_snapshot.get("next_renewal_source", "") or ""),
-                "billing_anchor_unix": int(manual_snapshot.get("billing_anchor_unix", 0) or 0),
-            }
-        )
-        return out
     stripe_diag = _stripe_subscription_snapshot(email) if email else {}
     stripe_status = str(stripe_diag.get("status", "") or "").strip().lower()
     stripe_ok = bool(stripe_diag.get("ok")) and stripe_status in {"active", "trialing"}
@@ -4694,7 +4705,7 @@ def _paid_access_snapshot_for_user(user: Optional[dict]) -> dict:
 
 
 def _billing_active_for_user(user: Optional[dict]) -> bool:
-    """Resolve paid access across Stripe and manual PayPal monthly access."""
+    """Resolve paid access from Stripe (or the explicit admin override) only."""
     return bool((_paid_access_snapshot_for_user(user) or {}).get("billing_active"))
 
 
@@ -10862,14 +10873,233 @@ def _job_update_scene_pointer(
     schedule_persist_job_state(job_id, job)
 
 
-def _job_diag_finalize(job_id: str):
+def _backend_owned_job_id(
+    request: Request | None,
+    *,
+    user_id: str,
+    operation: str,
+) -> str:
+    """Derive a stable internal job id from the backend command receipt key."""
+
+    headers = getattr(request, "headers", {}) if request is not None else {}
+    command_key = str((headers or {}).get("x-idempotency-key") or "").strip()
+    if not command_key:
+        # Public routes are wrapped by require_idempotency_key. This fallback
+        # keeps direct internal/unit invocations isolated without weakening the
+        # actual HTTP contract.
+        command_key = secrets.token_hex(16)
+    identity = "\0".join(
+        (
+            str(user_id or "").strip(),
+            str(operation or "").strip(),
+            command_key,
+        )
+    )
+    digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:32]
+    return f"job_{digest}"
+
+
+async def _reconcile_generation_credit_refund(
+    job_id: str,
+    job: Optional[dict] = None,
+) -> dict:
+    """Restore a failed paid generation exactly once, or leave a durable outbox flag."""
+    job = job if isinstance(job, dict) else jobs.get(job_id)
+    if not isinstance(job, dict):
+        return {}
+    status = str(job.get("status", "") or "").strip().lower()
+    source = str(job.get("credit_source", "") or "").strip().lower()
+    operation_id = str(job.get("credit_operation_id", "") or "").strip()
+    terminal_success = status in {"complete", "completed", "rendered"}
+    terminal_failure = status in {
+        "error",
+        "failed",
+        "cancelled",
+        "canceled",
+    }
+    if (
+        operation_id
+        and bool(job.get("credit_charged"))
+        and source in {"monthly", "topup", "non_animated_free"}
+        and (terminal_success or terminal_failure)
+    ):
+        desired_outcome = "commit" if terminal_success else "refund"
+        job["credit_refund_pending"] = True
+        try:
+            settled = await _settle_generation_credit_operation(
+                str(job.get("user_id", "") or ""),
+                operation_id,
+                outcome=desired_outcome,
+                reason=f"queued generation terminal status: {status}",
+            )
+            if not settled:
+                settlement_word = (
+                    "committed" if desired_outcome == "commit" else "refunded"
+                )
+                raise RuntimeError(
+                    f"wallet operation could not be {settlement_word}"
+                )
+            job["credit_refund_pending"] = False
+            job.pop("credit_refund_error", None)
+            if desired_outcome == "refund":
+                job["credit_refunded"] = True
+            else:
+                job["credit_refunded"] = False
+                job["credit_operation_committed"] = True
+        except Exception as settlement_error:
+            job["credit_refund_pending"] = True
+            job["credit_refunded"] = False
+            job["credit_refund_error"] = (
+                f"credit_operation_{desired_outcome}_pending"
+            )
+            log.error(
+                "[%s] Queued generation wallet settlement failed: %s",
+                job_id,
+                settlement_error,
+                exc_info=True,
+            )
+        return job
+    should_refund = (
+        terminal_failure
+        and bool(job.get("credit_charged"))
+        and not bool(job.get("credit_refunded"))
+        and source in {"monthly", "topup", "non_animated_free"}
+    )
+    if not should_refund:
+        return job
+
+    user_id = str(job.get("user_id", "") or "").strip()
+    refund_key = str(
+        job.get("credit_refund_idempotency_key")
+        or f"generation_refund:{job_id}"
+    ).strip()
+    job["credit_refund_pending"] = True
+    job["credit_refund_idempotency_key"] = refund_key
+    if not user_id:
+        job["credit_refunded"] = False
+        job["credit_refund_error"] = "missing_user_id"
+        log.error("[%s] Refund outbox is missing its user identity", job_id)
+        return job
+    try:
+        await _refund_generation_credit(
+            user_id,
+            source,
+            month_key=str(job.get("credit_month_key", "") or ""),
+            credits=int(job.get("credit_amount", 1) or 1),
+            idempotency_key=refund_key,
+        )
+        job["credit_refunded"] = True
+        job["credit_refund_pending"] = False
+        job.pop("credit_refund_error", None)
+    except Exception as refund_error:
+        # Queue acknowledgement and the periodic outbox scanner both key off
+        # this flag. Never report a refund until the wallet snapshot containing
+        # the restored credit is durable.
+        job["credit_refunded"] = False
+        job["credit_refund_pending"] = True
+        job["credit_refund_error"] = type(refund_error).__name__
+        log.error(
+            "[%s] Durable generation refund failed; leaving refund pending: %s",
+            job_id,
+            refund_error,
+            exc_info=True,
+        )
+    return job
+
+
+async def _reconcile_terminal_generation_job(
+    job_id: str,
+    job_state: dict,
+) -> dict:
+    """Queue-owned hook run before a terminal production receipt may be acknowledged."""
+    jobs[job_id] = job_state
+    return await _reconcile_generation_credit_refund(job_id, job_state)
+
+
+async def _create_and_reconcile_refund_outbox(
+    *,
+    user_id: str,
+    source: str,
+    month_key: str,
+    credits: int,
+    reason: str,
+) -> tuple[str, bool]:
+    """Persist an interactive-operation refund obligation before applying it."""
+    refund_job_id = f"refund_{int(time.time())}_{secrets.token_hex(8)}"
+    refund_state = {
+        "status": "error",
+        "lane": "billing_refund",
+        "mode": "interactive_refund_outbox",
+        "user_id": str(user_id or ""),
+        "created_at": time.time(),
+        "completed_at": time.time(),
+        "error": str(reason or "interactive provider failure")[:500],
+        "credit_charged": True,
+        "credit_source": str(source or ""),
+        "credit_month_key": str(month_key or ""),
+        "credit_amount": max(1, int(credits or 1)),
+        "credit_refunded": False,
+        "credit_refund_pending": True,
+        "credit_refund_idempotency_key": f"generation_refund:{refund_job_id}",
+    }
+    jobs[refund_job_id] = refund_state
+    try:
+        initial_durable = await persist_job_state_awaited(refund_job_id, refund_state)
+    except Exception as persist_error:
+        initial_durable = False
+        log.error("[%s] Initial refund outbox persistence failed: %s", refund_job_id, persist_error)
+    await _reconcile_terminal_generation_job(refund_job_id, refund_state)
+    try:
+        final_durable = await persist_job_state_awaited(refund_job_id, refund_state)
+    except Exception as persist_error:
+        final_durable = False
+        log.error("[%s] Final refund outbox persistence failed: %s", refund_job_id, persist_error)
+    completed = bool(refund_state.get("credit_refunded"))
+    if not completed and not (initial_durable or final_durable):
+        log.critical(
+            "[%s] Refund and all outbox persistence paths failed; in-memory retry remains active",
+            refund_job_id,
+        )
+    return refund_job_id, completed
+
+
+async def _mark_job_failed_and_reconcile_refund(job_id: str, error: Exception | str) -> dict:
+    """Make a pre-execution failure durable before attempting its refund."""
+    job = jobs.setdefault(job_id, {})
+    job["status"] = "error"
+    job["error"] = str(error)
+    source = str(job.get("credit_source", "") or "").strip().lower()
+    if (
+        bool(job.get("credit_charged"))
+        and not bool(job.get("credit_refunded"))
+        and source in {"monthly", "topup", "non_animated_free"}
+    ):
+        job["credit_refund_pending"] = True
+        job["credit_refund_idempotency_key"] = str(
+            job.get("credit_refund_idempotency_key")
+            or f"generation_refund:{job_id}"
+        )
+    try:
+        await persist_job_state_awaited(job_id, job)
+    except Exception as persist_error:
+        log.error("[%s] Pre-refund terminal outbox persistence failed: %s", job_id, persist_error)
+    await _job_diag_finalize(job_id)
+    try:
+        await persist_job_state_awaited(job_id, job)
+    except Exception as persist_error:
+        log.error("[%s] Post-refund terminal outbox persistence failed: %s", job_id, persist_error)
+    return job
+
+
+async def _job_diag_finalize(job_id: str):
     job = jobs.get(job_id)
     if not job:
         return
     now = time.time()
     diag = job.get("diagnostics")
     if not isinstance(diag, dict):
-        return
+        diag = {}
+        job["diagnostics"] = diag
     current_stage = diag.get("current_stage")
     stage_started = float(diag.get("stage_started_at") or now)
     if current_stage:
@@ -10881,21 +11111,7 @@ def _job_diag_finalize(job_id: str):
     status = str(job.get("status", "") or "")
     if status in {"complete", "error"} and not job.get("completed_at"):
         job["completed_at"] = now
-    if status == "error" and job.get("credit_charged") and (not job.get("credit_refunded")):
-        user_id = str(job.get("user_id", "") or "")
-        source = str(job.get("credit_source", "") or "")
-        month_key = str(job.get("credit_month_key", "") or "")
-        if user_id and source in {"monthly", "topup"}:
-            try:
-                asyncio.create_task(_refund_generation_credit(
-                    user_id,
-                    source,
-                    month_key=month_key,
-                    credits=int(job.get("credit_amount", 1) or 1),
-                ))
-                job["credit_refunded"] = True
-            except Exception:
-                pass
+    await _reconcile_generation_credit_refund(job_id, job)
     if status in {"complete", "error"} and job.get("credit_charged"):
         _append_usage_ledger({
             "type": "generation_terminal",
@@ -11485,7 +11701,7 @@ async def run_generation_pipeline(
             "output_file": output_filename,
             "title": script_data.get("title", topic),
         })
-        _job_diag_finalize(job_id)
+        await _job_diag_finalize(job_id)
         await persist_job_state(job_id, jobs[job_id])
         log.info(f"[{job_id}] COMPLETE: {output_filename} ({resolution}, {mode_label})")
 
@@ -11502,20 +11718,18 @@ async def run_generation_pipeline(
             friendly_error = (
                 "Your prompt was flagged by the AI provider's content filter. "
                 "Edit the topic to remove explicit references to crime, violence, "
-                "named real-world events, or identifiable real people and retry. "
-                "Your Catalyst credits have been refunded."
+                "named real-world events, or identifiable real people and retry."
             )
             error_kind = "content_policy"
         elif isinstance(e, _fg.FalBusy):
             friendly_error = (
-                "The AI provider is temporarily at capacity — please retry in 30 seconds. "
-                "Your Catalyst credits have been refunded."
+                "The AI provider is temporarily at capacity — please retry in 30 seconds."
             )
             error_kind = "upstream_busy"
         else:
             truncated = err_text[:240] if err_text else type(e).__name__
             friendly_error = (
-                f"Render failed: {truncated}. Your Catalyst credits have been refunded — click Back to Editor to try again."
+                f"Render failed: {truncated}. Click Back to Editor to try again."
             )
             error_kind = "generic_render_failure"
         jobs[job_id]["error"] = friendly_error
@@ -11531,7 +11745,16 @@ async def run_generation_pipeline(
                 "user_id": str(jobs[job_id].get("user_id", "") or ""),
             },
         )
-        _job_diag_finalize(job_id)
+        await _job_diag_finalize(job_id)
+        if jobs[job_id].get("credit_charged"):
+            if jobs[job_id].get("credit_refunded"):
+                friendly_error = f"{friendly_error} Your Catalyst credits were refunded."
+            else:
+                friendly_error = (
+                    f"{friendly_error} Credit restoration is pending; "
+                    "the refund has not been reported as complete."
+                )
+            jobs[job_id]["error"] = friendly_error
         await persist_job_state(job_id, jobs[job_id])
         await _update_project_by_job(job_id, {"status": "error", "error": friendly_error})
 
@@ -13850,7 +14073,7 @@ async def _run_longform_pipeline(job_id: str, session_id: str):
                 updated_channel_memory["key"] = channel_memory_key
                 _catalyst_channel_memory[channel_memory_key] = updated_channel_memory
             _save_catalyst_memory()
-        _job_diag_finalize(job_id)
+        await _job_diag_finalize(job_id)
         await persist_job_state(job_id, jobs[job_id])
         async with _longform_sessions_lock:
             session_live = _longform_sessions.get(session_id)
@@ -13872,7 +14095,7 @@ async def _run_longform_pipeline(job_id: str, session_id: str):
     except LongFormPauseError as e:
         jobs[job_id]["status"] = "error"
         jobs[job_id]["error"] = str(e)
-        _job_diag_finalize(job_id)
+        await _job_diag_finalize(job_id)
         await persist_job_state(job_id, jobs[job_id])
         async with _longform_sessions_lock:
             session_live = _longform_sessions.get(session_id)
@@ -13884,7 +14107,7 @@ async def _run_longform_pipeline(job_id: str, session_id: str):
     except Exception as e:
         jobs[job_id]["status"] = "error"
         jobs[job_id]["error"] = str(e)
-        _job_diag_finalize(job_id)
+        await _job_diag_finalize(job_id)
         await persist_job_state(job_id, jobs[job_id])
         async with _longform_sessions_lock:
             session_live = _longform_sessions.get(session_id)
@@ -15808,7 +16031,12 @@ async def _creative_ingest_url(body: dict, request: Request = None):
     return result
 
 
-async def _creative_generate_script(req: GenerateRequest, request: Request = None):
+async def _creative_generate_script_impl(
+    req: GenerateRequest,
+    request: Request = None,
+    *,
+    refund_context: Optional[dict] = None,
+):
     """Phase 1: Generate script + scenes for user review. Returns editable scene list."""
     user = await _legacy_production_route_user(request)
     if not user:
@@ -15829,15 +16057,34 @@ async def _creative_generate_script(req: GenerateRequest, request: Request = Non
     user_plan, _plan_limits = _resolve_user_plan_for_limits(user)
     is_admin = user.get("email", "") in ADMIN_EMAILS
     billing_active = _billing_active_for_user(user)
-    can_run, _source, _state = await _reserve_generation_credit(
+    operation_id = ""
+    if refund_context is not None and not is_admin:
+        operation_id = str(refund_context.get("operation_id", "") or "").strip()
+    can_run, credit_source, credit_state = await _reserve_generation_credit(
         user,
         user_plan if not is_admin else "pro",
         billing_active,
         is_admin=is_admin,
         usage_kind="non_animated",
+        operation_id=operation_id,
+        operation_context={
+            "kind": "interactive_script_generation",
+            "template": str(req.template or ""),
+        },
     )
     if not can_run:
         raise HTTPException(402, "Non-animated meter exhausted for this month. Please wait for renewal or upgrade plan.")
+    if refund_context is not None and not is_admin:
+        refund_context.update(
+            {
+                "charged": True,
+                "operation_id": operation_id,
+                "user_id": str(user.get("id", "") or ""),
+                "source": str(credit_source or ""),
+                "month_key": str(credit_state.get("month_key", "") or ""),
+                "credits": 1,
+            }
+        )
     cinematic_boost = _normalize_cinematic_boost(getattr(req, "cinematic_boost", True))
     reference_lock_mode = _normalize_reference_lock_mode(req.reference_lock_mode, default="strict")
     default_reference_url = _default_reference_for_template(req.template)
@@ -16044,6 +16291,18 @@ async def _creative_generate_script(req: GenerateRequest, request: Request = Non
                 503,
                 "Session persistence is temporarily unavailable. Please retry in a moment.",
             )
+    if refund_context is not None and refund_context.get("charged"):
+        committed = await _settle_generation_credit_operation(
+            str(refund_context.get("user_id", "") or ""),
+            str(refund_context.get("operation_id", "") or ""),
+            outcome="commit",
+            reason="interactive script session persisted",
+        )
+        if not committed:
+            raise RuntimeError(
+                "Interactive script credit operation could not be committed"
+            )
+        refund_context["settled"] = True
     return {
         "session_id": session_id,
         "title": script_data.get("title", req.prompt),
@@ -16074,6 +16333,58 @@ async def _creative_generate_script(req: GenerateRequest, request: Request = Non
         "prompt_passthrough": True,
         "mode": "script_to_short" if script_to_short_mode else "creative",
     }
+
+
+async def _creative_generate_script(
+    req: GenerateRequest,
+    request: Request = None,
+):
+    """Generate a script under the atomic wallet debit journal."""
+
+    operation_seed = _backend_owned_job_id(
+        request,
+        user_id="",
+        operation="interactive_script_generation",
+    )
+    refund_context: dict = {
+        "operation_id": f"interactive_script:{operation_seed}"
+    }
+    try:
+        return await _creative_generate_script_impl(
+            req,
+            request,
+            refund_context=refund_context,
+        )
+    except Exception as exc:
+        if refund_context.get("charged") and not refund_context.get("settled"):
+            reason = f"interactive script generation failed: {type(exc).__name__}"
+            try:
+                refunded = await _settle_generation_credit_operation(
+                    str(refund_context.get("user_id", "") or ""),
+                    str(refund_context.get("operation_id", "") or ""),
+                    outcome="refund",
+                    reason=reason,
+                )
+            except Exception as refund_error:
+                refunded = False
+                log.error(
+                    "Interactive script wallet-journal refund remains pending: %s",
+                    refund_error,
+                    exc_info=True,
+                )
+            if isinstance(exc, HTTPException):
+                detail = str(exc.detail or "").rstrip()
+                refund_detail = (
+                    "The credit charge was refunded."
+                    if refunded
+                    else "Credit restoration is pending and has not been reported as complete."
+                )
+                raise HTTPException(
+                    status_code=exc.status_code,
+                    detail=f"{detail} {refund_detail}".strip(),
+                    headers=exc.headers,
+                ) from exc
+        raise
 
 
 async def _creative_create_session(body: dict, request: Request = None):
@@ -16419,7 +16730,12 @@ async def _creative_session_scene_images(session_id: str, request: Request = Non
     return {"session_id": session_id, "scene_images": out}
 
 
-async def _creative_scene_image(req: SceneImageRequest, request: Request = None):
+async def _creative_scene_image_impl(
+    req: SceneImageRequest,
+    request: Request = None,
+    *,
+    refund_context: Optional[dict] = None,
+):
     """Generate (or regenerate) an image for a specific scene. Unlimited regenerations."""
     user = await _legacy_production_route_user(request)
     if not user:
@@ -16479,6 +16795,9 @@ async def _creative_scene_image(req: SceneImageRequest, request: Request = None)
     image_credit_cost = _creative_image_credit_cost(image_model_id, template=template)
     usage_kind = "animated" if image_credit_cost > 0 else "non_animated"
     credits_needed = max(1, image_credit_cost) if image_credit_cost > 0 else 1
+    operation_id = ""
+    if refund_context is not None and not is_admin:
+        operation_id = str(refund_context.get("operation_id", "") or "").strip()
     can_run, credit_source, credit_state = await _reserve_generation_credit(
         user,
         user_plan if not is_admin else "pro",
@@ -16486,6 +16805,12 @@ async def _creative_scene_image(req: SceneImageRequest, request: Request = None)
         is_admin=is_admin,
         usage_kind=usage_kind,
         credits_needed=credits_needed,
+        operation_id=operation_id,
+        operation_context={
+            "kind": "interactive_scene_image",
+            "session_id": str(req.session_id or ""),
+            "scene_index": int(req.scene_index),
+        },
     )
     if not can_run:
         if usage_kind == "non_animated":
@@ -16495,6 +16820,19 @@ async def _creative_scene_image(req: SceneImageRequest, request: Request = None)
         raise HTTPException(
             402,
             f"{image_model_profile.get('label', 'Selected image model')} needs {required_credits} Catalyst credits per image, but only {available_credits} are available.",
+        )
+    if refund_context is not None and not is_admin:
+        refund_context.update(
+            {
+                "charged": True,
+                "operation_id": operation_id,
+                "user_id": str(user.get("id", "") or ""),
+                "source": str(credit_source or ""),
+                "month_key": str(credit_state.get("month_key", "") or ""),
+                "credits": credits_needed,
+                "session_id": str(req.session_id or ""),
+                "scene_index": int(req.scene_index),
+            }
         )
     prompt_passthrough = _creative_prompt_passthrough_enabled(session)
     scene_reference = _resolve_reference_for_scene(session, template, req.scene_index)
@@ -16575,12 +16913,6 @@ async def _creative_scene_image(req: SceneImageRequest, request: Request = None)
             selected_model_id=image_model_id,
         )
     except Exception as e:
-        await _refund_generation_credit(
-            str(user.get("id", "") or ""),
-            credit_source,
-            month_key=str(credit_state.get("month_key", "") or ""),
-            credits=credits_needed,
-        )
         err_text = str(e or "").strip()
         err_l = err_text.lower()
         # Phase 1.5: map content-policy rejections from fal to a clean 400.
@@ -16593,21 +16925,20 @@ async def _creative_scene_image(req: SceneImageRequest, request: Request = None)
                 "Your prompt was flagged by the image provider's content filter. "
                 "Edit the scene prompt to remove explicit references to crime, "
                 "violence, named real-world events, or identifiable real people "
-                "and retry. The AC charge has been refunded."
+                "and retry."
             ) from e
         if "content_policy_violation" in err_l or "content checker" in err_l or "content_policy" in err_l:
             raise HTTPException(
                 400,
                 "Your prompt was flagged by the image provider's content filter. "
                 "Edit it to remove explicit references to crime, violence, named "
-                "real-world events, or identifiable real people and retry. The AC "
-                "charge has been refunded."
+                "real-world events, or identifiable real people and retry."
             ) from e
         if isinstance(e, _fg.FalBusy):
             raise HTTPException(
                 503,
                 "Image provider is temporarily at capacity — please retry in 30 seconds. "
-                "The AC charge has been refunded."
+                "Please try again."
             ) from e
         if "hidream is the only configured image provider" in err_l:
             raise HTTPException(503, err_text) from e
@@ -16781,6 +17112,18 @@ async def _creative_scene_image(req: SceneImageRequest, request: Request = None)
         "narration": session.get("narration", ""),
         "image_model_id": image_model_id,
     })
+    if refund_context is not None and refund_context.get("charged"):
+        committed = await _settle_generation_credit_operation(
+            str(refund_context.get("user_id", "") or ""),
+            str(refund_context.get("operation_id", "") or ""),
+            outcome="commit",
+            reason="interactive scene image persisted",
+        )
+        if not committed:
+            raise RuntimeError(
+                "Interactive scene credit operation could not be committed"
+            )
+        refund_context["settled"] = True
 
     return {
         "scene_index": req.scene_index,
@@ -16797,6 +17140,60 @@ async def _creative_scene_image(req: SceneImageRequest, request: Request = None)
         "qa_ok": bool(img_result.get("qa_ok", False)),
         "qa_notes": img_result.get("qa_notes", []),
     }
+
+
+async def _creative_scene_image(req: SceneImageRequest, request: Request = None):
+    """Run one charged interactive still as a wallet-journaled transaction."""
+    operation_seed = _backend_owned_job_id(
+        request,
+        user_id="",
+        operation=(
+            f"interactive_scene_image:{str(req.session_id or '')}:"
+            f"{int(req.scene_index)}"
+        ),
+    )
+    refund_context: dict = {
+        "operation_id": f"interactive_scene:{operation_seed}"
+    }
+    try:
+        return await _creative_scene_image_impl(
+            req,
+            request,
+            refund_context=refund_context,
+        )
+    except Exception as exc:
+        if refund_context.get("charged") and not refund_context.get("settled"):
+            reason = (
+                f"interactive scene {refund_context.get('session_id', '')}:"
+                f"{refund_context.get('scene_index', 0)} failed: {type(exc).__name__}"
+            )
+            try:
+                refunded = await _settle_generation_credit_operation(
+                    str(refund_context.get("user_id", "") or ""),
+                    str(refund_context.get("operation_id", "") or ""),
+                    outcome="refund",
+                    reason=reason,
+                )
+            except Exception as refund_error:
+                refunded = False
+                log.error(
+                    "Interactive scene wallet-journal refund remains pending: %s",
+                    refund_error,
+                    exc_info=True,
+                )
+            if isinstance(exc, HTTPException):
+                detail = str(exc.detail or "").rstrip()
+                refund_detail = (
+                    "The credit charge was refunded."
+                    if refunded
+                    else "Credit restoration is pending and has not been reported as complete."
+                )
+                raise HTTPException(
+                    status_code=exc.status_code,
+                    detail=f"{detail} {refund_detail}".strip(),
+                    headers=exc.headers,
+                ) from exc
+        raise
 
 
 async def _creative_scene_feedback(body: dict, request: Request = None):
@@ -16942,6 +17339,33 @@ async def _creative_finalize(req: FinalizeRequest, background_tasks: BackgroundT
         credits_required = max(1, _scene_count * _video_per_scene + _images_to_charge * _image_per_scene)
     else:
         credits_required = max(1, _images_to_charge * _image_per_scene)
+    job_id = _backend_owned_job_id(
+        request,
+        user_id=str(user.get("id", "") or ""),
+        operation="creative_finalize",
+    )
+    existing_job = jobs.get(job_id)
+    if not isinstance(existing_job, dict):
+        existing_job = await get_persisted_job_state(job_id)
+    if (
+        isinstance(existing_job, dict)
+        and str(existing_job.get("user_id", "") or "")
+        == str(user.get("id", "") or "")
+    ):
+        existing_status = str(existing_job.get("status", "") or "").lower()
+        admission = await generation_job_is_admitted(job_id)
+        if existing_status in {
+            "complete",
+            "completed",
+            "rendered",
+            "error",
+            "failed",
+            "cancelled",
+            "canceled",
+        } or admission is not False:
+            jobs[job_id] = existing_job
+            return {"job_id": job_id}
+    credit_operation_id = "" if is_admin else f"queued_job:{job_id}"
     can_render, credit_source, credit_state = await _reserve_generation_credit(
         user,
         user_plan if not is_admin else "pro",
@@ -16949,6 +17373,12 @@ async def _creative_finalize(req: FinalizeRequest, background_tasks: BackgroundT
         is_admin=is_admin,
         usage_kind=usage_kind,
         credits_needed=credits_required,
+        operation_id=credit_operation_id,
+        operation_context={
+            "kind": "queued_generation_job",
+            "job_id": job_id,
+            "mode": "creative_finalize",
+        },
     )
     if not can_render:
         if usage_kind == "non_animated":
@@ -16960,7 +17390,6 @@ async def _creative_finalize(req: FinalizeRequest, background_tasks: BackgroundT
             f"{video_model_profile.get('label', 'Selected video model')} needs {required_credits} Catalyst credits for this render, but only {available_credits} are available. Buy more credits or switch to slideshow.",
         )
 
-    job_id = f"{int(time.time())}_{random.randint(1000, 9999)}"
     jobs[job_id] = {
         "status": "queued",
         "progress": 0,
@@ -16987,7 +17416,8 @@ async def _creative_finalize(req: FinalizeRequest, background_tasks: BackgroundT
         "pacing_mode": pacing_mode,
         "subtitles_enabled": subtitles_enabled,
         "reference_lock_mode": reference_lock_mode,
-        "credit_charged": True,
+        "credit_charged": not is_admin,
+        "credit_operation_id": credit_operation_id,
         "credit_source": credit_source,
         "credit_amount": credits_required,
         "credit_cost": credits_required if animation_enabled else 0,
@@ -17005,11 +17435,24 @@ async def _creative_finalize(req: FinalizeRequest, background_tasks: BackgroundT
     # isn't enough because the response can be sent before the Supabase
     # write completes.
     try:
-        _ok = await persist_job_state_awaited(job_id, jobs[job_id])
-        if not _ok:
-            _log.error(f"[{job_id}] creative finalize: Supabase persist failed; cross-worker polls will 404")
-    except Exception as _e:
-        _log.error(f"[{job_id}] creative finalize: persist EXC: {type(_e).__name__}: {_e}")
+        durable = await persist_job_state_awaited(job_id, jobs[job_id])
+    except Exception as persist_error:
+        durable = False
+        log.error(
+            "[%s] Creative finalize initial persistence failed: %s",
+            job_id,
+            persist_error,
+            exc_info=True,
+        )
+    if not durable:
+        await _mark_job_failed_and_reconcile_refund(
+            job_id,
+            "Creative finalize could not persist its production command",
+        )
+        raise HTTPException(
+            503,
+            "Production command persistence is temporarily unavailable. Retry safely.",
+        )
     await _update_project_by_session(user.get("id", ""), req.session_id, {
         "status": "rendering",
         "job_id": job_id,
@@ -17036,18 +17479,14 @@ async def _creative_finalize(req: FinalizeRequest, background_tasks: BackgroundT
         # pass only the original positional args and read render modes from session.
         await enqueue_generation_job(job_id, user_plan, _run_creative_pipeline, (job_id, session, resolution))
     except QueueFullError as e:
-        if jobs[job_id].get("credit_charged") and str(jobs[job_id].get("credit_source", "")) in {"monthly", "topup"}:
-            await _refund_generation_credit(
-                str(jobs[job_id].get("user_id", "") or ""),
-                str(jobs[job_id].get("credit_source", "") or ""),
-                month_key=str(jobs[job_id].get("credit_month_key", "") or ""),
-                credits=int(jobs[job_id].get("credit_amount", 1) or 1),
-            )
-            jobs[job_id]["credit_refunded"] = True
-        jobs[job_id]["status"] = "error"
-        jobs[job_id]["error"] = str(e)
-        await persist_job_state(job_id, jobs[job_id])
+        await _mark_job_failed_and_reconcile_refund(job_id, e)
         raise HTTPException(429, str(e))
+    except Exception as e:
+        await _mark_job_failed_and_reconcile_refund(job_id, e)
+        raise HTTPException(
+            503,
+            "Production queue admission failed. Retry safely.",
+        ) from e
     return {"job_id": job_id}
 
 
@@ -17377,7 +17816,7 @@ async def _run_creative_pipeline(
             "output_file": output_filename,
             "title": script_data.get("title", session.get("topic", "")),
         })
-        _job_diag_finalize(job_id)
+        await _job_diag_finalize(job_id)
         await persist_job_state(job_id, jobs[job_id])
         log.info(f"[{job_id}] CREATIVE PIPELINE COMPLETE: {output_filename}")
 
@@ -17393,40 +17832,9 @@ async def _run_creative_pipeline(
 
     except Exception as e:
         log.error(f"[{job_id}] Creative pipeline failed: {e}", exc_info=True)
-        # Phase 1.4 BUG #2 fix: refund AC on pipeline failure. Previously the
-        # finalize debit happened at enqueue time, and if the render crashed
-        # mid-pipeline the user lost their AC with no refund. Users would
-        # chargeback via PayPal, which is the class of Korpi.AI ticket we're
-        # specifically trying not to have.
-        try:
-            _job = jobs.get(job_id) or {}
-            if _job.get("credit_charged") and not _job.get("credit_refunded"):
-                _source = str(_job.get("credit_source", "") or "")
-                if _source in {"monthly", "topup"}:
-                    await _refund_generation_credit(
-                        str(_job.get("user_id", "") or ""),
-                        _source,
-                        month_key=str(_job.get("credit_month_key", "") or ""),
-                        credits=int(_job.get("credit_amount", 1) or 1),
-                    )
-                    _job["credit_refunded"] = True
-                    jobs[job_id] = _job
-                    _studio_alerts.send_alert(
-                        "warn",
-                        "AC refunded on creative pipeline failure",
-                        f"Refunded {_job.get('credit_amount', 1)} AC to {_job.get('user_id', '?')[:12]} after render error: {str(e)[:200]}",
-                        context={"job_id": job_id, "credit_source": _source},
-                    )
-        except Exception as refund_err:
-            log.error(f"[{job_id}] AC refund on pipeline failure ALSO failed: {refund_err}", exc_info=True)
-            _studio_alerts.send_exception(
-                refund_err,
-                source="creative pipeline refund fallback",
-                context={"job_id": job_id, "original_error": str(e)[:200]},
-            )
         _job_set_stage(job_id, "error")
         jobs[job_id]["error"] = str(e)
-        _job_diag_finalize(job_id)
+        await _job_diag_finalize(job_id)
         await persist_job_state(job_id, jobs[job_id])
         await _update_project_by_job(job_id, {"status": "error", "error": str(e)})
 
@@ -17512,6 +17920,28 @@ async def _health_payload():
                 "queue_consumer": payload.get("queue_consumer", {}),
                 "backend_commit": payload.get("backend_commit", ""),
                 **deployment_identity,
+            },
+        )
+    token_storage = _youtube_token_storage_readiness(
+        require_key=payload.get("deployment_target") == "contabo"
+    )
+    payload["youtube_token_storage"] = token_storage
+    payload["youtube_token_storage_ready"] = bool(
+        token_storage.get("ready", False)
+    )
+    if (
+        payload.get("deployment_target") == "contabo"
+        and not payload["youtube_token_storage_ready"]
+    ):
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "status": "degraded",
+                "component": "youtube_token_storage",
+                "error": str(token_storage.get("error", "") or "storage_error"),
+                "backend_commit": payload.get("backend_commit", ""),
+                "deployment_target": payload.get("deployment_target", ""),
+                "release_id": payload.get("release_id", ""),
             },
         )
     return payload
@@ -17732,7 +18162,13 @@ mount_router(
 )
 
 
-async def _skeleton_reserve_credit(user: dict, *, ac_cost: int):
+async def _skeleton_reserve_credit(
+    user: dict,
+    *,
+    ac_cost: int,
+    operation_id: str = "",
+    operation_context: Optional[dict] = None,
+):
     """Adapt Skeleton AI's AC reservation to the unified Studio wallet."""
     user_plan, _plan_limits = _resolve_user_plan_for_limits(user)
     is_admin = _is_admin_user(user)
@@ -17743,6 +18179,8 @@ async def _skeleton_reserve_credit(user: dict, *, ac_cost: int):
         is_admin=is_admin,
         usage_kind="animated",
         credits_needed=ac_cost,
+        operation_id="" if is_admin else operation_id,
+        operation_context=operation_context,
     )
 
 
@@ -17769,6 +18207,7 @@ mount_router(
         require_auth=require_auth,
         reserve_credit=_skeleton_reserve_credit,
         refund_credit=_refund_generation_credit,
+        settle_credit_operation=_settle_generation_credit_operation,
     ),
 )
 
@@ -17818,10 +18257,8 @@ mount_router(
         # Without this, WS always returns "Sign in required" even for valid sessions.
         get_current_user=get_current_user,
         is_admin_check=_is_admin_user,
-        lane_access_check=lambda user: bool((_public_lane_access_for_user(user) or {}).get("agent")),
-        export_access_check=lambda user: bool(
-            (_public_lane_access_for_user(user) or {}).get("export_final")
-        ),
+        lane_access_check=_authenticated_studio_lane_access_for_user,
+        export_access_check=_authenticated_studio_lane_access_for_user,
     )
 )
 
@@ -18247,6 +18684,33 @@ async def _generate_short(
     is_admin = user.get("email", "") in ADMIN_EMAILS
     billing_active = _billing_active_for_user(user)
     usage_kind = "animated" if animation_enabled else "non_animated"
+    job_id = _backend_owned_job_id(
+        request,
+        user_id=str(user.get("id", "") or ""),
+        operation="auto_short_generate",
+    )
+    existing_job = jobs.get(job_id)
+    if not isinstance(existing_job, dict):
+        existing_job = await get_persisted_job_state(job_id)
+    if (
+        isinstance(existing_job, dict)
+        and str(existing_job.get("user_id", "") or "")
+        == str(user.get("id", "") or "")
+    ):
+        existing_status = str(existing_job.get("status", "") or "").lower()
+        admission = await generation_job_is_admitted(job_id)
+        if existing_status in {
+            "complete",
+            "completed",
+            "rendered",
+            "error",
+            "failed",
+            "cancelled",
+            "canceled",
+        } or admission is not False:
+            jobs[job_id] = existing_job
+            return {"status": "accepted", "job_id": job_id}
+    credit_operation_id = "" if is_admin else f"queued_job:{job_id}"
     can_render, credit_source, credit_state = await _reserve_generation_credit(
         user,
         user_plan if not is_admin else "pro",
@@ -18254,6 +18718,12 @@ async def _generate_short(
         is_admin=is_admin,
         usage_kind=usage_kind,
         credits_needed=credits_required,
+        operation_id=credit_operation_id,
+        operation_context={
+            "kind": "queued_generation_job",
+            "job_id": job_id,
+            "mode": "auto_short_generate",
+        },
     )
     if not can_render:
         if usage_kind == "non_animated":
@@ -18271,7 +18741,6 @@ async def _generate_short(
 
     resolution = _normalize_output_resolution(req.resolution, priority_allowed=bool(plan_limits.get("priority", False)))
 
-    job_id = f"{int(time.time())}_{random.randint(1000, 9999)}"
     jobs[job_id] = {
         "status": "queued",
         "progress": 0,
@@ -18305,7 +18774,8 @@ async def _generate_short(
         "reference_quality": reference_quality,
         "image_model_id": resolved_image_model_id,
         "video_model_id": resolved_video_model_id,
-        "credit_charged": True,
+        "credit_charged": not is_admin,
+        "credit_operation_id": credit_operation_id,
         "credit_source": credit_source,
         "credit_amount": credits_required,
         "credit_cost": credits_required if animation_enabled else 0,
@@ -18318,11 +18788,24 @@ async def _generate_short(
     # Synchronously land the job row in Supabase before returning.
     # Status polls hitting a different worker need the row to exist.
     try:
-        _ok = await persist_job_state_awaited(job_id, jobs[job_id])
-        if not _ok:
-            _log.error(f"[{job_id}] auto finalize: Supabase persist failed; cross-worker polls will 404")
-    except Exception as _e:
-        _log.error(f"[{job_id}] auto finalize: persist EXC: {type(_e).__name__}: {_e}")
+        durable = await persist_job_state_awaited(job_id, jobs[job_id])
+    except Exception as persist_error:
+        durable = False
+        log.error(
+            "[%s] Auto-short initial persistence failed: %s",
+            job_id,
+            persist_error,
+            exc_info=True,
+        )
+    if not durable:
+        await _mark_job_failed_and_reconcile_refund(
+            job_id,
+            "Auto-short could not persist its production command",
+        )
+        raise HTTPException(
+            503,
+            "Production command persistence is temporarily unavailable. Retry safely.",
+        )
     language = req.language if req.language in SUPPORTED_LANGUAGES else "en"
     project_id = _new_project_id()
     await _create_or_update_project(project_id, {
@@ -18352,18 +18835,14 @@ async def _generate_short(
             (job_id, req.template, req.prompt, resolution, language, quality_mode, mint_mode, transition_style, micro_escalation_mode),
         )
     except QueueFullError as e:
-        if jobs[job_id].get("credit_charged") and str(jobs[job_id].get("credit_source", "")) in {"monthly", "topup"}:
-            await _refund_generation_credit(
-                str(jobs[job_id].get("user_id", "") or ""),
-                str(jobs[job_id].get("credit_source", "") or ""),
-                month_key=str(jobs[job_id].get("credit_month_key", "") or ""),
-                credits=int(jobs[job_id].get("credit_amount", 1) or 1),
-            )
-            jobs[job_id]["credit_refunded"] = True
-        jobs[job_id]["status"] = "error"
-        jobs[job_id]["error"] = str(e)
-        await persist_job_state(job_id, jobs[job_id])
+        await _mark_job_failed_and_reconcile_refund(job_id, e)
         raise HTTPException(429, str(e))
+    except Exception as e:
+        await _mark_job_failed_and_reconcile_refund(job_id, e)
+        raise HTTPException(
+            503,
+            "Production queue admission failed. Retry safely.",
+        ) from e
 
     return {"status": "accepted", "job_id": job_id}
 
@@ -18536,9 +19015,7 @@ _download_video_response = build_download_video_response(
     jobs_ref=jobs,
     get_persisted_job_state=get_persisted_job_state,
     admin_emails=ADMIN_EMAILS,
-    export_access_check=lambda user: bool(
-        (_public_lane_access_for_user(user) or {}).get("export_final")
-    ),
+    export_access_check=_authenticated_studio_lane_access_for_user,
 )
 
 
@@ -19076,7 +19553,7 @@ async def run_clone_pipeline(
             "description": script_data.get("description", ""),
             "tags": script_data.get("tags", []),
         }
-        _job_diag_finalize(job_id)
+        await _job_diag_finalize(job_id)
         await persist_job_state(job_id, jobs[job_id])
         log.info(f"[{job_id}] COMPLETE: {output_filename} ({resolution}, {mode_label})")
 
@@ -19084,7 +19561,7 @@ async def run_clone_pipeline(
         log.error(f"[{job_id}] Clone pipeline failed: {e}", exc_info=True)
         _job_set_stage(job_id, "error")
         jobs[job_id]["error"] = str(e)
-        _job_diag_finalize(job_id)
+        await _job_diag_finalize(job_id)
         await persist_job_state(job_id, jobs[job_id])
         if video_path:
             Path(video_path).unlink(missing_ok=True)
@@ -19540,15 +20017,7 @@ _create_checkout = build_create_checkout_handler(
     plan_price_usd=PLAN_PRICE_USD,
     chat_story_allowed_plans=CHAT_STORY_ALLOWED_PLANS,
     stripe_secret_key=STRIPE_SECRET_KEY,
-    billing_stripe_primary=BILLING_STRIPE_PRIMARY,
     create_stripe_membership_checkout=_create_stripe_membership_checkout,
-    paypal_enabled=_paypal_enabled,
-    create_paypal_subscription_order=lambda user, price_id, plan, price_usd: _create_paypal_subscription_order(
-        user,
-        price_id,
-        plan,
-        price_usd,
-    ),
 )
 
 async def _capture_paypal_order_api(order_id: str) -> tuple[dict, str]:
@@ -19911,18 +20380,15 @@ async def _create_topup_checkout(req: TopupCheckoutRequest, user: dict = Depends
     pack = TOPUP_PACKS.get(req.price_id)
     if not pack:
         raise HTTPException(400, "Invalid top-up pack")
-    preferred_method = str(getattr(req, "preferred_method", "") or "").strip().lower()
-    if preferred_method not in {"card", "paypal"}:
-        preferred_method = "card" if (STRIPE_SECRET_KEY and STRIPE_TOPUP_PUBLIC_ENABLED) else "paypal"
-    if preferred_method == "card" and not STRIPE_TOPUP_PUBLIC_ENABLED:
-        raise HTTPException(400, "Stripe checkout is not enabled yet.")
+    preferred_method = str(getattr(req, "preferred_method", "card") or "card").strip().lower()
     if preferred_method == "paypal":
-        if not _paypal_enabled():
-            raise HTTPException(400, "PayPal is not configured. Use card checkout.")
-        checkout_url = await _create_paypal_topup_order(user, req.price_id, pack)
-        return {"checkout_url": checkout_url, "provider": "paypal"}
+        raise HTTPException(410, "PayPal checkout has been retired. Use Stripe card checkout.")
+    if preferred_method != "card":
+        raise HTTPException(400, "Only Stripe card checkout is supported.")
+    if not STRIPE_TOPUP_PUBLIC_ENABLED:
+        raise HTTPException(400, "Stripe checkout is not enabled yet.")
     if not STRIPE_SECRET_KEY:
-        raise HTTPException(500, "Stripe not configured")
+        raise HTTPException(503, "Stripe checkout is temporarily unavailable.")
     try:
         checkout_price_id = str(pack.get("stripe_price_id", "") or "").strip()
         line_item = (
@@ -20570,24 +21036,32 @@ async def _paypal_verify_order(order_id: str, user: dict = Depends(require_auth)
     }
 
 
+def _paypal_retired() -> HTTPException:
+    return HTTPException(
+        status_code=410,
+        detail="PayPal billing has been retired. Use Stripe checkout.",
+    )
+
+
+async def _paypal_return_retired(token: str = "", PayerID: str = ""):
+    _ = (token, PayerID)
+    raise _paypal_retired()
+
+
+async def _paypal_webhook_retired(request: Request):
+    _ = request
+    raise _paypal_retired()
+
+
+async def _paypal_verify_order_retired(order_id: str):
+    _ = order_id
+    raise _paypal_retired()
+
+
 async def _create_billing_portal_session(user: dict = Depends(require_auth)):
     """Create a Stripe customer portal session so users can cancel/manage plans."""
-    access_snapshot = _paid_access_snapshot_for_user(user)
-    billing_active = bool(access_snapshot.get("billing_active"))
-    access_source = str(access_snapshot.get("source", "") or "").strip().lower()
-    if billing_active and access_source != "stripe":
-        plan = str(access_snapshot.get("plan", "") or "").strip().lower()
-        plan_suffix = f"&plan={quote(plan)}" if plan else ""
-        provider_suffix = f"&provider={quote(access_source)}" if access_source else ""
-        subscription_state = "manual" if access_source == "paypal_manual" else "details"
-        return {
-            "portal_url": (
-                f"{_billing_site_url()}?page=subscription&subscription={subscription_state}"
-                f"{provider_suffix}{plan_suffix}"
-            )
-        }
     if not STRIPE_SECRET_KEY:
-        raise HTTPException(500, "Stripe not configured")
+        raise HTTPException(503, "Stripe billing is temporarily unavailable.")
     profile = await _supabase_get_billing_profile(str(user.get("id", "") or ""))
     customer_id = str(profile.get("stripe_customer_id", "") or "").strip()
     if not customer_id:
@@ -20661,13 +21135,11 @@ def _client_ip_from_request(request: Request | None) -> str:
 async def _join_waitlist(req: WaitlistJoinRequest, request: Request = None):
     """Open-beta waitlist reservation. Accepts BOTH unauthenticated visitors
     (from the public /waitlist landing) AND authenticated users (dashboard
-    redirect when WAITLIST_ONLY_MODE=true). Creates a Stripe or PayPal
-    checkout for the first-month subscription deposit and returns the URL.
+    redirect when WAITLIST_ONLY_MODE=true). Creates a Stripe checkout for the
+    first-month subscription deposit and returns the URL.
 
-    On successful payment, the existing Stripe webhook handler upserts the
-    `waitlist` table row with paid=true (see line 20905). PayPal completion
-    is handled via _paypal_return redirecting through
-    _capture_paypal_subscription_order which persists similarly.
+    On successful payment, the Stripe webhook handler upserts the `waitlist`
+    table row with paid=true.
     """
     # Rate limit BEFORE any DB or Stripe call so spam can't burn quotas.
     await _waitlist_rate_check(_client_ip_from_request(request))
@@ -20679,8 +21151,10 @@ async def _join_waitlist(req: WaitlistJoinRequest, request: Request = None):
 
     if plan not in {"starter", "creator", "pro"}:
         raise HTTPException(400, "Invalid plan. Pick starter, creator, or pro.")
-    if provider not in {"stripe", "paypal"}:
-        raise HTTPException(400, "Provider must be 'stripe' or 'paypal'.")
+    if provider == "paypal":
+        raise HTTPException(410, "PayPal checkout has been retired. Use Stripe.")
+    if provider != "stripe":
+        raise HTTPException(400, "Provider must be 'stripe'.")
 
     # Try auth first (authenticated users), fall back to email-in-body for
     # unauthenticated landing-page visitors.
@@ -20711,7 +21185,7 @@ async def _join_waitlist(req: WaitlistJoinRequest, request: Request = None):
         raise HTTPException(500, f"Plan {plan} has no configured price.")
 
     # Upsert a PENDING entry so admins can see unpaid signups too. Paid status
-    # flips to true when the checkout completes (Stripe webhook / PayPal return).
+    # flips to true when the Stripe checkout completes.
     try:
         await _supabase_upsert_waitlist_entry(
             email=email,
@@ -20728,7 +21202,7 @@ async def _join_waitlist(req: WaitlistJoinRequest, request: Request = None):
 
     if provider == "stripe":
         if not STRIPE_SECRET_KEY:
-            raise HTTPException(400, "Stripe is not configured yet. Please try PayPal.")
+            raise HTTPException(503, "Stripe checkout is temporarily unavailable.")
         stripe_lib.api_key = STRIPE_SECRET_KEY
         try:
             session = stripe_lib.checkout.Session.create(
@@ -20763,55 +21237,6 @@ async def _join_waitlist(req: WaitlistJoinRequest, request: Request = None):
             log.error(f"Stripe waitlist checkout error for {email}: {e}")
             raise HTTPException(500, f"Stripe checkout failed: {str(e)}")
 
-    # PayPal branch
-    if not _paypal_enabled():
-        raise HTTPException(400, "PayPal is not configured yet. Please try Stripe.")
-    order_payload = {
-        "intent": "CAPTURE",
-        "purchase_units": [
-            {
-                "reference_id": f"waitlist_{plan}",
-                "custom_id": f"waitlist_reservation:{plan}:{email}",
-                "description": f"Studio Open-Beta Waitlist — {plan.title()} (first-month deposit)",
-                "amount": {
-                    "currency_code": "USD",
-                    "value": f"{price_usd:.2f}",
-                },
-            }
-        ],
-        "application_context": {
-            "brand_name": "NYPTID Studio",
-            "landing_page": "LOGIN",
-            "user_action": "PAY_NOW",
-            "shipping_preference": "NO_SHIPPING",
-            "return_url": f"{_api_public_url()}/api/paypal/return",
-            "cancel_url": f"{site}/waitlist?status=cancelled",
-        },
-    }
-    data = await _paypal_request("POST", "/v2/checkout/orders", json_body=order_payload)
-    order_id = str(data.get("id", "") or "")
-    approve_url = ""
-    for link in list(data.get("links", []) or []):
-        if str(link.get("rel", "") or "").lower() == "approve":
-            approve_url = str(link.get("href", "") or "")
-            break
-    if not order_id or not approve_url:
-        raise HTTPException(500, "PayPal approval URL missing for waitlist order")
-    async with _paypal_orders_lock:
-        _paypal_orders[order_id] = {
-            "kind": "waitlist",
-            "user_id": user_id,
-            "email": email,
-            "name": name,
-            "price_id": f"waitlist_{plan}",
-            "plan": plan,
-            "price_usd": price_usd,
-            "activated": False,
-            "capture_id": "",
-            "created_at": time.time(),
-        }
-        _save_paypal_orders()
-    return {"checkout_url": approve_url, "provider": "paypal", "order_id": order_id}
 
 
 async def _stripe_apply_webhook_event_unordered(event: dict) -> dict:
@@ -21356,7 +21781,7 @@ async def _admin_refund_credits(body: dict, user: dict = Depends(require_auth)):
         raise HTTPException(404, f"No Supabase user found for {target_email}")
     applied_source = source_raw
     if source_raw == "auto":
-        # Prefer topup refunds for chargeback protection (PayPal-traced purchases).
+        # Prefer returning purchased top-up credits before monthly usage.
         applied_source = "topup"
     try:
         await _refund_generation_credit(
@@ -21459,9 +21884,9 @@ mount_router(
     build_billing_router(
         create_checkout_endpoint=_create_checkout,
         create_topup_checkout_endpoint=_create_topup_checkout,
-        paypal_return_endpoint=_paypal_return,
-        paypal_webhook_endpoint=_paypal_webhook,
-        paypal_verify_order_endpoint=_paypal_verify_order,
+        paypal_return_endpoint=_paypal_return_retired,
+        paypal_webhook_endpoint=_paypal_webhook_retired,
+        paypal_verify_order_endpoint=_paypal_verify_order_retired,
         create_billing_portal_session_endpoint=_create_billing_portal_session,
         join_waitlist_endpoint=_join_waitlist,
         stripe_webhook_endpoint=_stripe_webhook,
@@ -21475,8 +21900,139 @@ mount_router(
 # Register the SPA last so it can never shadow /api routes.
 configure_frontend_static(app)
 
+_credit_refund_reconciler_task: Optional[asyncio.Task] = None
+
+
+async def _reconcile_pending_generation_refunds_once() -> int:
+    """Replay durable job and wallet refund obligations."""
+    candidates: dict[str, dict] = {}
+    try:
+        for job_id, state in await list_pending_refund_job_states():
+            if (
+                bool(state.get("credit_refund_pending"))
+                and not bool(state.get("credit_refunded"))
+            ):
+                candidates[job_id] = state
+    except Exception as scan_error:
+        log.error("Refund outbox scan failed: %s", scan_error, exc_info=True)
+    for job_id, state in list(jobs.items()):
+        if (
+            isinstance(state, dict)
+            and bool(state.get("credit_refund_pending"))
+            and not bool(state.get("credit_refunded"))
+        ):
+            candidates[job_id] = state
+
+    completed = 0
+    for job_id, state in candidates.items():
+        jobs[job_id] = state
+        await _reconcile_terminal_generation_job(job_id, state)
+        if bool(state.get("credit_refunded")):
+            completed += 1
+        try:
+            await persist_job_state_awaited(job_id, state)
+        except Exception as persist_error:
+            log.error("[%s] Reconciled refund-state persistence failed: %s", job_id, persist_error)
+    try:
+        raw_grace = float(
+            os.getenv("INTERACTIVE_CREDIT_RECOVERY_GRACE_SEC", "1800") or 1800
+        )
+    except (TypeError, ValueError):
+        raw_grace = 1800.0
+    recovery_before = time.time() - max(300.0, raw_grace)
+    try:
+        stale_operations = await _list_stale_generation_credit_operations(
+            older_than=recovery_before
+        )
+    except Exception as scan_error:
+        stale_operations = []
+        log.error(
+            "Wallet generation-operation scan failed: %s",
+            scan_error,
+            exc_info=True,
+        )
+    for operation in stale_operations:
+        user_id = str(operation.get("user_id", "") or "")
+        operation_id = str(operation.get("operation_id", "") or "")
+        context = dict(operation.get("context") or {})
+        linked_job_id = str(context.get("job_id", "") or "").strip()
+        if str(context.get("kind", "") or "") == "queued_generation_job" and linked_job_id:
+            linked_state = jobs.get(linked_job_id)
+            if not isinstance(linked_state, dict):
+                linked_state = await get_persisted_job_state(linked_job_id)
+            linked_status = str(
+                (linked_state or {}).get("status", "") or ""
+            ).strip().lower()
+            if linked_status in {"complete", "completed", "rendered"}:
+                desired_outcome = "commit"
+            elif linked_status in {
+                "error",
+                "failed",
+                "cancelled",
+                "canceled",
+            }:
+                desired_outcome = "refund"
+            elif isinstance(linked_state, dict):
+                admission = await generation_job_is_admitted(linked_job_id)
+                if admission is not False:
+                    # A queued or in-flight job still owns the debit.
+                    continue
+                jobs[linked_job_id] = linked_state
+                await _mark_job_failed_and_reconcile_refund(
+                    linked_job_id,
+                    "Recovered a charged job that was never admitted to the queue",
+                )
+                if bool(jobs[linked_job_id].get("credit_refunded")):
+                    completed += 1
+                continue
+            else:
+                desired_outcome = "refund"
+        else:
+            desired_outcome = "refund"
+        try:
+            if await _settle_generation_credit_operation(
+                user_id,
+                operation_id,
+                outcome=desired_outcome,
+                reason=(
+                    "recovered after interrupted generation before durable "
+                    "command ownership"
+                ),
+            ):
+                completed += 1
+        except Exception as refund_error:
+            log.error(
+                "[%s] Wallet generation-operation recovery failed: %s",
+                operation_id,
+                refund_error,
+                exc_info=True,
+            )
+    return completed
+
+
+async def _credit_refund_reconciler_loop() -> None:
+    while True:
+        try:
+            await _reconcile_pending_generation_refunds_once()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("Periodic refund outbox reconciliation failed")
+        await asyncio.sleep(30)
+
 
 async def _start_embedded_production_consumer() -> None:
+    global _credit_refund_reconciler_task
+    set_terminal_job_reconciler(_reconcile_terminal_generation_job)
+    await _reconcile_pending_generation_refunds_once()
+    if (
+        _credit_refund_reconciler_task is None
+        or _credit_refund_reconciler_task.done()
+    ):
+        _credit_refund_reconciler_task = asyncio.create_task(
+            _credit_refund_reconciler_loop(),
+            name="studio-credit-refund-reconciler",
+        )
     await start_embedded_generation_worker(
         {
             "run_generation_pipeline": run_generation_pipeline,
@@ -21489,7 +22045,17 @@ async def _start_embedded_production_consumer() -> None:
 
 
 async def _stop_embedded_production_consumer() -> None:
+    global _credit_refund_reconciler_task
+    task = _credit_refund_reconciler_task
+    _credit_refund_reconciler_task = None
+    if task is not None and not task.done():
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
     await stop_embedded_generation_worker()
+    set_terminal_job_reconciler(None)
 
 
 app.on_event("startup")(_start_embedded_production_consumer)

@@ -16,6 +16,7 @@ Routes:
 """
 from __future__ import annotations
 import hashlib
+import inspect
 import os
 import uuid
 import json
@@ -423,6 +424,7 @@ def build_skeleton_ai_router(
     *,
     reserve_credit: Callable[..., Any] | None = None,
     refund_credit: Callable[..., Any] | None = None,
+    settle_credit_operation: Callable[..., Any] | None = None,
 ) -> APIRouter:
     """
     Build the Skeleton AI router.
@@ -1099,6 +1101,8 @@ def build_skeleton_ai_router(
         if replay is not None:
             return replay
         assert claim is not None
+        job_id = claim.ledger_key[:12]
+        credit_operation_id = f"skeleton_job:{job_id}"
 
         # Reserve AC up front. Returns (allowed, source, state). Source 'admin'
         # means free (the admin/owner bypass); 'monthly' or 'topup' means we
@@ -1106,7 +1110,29 @@ def build_skeleton_ai_router(
         credit_source = "admin"
         if reserve_credit:
             try:
-                allowed, credit_source, state = await reserve_credit(user, ac_cost=ac_required)
+                reserve_parameters = inspect.signature(reserve_credit).parameters
+                supports_journal = (
+                    "operation_id" in reserve_parameters
+                    or any(
+                        parameter.kind == inspect.Parameter.VAR_KEYWORD
+                        for parameter in reserve_parameters.values()
+                    )
+                )
+                if supports_journal:
+                    allowed, credit_source, state = await reserve_credit(
+                        user,
+                        ac_cost=ac_required,
+                        operation_id=credit_operation_id,
+                        operation_context={
+                            "kind": "synchronous_skeleton_generation",
+                            "job_id": job_id,
+                        },
+                    )
+                else:
+                    allowed, credit_source, state = await reserve_credit(
+                        user,
+                        ac_cost=ac_required,
+                    )
             except Exception as e:
                 _fail_skeleton_command(claim, e)
                 raise HTTPException(503, f"billing_check_failed: {e}")
@@ -1127,8 +1153,35 @@ def build_skeleton_ai_router(
                     },
                 )
 
-        job_id = claim.ledger_key[:12]
         workspace = OUTPUT_ROOT / job_id
+
+        async def settle_charge(outcome: str, reason: str) -> bool:
+            if credit_source == "admin":
+                return True
+            if settle_credit_operation:
+                try:
+                    return bool(
+                        await settle_credit_operation(
+                            _user_id(user),
+                            credit_operation_id,
+                            outcome=outcome,
+                            reason=reason,
+                        )
+                    )
+                except Exception:
+                    return False
+            if outcome == "refund":
+                await _maybe_refund(
+                    refund_credit,
+                    user,
+                    credit_source,
+                    ac_required,
+                )
+                return True
+            # Legacy/test adapters that do not journal the reservation have
+            # nothing to commit. Production always supplies the settler.
+            return settle_credit_operation is None
+
         try:
             with _skeleton_execution(claim):
                 _write_job_owner(workspace, job_id, user)
@@ -1151,18 +1204,40 @@ def build_skeleton_ai_router(
                     image_model_id=selected_image_model,
                 )
         except ValueError as e:
-            await _maybe_refund(refund_credit, user, credit_source, ac_required)
+            await settle_charge(
+                "refund",
+                f"skeleton validation failed: {type(e).__name__}",
+            )
             _fail_skeleton_command(claim, e)
             raise HTTPException(400, str(e))
         except GrokAuthError as e:
-            await _maybe_refund(refund_credit, user, credit_source, ac_required)
+            await settle_charge(
+                "refund",
+                f"skeleton provider auth failed: {type(e).__name__}",
+            )
             _fail_skeleton_command(claim, e)
             raise HTTPException(503, f"upstream_auth: {e}")
         except Exception as e:
-            await _maybe_refund(refund_credit, user, credit_source, ac_required)
+            await settle_charge(
+                "refund",
+                f"skeleton pipeline failed: {type(e).__name__}",
+            )
             _fail_skeleton_command(claim, e)
             raise HTTPException(500, f"pipeline_failed: {e}")
 
+        if not await settle_charge("commit", "skeleton result persisted"):
+            await settle_charge(
+                "refund",
+                "skeleton credit commit failed after result persistence",
+            )
+            settlement_error = RuntimeError(
+                "billing_settlement_failed: generation result was not charged"
+            )
+            _fail_skeleton_command(claim, settlement_error)
+            raise HTTPException(
+                503,
+                "Billing settlement is temporarily unavailable. Retry safely.",
+            )
         response = {
             "job_id": job_id,
             "ac_charged": ac_required if credit_source != "admin" else 0,

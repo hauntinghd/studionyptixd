@@ -1,0 +1,18 @@
+[Unit]
+Description=NYPTID Studio encrypted off-host restore verification
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/opt/studio/shared/restic-s3.env
+ConditionPathExists=/opt/studio/shared/active.env
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+WorkingDirectory=/opt/studio/current
+ExecStart=/usr/bin/bash /opt/studio/current/ops/contabo/restic_offsite.sh restore-check
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+UMask=0077
+TimeoutStartSec=24h

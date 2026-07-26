@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 VISUAL_QA_VERSION = 5
-SEMANTIC_QA_VERSION = 5
+SEMANTIC_QA_VERSION = 6
 # Bump whenever the acceptance contract changes so old cached decisions
 # cannot keep a scene blocked after the rules have been corrected.
 STILL_SEMANTIC_QA_VERSION = 8
@@ -1337,8 +1337,11 @@ def audit_generic_clip(
             "fingerprint": fingerprint,
         }
 
-    frames = _extract_clip_frames(clip_path, count=7)
-    if len(frames) < 4:
+    # Nine evenly spaced samples cover the complete five-second timeline at
+    # roughly half-second intervals. Seven samples left a wide enough gap for
+    # brief morphs and anatomy failures to evade the public-release gate.
+    frames = _extract_clip_frames(clip_path, count=9)
+    if len(frames) < 8:
         return {
             "status": "fail",
             "pass": False,
@@ -1600,8 +1603,8 @@ def audit_skeleton_clip(
         except Exception:
             pass
 
-    frames = _extract_clip_frames(clip_path, count=5)
-    if len(frames) < 4:
+    frames = _extract_clip_frames(clip_path, count=9)
+    if len(frames) < 8:
         return {
             "status": "fail" if required else "warn",
             "pass": False,

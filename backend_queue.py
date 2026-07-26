@@ -39,8 +39,13 @@ _log = logging.getLogger("nyptid-studio")
 _redis_client: Redis | None = None
 _redis_healthy = True
 _job_state_file_lock = asyncio.Lock()
+_terminal_job_reconciler: (
+    Callable[[str, dict[str, Any]], Awaitable[dict[str, Any]]] | None
+) = None
 _JOB_STATE_DIR = TEMP_DIR / "job_state_cache"
 _JOB_STATE_DIR.mkdir(parents=True, exist_ok=True)
+_REFUND_OUTBOX_DIR = TEMP_DIR / "credit_refund_outbox"
+_REFUND_OUTBOX_DIR.mkdir(parents=True, exist_ok=True)
 
 # Background tasks we've spawned from enqueue_generation_job. Python's asyncio
 # garbage-collects tasks that nothing references — silently cancelling the
@@ -257,6 +262,61 @@ def init_queue_runtime(jobs_ref: dict[str, dict[str, Any]], logger: logging.Logg
         _log = logger
 
 
+def set_terminal_job_reconciler(
+    callback: Callable[[str, dict[str, Any]], Awaitable[dict[str, Any]]] | None,
+) -> None:
+    """Install the application-owned terminal billing reconciler.
+
+    Queue receipts are not acknowledged while that callback reports a pending
+    credit refund. This keeps restart recovery from stranding a paid user's
+    durable refund after provider or wallet-storage failure.
+    """
+    global _terminal_job_reconciler
+    _terminal_job_reconciler = callback
+
+
+def _sync_refund_outbox_file(job_id: str, snapshot: dict[str, Any]) -> None:
+    path = _REFUND_OUTBOX_DIR / f"{job_id}.json"
+    pending = (
+        bool(snapshot.get("credit_refund_pending"))
+        and not bool(snapshot.get("credit_refunded"))
+    )
+    if not pending:
+        path.unlink(missing_ok=True)
+        return
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(
+        json.dumps(snapshot, ensure_ascii=True),
+        encoding="utf-8",
+    )
+    temporary.replace(path)
+
+
+async def list_pending_refund_job_states() -> list[tuple[str, dict[str, Any]]]:
+    """Read only the bounded pending-refund outbox, never all historical jobs."""
+
+    def _read_rows() -> list[tuple[str, dict[str, Any]]]:
+        rows: list[tuple[str, dict[str, Any]]] = []
+        for path in _REFUND_OUTBOX_DIR.glob("*.json"):
+            job_id = path.stem
+            if not _SAFE_JOB_ID_RE.fullmatch(job_id):
+                continue
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if (
+                isinstance(payload, dict)
+                and bool(payload.get("credit_refund_pending"))
+                and not bool(payload.get("credit_refunded"))
+            ):
+                rows.append((job_id, payload))
+        return rows
+
+    async with _job_state_file_lock:
+        return await asyncio.to_thread(_read_rows)
+
+
 def _get_job_queue() -> asyncio.PriorityQueue:
     global _job_queue
     if _job_queue is None:
@@ -396,6 +456,23 @@ async def _persist_job_state_primary(
     snapshot = json.loads(payload)
     redis_ok = False
     disk_ok = False
+    refund_pending = (
+        bool(snapshot.get("credit_refund_pending"))
+        and not bool(snapshot.get("credit_refunded"))
+    )
+    if refund_pending:
+        try:
+            async with _job_state_file_lock:
+                # Publish the recovery obligation before any faster Redis/main
+                # job write. A crash at every later boundary remains visible
+                # to the bounded startup scanner.
+                _sync_refund_outbox_file(job_id, snapshot)
+        except Exception as e:
+            _log.warning(
+                "Local refund-outbox prepublish failed for %s: %s",
+                job_id,
+                e,
+            )
     redis = await _get_redis()
     if redis is not None:
         try:
@@ -410,7 +487,16 @@ async def _persist_job_state_primary(
             path = _job_state_file(job_id)
             tmp = path.with_suffix(".tmp")
             tmp.write_text(payload, encoding="utf-8")
-            tmp.replace(path)
+            if refund_pending:
+                # Retry the sidecar write in case the prepublish encountered a
+                # transient filesystem failure, then publish the main state.
+                _sync_refund_outbox_file(job_id, snapshot)
+                tmp.replace(path)
+            else:
+                # For a cleared obligation, make the authoritative job state
+                # durable before deleting its idempotent retry sidecar.
+                tmp.replace(path)
+                _sync_refund_outbox_file(job_id, snapshot)
             disk_ok = True
     except Exception as e:
         _log.warning(f"Local job persistence failed for {job_id}: {e}")
@@ -721,6 +807,26 @@ async def acknowledge_generation_job(payload: dict[str, Any]) -> bool:
         return False
 
 
+async def generation_job_is_admitted(job_id: str) -> bool | None:
+    """Return Redis admission state, or None when it cannot be verified."""
+
+    normalized_job_id = str(job_id or "").strip()
+    if not _SAFE_JOB_ID_RE.fullmatch(normalized_job_id):
+        return False
+    redis = await _get_redis()
+    if redis is None:
+        return None
+    try:
+        return bool(await redis.exists(_queue_admission_key(normalized_job_id)))
+    except Exception as exc:
+        _log.warning(
+            "Redis admission-state lookup failed for %s: %s",
+            normalized_job_id,
+            exc,
+        )
+        return None
+
+
 async def _reject_raw_inflight(raw: str, reason: str, *, job_id: str = "") -> bool:
     """Move malformed/unsupported work to a bounded dead-letter list."""
     global _redis_healthy
@@ -860,6 +966,42 @@ async def _persist_and_ack_terminal_claim(
 
     durable = False
     while True:
+        reconciler = _terminal_job_reconciler
+        if reconciler is not None:
+            try:
+                reconciled = await reconciler(job_id, job_state)
+                if isinstance(reconciled, dict):
+                    job_state = reconciled
+                    if _jobs_ref is not None:
+                        _jobs_ref[job_id] = job_state
+                    # The application callback may have changed refund state;
+                    # prove that exact snapshot durable before every ack retry.
+                    durable = False
+            except Exception as exc:
+                _embedded_worker_last_error = "terminal_reconciliation_pending"
+                _log.error(
+                    "[%s] Terminal reconciliation failed; keeping queue receipt: %s",
+                    job_id,
+                    exc,
+                    exc_info=True,
+                )
+                if stop_event is not None and stop_event.is_set():
+                    return False
+                await asyncio.sleep(0.5)
+                continue
+        if (
+            bool(job_state.get("credit_refund_pending"))
+            and not bool(job_state.get("credit_refunded"))
+        ):
+            _embedded_worker_last_error = (
+                "credit_refund_reconciler_unavailable"
+                if reconciler is None
+                else "credit_refund_pending"
+            )
+            if stop_event is not None and stop_event.is_set():
+                return False
+            await asyncio.sleep(0.5)
+            continue
         if not durable:
             durable = await persist_terminal_job_state(job_id, job_state)
         if durable and await acknowledge_generation_job(payload):

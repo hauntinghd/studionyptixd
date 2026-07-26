@@ -43,7 +43,7 @@ export default function TermsPage() {
             <main className="mx-auto max-w-3xl px-6 py-14">
                 <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-violet-300">NYPTID Studio</p>
                 <h1 className="mt-2 text-3xl font-bold tracking-tight text-white sm:text-4xl">Terms of Service</h1>
-                <p className="mt-2 text-sm text-gray-500">Last updated: April 19, 2026</p>
+                <p className="mt-2 text-sm text-gray-500">Last updated: July 26, 2026</p>
 
                 <P>
                     These Terms of Service ("Terms") are a binding agreement between you and NYPTID Industries ("NYPTID," "we," "us") governing
@@ -67,7 +67,7 @@ export default function TermsPage() {
 
                 <H2>3. Subscription, Billing, and Refunds</H2>
                 <UL>
-                    <li>Paid plans are billed in advance on a recurring basis (monthly or annually) via PayPal or Stripe.</li>
+                    <li>Paid plans are billed monthly in advance on a recurring basis via Stripe.</li>
                     <li>Plan fees are non-refundable except where required by law or at NYPTID's sole discretion. Refund requests can be submitted via <em>Settings → Billing → Request Refund</em>.</li>
                     <li>We may change plan pricing with at least 14 days' advance notice. Price changes apply at your next renewal.</li>
                     <li>Failure to pay may result in service suspension until the balance is resolved.</li>
@@ -102,7 +102,7 @@ export default function TermsPage() {
 
                 <H2>7. Third-Party Services</H2>
                 <P>
-                    Studio integrates with third-party services including (but not limited to) YouTube (Google), Supabase, RunPod, Fal.ai, PayPal, Vercel, and Stripe.
+                    Studio integrates with third-party services including YouTube (Google), Contabo, Supabase, Stripe, Anthropic, Fal.ai, ElevenLabs, and Vercel.
                     Your use of those services through Studio is also subject to their respective terms.
                 </P>
                 <P>

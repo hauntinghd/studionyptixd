@@ -45,7 +45,10 @@ def build_refund_handlers(
         if amount_usd is None or amount_usd <= 0:
             raise HTTPException(400, "Amount paid is required and must be greater than zero")
         if not payment_reference:
-            raise HTTPException(400, "PayPal order / invoice id is required")
+            raise HTTPException(
+                400,
+                "Stripe charge, payment-intent, or invoice id is required",
+            )
         if not image_proof:
             raise HTTPException(400, "Image proof is required")
         is_data_url = image_proof.startswith("data:image/")

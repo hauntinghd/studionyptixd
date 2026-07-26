@@ -50,6 +50,7 @@ class StudioAgentRouterControlTests(unittest.TestCase):
 
     def test_shortform_animate_endpoint_runs_i2v_and_returns_snapshot(self):
         job_id = "shortform123"
+        session_id = "sa_control123456"
         with (
             patch(
                 "studio_agent.jobs.job_access_metadata",
@@ -69,9 +70,17 @@ class StudioAgentRouterControlTests(unittest.TestCase):
                     "animation_complete_count": 2,
                 },
             ),
+            patch(
+                "studio_agent.store.get_session",
+                return_value={
+                    "session_id": session_id,
+                    "user_id": "owner",
+                    "active_jobs": [{"job_id": job_id, "kind": "shortform"}],
+                },
+            ),
         ):
             response = self._client().post(
-                f"/api/studio-agent/jobs/{job_id}/animate",
+                f"/api/studio-agent/jobs/{job_id}/animate?session_id={session_id}",
                 headers={"X-Idempotency-Key": "animate-shortform123"},
             )
 
@@ -79,6 +88,7 @@ class StudioAgentRouterControlTests(unittest.TestCase):
         animate.assert_called_once_with(
             job_id,
             user_id="owner",
+            session_id=session_id,
             command_id="animate-shortform123",
         )
         data = response.json()
@@ -87,6 +97,7 @@ class StudioAgentRouterControlTests(unittest.TestCase):
 
     def test_shortform_finalize_blocks_when_requested_animation_is_missing(self):
         job_id = "shortform123"
+        session_id = "sa_control123456"
         with (
             patch(
                 "studio_agent.jobs.job_access_metadata",
@@ -101,9 +112,18 @@ class StudioAgentRouterControlTests(unittest.TestCase):
                 },
             ),
             patch("studio_agent.tools.spawn_finalize_production") as spawn,
+            patch(
+                "studio_agent.store.get_session",
+                return_value={
+                    "session_id": session_id,
+                    "user_id": "owner",
+                    "active_jobs": [{"job_id": job_id, "kind": "shortform"}],
+                },
+            ),
         ):
             response = self._client().post(
-                f"/api/studio-agent/jobs/{job_id}/finalize?kind=shortform",
+                f"/api/studio-agent/jobs/{job_id}/finalize"
+                f"?kind=shortform&session_id={session_id}",
                 headers={"X-Idempotency-Key": "finalize-shortform123"},
             )
 

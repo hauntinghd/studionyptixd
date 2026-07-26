@@ -9,7 +9,6 @@ from auth import FALLBACK_SUPABASE_ANON_KEY, FALLBACK_SUPABASE_URL
 from backend_settings import (
     ANIMATION_CREDIT_UNIT_USD,
     ANIMATION_MARKUP_MULTIPLIER,
-    BILLING_STRIPE_PRIMARY,
     DISABLE_ALL_SFX,
     FORCE_720P_ONLY,
     GOOGLE_OAUTH_CLIENT_KIND,
@@ -127,8 +126,8 @@ def build_public_config_payload(
                 "model": "unified_credits",
                 "default_membership_plan_id": default_membership_plan_id(),
                 "membership_label": "Studio credits",
-                "paypal_primary": not bool(BILLING_STRIPE_PRIMARY and STRIPE_SECRET_KEY),
-                "stripe_primary": bool(BILLING_STRIPE_PRIMARY and STRIPE_SECRET_KEY),
+                "paypal_primary": False,
+                "stripe_primary": bool(STRIPE_SECRET_KEY),
                 "slideshows_free": False,
                 "animated_credit_label": "Credits",
                 "non_animated_credit_label": "Credits",

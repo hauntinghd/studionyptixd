@@ -9,7 +9,7 @@ import time
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Callable, Literal
 
 from . import provider_policy
 
@@ -430,6 +430,10 @@ _SESSION_LOCKS_GUARD = threading.Lock()
 _SESSION_LOCKS: dict[str, threading.RLock] = {}
 _JOB_MUTATION_LOCKS_GUARD = threading.Lock()
 _JOB_MUTATION_LOCKS: dict[str, threading.RLock] = {}
+_BOOTSTRAP_LOCKS_GUARD = threading.Lock()
+_BOOTSTRAP_LOCKS: dict[str, threading.RLock] = {}
+_USER_SESSION_INDEX_LOCKS_GUARD = threading.Lock()
+_USER_SESSION_INDEX_LOCKS: dict[str, threading.RLock] = {}
 SINGLETON_PRODUCTION_APPROVAL_TOOLS = {
     "start_shortform_generate",
     "start_longform_render",
@@ -454,6 +458,28 @@ def _job_mutation_thread_lock(job_id: str) -> threading.RLock:
             lock = threading.RLock()
             _JOB_MUTATION_LOCKS[key] = lock
         return lock
+
+
+def _bootstrap_thread_lock(user_id: str) -> threading.RLock:
+    key = str(user_id or "").strip() or "__unknown__"
+    with _BOOTSTRAP_LOCKS_GUARD:
+        lock = _BOOTSTRAP_LOCKS.get(key)
+        if lock is None:
+            lock = threading.RLock()
+            _BOOTSTRAP_LOCKS[key] = lock
+        return lock
+
+
+def _user_session_index_thread_lock(user_id: str) -> threading.RLock:
+    key = str(user_id or "").strip() or "__unknown__"
+    with _USER_SESSION_INDEX_LOCKS_GUARD:
+        lock = _USER_SESSION_INDEX_LOCKS.get(key)
+        if lock is None:
+            lock = threading.RLock()
+            _USER_SESSION_INDEX_LOCKS[key] = lock
+        return lock
+
+
 _TITLE_STOPWORDS = {
     "the", "and", "for", "with", "that", "this", "when", "they", "them", "you", "your",
     "into", "from", "short", "video", "scene", "test", "make", "making", "going", "title",
@@ -673,6 +699,84 @@ def _session_write_file_lock(session_id: str):
     lock_dir.mkdir(parents=True, exist_ok=True)
     lock_path = lock_dir / f"{digest}.lock"
     with lock_path.open("a+b") as handle:
+        handle.seek(0, 2)
+        if handle.tell() == 0:
+            handle.write(b"\0")
+            handle.flush()
+        handle.seek(0)
+        if __import__("os").name == "nt":
+            import msvcrt
+
+            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            handle.seek(0)
+            if __import__("os").name == "nt":
+                import msvcrt
+
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+@contextmanager
+def _bootstrap_user_lock(user_id: str):
+    """Serialize resume-or-create decisions for one user across API workers."""
+
+    normalized = str(user_id or "").strip()
+    if not normalized:
+        raise ValueError("user_id is required for Studio bootstrap")
+    digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+    lock_dir = SESSIONS_DIR / ".bootstrap_locks"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = lock_dir / f"{digest}.lock"
+    with _bootstrap_thread_lock(normalized), lock_path.open("a+b") as handle:
+        handle.seek(0, 2)
+        if handle.tell() == 0:
+            handle.write(b"\0")
+            handle.flush()
+        handle.seek(0)
+        if __import__("os").name == "nt":
+            import msvcrt
+
+            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            handle.seek(0)
+            if __import__("os").name == "nt":
+                import msvcrt
+
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+@contextmanager
+def _user_session_index_lock(user_id: str):
+    """Serialize one account's index across API workers."""
+
+    normalized = str(user_id or "").strip()
+    if not normalized:
+        raise ValueError("user_id is required for Studio session index")
+    digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+    lock_dir = SESSIONS_DIR / ".user_session_index" / "locks"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = lock_dir / f"{digest}.lock"
+    with _user_session_index_thread_lock(normalized), lock_path.open("a+b") as handle:
         handle.seek(0, 2)
         if handle.tell() == 0:
             handle.write(b"\0")
@@ -3244,27 +3348,148 @@ def touch_title_from_user_message(session_id: str, user_text: str) -> None:
     _save(session)
 
 
-def list_sessions(user_id: str, *, limit: int = 50) -> list[dict[str, Any]]:
-    """List sessions for a user, newest first."""
-    SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
-    cap = max(1, min(limit, 200))
-    # Sort by file mtime first so we only parse the newest files — reading every
-    # session JSON on Agent boot was blocking the sidebar for heavy accounts.
-    paths = sorted(
-        SESSIONS_DIR.glob("sa_*.json"),
-        key=lambda p: p.stat().st_mtime,
-        reverse=True,
+_USER_SESSION_INDEX_VERSION = 1
+
+
+def _user_session_index_path(user_id: str) -> Path:
+    digest = hashlib.sha256(str(user_id or "").strip().encode("utf-8")).hexdigest()
+    return SESSIONS_DIR / ".user_session_index" / f"{digest}.json"
+
+
+def _read_user_session_index(user_id: str) -> dict[str, Any]:
+    path = _user_session_index_path(user_id)
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    if raw.get("version") != _USER_SESSION_INDEX_VERSION:
+        return {}
+    if str(raw.get("user_id") or "") != str(user_id or "").strip():
+        return {}
+    if not isinstance(raw.get("session_ids"), list):
+        return {}
+    return raw
+
+
+def _write_user_session_index(
+    *,
+    user_id: str,
+    session_ids: list[str],
+    complete: bool,
+) -> None:
+    path = _user_session_index_path(user_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    normalized_ids: list[str] = []
+    seen_ids: set[str] = set()
+    for raw in session_ids:
+        session_id = str(raw or "").strip()
+        if not re.fullmatch(r"sa_[A-Za-z0-9_-]{1,64}", session_id):
+            continue
+        if session_id in seen_ids:
+            continue
+        seen_ids.add(session_id)
+        normalized_ids.append(session_id)
+    payload = {
+        "version": _USER_SESSION_INDEX_VERSION,
+        "user_id": str(user_id or "").strip(),
+        "complete": bool(complete),
+        "session_ids": normalized_ids,
+        "updated_at": _now(),
+    }
+    temporary = path.parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
+    temporary.write_text(
+        json.dumps(payload, indent=2, ensure_ascii=False),
+        encoding="utf-8",
     )
+    temporary.replace(path)
+
+
+def _register_session_in_user_index_unlocked(
+    *,
+    user_id: str,
+    session_id: str,
+) -> None:
+    """Register before persistence while the caller owns the user index lock."""
+
+    current = _read_user_session_index(user_id)
+    if current.get("complete") is not True:
+        # Missing, corrupt, and legacy-incomplete indexes deliberately remain
+        # unsealed. The next list performs a full authoritative backfill.
+        return
+    session_ids = [
+        str(value or "").strip()
+        for value in list(current.get("session_ids") or [])
+    ]
+    if session_id not in session_ids:
+        session_ids.append(session_id)
+    _write_user_session_index(
+        user_id=user_id,
+        session_ids=session_ids,
+        complete=True,
+    )
+
+
+def list_sessions(user_id: str, *, limit: int = 50) -> list[dict[str, Any]]:
+    """List a user's sessions authoritatively, newest first.
+
+    Session files for every account share one directory. A bounded scan of the
+    newest global files can therefore return a false empty result for a quiet
+    user after other accounts create enough chats. Bootstrap treats an empty
+    list as permission to create, so the first discovery performs a complete
+    namespace backfill. New sessions register atomically in a per-user index,
+    making every subsequent discovery proportional to that account rather
+    than to all public accounts.
+    """
+    SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+    uid = str(user_id or "").strip()
+    if not uid:
+        return []
+    cap = max(1, min(limit, 200))
+
+    with _user_session_index_lock(uid):
+        index = _read_user_session_index(uid)
+        if index.get("complete") is not True:
+            discovered_ids: list[str] = []
+            for path in SESSIONS_DIR.glob("sa_*.json"):
+                try:
+                    session = _read_session_file(path)
+                except Exception:
+                    continue
+                if not session or str(session.get("user_id") or "") != uid:
+                    continue
+                if session.get("deleted_at"):
+                    continue
+                session_id = str(session.get("session_id") or path.stem).strip()
+                if re.fullmatch(r"sa_[A-Za-z0-9_-]{1,64}", session_id):
+                    discovered_ids.append(session_id)
+            # Merge registrations that existed before the backfill. Holding
+            # the per-user lock prevents a new create from appearing between
+            # the scan and this complete index commit.
+            discovered_ids.extend(
+                str(value or "").strip()
+                for value in list(index.get("session_ids") or [])
+            )
+            _write_user_session_index(
+                user_id=uid,
+                session_ids=discovered_ids,
+                complete=True,
+            )
+            index = _read_user_session_index(uid)
+        session_ids = [
+            str(value or "").strip()
+            for value in list(index.get("session_ids") or [])
+        ]
+
     rows: list[dict[str, Any]] = []
-    scan_budget = max(cap * 4, 80)
-    for path in paths[:scan_budget]:
-        if len(rows) >= cap:
-            break
+    for session_id in session_ids:
+        path = _session_path(session_id)
         try:
             session = _read_session_file(path)
             if not session:
                 continue
-            if session.get("user_id") != user_id:
+            if str(session.get("user_id") or "") != uid:
                 continue
             if session.get("deleted_at"):
                 continue
@@ -3273,6 +3498,143 @@ def list_sessions(user_id: str, *, limit: int = 50) -> list[dict[str, Any]]:
             continue
     rows.sort(key=lambda s: float(s.get("updated_at") or 0), reverse=True)
     return rows[:cap]
+
+
+def _bootstrap_receipt_path(user_id: str, bootstrap_key: str) -> Path:
+    identity = f"{str(user_id or '').strip()}\0{str(bootstrap_key or '').strip()}"
+    digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()
+    return SESSIONS_DIR / ".bootstrap_receipts" / f"{digest}.json"
+
+
+def _read_bootstrap_receipt(user_id: str, bootstrap_key: str) -> dict[str, Any]:
+    path = _bootstrap_receipt_path(user_id, bootstrap_key)
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    if str(raw.get("user_id") or "") != str(user_id or "").strip():
+        return {}
+    return raw
+
+
+def _write_bootstrap_receipt(
+    *,
+    user_id: str,
+    bootstrap_key: str,
+    session_id: str,
+) -> dict[str, Any]:
+    path = _bootstrap_receipt_path(user_id, bootstrap_key)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    row = {
+        "version": 1,
+        "user_id": str(user_id or "").strip(),
+        "bootstrap_key_sha256": hashlib.sha256(
+            str(bootstrap_key or "").strip().encode("utf-8")
+        ).hexdigest(),
+        "session_id": str(session_id or "").strip(),
+        "updated_at": _now(),
+    }
+    temporary = path.parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
+    temporary.write_text(
+        json.dumps(row, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    temporary.replace(path)
+    return row
+
+
+def bootstrap_session(
+    *,
+    user_id: str,
+    bootstrap_key: str,
+    preferred_session_id: str = "",
+    create_session_factory: Callable[[], dict[str, Any]],
+) -> dict[str, Any]:
+    """Atomically resume or create the one session for a bootstrap request.
+
+    The lock is per user rather than per client key. Two tabs, desktop/web
+    instances, or clients recovering different persisted keys therefore cannot
+    both observe an empty account and create separate automatic chats. The
+    ordinary ``create_session`` API remains separate for an explicit New Chat.
+    """
+
+    uid = str(user_id or "").strip()
+    key = str(bootstrap_key or "").strip()
+    preferred = str(preferred_session_id or "").strip()
+    if not uid:
+        raise ValueError("user_id is required for Studio bootstrap")
+    if len(key) < 8 or len(key) > 128:
+        raise ValueError("bootstrap_key must contain 8 to 128 characters")
+    if preferred and not re.fullmatch(r"sa_[A-Za-z0-9_-]{1,64}", preferred):
+        # A corrupted browser pointer must never become a filesystem path.
+        # Ignore it and continue with authoritative per-user discovery.
+        preferred = ""
+
+    with _bootstrap_user_lock(uid):
+        receipt = _read_bootstrap_receipt(uid, key)
+        selected: dict[str, Any] | None = None
+        source = ""
+
+        if preferred:
+            selected = get_session(
+                preferred,
+                user_id=uid,
+                reconcile_jobs=False,
+                _prune_active_jobs=False,
+            )
+            if selected:
+                source = "preferred"
+
+        # The current backend view wins over an old receipt when another
+        # intentional New Chat became the newest session since the last boot.
+        if selected is None:
+            existing = list_sessions(uid, limit=1)
+            if existing:
+                selected = existing[0]
+                source = "latest"
+
+        if selected is None:
+            receipt_session_id = str(receipt.get("session_id") or "").strip()
+            if receipt_session_id:
+                selected = get_session(
+                    receipt_session_id,
+                    user_id=uid,
+                    reconcile_jobs=False,
+                    _prune_active_jobs=False,
+                )
+                if selected:
+                    source = "receipt"
+
+        created = False
+        if selected is None:
+            selected = create_session_factory()
+            if not isinstance(selected, dict):
+                raise RuntimeError("Studio bootstrap create returned no session")
+            if str(selected.get("user_id") or "") != uid:
+                raise RuntimeError("Studio bootstrap create returned the wrong owner")
+            if not str(selected.get("session_id") or "").strip():
+                raise RuntimeError("Studio bootstrap create returned no session id")
+            source = "created"
+            created = True
+
+        session_id = str(selected.get("session_id") or "").strip()
+        replay = bool(
+            receipt
+            and str(receipt.get("session_id") or "").strip() == session_id
+        )
+        _write_bootstrap_receipt(
+            user_id=uid,
+            bootstrap_key=key,
+            session_id=session_id,
+        )
+        return {
+            "session": selected,
+            "mode": "created" if created else "resumed",
+            "source": source,
+            "idempotent_replay": replay,
+        }
 
 
 _CONTEXT_INGEST_TERMS = (
@@ -3607,7 +3969,20 @@ def create_session(
         "provider_policy_migrated_at": _now(),
         "provider_policy_migrations": [],
     }
-    _save(session)
+    normalized_user_id = str(user_id or "").strip()
+    if normalized_user_id:
+        # The registration and first durable write share one per-user lock.
+        # Discovery can therefore never observe a complete index without this
+        # newly committed session (or a harmless stale pre-write registration
+        # after a process crash).
+        with _user_session_index_lock(normalized_user_id):
+            _register_session_in_user_index_unlocked(
+                user_id=normalized_user_id,
+                session_id=sid,
+            )
+            _save(session)
+    else:
+        _save(session)
     return session
 
 

@@ -32,13 +32,10 @@ def test_studio_runpod_mutators_are_fail_closed_tombstones() -> None:
     env_example = (
         ROOT / "runpod-serverless" / ".runpod.env.example"
     ).read_text(encoding="utf-8")
-    paypal_patch = (
-        ROOT / "runpod-serverless" / "patch_paypal_webhook.py"
-    ).read_text(encoding="utf-8")
 
     assert f"GOOGLE_REDIRECT_URI={canonical_api}/api/oauth/google/youtube/callback" in env_example
-    assert f"PAYPAL_WEBHOOK_URL={canonical_api}/api/paypal/webhook" in env_example
-    assert f'NEW_URL = "{canonical_api}/api/paypal/webhook"' in paypal_patch
+    assert "PAYPAL" not in env_example.upper()
+    assert not (ROOT / "runpod-serverless" / "patch_paypal_webhook.py").exists()
     assert "STUDIO_RUNPOD_PRODUCTION_ENABLED=false" in env_example
     assert "STUDIO_RUNPOD_LONGFORM_ENABLED=false" in env_example
     assert "RUNPOD_API_KEY=" in env_example
@@ -76,7 +73,6 @@ def test_studio_runpod_mutators_are_fail_closed_tombstones() -> None:
     )
     for legacy_origin in legacy_origins:
         assert legacy_origin not in env_example
-        assert legacy_origin not in paypal_patch
 
 
 def test_release_image_embeds_frontend_identity_and_excludes_secret_files() -> None:
@@ -113,14 +109,18 @@ def test_ci_deploys_the_exact_published_manifest_digest() -> None:
     ).read_text(encoding="utf-8")
     deploy_script = _read("deploy.sh")
     lib = _read("lib.sh")
+    release_tests = (
+        ROOT / "ops" / "release_backend_tests.txt"
+    ).read_text(encoding="utf-8")
 
     assert "id: build_push" in publish
     assert "steps.build_push.outputs.digest" in publish
     assert "image_ref: ${{ steps.immutable_image.outputs.image_ref }}" in publish
     assert "image_ref: ${{ needs.build-and-publish.outputs.image_ref }}" in publish
-    assert "tests/test_xai_runtime_hard_disable.py" in publish
-    assert "tests/test_fly_cutover_evidence.py" in publish
-    assert "tests/test_desktop_release_channel.py" in publish
+    assert "ops/release_backend_tests.txt" in publish
+    assert "\ntests\n" in release_tests
+    assert "test_studio_agent_render_qa.py" in release_tests
+    assert "test_unified_credits.py" in release_tests
     assert "cargo test --locked --test updater_release" in publish
 
     assert "docker\\.io/nyptid/nyptid-studio-api@sha256:[0-9a-f]{64}" in deploy_workflow
@@ -205,6 +205,7 @@ def test_container_health_requires_provenance_and_single_consumer() -> None:
         "queue_mode",
         "queue_consumer_ready",
         "queue_consumer_running",
+        "youtube_token_storage_ready",
         'queue.get("workers") != 1',
     ):
         assert marker in source
@@ -302,6 +303,7 @@ def test_smoke_and_rollback_fail_closed() -> None:
         "release_id",
         'payload.get("queue_mode") == "redis"',
         'consumer.get("workers") != 1',
+        "youtube_token_storage_ready",
         "xai_image_fallback_enabled",
         "image_provider_order",
         "cliplab_virality_backend",
@@ -459,6 +461,8 @@ def test_secret_template_contains_no_secret_values_or_redis_override() -> None:
         "YOUTUBE_API_KEY",
         "GOOGLE_CLIENT_ID",
         "GOOGLE_CLIENT_SECRET",
+        "YOUTUBE_TOKEN_ENCRYPTION_KEY",
+        "YOUTUBE_TOKEN_ENCRYPTION_KEY_PREVIOUS",
         "GOOGLE_REDIRECT_URI",
         "SUPABASE_URL",
         "SUPABASE_ANON_KEY",
@@ -466,9 +470,6 @@ def test_secret_template_contains_no_secret_values_or_redis_override() -> None:
         "SUPABASE_SERVICE_KEY",
         "STRIPE_SECRET_KEY",
         "STRIPE_WEBHOOK_SECRET",
-        "PAYPAL_CLIENT_ID",
-        "PAYPAL_CLIENT_SECRET",
-        "PAYPAL_WEBHOOK_ID",
         "ALGROW_API_KEY",
         "PIKZELS_API_KEY",
         "OPUSCLIP_API_KEY",
@@ -484,8 +485,22 @@ def test_secret_template_contains_no_secret_values_or_redis_override() -> None:
         values[key] = value
     assert sensitive <= values.keys()
     assert all(values[key] == "" for key in sensitive)
+    assert not any(key.startswith("PAYPAL_") for key in values)
     assert "REDIS_URL" not in values
     assert "RUN_EMBEDDED_WORKER" not in values
+
+
+def test_release_preflight_rejects_legacy_paypal_secret_entries() -> None:
+    release_lib = _read("lib.sh")
+    validate_body = release_lib.split("validate_studio_secrets() {", 1)[1].split(
+        "\n}\n",
+        1,
+    )[0]
+    assert "PAYPAL_" in validate_body
+    assert "legacy PAYPAL_* entries must be removed" in validate_body
+    assert "YOUTUBE_TOKEN_ENCRYPTION_KEY_PREVIOUS" in validate_body
+    assert "base64.b64decode" in validate_body
+    assert "if len(decoded) != 32" in validate_body
 
 
 def test_backup_excludes_secrets_and_has_integrity_and_retention() -> None:

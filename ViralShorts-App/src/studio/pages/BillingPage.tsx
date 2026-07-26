@@ -27,7 +27,6 @@ export default function BillingPage({ onNavigate }: { onNavigate: PageNav }) {
         checkout,
         checkoutTopup,
         manageBilling,
-        verifyPayPalOrder,
         topupPacks,
         creditsTotalRemaining,
     } = useContext(AuthContext);
@@ -43,10 +42,6 @@ export default function BillingPage({ onNavigate }: { onNavigate: PageNav }) {
     const topupResult = String(params.get('topup') || '').trim().toLowerCase();
     const subscriptionResult = String(params.get('subscription') || '').trim().toLowerCase();
     const stripeProvider = String(params.get('provider') || '').trim().toLowerCase() === 'stripe';
-    const paypalProvider = String(params.get('provider') || '').trim().toLowerCase() === 'paypal';
-    const paypalOrderId = String(params.get('order_id') || '').trim();
-    const [paypalVerifyState, setPaypalVerifyState] = useState<'idle' | 'verifying' | 'verified' | 'failed' | 'revoked'>('idle');
-    const [paypalVerifyError, setPaypalVerifyError] = useState('');
     const requestedHash = String(locationState.hash || '').replace(/^#/, '').trim().toLowerCase();
     const [selectedPackId, setSelectedPackId] = useState('');
     const [checkoutError, setCheckoutError] = useState('');
@@ -67,7 +62,6 @@ export default function BillingPage({ onNavigate }: { onNavigate: PageNav }) {
 
     const normalizedMembershipSource = String(membershipSource || nextRenewalSource || '').trim().toLowerCase();
     const usesStripeMembership = billingActive && normalizedMembershipSource === 'stripe';
-    const usesManualPayPalMembership = billingActive && normalizedMembershipSource === 'paypal_manual';
     const sortedPacks = useMemo(() => {
         const hasUnified = topupPacks.some((p) => p.price_id.startsWith('uc_'));
         const source = hasUnified ? topupPacks : UNIFIED_TOPUP_PACKS;
@@ -193,50 +187,22 @@ export default function BillingPage({ onNavigate }: { onNavigate: PageNav }) {
     }, [requestedHash, requestedPackId, requestedSection, sortedPacks.length]);
 
     useEffect(() => {
-        const confirmed = (paypalProvider && paypalVerifyState === 'verified')
-            || (stripeCheckoutSync.kind === 'topup' && stripeCheckoutSync.status === 'confirmed');
+        const confirmed = stripeCheckoutSync.kind === 'topup' && stripeCheckoutSync.status === 'confirmed';
         if (!confirmed) return;
-        trackOnce(`billing_topup_confirmed:${stripeCheckoutSync.startedAt || paypalOrderId}`, () => {
+        trackOnce(`billing_topup_confirmed:${stripeCheckoutSync.startedAt}`, () => {
             trackTopupPurchaseCompleted(Number(selectedPack?.price_usd || 0));
         });
-    }, [paypalOrderId, paypalProvider, paypalVerifyState, selectedPack?.price_usd, stripeCheckoutSync]);
+    }, [selectedPack?.price_usd, stripeCheckoutSync]);
 
     useEffect(() => {
-        if (!paypalProvider || !paypalOrderId) return;
-        if (topupResult !== 'success' && subscriptionResult !== 'success') return;
-        let cancelled = false;
-        setPaypalVerifyState('verifying');
-        setPaypalVerifyError('');
-        (async () => {
-            const result = await verifyPayPalOrder(paypalOrderId);
-            if (cancelled) return;
-            if (!result.ok) {
-                setPaypalVerifyState('failed');
-                setPaypalVerifyError(result.error || 'Unable to verify payment');
-                return;
-            }
-            if (result.revoked) {
-                setPaypalVerifyState('revoked');
-                return;
-            }
-            setPaypalVerifyState(result.captured ? 'verified' : 'failed');
-            if (!result.captured) setPaypalVerifyError('PayPal has not confirmed capture yet. Refresh in a moment.');
-        })();
-        return () => {
-            cancelled = true;
-        };
-    }, [paypalProvider, paypalOrderId, topupResult, subscriptionResult, verifyPayPalOrder]);
-
-    useEffect(() => {
-        const confirmed = (paypalProvider && paypalVerifyState === 'verified')
-            || (stripeCheckoutSync.kind === 'subscription' && stripeCheckoutSync.status === 'confirmed');
+        const confirmed = stripeCheckoutSync.kind === 'subscription' && stripeCheckoutSync.status === 'confirmed';
         if (!confirmed) return;
         const planId = requestedPlanId || normalizedCurrentPlan || 'studio_pro_1k';
         const match = UNIFIED_PLANS.find((p) => p.id === planId);
-        trackOnce(`billing_membership_confirmed:${stripeCheckoutSync.startedAt || paypalOrderId}:${planId}`, () => {
+        trackOnce(`billing_membership_confirmed:${stripeCheckoutSync.startedAt}:${planId}`, () => {
             trackMembershipPurchaseCompleted(planId, match?.priceUsd || 0);
         });
-    }, [normalizedCurrentPlan, paypalOrderId, paypalProvider, paypalVerifyState, requestedPlanId, stripeCheckoutSync]);
+    }, [normalizedCurrentPlan, requestedPlanId, stripeCheckoutSync]);
 
     const handleBack = () => {
         if (isBillingHost) {
@@ -266,23 +232,16 @@ export default function BillingPage({ onNavigate }: { onNavigate: PageNav }) {
                     if (err) setCheckoutError(err);
                     return;
                 }
-                if (billingActive && normalizedCurrentPlan === planId) {
-                    if (usesManualPayPalMembership) {
-                        const err = await startPlanCheckout();
-                        if (err) setCheckoutError(err);
-                        return;
-                    }
-                }
                 const err = await startPlanCheckout();
                 if (err) setCheckoutError(err);
             } finally {
                 setPlanLoadingId('');
             }
         },
-        [billingActive, checkout, manageBilling, normalizedCurrentPlan, onNavigate, session, usesManualPayPalMembership, usesStripeMembership],
+        [billingActive, checkout, manageBilling, onNavigate, session, usesStripeMembership],
     );
 
-    const handlePackCheckout = useCallback(async (method: 'stripe' | 'paypal' = 'stripe') => {
+    const handlePackCheckout = useCallback(async () => {
         if (!selectedPack) {
             setCheckoutError('Select a credit pack first.');
             return;
@@ -292,18 +251,16 @@ export default function BillingPage({ onNavigate }: { onNavigate: PageNav }) {
             return;
         }
         setCheckoutError('');
-        setPackCheckoutLoadingId(method);
+        setPackCheckoutLoadingId('stripe');
         try {
-            if (method === 'stripe') {
-                beginBillingCheckout({
-                    kind: 'topup',
-                    expectedCredits: Number(selectedPack.credits || 0),
-                    baselineBalance: unifiedBalance == null ? undefined : Number(unifiedBalance),
-                });
-            }
-            const err = await checkoutTopup(selectedPack.price_id, method === 'paypal' ? 'paypal' : 'card');
+            beginBillingCheckout({
+                kind: 'topup',
+                expectedCredits: Number(selectedPack.credits || 0),
+                baselineBalance: unifiedBalance == null ? undefined : Number(unifiedBalance),
+            });
+            const err = await checkoutTopup(selectedPack.price_id);
             if (err) {
-                if (method === 'stripe') clearPendingBillingCheckout(readPendingBillingCheckout());
+                clearPendingBillingCheckout(readPendingBillingCheckout());
                 setCheckoutError(err);
             }
         } finally {
@@ -319,14 +276,14 @@ export default function BillingPage({ onNavigate }: { onNavigate: PageNav }) {
     const stripeMembershipPending = (stripeCheckoutSync.kind === 'subscription' && stripeCheckoutSync.status === 'pending')
         || (stripeProvider && subscriptionResult === 'success' && !stripeMembershipConfirmed);
 
-    const paypalBanner = (
+    const billingBanner = (
         <>
-            {(stripeTopupConfirmed || (paypalProvider && paypalVerifyState === 'verified')) && (
+            {stripeTopupConfirmed && (
                 <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-100">
                     Credit top-up confirmed. Your refreshed balance is shown below.
                 </div>
             )}
-            {(stripeMembershipConfirmed || (paypalProvider && paypalVerifyState === 'verified')) && (
+            {stripeMembershipConfirmed && (
                 <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-100">
                     Your plan is active. Monthly credits have been added to your wallet.
                 </div>
@@ -339,16 +296,6 @@ export default function BillingPage({ onNavigate }: { onNavigate: PageNav }) {
             {stripeCheckoutSync.status === 'timed_out' && (
                 <div className="rounded-xl border border-amber-500/20 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">
                     Payment is not confirmed in Studio yet. No credits or plan access are being claimed; refocus or reopen the app to check again.
-                </div>
-            )}
-            {paypalProvider && paypalVerifyState === 'verifying' && (
-                <div className="rounded-xl border border-sky-500/20 bg-sky-500/10 px-4 py-3 text-sm text-sky-100">
-                    Confirming your PayPal payment…
-                </div>
-            )}
-            {paypalProvider && paypalVerifyState === 'failed' && (
-                <div className="rounded-xl border border-amber-500/20 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">
-                    Payment not confirmed yet. {paypalVerifyError} Refresh if you were charged.
                 </div>
             )}
         </>
@@ -375,11 +322,11 @@ export default function BillingPage({ onNavigate }: { onNavigate: PageNav }) {
                 sortedPacks={sortedPacks}
                 onSelectPack={setSelectedPackId}
                 onPlanAction={(id) => void handlePlanAction(id as UnifiedPlanId)}
-                onPackCheckout={(method) => void handlePackCheckout(method)}
+                onPackCheckout={() => void handlePackCheckout()}
                 planLoadingId={planLoadingId}
                 packCheckoutLoadingId={packCheckoutLoadingId}
                 checkoutError={checkoutError}
-                paypalBanner={paypalBanner}
+                billingBanner={billingBanner}
                 topUpSectionRef={topupSectionRef}
                 refundSection={<RefundRequestCard />}
             />
@@ -511,7 +458,7 @@ function RefundRequestCard() {
             {open && !submitted && (
                 <div className="mt-4 space-y-3">
                     <p className="text-[11px] text-gray-500">
-                        All four fields are required so we can match your request to the PayPal charge and respond quickly.
+                        All four fields are required so we can match your request to the Stripe charge and respond quickly.
                     </p>
                     <label className="block">
                         <span className="text-[11px] font-semibold uppercase tracking-wider text-gray-500">
@@ -543,14 +490,14 @@ function RefundRequestCard() {
                         </label>
                         <label className="block">
                             <span className="text-[11px] font-semibold uppercase tracking-wider text-gray-500">
-                                PayPal order / invoice id <span className="text-red-400">(required)</span>
+                                Stripe payment / invoice id <span className="text-red-400">(required)</span>
                             </span>
                             <input
                                 type="text"
                                 value={paymentRef}
                                 onChange={(e) => setPaymentRef(e.target.value)}
                                 required
-                                placeholder="8AB123456789"
+                                placeholder="pi_... or in_..."
                                 className="mt-1 w-full rounded-lg border border-white/[0.08] bg-black/30 px-3 py-2 text-sm text-white placeholder-gray-600 focus:border-violet-400 focus:outline-none"
                             />
                         </label>

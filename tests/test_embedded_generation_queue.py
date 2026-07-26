@@ -93,6 +93,140 @@ def test_startup_recovery_uses_all_priority_lanes_and_processing_list(monkeypatc
     )
 
 
+def test_pending_refund_sidecar_is_bounded_and_removed_after_completion(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    job_dir = tmp_path / "jobs"
+    outbox_dir = tmp_path / "refunds"
+    job_dir.mkdir()
+    outbox_dir.mkdir()
+    monkeypatch.setattr(backend_queue, "_JOB_STATE_DIR", job_dir)
+    monkeypatch.setattr(backend_queue, "_REFUND_OUTBOX_DIR", outbox_dir)
+
+    async def no_redis():
+        return None
+
+    monkeypatch.setattr(backend_queue, "_get_redis", no_redis)
+    pending = {
+        "status": "error",
+        "credit_refund_pending": True,
+        "credit_refunded": False,
+    }
+
+    async def exercise():
+        _snapshot, _redis_ok, disk_ok = await backend_queue._persist_job_state_primary(
+            "refund-sidecar-job",
+            pending,
+        )
+        assert disk_ok is True
+        assert await backend_queue.list_pending_refund_job_states() == [
+            ("refund-sidecar-job", pending)
+        ]
+
+        completed = {
+            **pending,
+            "credit_refund_pending": False,
+            "credit_refunded": True,
+        }
+        _snapshot, _redis_ok, disk_ok = await backend_queue._persist_job_state_primary(
+            "refund-sidecar-job",
+            completed,
+        )
+        assert disk_ok is True
+        assert await backend_queue.list_pending_refund_job_states() == []
+
+    asyncio.run(exercise())
+    assert list(outbox_dir.glob("*.json")) == []
+    assert (job_dir / "refund-sidecar-job.json").is_file()
+
+
+def test_pending_refund_sidecar_survives_main_job_publish_failure(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    job_dir = tmp_path / "jobs"
+    outbox_dir = tmp_path / "refunds"
+    job_dir.mkdir()
+    outbox_dir.mkdir()
+    monkeypatch.setattr(backend_queue, "_JOB_STATE_DIR", job_dir)
+    monkeypatch.setattr(backend_queue, "_REFUND_OUTBOX_DIR", outbox_dir)
+
+    async def no_redis():
+        return None
+
+    original_replace = Path.replace
+
+    def fail_main_replace(self: Path, target: Path):
+        destination = Path(target)
+        if destination.parent == job_dir:
+            raise OSError("simulated crash before main job publish")
+        return original_replace(self, destination)
+
+    monkeypatch.setattr(backend_queue, "_get_redis", no_redis)
+    monkeypatch.setattr(Path, "replace", fail_main_replace)
+    pending = {
+        "status": "error",
+        "credit_refund_pending": True,
+        "credit_refunded": False,
+        "credit_source": "topup",
+        "user_id": "user-a",
+    }
+
+    async def exercise():
+        _snapshot, _redis_ok, disk_ok = await backend_queue._persist_job_state_primary(
+            "refund-crash-window",
+            pending,
+        )
+        assert disk_ok is False
+        assert await backend_queue.list_pending_refund_job_states() == [
+            ("refund-crash-window", pending)
+        ]
+
+    asyncio.run(exercise())
+    assert (outbox_dir / "refund-crash-window.json").is_file()
+    assert not (job_dir / "refund-crash-window.json").exists()
+
+
+def test_pending_refund_sidecar_is_published_before_redis(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    job_dir = tmp_path / "jobs"
+    outbox_dir = tmp_path / "refunds"
+    job_dir.mkdir()
+    outbox_dir.mkdir()
+    monkeypatch.setattr(backend_queue, "_JOB_STATE_DIR", job_dir)
+    monkeypatch.setattr(backend_queue, "_REFUND_OUTBOX_DIR", outbox_dir)
+
+    class _OrderingRedis:
+        async def set(self, *_args, **_kwargs):
+            assert (outbox_dir / "refund-before-redis.json").is_file()
+            return True
+
+    async def get_redis():
+        return _OrderingRedis()
+
+    monkeypatch.setattr(backend_queue, "_get_redis", get_redis)
+    pending = {
+        "status": "error",
+        "credit_refund_pending": True,
+        "credit_refunded": False,
+        "credit_source": "topup",
+        "user_id": "user-a",
+    }
+
+    _snapshot, redis_ok, disk_ok = asyncio.run(
+        backend_queue._persist_job_state_primary(
+            "refund-before-redis",
+            pending,
+        )
+    )
+
+    assert redis_ok is True
+    assert disk_ok is True
+
+
 def test_consumer_executes_only_whitelisted_task_then_acks(monkeypatch) -> None:
     jobs: dict[str, dict] = {}
     backend_queue.init_queue_runtime(jobs)
@@ -393,3 +527,42 @@ def test_api_health_fails_when_required_consumer_is_not_ready(monkeypatch) -> No
     assert caught.value.detail["deployment_target"] == "contabo"
     assert caught.value.detail["release_id"] == "studio-release-test"
     assert caught.value.detail["instance_id"] == "studio-api-01"
+
+
+def test_contabo_health_fails_when_oauth_token_storage_is_not_ready(
+    monkeypatch,
+) -> None:
+    import backend
+
+    async def healthy_queue_payload():
+        return {
+            "status": "online",
+            "backend_commit": "test-sha",
+            "deployment_target": "contabo",
+            "release_id": "studio-release-test",
+            "queue_consumer_ready": True,
+            "queue_consumer": {
+                "required": True,
+                "running": True,
+                "ready": True,
+            },
+        }
+
+    monkeypatch.setattr(backend, "_base_health_payload", healthy_queue_payload)
+    monkeypatch.setattr(
+        backend,
+        "_youtube_token_storage_readiness",
+        lambda **_kwargs: {
+            "ready": False,
+            "configured": True,
+            "previous_key_configured": False,
+            "error": "decrypt_failed",
+        },
+    )
+
+    with pytest.raises(backend.HTTPException) as caught:
+        asyncio.run(backend._health_payload())
+
+    assert caught.value.status_code == 503
+    assert caught.value.detail["component"] == "youtube_token_storage"
+    assert caught.value.detail["error"] == "decrypt_failed"

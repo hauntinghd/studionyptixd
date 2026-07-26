@@ -71,44 +71,14 @@ jobs:
 
       - name: Run release-critical backend suites
         run: |
-          python -m pytest -q \
-            tests/test_studio_paid_access.py \
-            tests/test_seedream_model_catalog.py \
-            tests/test_video_model_catalog.py \
-            tests/test_video_pricing.py \
-            tests/test_billing_webhook_idempotency.py \
-            test_unified_credits.py \
-            tests/test_unified_credits_settlement.py \
-            tests/test_runtime_security.py \
-            tests/test_security_boundaries.py \
-            tests/test_public_api_authorization.py \
-            tests/test_private_media_auth.py \
-            tests/test_media_file_ownership.py \
-            tests/test_studio_agent_job_ownership.py \
-            tests/test_long_form_router_job_ownership.py \
-            tests/test_static_security_remediation.py \
-            tests/test_clone_billing.py \
-            tests/test_longform_media_revision.py \
-            tests/test_shortform_background_route.py \
-            tests/test_skeleton_cast_integrity.py \
-            tests/test_studio_media_routing.py \
-            tests/test_studio_repair_safety.py \
-            tests/test_studio_session_store.py \
-            tests/test_studio_command_layer.py \
-            tests/test_studio_command_runner.py \
-            tests/test_production_command_authority.py \
-            tests/test_production_command_v2.py \
-            tests/test_production_workflows.py \
-            tests/test_contabo_release_contract.py \
-            tests/test_fly_cutover_evidence.py \
-            tests/test_embedded_generation_queue.py \
-            tests/test_frontend_static.py \
-            tests/test_xai_runtime_hard_disable.py \
-            tests/test_desktop_release_channel.py \
-            tests/test_skeleton_command_boundary.py \
-            tests/test_cliplab_command_boundary.py \
-            tests/test_runpod_direct_routes.py \
-            tests/test_runpod_standalone_routes.py
+          mapfile -t release_tests < <(
+            grep -Ev '^[[:space:]]*(#|$)' ops/release_backend_tests.txt
+          )
+          test "${#release_tests[@]}" -gt 0
+          for test_path in "${release_tests[@]}"; do
+            test -e "${test_path}"
+          done
+          python -m pytest -q "${release_tests[@]}"
 
       - name: Set up Node 20
         uses: actions/setup-node@v4
@@ -225,10 +195,56 @@ jobs:
           echo "image_ref=${image_ref}" >>"${GITHUB_OUTPUT}"
           printf 'Immutable image: %s\n' "${image_ref}"
 
-  deploy-production:
-    name: Deploy exact candidate to Contabo
+  contabo-deploy-readiness:
+    name: Check Contabo deploy opt-in
     needs: build-and-publish
     if: ${{ github.ref == 'refs/heads/master' }}
+    runs-on: ubuntu-latest
+    outputs:
+      ready: ${{ steps.gate.outputs.ready }}
+    steps:
+      - name: Gate automatic deployment on a non-root release principal
+        id: gate
+        env:
+          CONTABO_AUTO_DEPLOY_ENABLED: ${{ vars.CONTABO_AUTO_DEPLOY_ENABLED }}
+          CONTABO_SSH_HOST: ${{ secrets.CONTABO_SSH_HOST }}
+          CONTABO_SSH_USER: ${{ secrets.CONTABO_SSH_USER }}
+          CONTABO_SSH_PORT: ${{ secrets.CONTABO_SSH_PORT }}
+          CONTABO_SSH_KEY: ${{ secrets.CONTABO_SSH_KEY }}
+          CONTABO_SSH_KNOWN_HOSTS: ${{ secrets.CONTABO_SSH_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          ready=false
+          if [ "${CONTABO_AUTO_DEPLOY_ENABLED,,}" != "true" ]; then
+            echo "::notice::Contabo auto-deploy is disabled; verification and immutable image publication remain complete."
+          else
+            missing=()
+            for name in \
+              CONTABO_SSH_HOST \
+              CONTABO_SSH_USER \
+              CONTABO_SSH_PORT \
+              CONTABO_SSH_KEY \
+              CONTABO_SSH_KNOWN_HOSTS; do
+              if [ -z "${!name:-}" ]; then
+                missing+=("${name}")
+              fi
+            done
+            if [ "${#missing[@]}" -gt 0 ]; then
+              printf '::notice::Contabo auto-deploy skipped; missing least-privilege secret(s): %s\n' "${missing[*]}"
+            elif [ "${CONTABO_SSH_USER}" = "root" ]; then
+              echo "::notice::Contabo auto-deploy skipped; CONTABO_SSH_USER must be a dedicated non-root release principal."
+            else
+              ready=true
+            fi
+          fi
+          printf 'ready=%s\n' "${ready}" >>"${GITHUB_OUTPUT}"
+
+  deploy-production:
+    name: Deploy exact candidate to Contabo
+    needs:
+      - build-and-publish
+      - contabo-deploy-readiness
+    if: ${{ github.ref == 'refs/heads/master' && needs.contabo-deploy-readiness.outputs.ready == 'true' }}
     uses: ./.github/workflows/deploy-studio.yml
     with:
       git_sha: ${{ github.sha }}

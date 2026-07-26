@@ -210,6 +210,11 @@ class CreateSessionRequest(BaseModel):
     product_website: str = ""
 
 
+class BootstrapSessionRequest(CreateSessionRequest):
+    bootstrap_key: str = Field(..., min_length=8, max_length=128)
+    preferred_session_id: str = Field(default="", max_length=80)
+
+
 class PatchSessionRequest(BaseModel):
     agent_mode: Literal["plan", "studio", "cliplab"] | None = None
     model: str | None = None
@@ -297,6 +302,42 @@ class LoadTestSimulationRequest(BaseModel):
     iterations: int = Field(1, ge=1, le=50)
     hold_ms: int = Field(250, ge=0, le=30000)
     response_kb: int = Field(1, ge=0, le=256)
+
+
+def _create_persisted_session(body: CreateSessionRequest, user: dict) -> dict[str, Any]:
+    selected_model = body.model or openrouter.DEFAULT_MODEL
+    try:
+        model_registry.assert_model_selectable(selected_model)
+        selected_model = provider_policy.assert_runner_model_allowed(selected_model)
+    except (model_registry.ModelSelectionError, provider_policy.ProviderPolicyDenied) as exc:
+        raise HTTPException(422, str(exc)) from exc
+    try:
+        openrouter.api_key()
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc)) from exc
+    image_model = str(body.image_model_id or body.image_model or "").strip()
+    try:
+        return store.create_session(
+            user_id=_user_id(user),
+            model=selected_model,
+            agent_mode=body.agent_mode,
+            approval_mode=body.approval_mode,
+            content_format=body.content_format,
+            reasoning_depth=body.reasoning_depth,
+            render_style=body.render_style or store.DEFAULT_RENDER_STYLE,
+            image_model=store.normalize_image_model(image_model or store.DEFAULT_IMAGE_MODEL),
+            video_model=store.normalize_video_model(body.video_model or store.DEFAULT_VIDEO_MODEL),
+            channel_id=body.channel_id or "",
+            registry_key=body.registry_key or "",
+            channel_title=body.channel_title or "",
+            web_search=body.web_search,
+            animate=body.animate,
+            captions_enabled=body.captions_enabled,
+            caption_mode=body.caption_mode,
+            product_website=body.product_website,
+        )
+    except provider_policy.ProviderPolicyDenied as exc:
+        raise HTTPException(422, str(exc)) from exc
 
 
 def _apply_chat_turn_options(session_id: str, session: dict[str, Any], body: ChatRequest) -> dict[str, Any]:
@@ -1652,7 +1693,11 @@ def build_studio_agent_router(
     @router.get("/sessions")
     async def list_sessions(user: dict = Depends(_agent_user), limit: int = 40):
         uid = _user_id(user)
-        sessions = store.list_sessions(uid, limit=limit)
+        # Discovery is intentionally authoritative across the shared session
+        # namespace. Keep that filesystem scan off the ASGI event loop.
+        sessions = await run_in_threadpool(
+            lambda: store.list_sessions(uid, limit=limit)
+        )
         return {
             "sessions": [_session_summary(s) for s in sessions],
             "count": len(sessions),
@@ -1660,40 +1705,49 @@ def build_studio_agent_router(
 
     @router.post("/sessions")
     async def create_session(body: CreateSessionRequest, user: dict = Depends(_agent_user)):
-        selected_model = body.model or openrouter.DEFAULT_MODEL
-        try:
-            model_registry.assert_model_selectable(selected_model)
-            selected_model = provider_policy.assert_runner_model_allowed(selected_model)
-        except (model_registry.ModelSelectionError, provider_policy.ProviderPolicyDenied) as exc:
-            raise HTTPException(422, str(exc)) from exc
-        try:
-            openrouter.api_key()
-        except RuntimeError as exc:
-            raise HTTPException(503, str(exc)) from exc
-        image_model = str(body.image_model_id or body.image_model or "").strip()
-        try:
-            session = store.create_session(
-                user_id=_user_id(user),
-                model=selected_model,
-                agent_mode=body.agent_mode,
-                approval_mode=body.approval_mode,
-                content_format=body.content_format,
-                reasoning_depth=body.reasoning_depth,
-                render_style=body.render_style or store.DEFAULT_RENDER_STYLE,
-                image_model=store.normalize_image_model(image_model or store.DEFAULT_IMAGE_MODEL),
-                video_model=store.normalize_video_model(body.video_model or store.DEFAULT_VIDEO_MODEL),
-                channel_id=body.channel_id or "",
-                registry_key=body.registry_key or "",
-                channel_title=body.channel_title or "",
-                web_search=body.web_search,
-                animate=body.animate,
-                captions_enabled=body.captions_enabled,
-                caption_mode=body.caption_mode,
-                product_website=body.product_website,
-            )
-        except provider_policy.ProviderPolicyDenied as exc:
-            raise HTTPException(422, str(exc)) from exc
+        session = _create_persisted_session(body, user)
         return {"session": _public_session(session)}
+
+    @router.post("/sessions/bootstrap")
+    async def bootstrap_session(
+        body: BootstrapSessionRequest,
+        message_tail: int = Query(120, ge=0, le=500),
+        user: dict = Depends(_agent_user),
+    ):
+        """Backend-owned, idempotent cold resume-or-create contract.
+
+        Automatic boot is distinct from the ordinary POST /sessions New Chat
+        mutation. The per-user store lock makes concurrent tabs and retried
+        responses converge on one persisted session.
+        """
+
+        uid = _user_id(user)
+
+        def _bootstrap() -> tuple[dict[str, Any], list[dict[str, Any]]]:
+            result = store.bootstrap_session(
+                user_id=uid,
+                bootstrap_key=body.bootstrap_key,
+                preferred_session_id=body.preferred_session_id,
+                create_session_factory=lambda: _create_persisted_session(body, user),
+            )
+            return result, store.list_sessions(uid, limit=50)
+
+        try:
+            result, sessions = await run_in_threadpool(_bootstrap)
+        except HTTPException:
+            raise
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        selected = dict(result.get("session") or {})
+        if not selected:
+            raise HTTPException(500, "Studio bootstrap returned no session")
+        return {
+            "session": _public_session(selected, message_tail=message_tail),
+            "sessions": [_session_summary(session) for session in sessions],
+            "mode": str(result.get("mode") or "resumed"),
+            "source": str(result.get("source") or ""),
+            "idempotent_replay": bool(result.get("idempotent_replay")),
+        }
 
     @router.get("/memory")
     async def get_memory(

@@ -69,6 +69,18 @@ import {
 } from '../lib/productionView';
 import { AuthContext, resolveStudioBackendUrl, resolveStudioUploadUrl } from '../shared';
 import { loadStudioHubState } from '../lib/studioHubState';
+import {
+    STUDIO_BOOTSTRAP_RETRY_DELAYS_MS,
+    StudioBootstrapCancelledError,
+    StudioBootstrapSingleFlight,
+    clearStudioNetworkError,
+    isRetryableStudioBootstrapError,
+    isStudioNetworkError,
+    loadPersistedStudioBootstrapKey,
+    runBoundedStudioBootstrap,
+    studioApiError,
+    studioTransportError,
+} from '../lib/studioBootstrap';
 import AgentModelPicker, { type AgentModelOption } from './AgentModelPicker';
 
 type ApprovalMode = 'auto' | 'confirm';
@@ -77,9 +89,10 @@ type ApprovalMode = 'auto' | 'confirm';
 const SESSION_LOAD_TIMEOUT_MS = 120_000;
 const SESSION_LOAD_RETRIES = 2;
 const NETWORK_BLIP_RETRY_MS = 1800;
+const BOOTSTRAP_DISCOVERY_TIMEOUT_MS = 12_000;
+const BOOTSTRAP_CONTRACT_TIMEOUT_MS = 45_000;
 const THINKING_RECOVER_MS = 90_000;
-const isNetworkBlip = (message: string) =>
-    /failed to fetch|networkerror|load failed|fetch resource|could not reach the backend/i.test(message);
+const isNetworkBlip = (message: string) => isStudioNetworkError(message);
 const SESSION_MESSAGE_TAIL = 120;
 const sessionResumePath = (sessionId: string, syncPending: boolean) =>
     `/api/studio-agent/sessions/${sessionId}?sync_pending=${syncPending ? 'true' : 'false'}&message_tail=${SESSION_MESSAGE_TAIL}`;
@@ -1459,7 +1472,7 @@ function friendlyApiError(status: number, data: Record<string, unknown>, fallbac
     if (status === 524 || status === 504) {
         return (
             detail
-            || 'Studio Agent timed out before the backend responded. Your chat is preserved server-side — press Resume in a few seconds.'
+            || 'Studio Agent timed out before the backend responded. Your chat is preserved server-side — press Sync in a few seconds.'
         );
     }
     if (status === 429) {
@@ -1591,6 +1604,13 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
     const dismissedDockJobIdsRef = useRef<Set<string>>(new Set());
     const sessionLoadSeqRef = useRef(0);
     const autoSyncTimerRef = useRef<number | null>(null);
+    const bootstrapMountedRef = useRef(true);
+    const bootstrapGenerationRef = useRef(0);
+    const bootstrapSingleFlightRef = useRef(new StudioBootstrapSingleFlight());
+    const cancelBootstrapRecovery = useCallback(() => {
+        bootstrapGenerationRef.current += 1;
+        bootstrapSingleFlightRef.current.invalidate();
+    }, []);
     const sessionUiCacheRef = useRef<Map<string, SessionUiCache>>(new Map());
     const [jobTracks, setJobTracks] = useState<AgentJobTrack[]>([]);
     const [dockDismissed, setDockDismissed] = useState(false);
@@ -2442,12 +2462,25 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
     });
 
     const authFetch = useCallback(
-        async (path: string, init?: RequestInit & { timeoutMs?: number; retries?: number }) => {
+        async (
+            path: string,
+            init?: RequestInit & {
+                timeoutMs?: number;
+                retries?: number;
+                clearNetworkErrorOnSuccess?: boolean;
+            },
+        ) => {
             const tok = await getToken();
             const url = resolveStudioBackendUrl(path);
             const timeoutMs = init?.timeoutMs ?? 0;
             const retries = Math.max(0, Number(init?.retries ?? 0));
-            const { timeoutMs: _omitTimeout, retries: _omitRetries, ...fetchInit } = init || {};
+            const clearNetworkErrorOnSuccess = init?.clearNetworkErrorOnSuccess !== false;
+            const {
+                timeoutMs: _omitTimeout,
+                retries: _omitRetries,
+                clearNetworkErrorOnSuccess: _omitClearNetworkError,
+                ...fetchInit
+            } = init || {};
             let lastError: Error | null = null;
             for (let attempt = 0; attempt <= retries; attempt++) {
                 const ctrl = new AbortController();
@@ -2467,7 +2500,13 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                     });
                     const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
                     if (!res.ok) {
-                        throw new Error(friendlyApiError(res.status, data, res.statusText));
+                        throw studioApiError(
+                            friendlyApiError(res.status, data, res.statusText),
+                            res.status,
+                        );
+                    }
+                    if (clearNetworkErrorOnSuccess) {
+                        setError(clearStudioNetworkError);
                     }
                     return data;
                 } catch (e) {
@@ -2478,8 +2517,9 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                         continue;
                     }
                     if ((e as Error).name === 'AbortError') {
-                        throw new Error(
-                            `Studio Agent timed out after ${Math.round(timeoutMs / 1000)}s — retry Resume or open the chat from History.`,
+                        throw studioTransportError(
+                            `Studio Agent timed out after ${Math.round(timeoutMs / 1000)}s — press Sync/Reload or open the chat from History.`,
+                            e,
                         );
                     }
                     if (isNetworkBlip(message) && attempt < retries) {
@@ -2487,8 +2527,9 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                         continue;
                     }
                     if (isNetworkBlip(message)) {
-                        throw new Error(
-                            'Studio Agent could not reach the backend from this browser tab. Your chat is preserved; wait a moment and press Resume.',
+                        throw studioTransportError(
+                            'Studio Agent could not reach the backend from this browser tab. Your chat is preserved; wait a moment and press Sync/Reload.',
+                            e,
                         );
                     }
                     throw e;
@@ -3124,6 +3165,7 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
     const createNewSession = useCallback(
         async (pickModel: string) => {
             if (creatingSession) return;
+            cancelBootstrapRecovery();
             const priorSessionId = isPersistedAgentSessionId(sessionIdRef.current)
                 ? sessionIdRef.current
                 : null;
@@ -3194,12 +3236,13 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                 setCreatingSession(false);
             }
         },
-        [applySessionPayload, approvalMode, authFetch, canUseLongform, captionMode, contentFormat, creatingSession, imageModel, productWebsite, reasoningDepth, renderStyle, refreshHistory, selectedChannel, videoModel],
+        [applySessionPayload, approvalMode, authFetch, canUseLongform, cancelBootstrapRecovery, captionMode, contentFormat, creatingSession, imageModel, productWebsite, reasoningDepth, renderStyle, refreshHistory, selectedChannel, videoModel],
     );
 
     const openSession = useCallback(
         async (id: string) => {
             if (!id) return;
+            cancelBootstrapRecovery();
             const loadSeq = ++sessionLoadSeqRef.current;
             sessionIdRef.current = id;
             setSessionId(id);
@@ -3240,8 +3283,203 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                 if (sessionLoadSeqRef.current === loadSeq) setResuming(false);
             }
         },
-        [authFetch, resumeSession],
+        [authFetch, cancelBootstrapRecovery, resumeSession],
     );
+
+    const bootstrapStudio = useCallback((opts?: { manual?: boolean }) => (
+        bootstrapSingleFlightRef.current.run(async () => {
+            const generation = bootstrapGenerationRef.current + 1;
+            bootstrapGenerationRef.current = generation;
+            const bootstrapIsCurrent = () => (
+                bootstrapMountedRef.current
+                && bootstrapGenerationRef.current === generation
+            );
+            const manual = Boolean(opts?.manual);
+            if (manual) setResuming(true);
+            else setBooting(true);
+            setError('');
+
+            let lastId = '';
+            try {
+                lastId = localStorage.getItem(lastSessionKey) || '';
+            } catch {
+                lastId = '';
+            }
+            const cachedHistory = cachedSessionHistory(sessionUiCacheRef.current, lastId);
+            const cachedSessionId = sessionUiCacheRef.current.has(lastId)
+                ? lastId
+                : cachedHistory[0]?.session_id || '';
+            const cached = cachedSessionId
+                ? sessionUiCacheRef.current.get(cachedSessionId)
+                : undefined;
+            const restoredCachedShell = Boolean(cached && cachedSessionId);
+            if (bootstrapIsCurrent() && cachedHistory.length) setHistory(cachedHistory);
+            if (bootstrapIsCurrent() && cached && cachedSessionId) {
+                sessionIdRef.current = cachedSessionId;
+                setSessionId(cachedSessionId);
+                messagesRef.current = cached.messages;
+                setMessages(cached.messages);
+                setPending(cached.pending);
+                setJobTracks(cached.jobTracks);
+                setDockDismissed(cached.dockDismissed);
+                for (const track of cached.jobTracks) {
+                    if (track.job_id) jobSessionRef.current.set(track.job_id, cachedSessionId);
+                }
+                setBooting(false);
+            }
+
+            const bootstrapKey = loadPersistedStudioBootstrapKey(
+                window.localStorage,
+                String(session?.user?.id || ''),
+            );
+            try {
+                const result = await runBoundedStudioBootstrap<Record<string, unknown>>({
+                    retryDelaysMs: STUDIO_BOOTSTRAP_RETRY_DELAYS_MS,
+                    shouldRetry: isRetryableStudioBootstrapError,
+                    shouldContinue: bootstrapIsCurrent,
+                    sleep: (delayMs) => new Promise((resolve) => {
+                        window.setTimeout(resolve, delayMs);
+                    }),
+                    onRetry: ({ attempt, delayMs }) => {
+                        if (!bootstrapIsCurrent()) return;
+                        setQueueHint(
+                            `Studio is reconnecting automatically (attempt ${attempt + 1} in ${Math.round(delayMs / 1000)}s)...`,
+                        );
+                    },
+                    bootstrap: async () => {
+                        // Model catalogs are optional enrichment. Session
+                        // selection and automatic creation are one atomic,
+                        // backend-owned contract carrying a persisted key.
+                        const [modelsResult, bootstrapResult] = await Promise.allSettled([
+                            authFetch('/api/studio-agent/models', {
+                                timeoutMs: BOOTSTRAP_DISCOVERY_TIMEOUT_MS,
+                                clearNetworkErrorOnSuccess: false,
+                            }),
+                            authFetch(
+                                `/api/studio-agent/sessions/bootstrap?message_tail=${SESSION_MESSAGE_TAIL}`,
+                                {
+                                    method: 'POST',
+                                    timeoutMs: BOOTSTRAP_CONTRACT_TIMEOUT_MS,
+                                    clearNetworkErrorOnSuccess: false,
+                                    body: JSON.stringify({
+                                        bootstrap_key: bootstrapKey,
+                                        preferred_session_id: lastId,
+                                        approval_mode: 'confirm',
+                                        content_format: canUseLongform ? 'both' : 'short',
+                                        image_model: normalizeImageModel(
+                                            loadImageModelPref(DEFAULT_IMAGE_MODEL),
+                                        ),
+                                        video_model: DEFAULT_VIDEO_MODEL,
+                                    }),
+                                },
+                            ),
+                        ]);
+                        if (!bootstrapIsCurrent()) {
+                            throw new StudioBootstrapCancelledError();
+                        }
+                        if (modelsResult.status === 'fulfilled') {
+                            const modelData = modelsResult.value;
+                            const catalog = ((modelData?.models as AgentModelOption[]) || [])
+                                .filter(isAllowedServerChatModel);
+                            const modelDataImageOptions = (
+                                (modelData?.image_models as CreativeModelProfile[]) || []
+                            )
+                                .map(creativeModelOption)
+                                .filter((option): option is AgentModelOption => Boolean(option));
+                            const modelDataVideoOptions = (
+                                (modelData?.video_models as CreativeModelProfile[]) || []
+                            )
+                                .map(creativeModelOption)
+                                .filter((option): option is AgentModelOption => Boolean(option));
+                            const recommended = (modelData?.recommended as string[]) || [];
+                            const pickModel = catalog.find((option) => option.recommended)?.id
+                                || catalog.find((option) => recommended.includes(option.id))?.id
+                                || catalog[0]?.id
+                                || '';
+                            if (bootstrapIsCurrent()) {
+                                modelCatalogRef.current = catalog;
+                                setModelCatalog(catalog);
+                                setModel(pickModel);
+
+                                setImageModelCatalog(modelDataImageOptions);
+                                const requestedImageModel = normalizeImageModel(
+                                    loadImageModelPref(DEFAULT_IMAGE_MODEL),
+                                );
+                                const nextImageModel = selectCatalogModel(
+                                    modelDataImageOptions,
+                                    requestedImageModel,
+                                    DEFAULT_IMAGE_MODEL,
+                                );
+                                setImageModel(nextImageModel);
+                                saveImageModelPref(nextImageModel);
+
+                                setVideoModelCatalog(modelDataVideoOptions);
+                                setVideoModel(selectCatalogModel(
+                                    modelDataVideoOptions,
+                                    DEFAULT_VIDEO_MODEL,
+                                    DEFAULT_VIDEO_MODEL,
+                                ));
+                            }
+                        }
+                        if (bootstrapResult.status === 'rejected') {
+                            throw bootstrapResult.reason;
+                        }
+                        return bootstrapResult.value;
+                    },
+                });
+                if (!bootstrapIsCurrent()) {
+                    throw new StudioBootstrapCancelledError();
+                }
+                const payload = result.value;
+                const sessions = (payload?.sessions as SessionSummary[]) || [];
+                const authoritativeSession = (
+                    payload?.session as Record<string, unknown> | undefined
+                ) || {};
+                if (!isPersistedAgentSessionId(String(authoritativeSession.session_id || ''))) {
+                    throw new Error('Studio bootstrap returned no persisted session.');
+                }
+                setHistory(sessions);
+                await resumeSession(authoritativeSession, {
+                    rehydrateJobs: true,
+                    forceServer: true,
+                });
+                if (bootstrapIsCurrent()) {
+                    setError(clearStudioNetworkError);
+                    setQueueHint('');
+                    if (String(payload?.mode || '') === 'created') {
+                        setDockDismissed(true);
+                    }
+                }
+            } catch (caught) {
+                if (
+                    caught instanceof StudioBootstrapCancelledError
+                    || !bootstrapIsCurrent()
+                ) {
+                    return;
+                }
+                if (restoredCachedShell) {
+                    setError('');
+                    setQueueHint(
+                        'Studio is temporarily offline - showing your saved chat. '
+                        + 'Your work is preserved; Sync will reconnect it.',
+                    );
+                } else {
+                    setError((caught as Error).message);
+                }
+            } finally {
+                if (bootstrapIsCurrent()) {
+                    if (manual) setResuming(false);
+                    else setBooting(false);
+                }
+            }
+        })
+    ), [
+        authFetch,
+        canUseLongform,
+        lastSessionKey,
+        resumeSession,
+        session?.user?.id,
+    ]);
 
     const reloadCurrentSession = useCallback(async () => {
         // Cold resume / history reopen — separate from Sync chat (which uses force sync).
@@ -3250,23 +3488,14 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
         setError('');
         setQueueHint('');
         try {
-            let id = sessionId || '';
-            if (!id) {
-                try {
-                    id = localStorage.getItem(lastSessionKey) || '';
-                } catch {
-                    id = '';
-                }
-            }
-            if (!id && history.length > 0) {
-                id = history[0].session_id;
-            }
-            if (!id) {
-                setError(
-                    'No chat to resume — pick your thread from History on the left, or start a new chat.',
-                );
+            if (!sessionId) {
+                // A missing live session means the local pointers are not
+                // authoritative. Re-run models + server history discovery and
+                // recover/create through the duplicate-safe bootstrap.
+                await bootstrapStudio({ manual: true });
                 return;
             }
+            const id = sessionId;
             // Prefer authoritative sync when we already have the session open.
             let data: Record<string, unknown>;
             if (sessionId && id === sessionId) {
@@ -3308,7 +3537,7 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
         } finally {
             if (sessionLoadSeqRef.current === loadSeq) setResuming(false);
         }
-    }, [authFetch, history, lastSessionKey, resumeSession, scheduleAutoSync, sessionId]);
+    }, [authFetch, bootstrapStudio, resumeSession, scheduleAutoSync, sessionId]);
 
     const rolloverSession = useCallback(async () => {
         if (!sessionId || currentSessionRunning) return;
@@ -3439,138 +3668,13 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
     );
 
     useEffect(() => {
-        let cancelled = false;
-        (async () => {
-            setBooting(true);
-            setError('');
-            let lastId = '';
-            try {
-                lastId = localStorage.getItem(lastSessionStorageKey(session?.user?.id)) || '';
-            } catch {
-                lastId = '';
-            }
-            const cachedHistory = cachedSessionHistory(sessionUiCacheRef.current, lastId);
-            const cachedSessionId = sessionUiCacheRef.current.has(lastId)
-                ? lastId
-                : cachedHistory[0]?.session_id || '';
-            const cached = cachedSessionId
-                ? sessionUiCacheRef.current.get(cachedSessionId)
-                : undefined;
-            const restoredCachedShell = Boolean(cached && cachedSessionId);
-            if (!cancelled && cachedHistory.length) setHistory(cachedHistory);
-            if (!cancelled && cached && cachedSessionId) {
-                sessionIdRef.current = cachedSessionId;
-                setSessionId(cachedSessionId);
-                messagesRef.current = cached.messages;
-                setMessages(cached.messages);
-                setPending(cached.pending);
-                setJobTracks(cached.jobTracks);
-                setDockDismissed(cached.dockDismissed);
-                for (const track of cached.jobTracks) {
-                    if (track.job_id) jobSessionRef.current.set(track.job_id, cachedSessionId);
-                }
-                setBooting(false);
-            }
-            try {
-                // The authenticated Studio endpoint is the only authority for
-                // selectable runner and media models. Never synthesize rows
-                // from local constants or the unauthenticated config endpoint.
-                const modelsRequest = authFetch('/api/studio-agent/models', { timeoutMs: 12_000 });
-                const sessionsRequest = authFetch('/api/studio-agent/sessions?limit=50', { timeoutMs: 45_000, retries: SESSION_LOAD_RETRIES });
-                let pickModel = '';
-                const [modelsResult, sessionsResult] = await Promise.allSettled([
-                    modelsRequest,
-                    sessionsRequest,
-                ]);
-                if (modelsResult.status === 'fulfilled') {
-                    const modelData = modelsResult.value;
-                    const catalog = ((modelData?.models as AgentModelOption[]) || [])
-                        .filter(isAllowedServerChatModel);
-                    const modelDataImageOptions = ((modelData?.image_models as CreativeModelProfile[]) || [])
-                        .map(creativeModelOption)
-                        .filter((m): m is AgentModelOption => Boolean(m));
-                    const modelDataVideoOptions = ((modelData?.video_models as CreativeModelProfile[]) || [])
-                        .map(creativeModelOption)
-                        .filter((m): m is AgentModelOption => Boolean(m));
-                    const rec = (modelData?.recommended as string[]) || [];
-                    pickModel = catalog.find((option) => option.recommended)?.id
-                        || catalog.find((option) => rec.includes(option.id))?.id
-                        || catalog[0]?.id
-                        || '';
-                    if (!cancelled) {
-                        modelCatalogRef.current = catalog;
-                        setModelCatalog(catalog);
-                        setModel(pickModel);
-
-                        setImageModelCatalog(modelDataImageOptions);
-                        const requestedImageModel = normalizeImageModel(loadImageModelPref(DEFAULT_IMAGE_MODEL));
-                        const nextImageModel = selectCatalogModel(
-                            modelDataImageOptions,
-                            requestedImageModel,
-                            DEFAULT_IMAGE_MODEL,
-                        );
-                        setImageModel(nextImageModel);
-                        saveImageModelPref(nextImageModel);
-
-                        setVideoModelCatalog(modelDataVideoOptions);
-                        setVideoModel(selectCatalogModel(
-                            modelDataVideoOptions,
-                            DEFAULT_VIDEO_MODEL,
-                            DEFAULT_VIDEO_MODEL,
-                        ));
-                    }
-                }
-                if (sessionsResult.status === 'rejected') throw sessionsResult.reason;
-                const listData = sessionsResult.value;
-                const sessions = (listData?.sessions as SessionSummary[]) || [];
-                if (!cancelled) setHistory(sessions);
-
-                const resume = sessions.find((s) => s.session_id === lastId) || sessions[0];
-                if (!cancelled && resume?.session_id) {
-                    // Show the shell immediately; hydrate transcript in the background.
-                    if (!cancelled) setBooting(false);
-                    const data = await authFetch(sessionResumePath(resume.session_id, false), {
-                        timeoutMs: SESSION_LOAD_TIMEOUT_MS,
-                        retries: SESSION_LOAD_RETRIES,
-                    });
-                    if (!cancelled) {
-                        await resumeSession((data?.session as Record<string, unknown>) || {});
-                    }
-                    return;
-                }
-                if (!cancelled) setBooting(false);
-                if (!cancelled) {
-                    const created = await authFetch('/api/studio-agent/sessions', {
-                        method: 'POST',
-                        body: JSON.stringify({
-                            model: pickModel,
-                            approval_mode: 'confirm',
-                            content_format: canUseLongform ? 'both' : 'short',
-                            image_model: normalizeImageModel(loadImageModelPref(DEFAULT_IMAGE_MODEL)),
-                            video_model: DEFAULT_VIDEO_MODEL,
-                        }),
-                    });
-                    const bootSid = String((created.session as Record<string, unknown>)?.session_id || '');
-                    if (!isPersistedAgentSessionId(bootSid)) {
-                        throw new Error('Studio Agent could not start a chat session. Try again.');
-                    }
-                    applySessionPayload((created.session as Record<string, unknown>) || {});
-                    setHistory([]);
-                }
-            } catch (e) {
-                if (!cancelled && restoredCachedShell) {
-                    setError('');
-                    setQueueHint(
-                        'Studio is temporarily offline — showing your saved chat. Your work is preserved; Sync will reconnect it.',
-                    );
-                } else if (!cancelled) {
-                    setError((e as Error).message);
-                }
-            } finally {
-                if (!cancelled) setBooting(false);
-            }
-        })();
-        return () => { cancelled = true; };
+        bootstrapMountedRef.current = true;
+        void bootstrapStudio();
+        return () => {
+            bootstrapMountedRef.current = false;
+        };
+        // StrictMode intentionally invokes this effect twice. The single-flight
+        // coordinator shares one bootstrap and prevents duplicate session POSTs.
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
@@ -4136,7 +4240,7 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                         }
                     } catch (refreshError) {
                         throw new Error(
-                            `Studio Agent connection dropped and the recovery refresh could not reach the backend. Your chat is preserved; press Resume in a few seconds. ${String((streamError as Error).message || (refreshError as Error).message || '')}`,
+                            `Studio Agent connection dropped and the recovery refresh could not reach the backend. Your chat is preserved; press Sync in a few seconds. ${String((streamError as Error).message || (refreshError as Error).message || '')}`,
                         );
                     }
                     // The stream can be interrupted while the server-side run

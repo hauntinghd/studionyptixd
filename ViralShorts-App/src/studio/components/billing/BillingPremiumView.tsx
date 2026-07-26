@@ -36,7 +36,7 @@ export default function BillingPremiumView({
     planLoadingId,
     packCheckoutLoadingId,
     checkoutError,
-    paypalBanner,
+    billingBanner,
     topUpSectionRef,
     refundSection,
 }: {
@@ -48,11 +48,11 @@ export default function BillingPremiumView({
     sortedPacks: Pack[];
     onSelectPack: (id: string) => void;
     onPlanAction: (id: string) => void;
-    onPackCheckout: (method: 'stripe' | 'paypal') => void;
+    onPackCheckout: () => void;
     planLoadingId: string;
     packCheckoutLoadingId: string;
     checkoutError: string;
-    paypalBanner: ReactNode;
+    billingBanner: ReactNode;
     topUpSectionRef: RefObject<HTMLElement>;
     refundSection: React.ReactNode;
 }) {
@@ -75,7 +75,7 @@ export default function BillingPremiumView({
             : 'Start Studio Pro';
     return (
         <div className="mx-auto max-w-7xl space-y-8">
-            {paypalBanner}
+            {billingBanner}
             {checkoutError && (
                 <div className="rounded-xl border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-100">
                     {checkoutError}
@@ -208,23 +208,13 @@ export default function BillingPremiumView({
                     <div className="mt-5 flex flex-wrap gap-3">
                         <button
                             type="button"
-                            onClick={() => onPackCheckout('stripe')}
+                            onClick={onPackCheckout}
                             disabled={Boolean(packCheckoutLoadingId)}
                             className="w-full max-w-md rounded-xl bg-gradient-to-r from-cyan-600 to-cyan-500 py-3 text-sm font-semibold text-white shadow-lg shadow-cyan-900/30 transition hover:from-cyan-500 hover:to-cyan-400 disabled:opacity-60 sm:w-auto sm:px-8"
                         >
                             {packCheckoutLoadingId === 'stripe'
                                 ? 'Opening Stripe...'
                                 : `Card / Cash App / Crypto - ${creditLabel(selectedPack.credits)}`}
-                        </button>
-                        <button
-                            type="button"
-                            onClick={() => onPackCheckout('paypal')}
-                            disabled={Boolean(packCheckoutLoadingId)}
-                            className="w-full max-w-md rounded-xl border border-white/[0.1] bg-white/[0.04] py-3 text-sm font-semibold text-white transition hover:border-white/[0.18] hover:bg-white/[0.07] disabled:opacity-60 sm:w-auto sm:px-8"
-                        >
-                            {packCheckoutLoadingId === 'paypal'
-                                ? 'Opening PayPal...'
-                                : `PayPal - ${creditLabel(selectedPack.credits)}`}
                         </button>
                         <p className="w-full text-[11px] leading-relaxed text-gray-500">
                             Cash App Pay and crypto appear inside Stripe Checkout when enabled on the Stripe account.

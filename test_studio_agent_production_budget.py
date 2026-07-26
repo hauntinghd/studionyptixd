@@ -116,8 +116,9 @@ def test_animate_scene_budget_uses_selected_scene_count_and_duration():
     assert estimate.breakdown["scene_count"] == 3
     assert estimate.breakdown["video_seconds"] == 18.0
     assert estimate.breakdown["video_model"] == "pixverse"
+    retry_envelope = estimate.breakdown["video_retry_envelope"]
     assert estimate.estimated_usd == round(
-        18.0 * estimate.breakdown["video_usd_per_second"],
+        retry_envelope["usd_per_attempt"] * retry_envelope["max_attempts"],
         4,
     )
     assert "pricing_note" in estimate.breakdown
@@ -136,7 +137,12 @@ def test_animate_default_cap_allows_normal_three_scene_seedance_batch():
 
     assert estimate is not None
     assert estimate.max_budget_usd == 12.0
-    assert estimate.estimated_usd == 4.536
+    retry_envelope = estimate.breakdown["video_retry_envelope"]
+    assert estimate.estimated_usd == round(
+        retry_envelope["usd_per_attempt"] * retry_envelope["max_attempts"],
+        4,
+    )
+    assert retry_envelope["fallback_usd"] > 0
     assert estimate.estimated_usd <= estimate.max_budget_usd
 
 

@@ -60,6 +60,9 @@ cleanup() {
 }
 trap cleanup EXIT
 
+info "Pre-copying /var/data while Studio remains online to minimize the final quiesce"
+rsync --archive --numeric-ids --delete -- "${data_dir}/" "${snapshot_dir}/data/"
+
 info "Stopping admission and the sole consumer for a cross-store-consistent snapshot"
 compose_for "${active}" stop -t 120 studio-api
 api_stopped=1
@@ -74,7 +77,7 @@ assert_queue_snapshot_drained "${post_queue}"
 post_files="${snapshot_dir}/file-quiescence.json"
 capture_file_quiescence "${active}" "${post_files}"
 
-info "Copying immutable /var/data while every application writer is stopped"
+info "Applying the final /var/data delta while every application writer is stopped"
 rsync --archive --numeric-ids --delete -- "${data_dir}/" "${snapshot_dir}/data/"
 
 compose_for "${active}" exec -T redis sh -ec \
@@ -92,6 +95,7 @@ chmod 600 "${snapshot_dir}/redis/dump.rdb"
 
 git_sha="$(env_value "${active}" EXPECTED_GIT_SHA)"
 build_id="$(env_value "${active}" EXPECTED_BUILD_ID)"
+release_dir="$(env_value "${active}" RELEASE_DIR)"
 cat >"${snapshot_dir}/metadata.json" <<EOF
 {"format":2,"created_at":"${timestamp}","git_sha":"${git_sha}","build_id":"${build_id}","data_path":"/var/data","redis_snapshot":"dump.rdb","redis_rdb_sha256":"${redis_rdb_sha}","cross_store_alignment":"api-stopped-and-post-stop-quiescence-verified","recovery_class":"local-host-only-not-disaster-recovery"}
 EOF
@@ -115,6 +119,22 @@ printf '%s\n' \
   >"${archive}.NOT_DISASTER_RECOVERY"
 chmod 600 "${archive}.NOT_DISASTER_RECOVERY"
 
+offsite_failed=0
+restic_config="${STUDIO_SHARED_DIR}/restic-s3.env"
+if [[ -e "${restic_config}" ]]; then
+  info "Uploading the stable snapshot through the configured encrypted restic repository"
+  if ! bash "${release_dir}/ops/contabo/restic_offsite.sh" \
+    backup \
+    --config "${restic_config}" \
+    --snapshot-dir "${snapshot_dir}" \
+    --build-id "${build_id}"; then
+    info "Local recovery archive is intact, but encrypted off-host backup failed"
+    offsite_failed=1
+  fi
+else
+  info "No restic-s3.env is configured; this run remains local recovery only"
+fi
+
 mapfile -t expired < <(
   find "${backup_root}" -maxdepth 1 -type f -name 'studio-*.tar.gz' -printf '%T@ %p\n' |
     sort -nr |
@@ -133,4 +153,11 @@ for expired_archive in "${expired[@]}"; do
 done
 
 info "Consistent local recovery snapshot complete: ${archive}"
-info "NOT DR: configure encrypted, verified off-host storage before claiming disaster recovery"
+if (( offsite_failed )); then
+  die "local recovery succeeded but configured encrypted off-host backup failed"
+fi
+if [[ ! -e "${restic_config}" ]]; then
+  info "NOT DR: configure encrypted, verified off-host storage before claiming disaster recovery"
+else
+  info "Encrypted off-host copy completed; disaster recovery still requires a successful restore-check"
+fi

@@ -239,14 +239,13 @@ BILLING_STRIPE_PRIMARY = os.getenv(
     "BILLING_STRIPE_PRIMARY",
     "1" if STRIPE_SECRET_KEY else "0",
 ).lower() in ("1", "true", "yes", "on")
-PAYPAL_CLIENT_ID = os.getenv("PAYPAL_CLIENT_ID", "")
-PAYPAL_CLIENT_SECRET = os.getenv("PAYPAL_CLIENT_SECRET", "")
-PAYPAL_ENV = str(os.getenv("PAYPAL_ENV", "live") or "live").strip().lower()
-# Webhook ID from PayPal dashboard (https://developer.paypal.com/dashboard/applications/live)
-# Required for live webhook signature verification via /v1/notifications/verify-webhook-signature.
-# When empty, webhook endpoint still accepts events but logs a warning and only succeeds for
-# non-sensitive events; payment-affecting events require a verified signature.
-PAYPAL_WEBHOOK_ID = os.getenv("PAYPAL_WEBHOOK_ID", "")
+# PayPal is retired. Keep inert constants temporarily so historical audit and
+# reversal helpers can still import, but never reactivate them from environment
+# variables. Public billing, checkout, webhooks, and entitlements are Stripe-only.
+PAYPAL_CLIENT_ID = ""
+PAYPAL_CLIENT_SECRET = ""
+PAYPAL_ENV = "retired"
+PAYPAL_WEBHOOK_ID = ""
 SITE_URL = os.getenv("SITE_URL", "https://studio.nyptidindustries.com")
 
 

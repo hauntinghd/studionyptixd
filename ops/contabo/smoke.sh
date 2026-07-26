@@ -160,6 +160,7 @@ checks = (
     (payload.get("queue_mode") == "redis", "queue_mode is not redis"),
     (payload.get("queue_consumer_ready") is True, "queue consumer is not ready"),
     (payload.get("queue_consumer_running") is True, "queue consumer is not running"),
+    (payload.get("youtube_token_storage_ready") is True, "YouTube token storage is not ready"),
     (payload.get("xai_image_fallback_enabled") is False, "xAI image fallback is enabled"),
     (payload.get("runpod_production_enabled") is False, "unverified RunPod production is enabled"),
     (payload.get("runpod_longform_enabled") is False, "unverified RunPod long-form is enabled"),

@@ -39,6 +39,8 @@ container already serving ClipLab without replacing or restarting ClipLab.
     base.env                generated Redis password/runtime paths, mode 0600
     studio.env              provider and billing secrets, mode 0600
     caddy.env               Worker-origin token for Caddy only, mode 0600
+    restic-s3.env           optional scoped S3 repository config, mode 0600
+    restic-password         optional restic repository password, mode 0600
     data-manifests/         final Fly source manifests
     data-ready.attestation  verified destination count/bytes/hash, mode 0600
     fly-evidence/            raw, root-owned Fly status/config/probe evidence
@@ -69,8 +71,12 @@ sudo chmod 600 /opt/studio/shared/studio.env
 Copy secret values from the current production secret store without printing
 them into terminal logs. Do not put `REDIS_URL`, worker counts, provider policy,
 or filesystem paths in `studio.env`; Compose owns those invariants. Confirm the
-Google redirect URI and payment webhooks are registered for
+Google redirect URI and Stripe webhook are registered for
 `https://api-studio.nyptidindustries.com` before public cutover.
+`YOUTUBE_TOKEN_ENCRYPTION_KEY` must be an independent 32-byte URL-safe base64
+or 64-character hexadecimal secret. Changing it invalidates stored connected-
+channel tokens, so retain it in the production secret store and off-host
+recovery procedure.
 
 `prepare_host.sh` does not alter Caddy, ClipLab, DNS, or start Studio.
 
@@ -238,6 +244,16 @@ descriptor, validates the resolved Compose model, and prepares Redis. It
 intentionally does **not** start `studio-api`. Omitting `--image-ref` performs
 an explicit local source build and is reserved for operator-controlled recovery,
 not the production CI release path.
+
+GitHub verification and immutable image publication do not require production
+SSH access. Automatic Contabo deployment is an explicit opt-in and runs only
+when the repository variable `CONTABO_AUTO_DEPLOY_ENABLED` is exactly `true`,
+all five `CONTABO_SSH_*` secrets are non-empty, and `CONTABO_SSH_USER` is a
+dedicated non-root principal. Otherwise the deploy job is skipped with a notice
+while candidate verification and image publication remain successful. Do not
+enable the variable until the server account, pinned host key, private key, and
+its narrowly reviewed deployment authorization have been provisioned; never
+store the workstation's root key in GitHub.
 
 ## Data and queue cutover
 
@@ -631,7 +647,10 @@ The daily timer runs `backup.sh`, which:
   copied SHA-256 to match the source SHA-256;
 - records release provenance without copying provider secrets;
 - writes a SHA-256 sidecar;
-- retains the newest `BACKUP_RETENTION_COUNT` archives (default seven).
+- retains the newest `BACKUP_RETENTION_COUNT` local archives (default seven);
+- after the API has already resumed and the local archive is safely published,
+  uploads the stable uncompressed snapshot through restic when
+  `/opt/studio/shared/restic-s3.env` exists.
 
 List and verify backups:
 
@@ -642,12 +661,59 @@ cd /opt/studio/backups
 sudo sha256sum -c studio-<timestamp>.tar.gz.sha256
 ```
 
-Copy verified archives off the VPS. The local retention set is not protection
-against full-host loss. Restoration should be rehearsed on an isolated Docker
-project: verify the checksum, extract `data/` and `redis/dump.rdb` with the API
-and Redis stopped, preserve the current directories as a rollback copy, restore
-ownership (`root` for data and UID/GID 999 for Redis), then run the same
-provenance smoke before admitting traffic.
+With no restic configuration, backup remains local-only and succeeds without
+requiring an object-storage account. To enable encrypted off-host storage:
+
+1. Provision a private S3-compatible bucket, preferably outside the VPS region.
+2. Install a reviewed restic package on the VPS.
+3. Copy `restic-s3.env.example` to
+   `/opt/studio/shared/restic-s3.env`, fill in the provider's exact HTTPS
+   path-style repository endpoint and scoped access credentials, then keep the
+   file root-owned mode `0600`.
+4. Put a strong repository password in the separate root-owned mode-`0600`
+   path named by `RESTIC_PASSWORD_FILE`. Keep an offline copy; losing it makes
+   the client-side-encrypted backup unrecoverable.
+5. Initialize and prove the repository:
+
+   ```bash
+   sudo bash /opt/studio/current/ops/contabo/restic_offsite.sh init
+   sudo systemctl start studio-backup.service
+   sudo bash /opt/studio/current/ops/contabo/restic_offsite.sh check
+   sudo bash /opt/studio/current/ops/contabo/restic_offsite.sh restore-check
+   ```
+
+`restore-check` downloads the latest tagged snapshot into a private temporary
+directory, requires data plus Redis, verifies the recorded Redis SHA-256, and
+deletes the isolated extraction. The monthly
+`studio-offsite-restore-check.timer` runs the same proof only when the private
+restic configuration exists. Inspect its success marker and timer state:
+
+```bash
+sudo systemctl list-timers \
+  studio-backup.timer studio-offsite-restore-check.timer
+sudo cat /opt/studio/shared/offsite-last-success
+sudo cat /opt/studio/shared/offsite-restore-check-last-success
+```
+
+Retention and prune are deliberately separate from backup creation so an
+upload never deletes remote recovery points. Run the reviewed maintenance
+operation explicitly:
+
+```bash
+sudo bash /opt/studio/current/ops/contabo/restic_offsite.sh maintenance
+```
+
+The local archive is retained even if configured off-host upload fails, while
+the backup service returns failure so monitoring cannot mistake local-only
+recovery for completed disaster recovery. A second service at the same
+provider protects against VPS loss but not provider-account loss; truly
+independent disaster recovery needs another provider or account.
+
+Local restoration should still be rehearsed on an isolated Docker project:
+verify the checksum, extract `data/` and `redis/dump.rdb` with the API and Redis
+stopped, preserve the current directories as a rollback copy, restore ownership
+(`root` for data and UID/GID 999 for Redis), then run the same provenance smoke
+before admitting traffic.
 
 The backup intentionally excludes the live multipart AOF directory because its
 segments can rotate during a recursive copy. `dump.rdb` is internally

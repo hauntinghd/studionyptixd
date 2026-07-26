@@ -46,6 +46,8 @@ if payload.get("queue_consumer_ready") is not True:
     fail("production consumer is not ready")
 if payload.get("queue_consumer_running") is not True:
     fail("production consumer is not running")
+if payload.get("youtube_token_storage_ready") is not True:
+    fail("YouTube token storage is not ready")
 
 queue = payload.get("queue_consumer")
 if not isinstance(queue, dict) or queue.get("workers") != 1:

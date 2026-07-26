@@ -84,9 +84,17 @@ if (( install_backup_timer )); then
   require_commands systemctl
   install -m 644 -- "${CONTABO_OPS_DIR}/studio-backup.service" /etc/systemd/system/studio-backup.service
   install -m 644 -- "${CONTABO_OPS_DIR}/studio-backup.timer" /etc/systemd/system/studio-backup.timer
+  install -m 644 -- \
+    "${CONTABO_OPS_DIR}/studio-offsite-restore-check.service" \
+    /etc/systemd/system/studio-offsite-restore-check.service
+  install -m 644 -- \
+    "${CONTABO_OPS_DIR}/studio-offsite-restore-check.timer" \
+    /etc/systemd/system/studio-offsite-restore-check.timer
   systemctl daemon-reload
   systemctl enable --now studio-backup.timer
+  systemctl enable --now studio-offsite-restore-check.timer
   info "Enabled the daily quiesced local-recovery snapshot timer (not off-host DR)"
+  info "Enabled the monthly off-host restore-check timer (inactive until restic-s3.env exists)"
 fi
 
 if (( install_watchdog_timer )); then

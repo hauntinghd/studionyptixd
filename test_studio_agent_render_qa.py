@@ -14,7 +14,7 @@ def _write_package(path: Path, *, shortform: bool = True) -> None:
     )
 
 
-def test_shortform_passes_with_vertical_video_and_package() -> None:
+def test_shortform_blocks_without_durable_edit_and_visual_qa_evidence() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
         video = root / "styled_short.mp4"
@@ -38,8 +38,13 @@ def test_shortform_passes_with_vertical_video_and_package() -> None:
             )
         finally:
             render_qa._probe_video = original_probe
-        assert report["status"] == "pass"
-        assert report["score"] == 100
+        assert report["status"] == "fail"
+        failed_ids = {
+            check["id"]
+            for check in report["checks"]
+            if check["status"] == "fail"
+        }
+        assert "story_manifest" in failed_ids
         assert (root / "render_qa.json").is_file()
 
 
@@ -73,7 +78,7 @@ def test_shortform_fails_bad_aspect_and_missing_audio() -> None:
         assert "audio_stream" in failed_ids
 
 
-def test_probe_unavailable_warns_instead_of_crashing() -> None:
+def test_probe_unavailable_blocks_publish_instead_of_crashing() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
         video = root / "styled_short.mp4"
@@ -91,14 +96,14 @@ def test_probe_unavailable_warns_instead_of_crashing() -> None:
             )
         finally:
             render_qa._probe_video = original_probe
-        assert report["status"] == "warn"
-        assert any(c["id"] == "video_probe" and c["status"] == "warn" for c in report["checks"])
+        assert report["status"] == "fail"
+        assert any(c["id"] == "video_probe" and c["status"] == "fail" for c in report["checks"])
 
 
 def run_all() -> None:
-    test_shortform_passes_with_vertical_video_and_package()
+    test_shortform_blocks_without_durable_edit_and_visual_qa_evidence()
     test_shortform_fails_bad_aspect_and_missing_audio()
-    test_probe_unavailable_warns_instead_of_crashing()
+    test_probe_unavailable_blocks_publish_instead_of_crashing()
 
 
 if __name__ == "__main__":

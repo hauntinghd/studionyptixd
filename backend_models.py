@@ -80,6 +80,7 @@ class CheckoutRequest(BaseModel):
 
 class TopupCheckoutRequest(BaseModel):
     price_id: str
+    # Kept for backward-compatible request parsing; the backend accepts only card.
     preferred_method: str = "card"
 
 
@@ -90,7 +91,7 @@ class WaitlistJoinRequest(BaseModel):
     # backend falls back to the session user's email.
     email: str = ""
     name: str = ""
-    # "stripe" (default) or "paypal". Anything else rejected.
+    # Kept explicit for older clients; only "stripe" is accepted.
     provider: str = "stripe"
 
 

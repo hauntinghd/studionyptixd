@@ -55,7 +55,7 @@ export default function PrivacyPage() {
             <main className="mx-auto max-w-3xl px-6 py-14">
                 <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-violet-300">NYPTID Studio</p>
                 <h1 className="mt-2 text-3xl font-bold tracking-tight text-white sm:text-4xl">Privacy Policy</h1>
-                <p className="mt-2 text-sm text-gray-500">Last updated: June 25, 2026</p>
+                <p className="mt-2 text-sm text-gray-500">Last updated: July 26, 2026</p>
 
                 <P>
                     NYPTID Studio ("Studio," "we," "us") is a creator-tools platform operated by NYPTID Industries.
@@ -66,7 +66,7 @@ export default function PrivacyPage() {
                 <H3>Account information</H3>
                 <UL>
                     <li>Email address (via Supabase authentication or Google Sign-In)</li>
-                    <li>Plan level and subscription status (via PayPal / Stripe payment records)</li>
+                    <li>Plan level and subscription status (via Stripe payment records)</li>
                     <li>Profile role (creator, admin)</li>
                 </UL>
 
@@ -122,7 +122,7 @@ export default function PrivacyPage() {
                     <li><strong className="text-white">Scope of use.</strong> YouTube-derived data is used only to serve the creator who authorized access, inside that creator's own Studio dashboard.</li>
                     <li><strong className="text-white">Never sold.</strong> We do not sell, rent, or share YouTube data with third parties for advertising or any other purpose.</li>
                     <li><strong className="text-white">No human review.</strong> No NYPTID employee reads your YouTube data outside of what is strictly required to diagnose a support issue you've explicitly reported, or to comply with law.</li>
-                    <li><strong className="text-white">Server-side tokens.</strong> Refresh tokens are stored server-side only, never exposed to the browser or any third party. Access tokens are refreshed server-to-server and are not persisted beyond the request lifecycle.</li>
+                    <li><strong className="text-white">Server-side tokens.</strong> YouTube access and refresh tokens are encrypted at rest with a server-managed key and persisted only in protected server-side application storage so Studio can keep a channel connected. They are never exposed to the browser or shared with unrelated third parties.</li>
                     <li><strong className="text-white">Purpose-limited storage.</strong> YouTube analytics and authorized channel statistics may be retained while authorization remains active to power creator-facing Catalyst and Studio Agent features. Authorization and data validity are periodically rechecked.</li>
                     <li><strong className="text-white">Not used for general model training.</strong> YouTube OAuth-authorized data is segregated from NYPTID model-training datasets.</li>
                     <li><strong className="text-white">No redistribution.</strong> Studio never re-exposes one creator's private data to another creator or to the public internet.</li>
@@ -143,11 +143,13 @@ export default function PrivacyPage() {
                 <H2>5. Who We Share Data With</H2>
                 <P>Studio uses the following sub-processors to operate the service:</P>
                 <UL>
-                    <li><strong className="text-white">Supabase</strong> — authentication and authoritative data storage</li>
-                    <li><strong className="text-white">RunPod</strong> — GPU inference workers</li>
-                    <li><strong className="text-white">Fal.ai</strong> — managed AI model inference (image, video, audio, LLM)</li>
-                    <li><strong className="text-white">PayPal</strong> — payment processing</li>
-                    <li><strong className="text-white">Vercel</strong> — frontend hosting</li>
+                    <li><strong className="text-white">Contabo</strong> — backend compute and application storage</li>
+                    <li><strong className="text-white">Supabase</strong> — authentication and account, project, and job synchronization and storage</li>
+                    <li><strong className="text-white">Stripe</strong> — subscription, checkout, invoice, payment, and fraud-prevention records; Studio does not store full card details</li>
+                    <li><strong className="text-white">Anthropic</strong> — Studio Agent language and vision inference; relevant prompts, conversation context, and selected reference frames are sent only to fulfill your request</li>
+                    <li><strong className="text-white">Fal.ai</strong> — managed image, video, transcription, and media inference; relevant prompts and media inputs are sent only to generate the requested output</li>
+                    <li><strong className="text-white">ElevenLabs</strong> — voice generation when you select a supported hosted voice</li>
+                    <li><strong className="text-white">Vercel</strong> — public frontend hosting and delivery</li>
                     <li><strong className="text-white">Google (YouTube Data API, YouTube Analytics API)</strong> — only when you connect a YouTube channel</li>
                 </UL>
                 <P>We do not share your data with advertisers or data brokers. We do not sell your data.</P>
@@ -155,7 +157,7 @@ export default function PrivacyPage() {
                 <H2>6. Security</H2>
                 <UL>
                     <li>All traffic to Studio is encrypted in transit (TLS).</li>
-                    <li>Refresh tokens and API keys are stored in environment-isolated secret stores, not in application code.</li>
+                    <li>Provider API keys remain in environment-isolated secret stores. Connected-channel OAuth tokens are encrypted at rest with a dedicated server-managed key, remain in access-controlled server-side application storage, and are used only for requested YouTube features.</li>
                     <li>Access to production systems is limited to Studio operators and logged.</li>
                 </UL>
 

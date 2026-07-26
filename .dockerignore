@@ -19,6 +19,8 @@ client_secrets.json
 *.pfx
 .runpod.env
 **/.runpod.env
+ops/contabo/restic-s3.env
+ops/contabo/restic-password
 .tmp*
 tmp_*
 analysis/

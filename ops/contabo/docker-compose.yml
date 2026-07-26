@@ -112,7 +112,6 @@ services:
       SITE_URL: https://studio.nyptidindustries.com
       API_PUBLIC_URL: https://api-studio.nyptidindustries.com
       BILLING_SITE_URL: https://studio.nyptidindustries.com
-      PAYPAL_ENV: live
       IMAGE_PROVIDER_ORDER: fal
       XAI_API_KEY: ""
       USE_XAI_VIDEO: "false"
