@@ -269,6 +269,8 @@ def test_first_activation_is_fenced_and_stage_never_starts_api() -> None:
     lib = _read("lib.sh")
     assert "candidate image ID is invalid" in lib
     assert "create_verified_api_container" in lib
+    assert "up --no-start --force-recreate --no-deps studio-api" in lib
+    assert "create --force-recreate --no-deps studio-api" not in lib
     assert "candidate container ran before immutable image verification" in lib
     assert "STUDIO_IMAGE_ID" in deploy
     assert "running container image ID does not match" in _read("smoke.sh")

@@ -155,7 +155,10 @@ create_verified_api_container() {
   local candidate="$1"
   local container_id expected_image_id actual_image_id running
   assert_candidate_image_binding "${candidate}"
-  compose_for "${candidate}" create --force-recreate --no-deps studio-api
+  # Compose v5 removed --no-deps from `compose create`. `up --no-start`
+  # preserves the stopped-container preflight while keeping dependency
+  # creation and startup disabled across supported Compose releases.
+  compose_for "${candidate}" up --no-start --force-recreate --no-deps studio-api
   container_id="$(
     compose_for "${candidate}" ps --all --quiet studio-api | awk 'NF { print; exit }'
   )"
