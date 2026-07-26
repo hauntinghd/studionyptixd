@@ -186,8 +186,12 @@ stg="`$HOME/$remoteStaging"
 dst="$RemoteReleaseDir"
 exe="$contractName"
 # Verify the signed installer's SHA-256 on the server before publishing.
+# The sidecar is a bare hash (backend contract), so compare directly rather
+# than with `sha256sum -c`, which expects "<hash>  <filename>".
 cd "`$stg"
-sha256sum -c "`$exe.sha256"
+actual="`$(sha256sum "`$exe" | awk '{print `$1}')"
+expected="`$(tr -d '[:space:]' < "`$exe.sha256")"
+if [ "`$actual" != "`$expected" ]; then echo "sha256 mismatch: `$actual != `$expected" >&2; exit 1; fi
 as_root install -d -m 0755 "`$dst"
 as_root install -m 0644 "`$stg/`$exe" "`$dst/`$exe"
 as_root install -m 0644 "`$stg/`$exe.sig" "`$dst/`$exe.sig"
@@ -195,7 +199,8 @@ as_root install -m 0644 "`$stg/`$exe.sha256" "`$dst/`$exe.sha256"
 $( if (-not $KeepStaging) { 'rm -rf "$stg"' } )
 echo "PUBLISHED `$dst/`$exe"
 "@
-Invoke-Native { $publishScript | & ssh @sshArgs "bash -s" } "publish to $RemoteReleaseDir"
+# Strip CR so CRLF here-string line endings do not break bash on the server.
+Invoke-Native { ($publishScript -replace "\r","") | & ssh @sshArgs "bash -s" } "publish to $RemoteReleaseDir"
 
 if (-not $KeepStaging) { Remove-Item $stage -Recurse -Force }
 
