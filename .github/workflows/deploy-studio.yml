@@ -1,57 +1,322 @@
-name: Deploy Studio (legacy disabled)
+name: Deploy Studio to Contabo
 
 on:
+  workflow_call:
+    inputs:
+      git_sha:
+        description: Exact 40-character release commit
+        required: true
+        type: string
+      build_id:
+        description: Immutable studio-<UTC>-<12hex> build identifier
+        required: true
+        type: string
+      image_ref:
+        description: Exact CI-published Docker manifest digest reference
+        required: true
+        type: string
+    secrets:
+      CONTABO_SSH_HOST:
+        required: true
+      CONTABO_SSH_USER:
+        required: true
+      CONTABO_SSH_PORT:
+        required: true
+      CONTABO_SSH_KEY:
+        required: true
+      CONTABO_SSH_KNOWN_HOSTS:
+        required: true
+    outputs:
+      activated:
+        description: Whether an existing Contabo production release was replaced
+        value: ${{ jobs.deploy.outputs.activated }}
   workflow_dispatch:
+    inputs:
+      git_sha:
+        description: Exact 40-character commit to stage from the canonical repository
+        required: true
+        type: string
+      build_id:
+        description: Matching studio-<UTC>-<12hex> build identifier
+        required: true
+        type: string
+      image_ref:
+        description: Exact docker.io/nyptid/nyptid-studio-api@sha256:<64hex> reference
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-studio-contabo-production
+  cancel-in-progress: false
 
 jobs:
   deploy:
-    # This SSH path has no immutable image/provenance attestation and must not
-    # race the gated Fly release. Kept only as historical recovery reference.
-    if: ${{ false }}
+    name: Stage and conditionally activate exact Contabo release
     runs-on: ubuntu-latest
+    timeout-minutes: 45
+    outputs:
+      activated: ${{ steps.active_state.outputs.has_active }}
+    env:
+      RELEASE_GIT_SHA: ${{ inputs.git_sha }}
+      RELEASE_BUILD_ID: ${{ inputs.build_id }}
+      RELEASE_IMAGE_REF: ${{ inputs.image_ref }}
+      REPOSITORY_URL: https://github.com/${{ github.repository }}.git
     steps:
-      - name: Deploy over SSH
-        uses: appleboy/ssh-action@v1.2.0
-        with:
-          host: ${{ secrets.STUDIO_SSH_HOST }}
-          username: ${{ secrets.STUDIO_SSH_USER }}
-          key: ${{ secrets.STUDIO_SSH_KEY }}
-          port: ${{ secrets.STUDIO_SSH_PORT }}
-          script_stop: true
-          script: |
-            set -euo pipefail
-            APP_DIR="${{ secrets.STUDIO_APP_DIR }}"
-            STUDIO_PORT="${{ secrets.STUDIO_PORT }}"
-            SERVICE_NAME="${{ secrets.STUDIO_SERVICE_NAME }}"
-            if [ -z "${APP_DIR}" ]; then APP_DIR="$HOME/asd"; fi
-            if [ -z "${STUDIO_PORT}" ]; then STUDIO_PORT="8000"; fi
-            if [ -z "${SERVICE_NAME}" ]; then SERVICE_NAME="nyptid-studio"; fi
-
-            cd "${APP_DIR}"
-            git fetch origin master
-            git reset --hard origin/master
-
-            if [ -d "ViralShorts-App" ]; then
-              cd ViralShorts-App
-              npm ci
-              npm run build
-              cd ..
+      - name: Validate release identity and required production secrets
+        env:
+          CONTABO_SSH_HOST: ${{ secrets.CONTABO_SSH_HOST }}
+          CONTABO_SSH_USER: ${{ secrets.CONTABO_SSH_USER }}
+          CONTABO_SSH_PORT: ${{ secrets.CONTABO_SSH_PORT }}
+          CONTABO_SSH_KEY: ${{ secrets.CONTABO_SSH_KEY }}
+          CONTABO_SSH_KNOWN_HOSTS: ${{ secrets.CONTABO_SSH_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          missing=()
+          for name in \
+            CONTABO_SSH_HOST \
+            CONTABO_SSH_USER \
+            CONTABO_SSH_PORT \
+            CONTABO_SSH_KEY \
+            CONTABO_SSH_KNOWN_HOSTS; do
+            if [ -z "${!name:-}" ]; then
+              missing+=("${name}")
             fi
+          done
+          if [ "${#missing[@]}" -gt 0 ]; then
+            printf '::error::Missing required Contabo production secret(s): %s\n' "${missing[*]}"
+            exit 1
+          fi
+          [[ "${RELEASE_GIT_SHA}" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "::error::git_sha must be an exact lowercase 40-character commit SHA"
+            exit 1
+          }
+          short_sha="${RELEASE_GIT_SHA:0:12}"
+          [[ "${RELEASE_BUILD_ID}" =~ ^studio-[0-9]{8}T[0-9]{6}Z-${short_sha}$ ]] || {
+            echo "::error::build_id must be studio-<UTC timestamp>-${short_sha}"
+            exit 1
+          }
+          [[ "${RELEASE_IMAGE_REF}" =~ ^docker\.io/nyptid/nyptid-studio-api@sha256:[0-9a-f]{64}$ ]] || {
+            echo "::error::image_ref must be the exact trusted Docker Hub manifest digest"
+            exit 1
+          }
+          [[ "${CONTABO_SSH_PORT}" =~ ^[1-9][0-9]{0,4}$ ]] || {
+            echo "::error::CONTABO_SSH_PORT must be numeric"
+            exit 1
+          }
+          [[ "${CONTABO_SSH_HOST}" != *[$' \t\r\n']* ]] || {
+            echo "::error::CONTABO_SSH_HOST contains whitespace"
+            exit 1
+          }
+          [[ "${CONTABO_SSH_USER}" =~ ^[A-Za-z_][A-Za-z0-9_.-]*$ ]] || {
+            echo "::error::CONTABO_SSH_USER is invalid"
+            exit 1
+          }
 
-            if command -v systemctl >/dev/null 2>&1; then
-              if sudo -n true >/dev/null 2>&1; then
-                if [ -f "nyptid-studio.service" ]; then
-                  sudo -n cp "nyptid-studio.service" "/etc/systemd/system/${SERVICE_NAME}.service"
-                fi
-                sudo -n systemctl daemon-reload
-                sudo -n systemctl restart "${SERVICE_NAME}"
+      - name: Configure pinned Contabo SSH identity
+        env:
+          CONTABO_SSH_HOST: ${{ secrets.CONTABO_SSH_HOST }}
+          CONTABO_SSH_USER: ${{ secrets.CONTABO_SSH_USER }}
+          CONTABO_SSH_PORT: ${{ secrets.CONTABO_SSH_PORT }}
+          CONTABO_SSH_KEY: ${{ secrets.CONTABO_SSH_KEY }}
+          CONTABO_SSH_KNOWN_HOSTS: ${{ secrets.CONTABO_SSH_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          install -d -m 700 "${HOME}/.ssh"
+          printf '%s\n' "${CONTABO_SSH_KEY}" | tr -d '\r' >"${HOME}/.ssh/contabo_release"
+          printf '%s\n' "${CONTABO_SSH_KNOWN_HOSTS}" | tr -d '\r' >"${HOME}/.ssh/known_hosts"
+          chmod 600 "${HOME}/.ssh/contabo_release" "${HOME}/.ssh/known_hosts"
+          cat >"${HOME}/.ssh/config" <<EOF
+          Host studio-contabo-release
+            HostName ${CONTABO_SSH_HOST}
+            User ${CONTABO_SSH_USER}
+            Port ${CONTABO_SSH_PORT}
+            IdentityFile ${HOME}/.ssh/contabo_release
+            UserKnownHostsFile ${HOME}/.ssh/known_hosts
+            IdentitiesOnly yes
+            BatchMode yes
+            StrictHostKeyChecking yes
+          EOF
+          chmod 600 "${HOME}/.ssh/config"
+          ssh studio-contabo-release \
+            'if [ "$(id -u)" -eq 0 ]; then true; else sudo -n true; fi'
+
+      - name: Record whether Contabo already owns production
+        id: active_state
+        run: |
+          set -euo pipefail
+          state="$(
+            ssh studio-contabo-release '
+              as_root() {
+                if [ "$(id -u)" -eq 0 ]; then "$@"; else sudo -n "$@"; fi
+              }
+              if as_root test -L /opt/studio/shared/active.env; then
+                printf active
               else
-                systemctl --user daemon-reload || true
-                systemctl --user restart "${SERVICE_NAME}"
+                printf first-cutover
               fi
-            else
-              echo "systemctl not found; refusing to start ad-hoc uvicorn process."
+            '
+          )"
+          case "${state}" in
+            active)
+              echo "has_active=true" >>"${GITHUB_OUTPUT}"
+              ;;
+            first-cutover)
+              echo "has_active=false" >>"${GITHUB_OUTPUT}"
+              echo "::notice::No active.env exists. This run will stage only; first activation remains manually fenced."
+              ;;
+            *)
+              echo "::error::Could not determine Contabo production ownership"
               exit 1
+              ;;
+          esac
+
+      - name: Fetch exact commit, create immutable release, prepare host, and stage
+        run: |
+          set -euo pipefail
+          ssh studio-contabo-release \
+            "bash -s -- '${RELEASE_GIT_SHA}' '${RELEASE_BUILD_ID}' '${REPOSITORY_URL}' '${RELEASE_IMAGE_REF}'" <<'REMOTE'
+          set -Eeuo pipefail
+          sha="$1"
+          build_id="$2"
+          repository_url="$3"
+          image_ref="$4"
+          repo_dir="/opt/studio/repo.git"
+          release_dir="/opt/studio/releases/${sha}"
+
+          as_root() {
+            if [ "$(id -u)" -eq 0 ]; then
+              "$@"
+            else
+              sudo -n "$@"
             fi
-            sleep 3
-            curl -fsS "http://127.0.0.1:${STUDIO_PORT}/api/health"
+          }
+          die() {
+            printf 'ERROR: %s\n' "$*" >&2
+            exit 1
+          }
+
+          [[ "${sha}" =~ ^[0-9a-f]{40}$ ]] || die "invalid release SHA"
+          [[ "${build_id}" =~ ^studio-[0-9]{8}T[0-9]{6}Z-${sha:0:12}$ ]] ||
+            die "build ID does not match release SHA"
+          [[ "${repository_url}" =~ ^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\.git$ ]] ||
+            die "unexpected repository URL"
+          [[ "${image_ref}" =~ ^docker\.io/nyptid/nyptid-studio-api@sha256:[0-9a-f]{64}$ ]] ||
+            die "unexpected CI image digest reference"
+
+          as_root install -d -m 700 /opt/studio /opt/studio/releases
+          if ! as_root test -d "${repo_dir}"; then
+            as_root git init --bare "${repo_dir}"
+          fi
+          [[ "$(as_root git --git-dir="${repo_dir}" rev-parse --is-bare-repository)" == "true" ]] ||
+            die "${repo_dir} is not a bare repository"
+
+          as_root git --git-dir="${repo_dir}" fetch \
+            --force \
+            --no-tags \
+            "${repository_url}" \
+            "${sha}:refs/releases/${sha}"
+          fetched_sha="$(
+            as_root git --git-dir="${repo_dir}" rev-parse "refs/releases/${sha}^{commit}"
+          )"
+          [[ "${fetched_sha}" == "${sha}" ]] || die "remote fetch did not resolve the exact release"
+
+          if as_root test -e "${release_dir}"; then
+            [[ "$(as_root git -C "${release_dir}" rev-parse HEAD)" == "${sha}" ]] ||
+              die "existing release directory points at another commit"
+            [[ -z "$(as_root git -C "${release_dir}" status --porcelain)" ]] ||
+              die "existing release directory is dirty"
+          else
+            as_root git --git-dir="${repo_dir}" worktree add \
+              --detach \
+              "${release_dir}" \
+              "refs/releases/${sha}"
+          fi
+
+          as_root bash "${release_dir}/ops/contabo/prepare_host.sh"
+          as_root bash "${release_dir}/ops/contabo/deploy.sh" \
+            stage \
+            --build-id "${build_id}" \
+            --image-ref "${image_ref}"
+          as_root chmod -R a-w "${release_dir}"
+          REMOTE
+
+      - name: Activate staged release over the existing Contabo owner
+        if: ${{ steps.active_state.outputs.has_active == 'true' }}
+        run: |
+          set -euo pipefail
+          ssh studio-contabo-release \
+            "bash -s -- '${RELEASE_GIT_SHA}' '${RELEASE_BUILD_ID}'" <<'REMOTE'
+          set -Eeuo pipefail
+          sha="$1"
+          build_id="$2"
+          release_dir="/opt/studio/releases/${sha}"
+          candidate="/opt/studio/shared/candidates/${build_id}.env"
+          as_root() {
+            if [ "$(id -u)" -eq 0 ]; then "$@"; else sudo -n "$@"; fi
+          }
+          as_root test -L /opt/studio/shared/active.env
+          as_root bash "${release_dir}/ops/contabo/deploy.sh" \
+            activate \
+            --candidate "${candidate}"
+          REMOTE
+
+      - name: Verify canonical Contabo release provenance
+        if: ${{ steps.active_state.outputs.has_active == 'true' }}
+        run: |
+          set -euo pipefail
+          actual_sha=""
+          actual_build=""
+          actual_target=""
+          actual_release=""
+          actual_status=""
+          for attempt in $(seq 1 30); do
+            health="$(
+              curl \
+                --fail \
+                --silent \
+                --show-error \
+                --connect-timeout 5 \
+                --max-time 20 \
+                https://api-studio.nyptidindustries.com/api/health || true
+            )"
+            actual_sha="$(printf '%s' "${health}" | jq -r '.backend_commit // ""' 2>/dev/null || true)"
+            actual_build="$(printf '%s' "${health}" | jq -r '.frontend_bundle // ""' 2>/dev/null || true)"
+            actual_target="$(printf '%s' "${health}" | jq -r '.deployment_target // ""' 2>/dev/null || true)"
+            actual_release="$(printf '%s' "${health}" | jq -r '.release_id // ""' 2>/dev/null || true)"
+            actual_status="$(printf '%s' "${health}" | jq -r '.status // ""' 2>/dev/null || true)"
+            if \
+              [ "${actual_sha}" = "${RELEASE_GIT_SHA}" ] &&
+              [ "${actual_build}" = "${RELEASE_BUILD_ID}" ] &&
+              [ "${actual_release}" = "${RELEASE_BUILD_ID}" ] &&
+              [ "${actual_target}" = "contabo" ] &&
+              [ "${actual_status}" = "online" ]; then
+              break
+            fi
+            echo "Waiting for canonical Contabo provenance (attempt ${attempt}/30): sha=${actual_sha:-missing} build=${actual_build:-missing} target=${actual_target:-missing}"
+            sleep 5
+          done
+          test "${actual_sha}" = "${RELEASE_GIT_SHA}"
+          test "${actual_build}" = "${RELEASE_BUILD_ID}"
+          test "${actual_release}" = "${RELEASE_BUILD_ID}"
+          test "${actual_target}" = "contabo"
+          test "${actual_status}" = "online"
+          printf 'Verified canonical Contabo release sha=%s build=%s\n' \
+            "${actual_sha}" \
+            "${actual_build}"
+
+      - name: Report manually fenced first cutover
+        if: ${{ steps.active_state.outputs.has_active != 'true' }}
+        run: |
+          {
+            echo "### Studio candidate staged"
+            echo
+            echo "No prior Contabo active.env existed, so automation did not start an API/consumer."
+            echo "Complete the one-time data/queue cutover and use the reviewed cutover fence before activation."
+            echo
+            echo "- Commit: \`${RELEASE_GIT_SHA}\`"
+            echo "- Build: \`${RELEASE_BUILD_ID}\`"
+            echo "- Image: \`${RELEASE_IMAGE_REF}\`"
+          } >>"${GITHUB_STEP_SUMMARY}"

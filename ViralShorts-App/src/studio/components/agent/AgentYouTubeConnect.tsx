@@ -67,8 +67,8 @@ export default function AgentYouTubeConnect({
                 const msg = (e as Error).message || '';
                 if (/429|too many|queue/i.test(msg)) {
                     setError(
-                        'YouTube refresh is waiting on API capacity (RunPod queue). '
-                        + 'Your agent session on Fly is separate — you can still approve renders. '
+                        'YouTube refresh is waiting on backend capacity. '
+                        + 'Your agent session is preserved — you can still approve renders. '
                         + 'Retry refresh in a minute.',
                     );
                 } else {

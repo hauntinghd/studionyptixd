@@ -138,6 +138,11 @@ def _target(arguments: dict[str, Any]) -> tuple[str, str]:
         or arguments.get("_requested_job_id")
         or arguments.get("analyze_job_id")
         or (
+            arguments.get("session_id")
+            if "longform" in tool_name
+            else ""
+        )
+        or (
             arguments.get("video_id")
             if "cliplab" in tool_name and tool_name != "ingest_cliplab_attachment"
             else ""

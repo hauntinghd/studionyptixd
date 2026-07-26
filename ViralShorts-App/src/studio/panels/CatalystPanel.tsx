@@ -1,6 +1,6 @@
 import { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { AlertTriangle, Bot, BrainCircuit, Download, Loader2, RefreshCw, Save, Sparkles, Target, Youtube } from 'lucide-react';
-import { API, AuthContext, PROD_API_BASE_URL, resolveStudioBackendUrl, startYouTubeBrowserConnect } from '../shared';
+import { API, AuthContext, resolveStudioBackendUrl, resolveStudioUploadUrl, startYouTubeBrowserConnect } from '../shared';
 import { acquireProductionCommandLease } from '../lib/productionIdempotency';
 import CatalystReferencesSection from './CatalystReferencesSection';
 
@@ -492,14 +492,6 @@ export default function CatalystPanel() {
             setError(String(err?.message || 'Download failed'));
         }
     }, [fetchWithAuthRetry]);
-    const directApiBase = useMemo(() => {
-        if (typeof window !== 'undefined') {
-            const host = String(window.location.hostname || '').toLowerCase();
-            if (host === 'localhost' || host === '127.0.0.1') return API;
-        }
-        return PROD_API_BASE_URL || API;
-    }, []);
-
     useEffect(() => {
         selectedChannelIdRef.current = String(selectedChannelId || '').trim();
     }, [selectedChannelId]);
@@ -1096,7 +1088,7 @@ export default function CatalystPanel() {
                     return fetchCatalystProductionResponse(
                         'catalyst-reference-analysis-manual',
                         `${channelIdForAnalysis}-${selectedWorkspaceId}`,
-                        `${directApiBase}/api/catalyst/hub/reference-video-analysis/manual`,
+                        resolveStudioUploadUrl('/api/catalyst/hub/reference-video-analysis/manual'),
                         {
                             method: 'POST',
                             body: formData,

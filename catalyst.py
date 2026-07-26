@@ -3925,7 +3925,7 @@ async def _build_catalyst_reference_video_analysis(
                 analysis_video_path,
                 max_seconds=min(analysis_seconds, CATALYST_REFERENCE_AUDIO_MAX_SECONDS),
             ) or ""
-            audio_summary = await transcribe_audio_with_grok(audio_path) if audio_path else ""
+            audio_summary = await _transcribe_audio_with_grok(audio_path) if audio_path else ""
         finally:
             if audio_path:
                 try:

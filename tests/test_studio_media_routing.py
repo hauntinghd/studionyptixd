@@ -173,6 +173,121 @@ def test_terminal_run_releases_orphaned_production_gate_for_retry(tmp_path, monk
     assert retried["active_command_id"] == "retry-command"
 
 
+def test_live_run_worker_lease_survives_stale_snapshot_and_denies_second_command(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(store, "SESSIONS_DIR", tmp_path)
+    monkeypatch.setattr(store, "STALE_RUN_AFTER_SEC", 0)
+    session = store.create_session(user_id="gate-user", model="test-model")
+    session_id = session["session_id"]
+    run = store.create_run(
+        session_id,
+        user_text="Repair Scene 1",
+        request_id="worker-owned-repair",
+    )
+    store.append_run_event(
+        session_id,
+        run["run_id"],
+        "studio_command",
+        {"command": {"command_id": "worker-owned-command"}},
+    )
+    stale_http_snapshot = store.get_session(session_id, reconcile_jobs=False)
+    assert stale_http_snapshot is not None
+    stale_http_snapshot["runs"][0]["updated_at"] = 1
+
+    assert store.claim_run_worker(
+        session_id,
+        run["run_id"],
+        worker_id="worker-one",
+        lease_seconds=60,
+    )
+    claimed = store.claim_production_gate(
+        session_id,
+        command_id="worker-owned-command",
+        job_id="job-one",
+        run_id=run["run_id"],
+        worker_id="worker-one",
+    )
+    assert claimed is not None
+
+    concurrent_bookkeeping = store.update_session(
+        session_id,
+        interaction_state="clarification",
+        production_gate_open=False,
+        active_command_id="",
+        active_command_job_id="",
+    )
+    assert concurrent_bookkeeping["production_gate_open"] is True
+    assert concurrent_bookkeeping["active_command_id"] == "worker-owned-command"
+
+    reconciled = store.reconcile_stale_runs(stale_http_snapshot)
+    persisted_run = next(row for row in reconciled["runs"] if row["run_id"] == run["run_id"])
+    assert persisted_run["status"] == "running"
+    assert persisted_run["worker_id"] == "worker-one"
+    assert reconciled["production_gate_open"] is True
+    assert reconciled["active_command_worker_id"] == "worker-one"
+    assert store.claim_production_gate(
+        session_id,
+        command_id="second-command",
+        job_id="job-one",
+    ) is None
+
+
+def test_expired_run_worker_lease_allows_stale_gate_recovery(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(store, "SESSIONS_DIR", tmp_path)
+    monkeypatch.setattr(store, "STALE_RUN_AFTER_SEC", 0)
+    session = store.create_session(user_id="gate-user", model="test-model")
+    session_id = session["session_id"]
+    run = store.create_run(
+        session_id,
+        user_text="Repair Scene 1",
+        request_id="expired-worker-repair",
+    )
+    store.append_run_event(
+        session_id,
+        run["run_id"],
+        "studio_command",
+        {"command": {"command_id": "expired-worker-command"}},
+    )
+    assert store.claim_run_worker(
+        session_id,
+        run["run_id"],
+        worker_id="worker-expired",
+        lease_seconds=60,
+    )
+    assert store.claim_production_gate(
+        session_id,
+        command_id="expired-worker-command",
+        job_id="job-one",
+        run_id=run["run_id"],
+        worker_id="worker-expired",
+    ) is not None
+
+    persisted = store.get_session(session_id, reconcile_jobs=False)
+    assert persisted is not None
+    persisted_run = next(row for row in persisted["runs"] if row["run_id"] == run["run_id"])
+    persisted_run.update({
+        "status": "stream_disconnected",
+        "updated_at": 1,
+        "worker_heartbeat_at": 1,
+        "worker_lease_expires_at": 1,
+    })
+    store.update_session(session_id, runs=persisted["runs"])
+
+    reconciled = store.reconcile_stale_runs(persisted)
+    expired_run = next(row for row in reconciled["runs"] if row["run_id"] == run["run_id"])
+    assert expired_run["status"] == "interrupted"
+    assert reconciled["production_gate_open"] is False
+    retried = store.claim_production_gate(
+        session_id,
+        command_id="retry-after-expiry",
+        job_id="job-one",
+    )
+    assert retried is not None
+    assert retried["active_command_id"] == "retry-after-expiry"
+
+
 def test_scene_repair_is_registered_as_a_guarded_billable_mutation() -> None:
     # Repair is synchronous because typed postconditions verify immediately;
     # RunPod's accepted-then-sync bridge cannot safely satisfy that contract.

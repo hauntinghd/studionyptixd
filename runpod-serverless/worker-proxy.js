@@ -1,324 +1,192 @@
 /**
- * Cloudflare Worker — public HTTP bridge to RunPod serverless endpoint.
+ * Cloudflare ingress for the canonical NYPTID Studio API.
  *
- * Map: api.studio.nyptidindustries.com/* → RunPod /runsync (or /run for async)
+ * Every request is streamed unchanged to the single Contabo backend. The
+ * backend owns routing, CORS, authentication, command execution, queues, and
+ * status semantics; this Worker is only the public TLS/ingress pass-through.
  *
- * Secrets (set via `wrangler secret put`):
- *   RUNPOD_API_KEY    — your RunPod account API key
- *   RUNPOD_ENDPOINT_ID — endpoint ID from deploy.sh output
- *
- * Long-running jobs (>30s, e.g. full video render) automatically use /run (async)
- * and return a job_id that the frontend polls via /status/:job_id.
- *
- * Usage:
- *   wrangler deploy
- *   wrangler secret put RUNPOD_API_KEY
- *   wrangler secret put RUNPOD_ENDPOINT_ID
+ * The sole credential here is STUDIO_ORIGIN_TOKEN, stored as a Cloudflare
+ * Worker secret. Caddy requires the corresponding private header on every
+ * non-upload origin request and removes it before proxying to the API.
  */
 
-const ASYNC_PATHS = [
-  "/api/render/",        // all video renders
-  "/api/generate/",      // AI gen jobs
-  "/api/cliplab/",      // long-video clip intelligence + render
-  "/api/studio-agent/",  // agent chat/approve/stream (long OpenRouter turns)
-];
+const DEFAULT_CONTABO_STUDIO_ORIGIN = "https://studio.82.197.67.155.sslip.io";
+const INGRESS_HEADER = "X-NYPTID-Studio-Ingress";
+const INGRESS_IDENTITY = "cloudflare-contabo-v1";
+const ORIGIN_AUTH_HEADER = "X-NYPTID-Studio-Origin-Token";
+const ORIGIN_AUTH_SCHEME = "v1.";
+const ORIGIN_TOKEN_PATTERN = /^[A-Za-z0-9_-]{43,128}$/;
 
-/** Fly: agent sessions, YouTube OAuth, studio analytics (avoid RunPod 429 / cold sync). */
-const FLY_DIRECT_PREFIXES = [
-  "/api/health",
-  "/api/oauth/google/youtube/",
-  "/api/studio-agent",
-  "/api/studio-hub",
-  "/api/youtube/",
-  "/api/studio/analytics",
-];
-
-// Allowed origins — must be exact matches because we also send Allow-Credentials.
-// Wildcard + credentials is forbidden by the CORS spec. Add any other frontend
-// origin that needs direct API access here.
-const ALLOWED_ORIGINS = new Set([
-  "https://studio.nyptidindustries.com",
-  "https://billing.nyptidindustries.com",
-  "https://invoicer.nyptidindustries.com",
-  "http://localhost:8080",
-  "http://localhost:5173",
-  "http://127.0.0.1:8080",
-  "http://127.0.0.1:5173",
+const HOP_BY_HOP_HEADERS = new Set([
+  "connection",
+  "keep-alive",
+  "proxy-authenticate",
+  "proxy-authorization",
+  "te",
+  "trailer",
+  "transfer-encoding",
+  "upgrade",
 ]);
 
-function corsHeadersFor(request) {
-  // Echo the requested origin back when it's in the allowlist; otherwise fall back
-  // to the canonical studio origin so responses still carry CORS headers (useful
-  // for error pages viewed directly in a browser).
-  const origin = request.headers.get("Origin") || "";
-  const allowOrigin = ALLOWED_ORIGINS.has(origin)
-    ? origin
-    : "https://studio.nyptidindustries.com";
-  const reqHeaders = request.headers.get("Access-Control-Request-Headers") || "authorization,content-type";
-  return {
-    "Access-Control-Allow-Origin": allowOrigin,
-    "Access-Control-Allow-Credentials": "true",
-    "Access-Control-Allow-Methods": "GET,POST,PUT,PATCH,DELETE,OPTIONS",
-    "Access-Control-Allow-Headers": reqHeaders,
-    "Access-Control-Max-Age": "86400",
-    "Vary": "Origin",
-  };
+const METHODS_WITHOUT_BODY = new Set(["GET", "HEAD"]);
+
+function jsonErrorResponse() {
+  return new Response(
+    JSON.stringify({
+      error: "studio_origin_unavailable",
+      message: "Studio backend is temporarily unavailable.",
+    }),
+    {
+      status: 502,
+      headers: {
+        "content-type": "application/json; charset=utf-8",
+        "cache-control": "no-store",
+        "access-control-allow-origin": "https://studio.nyptidindustries.com",
+        "access-control-allow-credentials": "true",
+        "vary": "Origin",
+        [INGRESS_HEADER]: INGRESS_IDENTITY,
+      },
+    },
+  );
 }
 
-function jsonResponse(obj, { status = 200, cors = {} } = {}) {
-  return new Response(JSON.stringify(obj), {
-    status,
-    headers: { "content-type": "application/json", ...cors },
+function configuredOrigin(env) {
+  const configured = String(
+    (env && env.CONTABO_STUDIO_ORIGIN) || DEFAULT_CONTABO_STUDIO_ORIGIN,
+  ).trim();
+  const origin = new URL(configured);
+  if (origin.protocol !== "https:") {
+    throw new Error("Studio origin must use HTTPS");
+  }
+  if (origin.username || origin.password || origin.search || origin.hash) {
+    throw new Error("invalid Studio origin");
+  }
+  if (origin.pathname && origin.pathname !== "/") {
+    throw new Error("Studio origin must not contain a path");
+  }
+  return origin;
+}
+
+function configuredOriginAuthorization(env) {
+  const token = String((env && env.STUDIO_ORIGIN_TOKEN) || "").trim();
+  if (!ORIGIN_TOKEN_PATTERN.test(token)) {
+    throw new Error("Studio origin token is missing or invalid");
+  }
+  return `${ORIGIN_AUTH_SCHEME}${token}`;
+}
+
+function upstreamUrlFor(requestUrl, env) {
+  const publicUrl = new URL(requestUrl);
+  const origin = configuredOrigin(env);
+  if (publicUrl.host.toLowerCase() === origin.host.toLowerCase()) {
+    throw new Error("Studio origin cannot point back to public ingress");
+  }
+  publicUrl.protocol = origin.protocol;
+  publicUrl.hostname = origin.hostname;
+  publicUrl.port = origin.port;
+  publicUrl.username = "";
+  publicUrl.password = "";
+  return publicUrl;
+}
+
+function sanitizedForwardHeaders(request, originAuthorization) {
+  const headers = new Headers(request.headers);
+  const upgrade = String(headers.get("upgrade") || "").trim().toLowerCase();
+  const websocket = upgrade === "websocket";
+  const rawClientIp = String(headers.get("cf-connecting-ip") || "").trim();
+  const clientIp = /^[0-9A-Fa-f:.]{2,64}$/.test(rawClientIp) ? rawClientIp : "";
+  const publicUrl = new URL(request.url);
+
+  const connectionTokens = String(headers.get("connection") || "")
+    .split(",")
+    .map((value) => value.trim().toLowerCase())
+    .filter(Boolean);
+  for (const headerName of connectionTokens) {
+    headers.delete(headerName);
+  }
+  for (const headerName of HOP_BY_HOP_HEADERS) {
+    headers.delete(headerName);
+  }
+  for (const headerName of Array.from(headers.keys())) {
+    const normalized = headerName.toLowerCase();
+    if (normalized === "host" || normalized.startsWith("cf-")) {
+      headers.delete(headerName);
+    }
+  }
+
+  // Never trust client-supplied forwarding metadata. Cloudflare's
+  // CF-Connecting-IP is the sole client-IP source at this ingress.
+  headers.delete("forwarded");
+  headers.delete("x-forwarded-for");
+  headers.delete("x-forwarded-host");
+  headers.delete("x-forwarded-port");
+  headers.delete("x-forwarded-proto");
+  headers.delete("x-real-ip");
+  headers.delete(ORIGIN_AUTH_HEADER);
+  if (clientIp) {
+    headers.set("x-forwarded-for", clientIp);
+    headers.set("x-real-ip", clientIp);
+  }
+  headers.set("x-forwarded-host", publicUrl.host);
+  headers.set("x-forwarded-proto", publicUrl.protocol.replace(":", ""));
+  headers.set(
+    "x-forwarded-port",
+    publicUrl.port || (publicUrl.protocol === "https:" ? "443" : "80"),
+  );
+  headers.delete(INGRESS_HEADER);
+  headers.set(ORIGIN_AUTH_HEADER, originAuthorization);
+
+  // Upgrade is hop-by-hop for ordinary HTTP, but is required for an upstream
+  // WebSocket handshake. Cloudflare manages the Connection header itself.
+  if (websocket) {
+    headers.set("upgrade", "websocket");
+  }
+  return headers;
+}
+
+function downstreamResponse(upstreamResponse) {
+  const headers = new Headers(upstreamResponse.headers);
+  headers.set(INGRESS_HEADER, INGRESS_IDENTITY);
+
+  if (upstreamResponse.webSocket) {
+    return new Response(null, {
+      status: upstreamResponse.status,
+      statusText: upstreamResponse.statusText,
+      headers,
+      webSocket: upstreamResponse.webSocket,
+    });
+  }
+
+  return new Response(upstreamResponse.body, {
+    status: upstreamResponse.status,
+    statusText: upstreamResponse.statusText,
+    headers,
   });
 }
 
 export default {
-  async fetch(request, env, ctx) {
-    const cors = corsHeadersFor(request);
-
-    // Preflight — the browser fires OPTIONS before any fetch with an Authorization
-    // header (non-simple request). We MUST respond with 2xx + CORS headers or the
-    // real request never goes out.
-    if (request.method === "OPTIONS") {
-      return new Response(null, { status: 204, headers: cors });
-    }
-
-    const url = new URL(request.url);
-
-    const flyDirect = FLY_DIRECT_PREFIXES.some((p) => url.pathname.startsWith(p));
-    if (flyDirect) {
-      const flyOrigin = (env.FLY_STUDIO_ORIGIN || "https://nyptid-studio.fly.dev").replace(/\/+$/, "");
-      const flyUrl = `${flyOrigin}${url.pathname}${url.search}`;
-      const hopHeaders = new Headers();
-      for (const [k, v] of request.headers) {
-        const lk = k.toLowerCase();
-        if (lk === "host" || lk.startsWith("cf-")) continue;
-        hopHeaders.set(k, v);
-      }
-      let flyResp;
-      try {
-        flyResp = await fetch(flyUrl, {
-          method: request.method,
-          headers: hopHeaders,
-          body: ["GET", "HEAD"].includes(request.method) ? undefined : request.body,
-          redirect: "manual",
-        });
-      } catch (fetchErr) {
-        return jsonResponse(
-          { error: "fly_agent_proxy_failed", detail: String(fetchErr).slice(0, 300) },
-          { status: 502, cors },
-        );
-      }
-      const outHeaders = new Headers(flyResp.headers);
-      for (const [k, v] of Object.entries(cors)) outHeaders.set(k, v);
-      return new Response(flyResp.body, { status: flyResp.status, headers: outHeaders });
-    }
-
-    const apiKey = env.RUNPOD_API_KEY;
-    const endpointId = env.RUNPOD_ENDPOINT_ID;
-
-    if (!apiKey || !endpointId) {
-      return jsonResponse({ error: "RunPod not configured" }, { status: 500, cors });
-    }
-
-    // ───────────────────────────────────────────────────────────
-    // Status endpoint: GET /status/:job_id → RunPod status
-    // ───────────────────────────────────────────────────────────
-    if (url.pathname.startsWith("/status/")) {
-      const jobId = url.pathname.split("/")[2];
-      const statusResp = await fetch(
-        `https://api.runpod.ai/v2/${endpointId}/status/${jobId}`,
-        { headers: { Authorization: `Bearer ${apiKey}` } },
-      );
-      return new Response(await statusResp.text(), {
-        status: statusResp.status,
-        headers: { "content-type": "application/json", ...cors },
-      });
-    }
-
-    // ───────────────────────────────────────────────────────────
-    // Decide sync vs async based on path
-    // ───────────────────────────────────────────────────────────
-    const runpodPath = ASYNC_PATHS.some((p) => url.pathname.startsWith(p))
-      ? "run"      // returns job_id immediately, client polls
-      : "runsync"; // waits up to 30s for result
-
-    // ───────────────────────────────────────────────────────────
-    // Build RunPod event payload from HTTP request
-    // ───────────────────────────────────────────────────────────
-    const headers = {};
-    for (const [k, v] of request.headers) {
-      // Drop CF-internal headers
-      if (k.toLowerCase().startsWith("cf-") || k.toLowerCase() === "host") continue;
-      headers[k] = v;
-    }
-
-    const query = {};
-    for (const [k, v] of url.searchParams) query[k] = v;
-
-    let body = null;
-    const ct = request.headers.get("content-type") || "";
-    if (["GET", "HEAD"].indexOf(request.method) === -1) {
-      if (ct.includes("application/json")) {
-        body = await request.json().catch(() => null);
-      } else if (ct.startsWith("text/")) {
-        body = await request.text();
-      } else {
-        // Binary or form → base64
-        const buf = await request.arrayBuffer();
-        body = "b64:" + btoa(String.fromCharCode(...new Uint8Array(buf)));
-      }
-    }
-
-    const runpodPayload = {
-      input: {
-        method: request.method,
-        path: url.pathname,
-        query,
-        headers,
-        body,
-      },
-    };
-
-    // ───────────────────────────────────────────────────────────
-    // Forward to RunPod
-    // ───────────────────────────────────────────────────────────
-    let rpResp;
+  async fetch(request, env) {
     try {
-      rpResp = await fetch(
-        `https://api.runpod.ai/v2/${endpointId}/${runpodPath}`,
-        {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${apiKey}`,
-            "content-type": "application/json",
-          },
-          body: JSON.stringify(runpodPayload),
-        },
-      );
-    } catch (fetchErr) {
-      return jsonResponse(
-        { error: "runpod_fetch_failed", detail: String(fetchErr).slice(0, 300) },
-        { status: 502, cors },
-      );
-    }
-
-    let rpData;
-    try {
-      rpData = await rpResp.json();
-    } catch (parseErr) {
-      return jsonResponse(
-        { error: "runpod_response_not_json", status: rpResp.status },
-        { status: 502, cors },
-      );
-    }
-
-    // Propagate RunPod-level errors (429 queue-full, 401 auth, etc.) with CORS
-    // headers so the frontend can actually read the status + message.
-    if (!rpResp.ok) {
-      return jsonResponse(rpData, { status: rpResp.status, cors });
-    }
-
-    // Async → return job_id for polling
-    if (runpodPath === "run") {
-      return jsonResponse(
-        {
-          job_id: rpData.id,
-          status: rpData.status || "IN_QUEUE",
-          poll_url: `/status/${rpData.id}`,
-        },
-        { status: 202, cors },
-      );
-    }
-
-    // ───────────────────────────────────────────────────────────
-    // Sync-timeout handling: when the backend worker is cold-booting or
-    // throttled, RunPod's /runsync returns `{id, status: "IN_QUEUE"}` without
-    // an `output` field instead of the real response. If we pass that to the
-    // browser, the user sees a confusing JSON blob with no actual result —
-    // which is what was happening on OAuth redirects. Poll the status endpoint
-    // ourselves up to POLL_MAX_MS, return the real response when complete,
-    // and fall back to a clean 504 + CORS if we hit the budget.
-    //
-    // Total elapsed from user's first request: ~30s (runsync) + POLL_MAX_MS.
-    // Kept under Cloudflare's 100s CPU budget and typical browser request timeout.
-    // ───────────────────────────────────────────────────────────
-    if (runpodPath === "runsync" && rpData && rpData.id && !rpData.output) {
-      const jobId = rpData.id;
-      const POLL_MAX_MS = 60_000;    // up to 60s of extra polling
-      const POLL_INTERVAL_MS = 2000; // 2s between polls
-      const deadline = Date.now() + POLL_MAX_MS;
-
-      while (Date.now() < deadline) {
-        await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
-        let statusResp;
-        try {
-          statusResp = await fetch(
-            `https://api.runpod.ai/v2/${endpointId}/status/${jobId}`,
-            { headers: { Authorization: `Bearer ${apiKey}` } },
-          );
-        } catch {
-          continue; // transient network error — try again next interval
-        }
-        if (!statusResp.ok) continue;
-        let statusData;
-        try { statusData = await statusResp.json(); } catch { continue; }
-        const s = String(statusData.status || "").toUpperCase();
-        if (s === "COMPLETED") {
-          rpData = statusData; // swap in the finished payload and fall through
-          break;
-        }
-        if (s === "FAILED" || s === "CANCELLED" || s === "TIMED_OUT") {
-          return jsonResponse(
-            { error: "backend_job_failed", status: s, detail: statusData.error || null },
-            { status: 502, cors },
-          );
-        }
-        // Still IN_QUEUE or IN_PROGRESS — keep polling
+      const upstreamUrl = upstreamUrlFor(request.url, env);
+      const originAuthorization = configuredOriginAuthorization(env);
+      const method = String(request.method || "GET").toUpperCase();
+      const init = {
+        method,
+        headers: sanitizedForwardHeaders(request, originAuthorization),
+        redirect: "manual",
+        signal: request.signal,
+      };
+      if (!METHODS_WITHOUT_BODY.has(method)) {
+        init.body = request.body;
+        // Required by Node's standards-compatible fetch in the provider-free
+        // contract test; ignored harmlessly by the Workers runtime.
+        init.duplex = "half";
       }
 
-      // Deadline hit without completion — return a proper 504 with CORS so
-      // the browser can surface a meaningful error instead of a raw job-id blob.
-      if (!rpData.output) {
-        return jsonResponse(
-          {
-            error: "backend_cold_or_throttled",
-            detail: "RunPod worker did not complete the request in time. This usually means the worker is cold-booting or the account is low on balance. Retry in a moment.",
-            job_id: jobId,
-          },
-          { status: 504, cors },
-        );
-      }
+      const upstreamResponse = await fetch(upstreamUrl.toString(), init);
+      return downstreamResponse(upstreamResponse);
+    } catch {
+      return jsonErrorResponse();
     }
-
-    // Sync → unwrap RunPod output into native HTTP response
-    const output = rpData.output || {};
-    const outStatus = output.status_code || 502;
-    const outHeaders = output.headers || {};
-    const respHeaders = new Headers();
-    for (const [k, v] of Object.entries(outHeaders)) {
-      // Strip hop-by-hop headers
-      if (["content-length", "transfer-encoding", "connection"].indexOf(k.toLowerCase()) !== -1) continue;
-      respHeaders.set(k, v);
-    }
-    // Always layer our CORS headers AFTER copying backend headers so they win.
-    // FastAPI's CORSMiddleware also sets these, but when the backend never
-    // responded (502) we still need them here.
-    for (const [k, v] of Object.entries(cors)) {
-      respHeaders.set(k, v);
-    }
-
-    // Body can be: `body` (dict/str) or `body_b64` (binary)
-    let respBody;
-    if (output.body_b64) {
-      respBody = Uint8Array.from(atob(output.body_b64), (c) => c.charCodeAt(0));
-    } else if (typeof output.body === "string") {
-      respBody = output.body;
-    } else {
-      respBody = JSON.stringify(output.body ?? rpData);
-      if (!respHeaders.has("content-type")) respHeaders.set("content-type", "application/json");
-    }
-
-    return new Response(respBody, { status: outStatus, headers: respHeaders });
   },
 };

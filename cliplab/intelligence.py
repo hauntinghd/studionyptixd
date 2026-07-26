@@ -12,6 +12,7 @@ from cliplab.config import RUNPOD_CLIPLAB_URL, VIRALITY_BACKEND
 from cliplab.model_registry import active_checkpoint, load_registry
 from cliplab.models import ClipSegment, TranscriptCue
 from cliplab.transcribe import transcript_plain
+from studio_agent import provider_policy
 
 _log = logging.getLogger("nyptid-studio.cliplab.intelligence")
 
@@ -47,6 +48,10 @@ JsonCompletionFn = Callable[..., Awaitable[dict]]
 
 
 async def _score_with_runpod(segments: list[ClipSegment], transcript: str, prompt: str) -> list[ClipSegment]:
+    provider_policy.assert_provider_allowed(
+        "runpod",
+        provider_policy.SEMANTIC_QA_CAPABILITY,
+    )
     runpod_key = os.getenv("RUNPOD_API_KEY", "").strip()
     if not runpod_key or not RUNPOD_CLIPLAB_URL:
         return segments

@@ -8,6 +8,17 @@ __pycache__/
 *.pid
 *.db
 .env
+.env.*
+**/.env
+**/.env.*
+client_secrets.json
+**/client_secrets.json
+*.key
+*.pem
+*.p12
+*.pfx
+.runpod.env
+**/.runpod.env
 .tmp*
 tmp_*
 analysis/
@@ -32,7 +43,8 @@ ViralShorts-App/dist/
 ViralShorts-App/.vercel/
 # The native desktop shell is built locally/released separately. None of its
 # Rust target artifacts or platform icons belong in the Fly web/API image.
-ViralShorts-App/src-tauri/
+ViralShorts-App/src-tauri/*
+!ViralShorts-App/src-tauri/tauri.conf.json
 test*.py
 setup_supabase.py
 train_thumbnail_lora.py

@@ -1,8 +1,9 @@
-"""Signed, production-only contract shared by the RunPod dispatcher and worker.
+"""Archived signed RunPod contract retained for legacy receipt verification.
 
-This module intentionally knows nothing about HTTP routing or Studio chat.  It
-only describes a single approved production tool dispatch.  Keeping signing and
-semantic idempotency here prevents the control plane and worker from drifting.
+Execution is permanently retired: both effective feature flags return false,
+and every live bridge/worker entrypoint calls the unconditional retirement
+guard. Signing and normalization remain so historical receipts can still be
+validated without reviving a second production plane.
 """
 from __future__ import annotations
 
@@ -22,6 +23,10 @@ RUNPOD_DISPATCH_SECRET_ENV = "RUNPOD_DISPATCH_SECRET"
 RUNPOD_PRODUCTION_ENABLED_ENV = "STUDIO_RUNPOD_PRODUCTION_ENABLED"
 RUNPOD_LONGFORM_ENABLED_ENV = "STUDIO_RUNPOD_LONGFORM_ENABLED"
 RUNPOD_ENABLED_VALUES = frozenset({"1", "true", "yes", "on", "enabled"})
+RUNPOD_RETIREMENT_CODE = "runpod_retired"
+RUNPOD_RETIREMENT_MESSAGE = (
+    "RunPod execution is permanently retired; Studio production is Contabo-owned."
+)
 
 # Deliberately excludes chat, planning, reads, polling/status, arbitrary HTTP,
 # project-file writes, and shell/build execution.
@@ -74,15 +79,25 @@ class RunPodContractError(ValueError):
 
 
 def runpod_production_enabled() -> bool:
-    """One canonical feature-flag parser for dispatch and ownership polling."""
+    """Return the effective production policy.
 
-    return str(os.getenv(RUNPOD_PRODUCTION_ENABLED_ENV) or "").strip().lower() in RUNPOD_ENABLED_VALUES
+    The historical environment variable is intentionally ignored. A saved key
+    or stale deployment flag must never recreate a second execution plane.
+    """
+
+    return False
 
 
 def runpod_longform_enabled() -> bool:
-    """Separate, default-off kill switch for RunPod long-form execution."""
+    """Return the permanently disabled long-form execution policy."""
 
-    return str(os.getenv(RUNPOD_LONGFORM_ENABLED_ENV) or "").strip().lower() in RUNPOD_ENABLED_VALUES
+    return False
+
+
+def assert_runpod_execution_retired() -> None:
+    """Fail before credentials, storage, or network can be consulted."""
+
+    raise RunPodContractError(RUNPOD_RETIREMENT_CODE, RUNPOD_RETIREMENT_MESSAGE)
 
 
 def _canonical_bytes(value: Any) -> bytes:

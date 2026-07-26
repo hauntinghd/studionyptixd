@@ -20,6 +20,13 @@ from studio_agent.runpod_contract import (
 SECRET = "test-runpod-dispatch-secret-at-least-32-bytes"
 
 
+@pytest.fixture(autouse=True)
+def _legacy_bridge_harness(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Exercise archived bridge invariants without reopening runtime policy."""
+
+    monkeypatch.setattr(runpod_bridge, "assert_runpod_execution_retired", lambda: None)
+
+
 class _FakeResponse:
     def __init__(self, payload: dict[str, Any], status: int = 200):
         self.payload = payload

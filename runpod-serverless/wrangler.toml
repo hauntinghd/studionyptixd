@@ -1,19 +1,23 @@
+# Keep the existing Worker name so deployment updates the custom-domain
+# ingress in place instead of creating a second competing Worker.
 name = "studio-runpod-proxy"
 main = "worker-proxy.js"
 compatibility_date = "2026-04-01"
+workers_dev = false
 
-# Custom Domain — single-level subdomain covered by free Universal SSL wildcard
-# (*.nyptidindustries.com). CF auto-creates the DNS record + issues the cert.
+# Canonical Studio API custom domain. Cloudflare terminates public TLS and the
+# Worker streams every request to the single backend-owned Contabo service.
 routes = [
   { pattern = "api-studio.nyptidindustries.com", custom_domain = true }
 ]
 
-# Set via `wrangler secret put RUNPOD_API_KEY` and `wrangler secret put RUNPOD_ENDPOINT_ID`
-# DO NOT put secrets here.
+# Required origin-auth credential (never put the value in this file):
+#   npx wrangler secret put STUDIO_ORIGIN_TOKEN --config wrangler.toml
+# The Worker fails closed before fetch() when this secret is absent or invalid.
 
 [vars]
-# Studio Agent chat/approve/sessions — proxied to Fly (persistent /var/data sessions).
-FLY_STUDIO_ORIGIN = "https://nyptid-studio.fly.dev"
+# Nonsecret origin override for the Contabo Caddy ingress.
+CONTABO_STUDIO_ORIGIN = "https://studio.82.197.67.155.sslip.io"
 
 [observability]
 enabled = true

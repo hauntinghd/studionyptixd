@@ -14,6 +14,28 @@ export type DesktopRelease = {
 };
 
 const VERSION_RE = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
+const TRUSTED_DESKTOP_DOWNLOAD_ORIGINS = new Set([
+    PROD_API_BASE_URL,
+    // Signed releases already published by the previous backend remain valid
+    // during rollback and updater transition, but new clients never route API
+    // traffic here by default.
+    'https://nyptid-studio.fly.dev',
+]);
+
+function isTrustedDesktopDownloadUrl(parsed: URL): boolean {
+    return (
+        TRUSTED_DESKTOP_DOWNLOAD_ORIGINS.has(parsed.origin)
+        && !parsed.username
+        && !parsed.password
+        && !parsed.port
+        && !parsed.search
+        && !parsed.hash
+        && (
+            parsed.pathname === '/api/desktop/download'
+            || parsed.pathname.startsWith('/api/desktop/download/')
+        )
+    );
+}
 
 export function compareVersions(left: string, right: string): number {
     if (!VERSION_RE.test(left) || !VERSION_RE.test(right)) return 0;
@@ -37,7 +59,7 @@ export async function fetchDesktopRelease(): Promise<DesktopRelease | null> {
             !VERSION_RE.test(version)
             || payload.available !== true
             || parsed.protocol !== 'https:'
-            || parsed.hostname !== 'nyptid-studio.fly.dev'
+            || !isTrustedDesktopDownloadUrl(parsed)
         ) return null;
         return {
             version,
@@ -83,8 +105,9 @@ export type DesktopUpdateResult = 'relaunching' | 'manual-download';
 
 /**
  * Install an update through Tauri's signed native updater. Versions older than
- * 0.2.2 predate the native bridge, so they receive the one unavoidable manual
- * installer download; all later versions update in place and relaunch.
+ * 1.0.2 trust the retired updater key and/or Fly endpoint, so the deliberate
+ * Contabo trust rotation requires one manual installer. Version 1.0.2 and
+ * later update in place through the canonical API and relaunch.
  */
 export async function installDesktopUpdate(
     release: DesktopRelease,
@@ -93,7 +116,7 @@ export async function installDesktopUpdate(
     const currentVersion = await runningDesktopVersion();
     if (!currentVersion) throw new Error('Could not verify the installed Studio version.');
 
-    if (compareVersions(currentVersion, '0.2.2') < 0) {
+    if (compareVersions(currentVersion, '1.0.2') < 0) {
         window.location.assign(release.download_url);
         return 'manual-download';
     }

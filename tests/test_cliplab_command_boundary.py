@@ -18,16 +18,56 @@ def _isolated_command_ledger(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
         "_LEDGER",
         FileExecutionLedger(tmp_path / "command-ledger"),
     )
+    monkeypatch.setattr(cliplab_router, "save_job_state", lambda *_args, **_kwargs: None)
 
 
-def _client(jobs: dict, *, debit_credits=None) -> TestClient:
+def _client(
+    jobs: dict,
+    *,
+    debit_credits=None,
+    refund_credits=None,
+    enqueue_job=None,
+) -> TestClient:
+    async def enqueue(job_id: str, _plan: str, descriptor: dict) -> None:
+        operation = descriptor["operation"]
+        if operation == "ingest":
+            await cliplab_router.run_ingest_pipeline(
+                job_id,
+                jobs,
+                {"id": descriptor["user_id"]},
+                video_path=descriptor["video_path"],
+                video_id=descriptor["video_id"],
+            )
+        elif operation == "analyze":
+            await cliplab_router.run_analyze_pipeline(
+                job_id,
+                jobs,
+                video_id=descriptor["video_id"],
+                prompt=descriptor["prompt"],
+                max_segments=descriptor["max_segments"],
+                json_completion=None,
+                user_id=descriptor["user_id"],
+            )
+        elif operation == "render":
+            await cliplab_router.run_render_pipeline(
+                job_id,
+                jobs,
+                video_id=descriptor["video_id"],
+                analyze_job_id=descriptor["analyze_job_id"],
+                segment_indices=descriptor["segment_indices"],
+                burn_captions=descriptor["burn_captions"],
+                user_id=descriptor["user_id"],
+            )
+
     app = FastAPI()
     app.include_router(
         cliplab_router.build_cliplab_router(
             require_auth=lambda: {"id": "creator-1"},
             jobs=jobs,
+            enqueue_job=enqueue_job or enqueue,
             fal_json_completion=lambda *_args, **_kwargs: {},
             debit_credits=debit_credits,
+            refund_credits=refund_credits,
         )
     )
     return TestClient(app)
@@ -171,3 +211,49 @@ def test_render_replay_is_exact_and_key_reuse_with_new_scope_is_rejected(
     assert conflict.status_code == 409
     assert "different production mutation" in conflict.text
     assert calls == [[0, 2]]
+
+
+def test_queue_failure_never_returns_accepted_and_refunds_upload(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    jobs: dict = {}
+    events: list[str] = []
+    monkeypatch.setattr(cliplab_router, "CLIPLAB_UPLOAD_DIR", tmp_path / "uploads")
+    monkeypatch.setattr(cliplab_router, "new_job_id", lambda prefix: f"{prefix}_one")
+    monkeypatch.setattr(cliplab_router, "probe_duration", lambda _path: 61.0)
+
+    async def write_upload(file, dest, **_kwargs):
+        payload = await file.read()
+        Path(dest).parent.mkdir(parents=True, exist_ok=True)
+        Path(dest).write_bytes(payload)
+        return len(payload)
+
+    async def reject_queue(_job_id: str, _plan: str, _descriptor: dict) -> None:
+        events.append("queue")
+        raise RuntimeError("redis unavailable")
+
+    def debit(*_args, **_kwargs):
+        events.append("debit")
+        return True
+
+    def refund(*_args, **_kwargs):
+        events.append("refund")
+
+    monkeypatch.setattr(cliplab_router, "write_upload_limited", write_upload)
+    response = _client(
+        jobs,
+        debit_credits=debit,
+        refund_credits=refund,
+        enqueue_job=reject_queue,
+    ).post(
+        "/api/cliplab/ingest/upload",
+        headers={"X-Idempotency-Key": "cliplab-queue-failure-1"},
+        files={"file": ("source.mp4", b"video-data", "video/mp4")},
+    )
+
+    assert response.status_code == 503
+    assert "no job was accepted" in response.text
+    assert events == ["debit", "queue", "refund"]
+    assert jobs["clipi_one"]["status"] == "error"
+    assert not list((tmp_path / "uploads").rglob("vid_one.*"))

@@ -1432,7 +1432,7 @@ def build_studio_agent_router(
         user: dict = Depends(_agent_user),
         audio: UploadFile = File(...),
     ):
-        """Server STT for recorded mic audio (xAI primary, FAL fallback)."""
+        """Server STT for recorded mic audio through FAL only."""
         from upload_limits import MAX_DICTATION_AUDIO_BYTES, UploadTooLargeError, read_upload_limited
 
         try:
@@ -1462,11 +1462,12 @@ def build_studio_agent_router(
         websocket: WebSocket,
         language: str = Query(""),
     ):
-        """Authenticated proxy to xAI streaming STT for live voice planning.
+        """Authenticated fail-closed compatibility route for retired live STT.
 
         Browser clients authenticate with the first JSON frame; non-browser
         clients may use an Authorization header. Tokens are never accepted in
-        the WebSocket URL.
+        the WebSocket URL. No FAL streaming adapter is approved, so this route
+        never opens an upstream socket and directs clients to recorded FAL STT.
         """
         await websocket.accept()
 

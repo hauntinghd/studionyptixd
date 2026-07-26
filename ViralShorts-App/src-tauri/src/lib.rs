@@ -41,6 +41,10 @@ fn is_trusted_external_navigation(url: &Url) -> bool {
             | "nyptidindustries.com"
             | "www.nyptidindustries.com"
             | "invoicer.nyptidindustries.com"
+            | "api-studio.nyptidindustries.com"
+            // Keep already-issued signed Fly release URLs launchable during
+            // the Contabo cutover. Application API traffic no longer defaults
+            // to this transitional host.
             | "nyptid-studio.fly.dev"
     )
 }
@@ -329,6 +333,23 @@ mod tests {
         ));
         assert!(!is_trusted_external_navigation(
             &Url::parse("http://studio.nyptidindustries.com/").unwrap()
+        ));
+    }
+
+    #[test]
+    fn canonical_api_and_transitional_release_host_are_exact_https_hosts() {
+        assert!(is_trusted_external_navigation(
+            &Url::parse("https://api-studio.nyptidindustries.com/api/desktop/download/1.0.2")
+                .unwrap()
+        ));
+        assert!(is_trusted_external_navigation(
+            &Url::parse("https://nyptid-studio.fly.dev/api/desktop/download/1.0.2").unwrap()
+        ));
+        assert!(!is_trusted_external_navigation(
+            &Url::parse("https://api-studio.nyptidindustries.com.attacker.example/").unwrap()
+        ));
+        assert!(!is_trusted_external_navigation(
+            &Url::parse("http://api-studio.nyptidindustries.com/").unwrap()
         ));
     }
 

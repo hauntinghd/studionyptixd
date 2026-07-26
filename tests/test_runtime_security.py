@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 
 import backend_health
 import backend_runtime
+import backend_settings
 
 
 def test_error_alert_omits_query_values_and_unverified_jwt_claims(monkeypatch) -> None:
@@ -148,6 +149,68 @@ def test_backend_registers_cors_once_and_public_health_omits_provider_url() -> N
     assert payload["xai_image_fallback_enabled"] is False
     assert set(payload["image_provider_order"]) <= {"fal"}
     assert "http" not in str(payload["queue_consumer"].get("last_error", ""))
+
+
+def test_public_health_and_client_manifest_share_deployment_identity(monkeypatch) -> None:
+    monkeypatch.setenv("STUDIO_DEPLOYMENT_TARGET", "contabo")
+    monkeypatch.setenv("STUDIO_RELEASE_ID", "studio:release/161280d")
+    monkeypatch.setenv("STUDIO_INSTANCE_ID", "studio api 01")
+    monkeypatch.setenv("UNRELATED_SECRET", "must-not-be-published")
+
+    import backend
+
+    health = asyncio.run(backend._base_health_payload())
+    assert health["deployment_target"] == "contabo"
+    assert health["release_id"] == "studio:release-161280d"
+    assert health["instance_id"] == "studio-api-01"
+
+    app = FastAPI()
+    backend_runtime.configure_backend_runtime(app)
+    manifest = TestClient(app).get(
+        "/api/studio/client-manifest",
+        headers={"Host": "api-studio.nyptidindustries.com"},
+    ).json()
+    assert manifest["deployment_target"] == health["deployment_target"]
+    assert manifest["release_id"] == health["release_id"]
+    assert manifest["instance_id"] == health["instance_id"]
+    assert "must-not-be-published" not in repr(health)
+    assert "must-not-be-published" not in repr(manifest)
+
+
+def test_canonical_api_and_google_callback_defaults(monkeypatch) -> None:
+    monkeypatch.delenv("API_PUBLIC_URL", raising=False)
+    monkeypatch.setattr(backend_settings, "SITE_URL", "")
+
+    assert backend_settings.api_public_url() == "https://api-studio.nyptidindustries.com"
+    assert backend_settings.GOOGLE_DEFAULT_REDIRECT_URI == (
+        "https://api-studio.nyptidindustries.com/api/oauth/google/youtube/callback"
+    )
+
+
+def test_provider_facing_media_urls_use_api_origin(tmp_path, monkeypatch) -> None:
+    import base64
+    import backend
+
+    api_origin = "https://api-studio.nyptidindustries.com"
+    monkeypatch.setattr(backend, "_api_public_url", lambda: api_origin)
+    monkeypatch.setattr(backend, "TEMP_DIR", tmp_path)
+
+    assert backend._longform_reference_file_public_url("../reference.png") == (
+        f"{api_origin}/api/longform/reference-file/reference.png"
+    )
+
+    inline_reference = (
+        "data:image/png;base64,"
+        + base64.b64encode(b"provider-reference").decode("ascii")
+    )
+    session = {
+        "reference_image_url": inline_reference,
+        "skeleton_reference_image": inline_reference,
+        "template": "skeleton",
+    }
+    public_url = backend._ensure_reference_public_url("session-1", session)
+    assert public_url == f"{api_origin}/api/creative/reference-file/session-1_reference.png"
+    assert session["skeleton_reference_image"] == public_url
 
 
 def test_fly_health_check_uses_a_trusted_host() -> None:

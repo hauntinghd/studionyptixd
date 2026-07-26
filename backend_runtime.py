@@ -21,6 +21,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 import studio_alerts as _studio_alerts
+from backend_settings import studio_deployment_identity
 
 
 _deploy_meta_cache = {"ts": 0.0, "backend_commit": "", "frontend_bundle": ""}
@@ -474,6 +475,7 @@ def configure_backend_runtime(app: FastAPI) -> None:
             "backend_commit": backend_commit,
             "frontend_bundle": frontend_bundle,
             "built_at": time.time(),
+            **studio_deployment_identity(),
         }
 
 

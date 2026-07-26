@@ -4,6 +4,14 @@ NYPTID Studio is the backend and frontend for Studio Agent, Catalyst, long-form 
 
 **Current public release:** 1.0.1 (Windows x64 desktop app plus web billing/auth portal).
 
+**Next prepared desktop release:** 1.0.2 (canonical Contabo API and signed-updater cutover). It is
+not public until the matching signed Windows artifact and checksum sidecars are installed on the
+production backend. This release deliberately rotates the updater trust key: installed 1.0.0 and
+1.0.1 clients cannot auto-update to 1.0.2 and require one manual installer. Signed in-app updates
+resume from 1.0.2 onward through `api-studio.nyptidindustries.com`.
+Signing custody and the exact backend artifact contract are documented in
+`ViralShorts-App/src-tauri/RELEASE.md`.
+
 ## Current Architecture
 
 - `backend.py` is the FastAPI entry point and currently mounts most production routes.
@@ -43,11 +51,23 @@ Important env groups:
 
 ## Deployment
 
-Fly backend deploy:
+The canonical production backend runs on Contabo. Release only a clean,
+committed exact SHA through the reviewed Contabo workflow:
 
 ```powershell
-flyctl deploy --remote-only --config fly.toml --app nyptid-studio
+.\ops\deploy_studio_agent.ps1
 ```
+
+For the one-time first cutover, follow
+`ops/contabo/README.md`: stage the candidate, migrate `/var/data`, disable and
+request-test Fly autostart, stop the Fly consumer, write the short-lived
+cutover fence, then activate Contabo. Later exact-SHA releases can activate
+through `.github/workflows/deploy-studio.yml`.
+
+`fly.toml` is rollback-only. Never run `fly deploy`, start the Fly machine, or
+enable Fly autostart while Contabo owns production; that would create a second
+billable-work consumer. A rollback to Fly must first stop and fence the Contabo
+consumer as documented in `ops/contabo/README.md`.
 
 The Docker image builds the frontend from `ViralShorts-App/` and copies the generated `dist` into the runtime image. Do not commit `ViralShorts-App/dist/` or `/build/`; they are generated artifacts.
 

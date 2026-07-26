@@ -7,7 +7,7 @@ import {
     Upload,
     Youtube,
 } from 'lucide-react';
-import { API, AuthContext, DIRECT_API } from '../shared';
+import { API, AuthContext, DIRECT_API, resolveStudioUploadUrl } from '../shared';
 import { ThumbProgressBar } from '../components/StudioWidgets';
 
 type Segment = {
@@ -148,7 +148,7 @@ export default function ClipLabPanel() {
         try {
             const fd = new FormData();
             fd.append('file', file);
-            const r = await fetch(`${api}/api/cliplab/ingest/upload`, {
+            const r = await fetch(resolveStudioUploadUrl('/api/cliplab/ingest/upload'), {
                 method: 'POST',
                 headers: {
                     Authorization: `Bearer ${token}`,

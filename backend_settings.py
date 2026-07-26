@@ -71,7 +71,7 @@ def _collect_youtube_api_keys() -> list[str]:
 
 YOUTUBE_API_KEYS = _collect_youtube_api_keys()
 YOUTUBE_API_KEY = YOUTUBE_API_KEYS[0] if YOUTUBE_API_KEYS else ""
-GOOGLE_DEFAULT_REDIRECT_URI = "https://api.nyptidindustries.com/api/oauth/google/youtube/callback"
+GOOGLE_DEFAULT_REDIRECT_URI = "https://api-studio.nyptidindustries.com/api/oauth/google/youtube/callback"
 GOOGLE_CLIENT_SECRETS_PATH = Path(__file__).parent / "client_secrets.json"
 YOUTUBE_OAUTH_MODE = str(os.getenv("YOUTUBE_OAUTH_MODE", "auto") or "auto").strip().lower()
 if YOUTUBE_OAUTH_MODE not in {"auto", "web", "installed"}:
@@ -276,10 +276,10 @@ def api_public_url() -> str:
         return configured
     site = str(SITE_URL or "").strip().rstrip("/")
     if not site:
-        return "https://nyptid-studio.fly.dev"
+        return "https://api-studio.nyptidindustries.com"
     match = re.match(r"^(https?://)([^/]+)(.*)$", site, flags=re.IGNORECASE)
     if not match:
-        return "https://nyptid-studio.fly.dev"
+        return "https://api-studio.nyptidindustries.com"
     scheme, host, suffix = match.groups()
     host_l = host.lower()
     for apex in ("nyptidindustries.com", "niptidindustries.com"):
@@ -287,7 +287,36 @@ def api_public_url() -> str:
             return f"{scheme}{host}{suffix}"
         if host_l in {apex, f"studio.{apex}", f"billing.{apex}"} or host_l.endswith("." + apex):
             return f"{scheme}api-studio.{apex}{suffix}"
-    return "https://nyptid-studio.fly.dev"
+    return "https://api-studio.nyptidindustries.com"
+
+
+def _public_deployment_identity_value(env_name: str, *, max_length: int) -> str:
+    """Return a bounded, nonsecret deployment label safe for public diagnostics."""
+    raw = str(os.getenv(env_name, "") or "").strip()
+    if not raw:
+        return ""
+    normalized = re.sub(r"[^A-Za-z0-9._:-]+", "-", raw)
+    return normalized.strip("-")[:max_length]
+
+
+def studio_deployment_identity() -> dict[str, str]:
+    """Describe the serving deployment without exposing host or provider secrets."""
+    target = _public_deployment_identity_value("STUDIO_DEPLOYMENT_TARGET", max_length=64)
+    if not target:
+        if str(os.getenv("FLY_APP_NAME", "") or "").strip() or str(os.getenv("FLY_MACHINE_ID", "") or "").strip():
+            target = "fly"
+        elif str(os.getenv("STUDIO_ENVIRONMENT", "") or "").strip().lower() in {"production", "prod", "live"}:
+            target = "self-hosted"
+        else:
+            target = "local"
+    identity = {"deployment_target": target}
+    release_id = _public_deployment_identity_value("STUDIO_RELEASE_ID", max_length=160)
+    instance_id = _public_deployment_identity_value("STUDIO_INSTANCE_ID", max_length=160)
+    if release_id:
+        identity["release_id"] = release_id
+    if instance_id:
+        identity["instance_id"] = instance_id
+    return identity
 
 
 FAL_AI_KEY = os.getenv("FAL_AI_KEY", "")

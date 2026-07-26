@@ -1,7 +1,5 @@
-"""Minimal handler to verify RunPod serverless works at all."""
-import runpod
+"""Retired RunPod serverless smoke entrypoint."""
 
-def handler(event):
-    return {"status_code": 200, "body": {"ok": True, "msg": "minimal handler alive"}}
-
-runpod.serverless.start({"handler": handler})
+raise SystemExit(
+    "RETIRED: Studio production is Contabo-owned; no RunPod worker was started."
+)

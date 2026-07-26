@@ -253,3 +253,18 @@ def test_create_panel_sends_a_single_script_action_key() -> None:
     script_call = script_call[: script_call.index("body: JSON.stringify")]
     assert "'X-Idempotency-Key': command.commandId" in script_call
     assert "command.release()" in source
+
+
+def test_create_panel_routes_every_skeleton_call_through_canonical_backend() -> None:
+    source = (
+        Path(__file__).resolve().parents[1]
+        / "ViralShorts-App"
+        / "src"
+        / "studio"
+        / "panels"
+        / "CreatePanel.tsx"
+    ).read_text(encoding="utf-8")
+
+    assert "fetch('/api/skeleton-ai/" not in source
+    assert 'fetch("/api/skeleton-ai/' not in source
+    assert source.count("fetch(resolveStudioBackendUrl('/api/skeleton-ai/") == 9

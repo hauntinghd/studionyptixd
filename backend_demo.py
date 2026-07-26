@@ -8,6 +8,7 @@ from pathlib import Path
 import httpx
 
 from backend_settings import DEMO_UPLOAD_DIR, TEMP_DIR, XAI_IMAGE_MODEL
+from studio_agent import provider_policy
 
 log = logging.getLogger("nyptid-studio")
 
@@ -49,6 +50,7 @@ SADTALKER_REPLICATE_MODEL = "cjwbw/sadtalker:a519cc0cfebaaeade5f0f1a88b tried"
 
 async def analyze_screen_recording(video_path: str) -> dict:
     """Extract frames from screen recording and analyze with Grok Vision. Memory-optimized for 512MB."""
+    provider_policy.assert_provider_allowed("xai", provider_policy.SEMANTIC_QA_CAPABILITY)
     import base64
     import gc
 
@@ -138,6 +140,7 @@ async def analyze_screen_recording(video_path: str) -> dict:
 
 async def generate_demo_script(analysis: dict, product_name: str = "", reference_notes: str = "") -> dict:
     """Generate a timed voiceover script for the product demo."""
+    provider_policy.assert_provider_allowed("xai", provider_policy.RUNNER_CAPABILITY)
     xai_key = os.environ.get("XAI_API_KEY", "")
     duration = analysis.get("duration", 30)
     target_words_min = max(40, int(duration * 2.0))
@@ -258,6 +261,7 @@ Target total narration length around {target_words_ideal} words (acceptable rang
 
 async def generate_ai_face(output_path: str) -> str:
     """Generate a realistic AI male face photo using xAI Grok image generation."""
+    provider_policy.assert_provider_allowed("xai", provider_policy.IMAGE_CAPABILITY)
     xai_key = os.environ.get("XAI_API_KEY", "")
     ages = ["mid-20s", "late 20s", "early 30s", "mid-30s"]
     styles = [

@@ -63,7 +63,7 @@ export default function ChannelHomePanel({
                         if (res.status === 403) {
                             setError('Connect YouTube in Settings to see your channel stats here.');
                         } else if (res.status === 429) {
-                            setError('Channel analytics is rate-limited on the API bridge. Refresh in a minute; Studio Agent chat still works on Fly.');
+                            setError('Channel analytics is rate-limited on the Studio backend. Refresh in a minute; Studio Agent chat remains available.');
                         } else {
                             setError(`Couldn't load channel analytics (${res.status})`);
                         }

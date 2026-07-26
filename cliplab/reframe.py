@@ -21,6 +21,7 @@ from cliplab.config import (
 )
 from cliplab.model_registry import active_checkpoint
 from cliplab.models import FaceTrajectoryPoint
+from studio_agent import provider_policy
 
 _log = logging.getLogger("nyptid-studio.cliplab.reframe")
 
@@ -118,6 +119,10 @@ class FaceTracker:
 
 
 async def _runpod_face_trajectory(video_path: str, start_sec: float, duration_sec: float) -> list[FaceTrajectoryPoint]:
+    provider_policy.assert_provider_allowed(
+        "runpod",
+        provider_policy.I2V_CAPABILITY,
+    )
     runpod_key = os.getenv("RUNPOD_API_KEY", "").strip()
     if not runpod_key or not RUNPOD_CLIPLAB_URL:
         return []

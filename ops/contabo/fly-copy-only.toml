@@ -1,0 +1,15 @@
+# Safety-only Fly machine profile for final data copy and rollback transfer.
+# It deliberately defines no http_service, services, checks, or process map.
+# The exact inert command is supplied with `fly machine update --command`.
+app = "nyptid-studio"
+primary_region = "iad"
+kill_signal = "SIGTERM"
+kill_timeout = 120
+
+[[mounts]]
+  source = "studio_data_recovery"
+  destination = "/var/data"
+
+[[vm]]
+  size = "shared-cpu-4x"
+  memory = "4gb"

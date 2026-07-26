@@ -3,7 +3,9 @@ param(
     [switch]$DeployWorker,
     [switch]$DeployVercel,
     [string]$VercelProject = "studio-frontend-asd",
-    [string]$VercelScope = "nyptids-projects"
+    [string]$VercelScope = "nyptids-projects",
+    [string]$SshAlias = "cliplab-vps",
+    [string]$SshConfig = "$env:USERPROFILE\.ssh\cliplab_vps_config"
 )
 
 # Build and deploy one immutable Studio candidate. A dirty worktree is refused
@@ -45,7 +47,19 @@ $gitSha = (& $git -c safe.directory=$($Root.Replace('\', '/')) rev-parse HEAD).T
 Assert-NativeSuccess "git rev-parse"
 if ($gitSha -notmatch '^[0-9a-f]{40}$') { throw "Could not resolve a full Git SHA" }
 $shortSha = $gitSha.Substring(0, 12)
-$buildId = "studio-{0}-{1}" -f (Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssZ'), $shortSha
+$commitEpochRaw = (& $git -c safe.directory=$($Root.Replace('\', '/')) show -s --format=%ct $gitSha).Trim()
+Assert-NativeSuccess "git commit timestamp"
+if ($commitEpochRaw -notmatch '^[0-9]+$') { throw "Could not resolve the release commit timestamp" }
+$commitUtc = [DateTimeOffset]::FromUnixTimeSeconds([int64]$commitEpochRaw).UtcDateTime
+$buildId = "studio-{0}-{1}" -f $commitUtc.ToString('yyyyMMddTHHmmssZ'), $shortSha
+$repoUrl = (& $git -c safe.directory=$($Root.Replace('\', '/')) remote get-url origin).Trim()
+Assert-NativeSuccess "git origin URL"
+if ($repoUrl -notmatch '^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:\.git)?$') {
+    throw "The Contabo release fetch requires a public HTTPS GitHub origin URL"
+}
+if (-not $repoUrl.EndsWith(".git", [StringComparison]::OrdinalIgnoreCase)) {
+    $repoUrl = "$repoUrl.git"
+}
 
 if (-not $SkipTests) {
     $python = Find-CommandPath "py"
@@ -75,6 +89,9 @@ if (-not $SkipTests) {
         "tests/test_studio_agent_job_ownership.py",
         "tests/test_studio_paid_access.py",
         "tests/test_public_api_authorization.py",
+        "tests/test_contabo_release_contract.py",
+        "tests/test_embedded_generation_queue.py",
+        "tests/test_frontend_static.py",
         "tests/test_desktop_release_channel.py",
         "tests/test_billing_webhook_idempotency.py",
         "tests/test_unified_credits_settlement.py",
@@ -95,6 +112,14 @@ if (-not $SkipTests) {
     } finally {
         Pop-Location
     }
+
+    Push-Location (Join-Path $Root "runpod-serverless")
+    try {
+        & node --test worker-proxy.test.mjs
+        Assert-NativeSuccess "Cloudflare-to-Contabo streaming ingress tests"
+    } finally {
+        Pop-Location
+    }
 }
 
 $dirtyAfterTests = @(& $git -c safe.directory=$($Root.Replace('\', '/')) status --porcelain)
@@ -103,18 +128,128 @@ if ($dirtyAfterTests.Count -gt 0) {
     throw "Release tests changed tracked source. Refusing to deploy a candidate that no longer matches $gitSha."
 }
 
-$fly = Find-CommandPath "fly" @(
-    "$env:USERPROFILE\.fly\bin\fly.exe",
-    "$env:LOCALAPPDATA\fly\bin\fly.exe",
-    "C:\Users\casey\.fly\bin\fly.exe"
+$ssh = Find-CommandPath "ssh"
+if (-not $ssh) { throw "OpenSSH is required for the Contabo backend deployment" }
+if (-not (Test-Path -LiteralPath $SshConfig -PathType Leaf)) {
+    throw "SSH config was not found: $SshConfig"
+}
+if ($SshAlias -notmatch '^[A-Za-z0-9_.-]+$') { throw "SSH alias is invalid" }
+$sshArgs = @(
+    "-F", $SshConfig,
+    "-o", "BatchMode=yes",
+    "-o", "StrictHostKeyChecking=yes",
+    $SshAlias
 )
-if (-not $fly) { throw "fly CLI is required for the Studio backend deployment" }
 
-Write-Host "==> Deploying immutable Fly candidate $buildId ($gitSha)"
-& $fly deploy --remote-only --build-arg "GIT_SHA=$gitSha" --build-arg "FRONTEND_BUILD_ID=$buildId"
-Assert-NativeSuccess "Fly deploy"
+Write-Host "==> Testing pinned Contabo SSH target $SshAlias"
+& $ssh @sshArgs 'if [ "$(id -u)" -eq 0 ]; then true; else sudo -n true; fi'
+Assert-NativeSuccess "Contabo SSH readiness"
 
-$healthUrl = "https://nyptid-studio.fly.dev/api/health"
+$activeProbe = @'
+set -Eeuo pipefail
+as_root() {
+  if [ "$(id -u)" -eq 0 ]; then "$@"; else sudo -n "$@"; fi
+}
+if as_root test -L /opt/studio/shared/active.env; then
+  printf '__STUDIO_ACTIVE__=1\n'
+else
+  printf '__STUDIO_ACTIVE__=0\n'
+fi
+'@
+$activeOutput = @($activeProbe | & $ssh @sshArgs "bash -s")
+Assert-NativeSuccess "Contabo ownership probe"
+$hadActive = $activeOutput -contains "__STUDIO_ACTIVE__=1"
+
+$remoteStageScript = @'
+set -Eeuo pipefail
+sha="$1"
+build_id="$2"
+repository_url="$3"
+repo_dir="/opt/studio/repo.git"
+release_dir="/opt/studio/releases/${sha}"
+
+as_root() {
+  if [ "$(id -u)" -eq 0 ]; then
+    "$@"
+  else
+    sudo -n "$@"
+  fi
+}
+die() {
+  printf 'ERROR: %s\n' "$*" >&2
+  exit 1
+}
+
+[[ "${sha}" =~ ^[0-9a-f]{40}$ ]] || die "invalid release SHA"
+[[ "${build_id}" =~ ^studio-[0-9]{8}T[0-9]{6}Z-${sha:0:12}$ ]] ||
+  die "build ID does not match release SHA"
+[[ "${repository_url}" =~ ^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\.git$ ]] ||
+  die "unexpected repository URL"
+
+as_root install -d -m 700 /opt/studio /opt/studio/releases
+if ! as_root test -d "${repo_dir}"; then
+  as_root git init --bare "${repo_dir}"
+fi
+[[ "$(as_root git --git-dir="${repo_dir}" rev-parse --is-bare-repository)" == "true" ]] ||
+  die "${repo_dir} is not a bare repository"
+as_root git --git-dir="${repo_dir}" fetch \
+  --force \
+  --no-tags \
+  "${repository_url}" \
+  "${sha}:refs/releases/${sha}"
+fetched_sha="$(as_root git --git-dir="${repo_dir}" rev-parse "refs/releases/${sha}^{commit}")"
+[[ "${fetched_sha}" == "${sha}" ]] || die "remote fetch did not resolve the exact release"
+
+if as_root test -e "${release_dir}"; then
+  [[ "$(as_root git -C "${release_dir}" rev-parse HEAD)" == "${sha}" ]] ||
+    die "existing release directory points at another commit"
+  [[ -z "$(as_root git -C "${release_dir}" status --porcelain)" ]] ||
+    die "existing release directory is dirty"
+else
+  as_root git --git-dir="${repo_dir}" worktree add \
+    --detach \
+    "${release_dir}" \
+    "refs/releases/${sha}"
+fi
+
+as_root bash "${release_dir}/ops/contabo/prepare_host.sh"
+as_root bash "${release_dir}/ops/contabo/deploy.sh" stage --build-id "${build_id}"
+as_root chmod -R a-w "${release_dir}"
+'@
+
+Write-Host "==> Staging immutable Contabo candidate $buildId ($gitSha)"
+$stageCommand = "bash -s -- '$gitSha' '$buildId' '$repoUrl'"
+$remoteStageScript | & $ssh @sshArgs $stageCommand
+Assert-NativeSuccess "Contabo release stage"
+
+if (-not $hadActive) {
+    Write-Warning "No Contabo active.env existed. Candidate is staged only; first activation remains manually fenced."
+    if ($DeployWorker -or $DeployVercel) {
+        throw "Downstream deployment was requested, but the first Contabo cutover has not been manually activated."
+    }
+    Write-Host "Staged candidate: $buildId"
+    return
+}
+
+$remoteActivateScript = @'
+set -Eeuo pipefail
+sha="$1"
+build_id="$2"
+release_dir="/opt/studio/releases/${sha}"
+candidate="/opt/studio/shared/candidates/${build_id}.env"
+as_root() {
+  if [ "$(id -u)" -eq 0 ]; then "$@"; else sudo -n "$@"; fi
+}
+as_root test -L /opt/studio/shared/active.env
+as_root bash "${release_dir}/ops/contabo/deploy.sh" \
+  activate \
+  --candidate "${candidate}"
+'@
+$activateCommand = "bash -s -- '$gitSha' '$buildId'"
+$remoteActivateScript | & $ssh @sshArgs $activateCommand
+Assert-NativeSuccess "Contabo release activation"
+
+$healthUrl = "https://api-studio.nyptidindustries.com/api/health"
 $verified = $false
 for ($attempt = 1; $attempt -le 60; $attempt++) {
     try {
@@ -122,20 +257,22 @@ for ($attempt = 1; $attempt -le 60; $attempt++) {
         if (
             [string]$health.backend_commit -eq $gitSha -and
             [string]$health.frontend_bundle -eq $buildId -and
+            [string]$health.release_id -eq $buildId -and
+            [string]$health.deployment_target -eq "contabo" -and
             [string]$health.status -eq "online"
         ) {
             $verified = $true
             break
         }
     } catch {
-        # Fly may still be replacing the old machine; retry the immutable check.
+        # The canonical edge may still be converging on the activated release.
     }
     Start-Sleep -Seconds 5
 }
 if (-not $verified) {
-    throw "Fly returned no health payload matching commit $gitSha and build $buildId; candidate is not released."
+    throw "Canonical Studio health did not match Contabo commit $gitSha and build $buildId."
 }
-Write-Host "==> Fly provenance verified: $gitSha / $buildId"
+Write-Host "==> Contabo provenance verified: $gitSha / $buildId"
 
 if ($DeployWorker) {
     $wrangler = Find-CommandPath "wrangler.cmd"

@@ -9,7 +9,7 @@ import {
     Upload,
     Youtube,
 } from 'lucide-react';
-import { API, AuthContext, DIRECT_API } from '../shared';
+import { API, AuthContext, DIRECT_API, resolveStudioUploadUrl } from '../shared';
 import { FeedbackWidget, ThumbProgressBar } from '../components/StudioWidgets';
 import { downloadStudioAsset } from '../lib/agentProduction';
 import { useAuthenticatedMediaUrl } from '../hooks/useAuthenticatedMedia';
@@ -211,7 +211,7 @@ export default function ThumbnailPanel() {
         try {
             const fd = new FormData();
             fd.append('file', file);
-            const r = await fetch(`${api}/api/thumbnails/upload-video`, {
+            const r = await fetch(resolveStudioUploadUrl('/api/thumbnails/upload-video'), {
                 method: 'POST',
                 headers: { Authorization: `Bearer ${token}` },
                 body: fd,

@@ -1,0 +1,11 @@
+[Unit]
+Description=Check NYPTID Studio consumer health every minute
+
+[Timer]
+OnBootSec=2m
+OnUnitActiveSec=1m
+AccuracySec=10s
+Unit=studio-watchdog.service
+
+[Install]
+WantedBy=timers.target

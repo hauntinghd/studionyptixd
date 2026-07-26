@@ -57,6 +57,10 @@ def _resign(envelope: dict[str, Any]) -> dict[str, Any]:
 
 @pytest.fixture(autouse=True)
 def _worker_environment(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # The production entrypoint is retired. These tests retain the signed
+    # envelope, durable receipt, and legacy parser invariants behind a
+    # code-only harness that no environment variable can enable.
+    monkeypatch.setattr(runpod_worker, "assert_runpod_execution_retired", lambda: None)
     monkeypatch.setenv("APP_DATA_DIR", str(tmp_path / "studio"))
     monkeypatch.setenv("RUNPOD_DISPATCH_SECRET", SECRET)
     monkeypatch.delenv("SKELETON_AI_OUTPUT_ROOT", raising=False)

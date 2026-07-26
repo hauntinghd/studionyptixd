@@ -42,8 +42,5 @@ log "Train face reframe tracker (40 epochs, batch 16)"
   --batch-size 16 \
   --lr 5e-4
 
-log "Activate registry"
-"$PY" "$RUNPOD_DIR/activate_registry.py" --registry "$ROOT/cliplab/models/model_registry.json"
-
-log "=== ClipLab PRODUCTION TRAINING COMPLETE ==="
+log "=== ClipLab OFFLINE TRAINING COMPLETE (artifacts not activated) ==="
 ls -lh "$ROOT/cliplab/models/virality/v1/model.pt" "$ROOT/cliplab/models/reframe/v1/tracker.pt"

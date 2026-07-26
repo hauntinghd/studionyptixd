@@ -6,8 +6,10 @@ import json
 import pytest
 from starlette.requests import Request
 
-from studio_agent import production_budget, store, tools
-from studio_agent.direct_production import execute_logged_production
+from studio_agent import idempotent_mutations, production_budget, store, tools
+from studio_agent.command_contract import ProductionCommandEnvelopeV2
+from studio_agent.command_execution import InMemoryExecutionLedger
+from studio_agent.direct_production import claim_direct_production, execute_logged_production
 from studio_agent.execution_context import (
     ProductionCommandViolation,
     authorize_production_mutation,
@@ -215,12 +217,12 @@ def test_direct_production_panel_issues_backend_authority(monkeypatch):
         assert authority.command_id == "direct-click-1"
         assert authority.user_id == "creator-1"
         assert authority.source == "server_workflow"
+        assert authority.session_id.startswith("direct_")
         assert name == "cancel_production_job"
         assert arguments == {"job_id": "job-1"}
-        assert context == {
-            "user_id": "creator-1",
-            "content_format": "short",
-        }
+        assert context["user_id"] == "creator-1"
+        assert context["content_format"] == "short"
+        assert context["session_id"] == authority.session_id
         return json.dumps({"ok": True, "status": "complete"})
 
     monkeypatch.setattr(tools, "execute_tool_logged", execute)
@@ -242,3 +244,46 @@ def test_direct_production_panel_issues_backend_authority(monkeypatch):
     )
 
     assert result["status"] == "complete"
+
+
+def test_direct_receipt_contains_deterministic_v2_envelope(monkeypatch):
+    monkeypatch.setattr(
+        idempotent_mutations,
+        "_LEDGER",
+        InMemoryExecutionLedger(),
+    )
+    request = Request(
+        {
+            "type": "http",
+            "headers": [(b"x-idempotency-key", b"direct-envelope-command-1")],
+        }
+    )
+    first_envelope: dict = {}
+    with claim_direct_production(
+        "catalyst_refresh_hub",
+        {"channel_id": "channel-1", "refresh_outcomes": True},
+        request=request,
+        user_id="creator-1",
+        content_format="long",
+    ) as command:
+        first_envelope = dict(command.arguments["_production_command_envelope"])
+        parsed = ProductionCommandEnvelopeV2.model_validate(first_envelope)
+        assert parsed.session_id.startswith("direct_")
+        assert parsed.user_id == "creator-1"
+        assert parsed.action == "execute_backend_workflow"
+        assert parsed.operation.tool_name == "catalyst_refresh_hub"
+        assert parsed.operation.target_kind == "channel"
+        assert parsed.operation.target_id == "channel-1"
+        assert parsed.target.job_id == ""
+        assert parsed.created_at == 0
+        command.complete({"ok": True, "status": "complete"})
+
+    with claim_direct_production(
+        "catalyst_refresh_hub",
+        {"channel_id": "channel-1", "refresh_outcomes": True},
+        request=request,
+        user_id="creator-1",
+        content_format="long",
+    ) as replay:
+        assert replay.replay is not None
+        assert replay.arguments["_production_command_envelope"] == first_envelope

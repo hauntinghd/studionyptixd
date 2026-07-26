@@ -33,6 +33,8 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Resp
 from typing import Optional
 import stripe as stripe_lib
 import uvicorn
+from nacl.exceptions import BadSignatureError
+from nacl.signing import VerifyKey
 from backend_router_mounts import mount_router
 from backend_refunds import build_refund_handlers
 from backend_public_config import build_public_config_payload
@@ -138,7 +140,6 @@ from backend_settings import (
     PAYPAL_CLIENT_SECRET,
     PAYPAL_ENV,
     PAYPAL_WEBHOOK_ID,
-    SITE_URL,
     FAL_AI_KEY,
     FAL_IMAGE_BACKUP_MODEL,
     PLAN_PRICE_USD,
@@ -692,11 +693,6 @@ try:
 except Exception:
     yt_dlp = None
 
-try:
-    from faster_whisper import WhisperModel as FasterWhisperModel
-except Exception:
-    FasterWhisperModel = None
-
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 # Third-party request loggers include full query strings and customer lookup
 # URLs at INFO. Keep operational failures while preventing API keys, emails,
@@ -716,8 +712,6 @@ CATALYST_REFERENCE_FRAME_AUDIT_TARGET_FPS = 4.0
 CATALYST_REFERENCE_FRAME_AUDIT_MAX_TIMELINE_FRAMES = 4800
 CATALYST_REFERENCE_FRAME_AUDIT_MAX_REPORT_ROWS = 1200
 CATALYST_REFERENCE_FRAME_AUDIT_WORKING_MAX_WIDTH = 640
-_reference_whisper_model = None
-_reference_whisper_lock = asyncio.Lock()
 
 configure_reference_video_audit_hooks(
     analysis_max_seconds=CATALYST_REFERENCE_ANALYSIS_MAX_SECONDS,
@@ -729,7 +723,7 @@ configure_reference_video_audit_hooks(
     frame_audit_working_max_width=CATALYST_REFERENCE_FRAME_AUDIT_WORKING_MAX_WIDTH,
     extract_video_metadata=lambda *args, **kwargs: extract_video_metadata(*args, **kwargs),
     extract_audio_from_video=lambda *args, **kwargs: extract_audio_from_video(*args, **kwargs),
-    transcribe_audio_with_grok=lambda *args, **kwargs: transcribe_audio_with_grok(*args, **kwargs),
+    transcribe_audio_with_grok=lambda *args, **kwargs: _transcribe_reference_audio_fal(*args, **kwargs),
     reference_audio_max_seconds=CATALYST_REFERENCE_AUDIO_MAX_SECONDS,
 )
 
@@ -742,13 +736,18 @@ app = FastAPI(
 app.add_middleware(MultipartContentLengthLimitMiddleware)
 configure_backend_runtime(app)
 
-DESKTOP_RELEASE_VERSION = "1.0.1"
+DESKTOP_RELEASE_VERSION = "1.0.2"
 DESKTOP_RELEASE_DIR = Path(str(os.getenv("APP_DATA_DIR") or TEMP_DIR)) / "studio_releases"
 DESKTOP_RELEASE_FILENAME = f"NYPTID-Studio_{DESKTOP_RELEASE_VERSION}_x64-setup.exe"
+DESKTOP_UPDATER_CONFIG_PATH = (
+    Path(__file__).resolve().parent / "ViralShorts-App" / "src-tauri" / "tauri.conf.json"
+)
 DESKTOP_RELEASE_NOTES = (
-    "NYPTID Studio 1.0.1: Windows and Razer mouse compatibility hardening. Studio no longer "
-    "subscribes to unused raw mouse or keyboard device events, heals stale Studio-owned Windows "
-    "mouse capture, and safely releases scene-inspector pointer drags on every exit path."
+    "NYPTID Studio 1.0.2: canonical Contabo API and signed-updater cutover. Desktop API, "
+    "release checks, downloads, and future in-app updates use api-studio.nyptidindustries.com, "
+    "while the reviewed bundled UI retains the 1.0.1 Windows and Razer mouse safeguards. "
+    "Because 1.0.2 deliberately rotates updater trust, 1.0.0 and 1.0.1 require this one "
+    "manual installer; 1.0.2 and later resume signed in-app updates."
 )
 
 
@@ -756,22 +755,108 @@ def _desktop_release_path() -> Path:
     return DESKTOP_RELEASE_DIR / DESKTOP_RELEASE_FILENAME
 
 
+def _desktop_updater_public_key() -> tuple[bytes, bytes]:
+    """Decode the exact Tauri Minisign trust anchor as (key_id, Ed25519 key)."""
+
+    config = json.loads(DESKTOP_UPDATER_CONFIG_PATH.read_text(encoding="utf-8"))
+    encoded_document = str(
+        ((config.get("plugins") or {}).get("updater") or {}).get("pubkey") or ""
+    ).strip()
+    if not encoded_document or len(encoded_document) > 4096:
+        raise ValueError("Tauri updater public key is missing or oversized")
+    document = base64.b64decode(encoded_document, validate=True).decode("utf-8")
+    lines = document.splitlines()
+    if len(lines) != 2 or not lines[0].startswith("untrusted comment: "):
+        raise ValueError("Tauri updater public key document is malformed")
+    payload = base64.b64decode(lines[1], validate=True)
+    if len(payload) != 42 or payload[:2] not in {b"Ed", b"ED"}:
+        raise ValueError("Tauri updater public key payload is malformed")
+    return payload[2:10], payload[10:42]
+
+
+def _desktop_release_signature_is_valid(release_path: Path, encoded_signature: str) -> bool:
+    """Verify the base64-wrapped Minisign signature exactly before publication.
+
+    Tauri signer emits the modern prehashed ``ED`` format. It signs the
+    64-byte BLAKE2b artifact digest and separately signs the detached
+    signature plus trusted comment. Both signatures and the embedded key ID
+    must match the public key in ``tauri.conf.json``.
+    """
+
+    try:
+        candidate = str(encoded_signature or "").strip()
+        if not release_path.is_file() or not candidate or len(candidate) > 8192:
+            return False
+        document = base64.b64decode(candidate, validate=True).decode("utf-8")
+        lines = document.splitlines()
+        if len(lines) != 4:
+            return False
+        if not lines[0].startswith("untrusted comment: "):
+            return False
+        if not lines[2].startswith("trusted comment: "):
+            return False
+
+        signature_payload = base64.b64decode(lines[1], validate=True)
+        global_signature = base64.b64decode(lines[3], validate=True)
+        if len(signature_payload) != 74 or len(global_signature) != 64:
+            return False
+        # Only publish the bounded-memory, modern Minisign mode produced by
+        # Tauri's current signer. Legacy non-prehashed signatures are rejected.
+        if signature_payload[:2] != b"ED":
+            return False
+
+        public_key_id, public_key = _desktop_updater_public_key()
+        signature_key_id = signature_payload[2:10]
+        if not secrets.compare_digest(signature_key_id, public_key_id):
+            return False
+        detached_signature = signature_payload[10:74]
+
+        artifact_digest = hashlib.blake2b(digest_size=64)
+        with release_path.open("rb") as release_file:
+            for chunk in iter(lambda: release_file.read(1024 * 1024), b""):
+                artifact_digest.update(chunk)
+
+        verifier = VerifyKey(public_key)
+        verifier.verify(artifact_digest.digest(), detached_signature)
+        trusted_comment = lines[2][len("trusted comment: ") :].encode("utf-8")
+        verifier.verify(detached_signature + trusted_comment, global_signature)
+        return True
+    except (BadSignatureError, OSError, UnicodeError, ValueError, TypeError, json.JSONDecodeError):
+        return False
+
+
+def _desktop_release_sidecar_text(path: Path, *, max_bytes: int) -> str:
+    """Read a small UTF-8 release sidecar without letting malformed input escape."""
+
+    try:
+        if not path.is_file() or path.stat().st_size > max_bytes:
+            return ""
+        return path.read_bytes().decode("utf-8").strip()
+    except (OSError, UnicodeError):
+        return ""
+
+
 def _desktop_release_metadata() -> tuple[Path, str, str]:
     release_path = _desktop_release_path()
     sha_path = release_path.with_suffix(f"{release_path.suffix}.sha256")
     signature_path = release_path.with_suffix(f"{release_path.suffix}.sig")
-    declared_sha256 = sha_path.read_text(encoding="utf-8").strip().lower() if sha_path.is_file() else ""
-    signature = signature_path.read_text(encoding="utf-8").strip() if signature_path.is_file() else ""
+    declared_sha256 = _desktop_release_sidecar_text(sha_path, max_bytes=256).lower()
+    signature = _desktop_release_sidecar_text(signature_path, max_bytes=8192)
     verified_sha256 = ""
+    verified_signature = ""
     if release_path.is_file() and re.fullmatch(r"[0-9a-f]{64}", declared_sha256):
         digest = hashlib.sha256()
         with release_path.open("rb") as release_file:
             for chunk in iter(lambda: release_file.read(1024 * 1024), b""):
                 digest.update(chunk)
         actual_sha256 = digest.hexdigest()
-        if actual_sha256 == declared_sha256:
+        if (
+            actual_sha256 == declared_sha256
+            and _desktop_release_signature_is_valid(release_path, signature)
+        ):
             verified_sha256 = actual_sha256
-    return release_path, verified_sha256, signature
+            verified_signature = signature
+    return release_path, verified_sha256, verified_signature
 
 
 def _desktop_release_is_published(release_path: Path, sha256: str, signature: str) -> bool:
@@ -796,7 +881,7 @@ async def desktop_release_latest():
     return {
         "version": DESKTOP_RELEASE_VERSION,
         "available": published,
-        "download_url": f"https://nyptid-studio.fly.dev/api/desktop/download/{DESKTOP_RELEASE_VERSION}",
+        "download_url": f"{_api_public_url()}/api/desktop/download/{DESKTOP_RELEASE_VERSION}",
         "sha256": sha256,
         "published_at": datetime.fromtimestamp(release_path.stat().st_mtime, timezone.utc).isoformat()
         if published else "",
@@ -851,7 +936,7 @@ async def desktop_release_updater(target: str, arch: str, current_version: str):
         {
             "version": DESKTOP_RELEASE_VERSION,
             "pub_date": datetime.fromtimestamp(release_path.stat().st_mtime, timezone.utc).isoformat(),
-            "url": f"https://nyptid-studio.fly.dev/api/desktop/download/{DESKTOP_RELEASE_VERSION}",
+            "url": f"{_api_public_url()}/api/desktop/download/{DESKTOP_RELEASE_VERSION}",
             "signature": signature,
             "notes": DESKTOP_RELEASE_NOTES,
         },
@@ -2548,7 +2633,7 @@ def _decode_data_image_url(data_url: str) -> tuple[bytes, str]:
 
 def _longform_reference_file_public_url(filename: str) -> str:
     safe = os.path.basename(str(filename or "").strip())
-    return f"{SITE_URL.rstrip('/')}/api/longform/reference-file/{safe}"
+    return f"{_api_public_url()}/api/longform/reference-file/{safe}"
 
 
 def _persist_longform_reference_image(
@@ -4260,7 +4345,7 @@ def _ensure_reference_public_url(session_id: str, session: dict) -> str:
         ref_name = f"{session_id}_reference{ext}"
         ref_path = ref_dir / ref_name
         ref_path.write_bytes(raw)
-        public_url = f"{SITE_URL.rstrip('/')}/api/creative/reference-file/{ref_name}"
+        public_url = f"{_api_public_url()}/api/creative/reference-file/{ref_name}"
         session["reference_image_path"] = str(ref_path)
         session["reference_image_public_url"] = public_url
         # Keep skeleton compatibility key aligned with provider-friendly URL.
@@ -16200,7 +16285,7 @@ async def _creative_reference_image(
     ref_name = f"{session_id}_reference{ext}"
     ref_path = ref_dir / ref_name
     ref_path.write_bytes(raw)
-    public_url = f"{SITE_URL.rstrip('/')}/api/creative/reference-file/{ref_name}"
+    public_url = f"{_api_public_url()}/api/creative/reference-file/{ref_name}"
     session["reference_image_url"] = data_url
     session["reference_image_path"] = str(ref_path)
     session["reference_image_public_url"] = public_url
@@ -17415,12 +17500,18 @@ async def _health_payload():
     if not bool(payload.get("queue_consumer_ready", True)):
         # Fly's HTTP check must withdraw a process whose required consumer died
         # or lost Redis; a 200 "API online" response would strand paid work.
+        deployment_identity = {
+            key: payload[key]
+            for key in ("deployment_target", "release_id", "instance_id")
+            if payload.get(key)
+        }
         raise HTTPException(
             status_code=503,
             detail={
                 "status": "degraded",
                 "queue_consumer": payload.get("queue_consumer", {}),
                 "backend_commit": payload.get("backend_commit", ""),
+                **deployment_identity,
             },
         )
     return payload
@@ -17766,11 +17857,84 @@ def _cliplab_refund_credits(user_id: str, credits: int, reason: str, metadata: d
     )
 
 
+async def _run_cliplab_pipeline(job_id: str, descriptor: dict) -> None:
+    """Execute one durable, backend-authored ClipLab queue descriptor."""
+
+    from cliplab.pipeline import (
+        run_analyze_pipeline,
+        run_ingest_pipeline,
+        run_render_pipeline,
+    )
+
+    payload = dict(descriptor or {})
+    operation = str(payload.get("operation") or "").strip().lower()
+    user_id = str(payload.get("user_id") or "").strip()
+    if not user_id:
+        raise RuntimeError("ClipLab queue descriptor has no authenticated owner")
+    if operation == "ingest":
+        video_path = Path(str(payload.get("video_path") or "")).resolve()
+        if not video_path.is_file():
+            raise RuntimeError("ClipLab queued source video is missing")
+        vtt_text = ""
+        vtt_path_text = str(payload.get("vtt_path") or "").strip()
+        if vtt_path_text:
+            vtt_path = Path(vtt_path_text).resolve()
+            if not vtt_path.is_file() or vtt_path.stat().st_size > 20 * 1024 * 1024:
+                raise RuntimeError("ClipLab queued subtitle file is invalid")
+            vtt_text = vtt_path.read_text(encoding="utf-8", errors="ignore")
+        await run_ingest_pipeline(
+            job_id,
+            jobs,
+            {"id": user_id},
+            video_path=str(video_path),
+            video_id=str(payload.get("video_id") or ""),
+            vtt_text=vtt_text,
+            fal_key=FAL_AI_KEY,
+        )
+        return
+    if operation == "analyze":
+        await run_analyze_pipeline(
+            job_id,
+            jobs,
+            video_id=str(payload.get("video_id") or ""),
+            prompt=str(payload.get("prompt") or ""),
+            max_segments=max(1, min(int(payload.get("max_segments") or 12), 40)),
+            # Text reasoning uses Studio's Anthropic-only provider router.
+            json_completion=None,
+            user_id=user_id,
+            source="cliplab_api",
+        )
+        return
+    if operation == "render":
+        await run_render_pipeline(
+            job_id,
+            jobs,
+            video_id=str(payload.get("video_id") or ""),
+            analyze_job_id=str(payload.get("analyze_job_id") or ""),
+            segment_indices=[int(index) for index in list(payload.get("segment_indices") or [])],
+            burn_captions=bool(payload.get("burn_captions")),
+            user_id=user_id,
+            source="cliplab_api",
+        )
+        return
+    raise RuntimeError(f"Unsupported ClipLab queue operation: {operation or 'missing'}")
+
+
+async def _enqueue_cliplab_job(job_id: str, plan: str, descriptor: dict) -> None:
+    await enqueue_generation_job(
+        job_id,
+        str(plan or "free"),
+        _run_cliplab_pipeline,
+        (job_id, dict(descriptor or {})),
+    )
+
+
 mount_router(
     app,
     build_cliplab_router(
         require_auth=require_auth,
         jobs=jobs,
+        enqueue_job=_enqueue_cliplab_job,
         fal_json_completion=_fal_any_llm_json_completion,
         fal_ai_key=FAL_AI_KEY,
         debit_credits=_cliplab_debit_credits,
@@ -18460,62 +18624,12 @@ async def extract_audio_from_video(video_path: str, *, max_seconds: float | None
     return None
 
 
-async def transcribe_audio_with_grok(audio_path: str) -> str:
-    """Extract a real transcript excerpt from sampled audio when YouTube captions are unavailable."""
-    source_path = str(audio_path or "").strip()
-    if not source_path or not Path(source_path).exists():
-        return ""
-
-    def _transcribe_blocking() -> str:
-        global _reference_whisper_model
-
-        if FasterWhisperModel is None:
-            return ""
-
-        try:
-            if _reference_whisper_model is None:
-                model_dir = TEMP_DIR / "whisper_models"
-                model_dir.mkdir(parents=True, exist_ok=True)
-                _reference_whisper_model = FasterWhisperModel(
-                    "tiny.en",
-                    device="cpu",
-                    compute_type="int8",
-                    download_root=str(model_dir),
-                )
-            segments, _info = _reference_whisper_model.transcribe(
-                source_path,
-                language="en",
-                beam_size=1,
-                best_of=1,
-                vad_filter=True,
-                condition_on_previous_text=False,
-                without_timestamps=True,
-            )
-            parts: list[str] = []
-            total_chars = 0
-            for seg in segments:
-                text = re.sub(r"\s+", " ", str(getattr(seg, "text", "") or "").strip())
-                if not text:
-                    continue
-                parts.append(text)
-                total_chars += len(text) + 1
-                if total_chars >= CATALYST_REFERENCE_TRANSCRIPT_MAX_CHARS:
-                    break
-            transcript = re.sub(r"\s+", " ", " ".join(parts)).strip()
-            return _clip_text(transcript, CATALYST_REFERENCE_TRANSCRIPT_MAX_CHARS)
-        except Exception as e:
-            log.warning(f"Reference audio transcription fallback failed: {e}")
-            return ""
-
-    async with _reference_whisper_lock:
-        transcript = await asyncio.to_thread(_transcribe_blocking)
-    if not transcript:
-        return ""
-    return f"Sampled audio transcript excerpt: {transcript}"
-
-
-async def _transcribe_clone_audio_fal(audio_path: str) -> str:
-    """Transcribe an uploaded clone reference through the FAL-only STT adapter."""
+async def _transcribe_reference_audio_fal(
+    audio_path: str,
+    *,
+    context: str = "reference",
+) -> str:
+    """Transcribe sampled reference audio through the canonical FAL STT adapter."""
     source_path = str(audio_path or "").strip()
     if not source_path or not Path(source_path).exists():
         return ""
@@ -18529,9 +18643,23 @@ async def _transcribe_clone_audio_fal(audio_path: str) -> str:
     if not transcript:
         error = str((result or {}).get("error", "") or "").strip()
         if error:
-            log.warning("FAL clone audio transcription returned no transcript: %s", error)
+            log.warning(
+                "FAL %s audio transcription returned no transcript: %s",
+                str(context or "reference").strip() or "reference",
+                error,
+            )
         return ""
     return f"Sampled audio transcript excerpt: {transcript}"
+
+
+async def transcribe_audio_with_grok(audio_path: str) -> str:
+    """Legacy name for the FAL-only reference-audio transcription boundary."""
+    return await _transcribe_reference_audio_fal(audio_path)
+
+
+async def _transcribe_clone_audio_fal(audio_path: str) -> str:
+    """Transcribe an uploaded clone reference through the FAL-only STT adapter."""
+    return await _transcribe_reference_audio_fal(audio_path, context="clone")
 
 
 async def _generate_clone_voiceover_fal(text: str, output_path: str, *, template: str) -> dict:
@@ -18657,7 +18785,7 @@ configure_catalyst_runtime_hooks(
     extract_video_metadata=lambda *args, **kwargs: extract_video_metadata(*args, **kwargs),
     youtube_fetch_owned_video_bundle_oauth=_youtube_fetch_owned_video_bundle_oauth,
     extract_audio_from_video=lambda *args, **kwargs: extract_audio_from_video(*args, **kwargs),
-    transcribe_audio_with_grok=lambda *args, **kwargs: transcribe_audio_with_grok(*args, **kwargs),
+    transcribe_audio_with_grok=lambda *args, **kwargs: _transcribe_reference_audio_fal(*args, **kwargs),
 )
 
 
@@ -21355,6 +21483,7 @@ async def _start_embedded_production_consumer() -> None:
             "_run_creative_pipeline": _run_creative_pipeline,
             "_run_longform_pipeline": _run_longform_pipeline,
             "run_clone_pipeline": run_clone_pipeline,
+            "_run_cliplab_pipeline": _run_cliplab_pipeline,
         }
     )
 

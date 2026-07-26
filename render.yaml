@@ -1,7 +1,10 @@
+# DISABLED LEGACY BLUEPRINT: Contabo owns production and Fly is the only
+# retained rollback platform. Never resume this service as a production owner.
 services:
   - type: web
     name: nyptid-studio-api
     runtime: docker
+    autoDeploy: false
     dockerfilePath: ./Dockerfile
     dockerContext: .
     dockerCommand: ./ops/run_render_service.sh
@@ -36,13 +39,13 @@ services:
           name: studio-queue
           property: connectionString
       - key: REDIS_QUEUE_ENABLED
-        value: "true"
+        value: "false"
       - key: REDIS_QUEUE_PREFIX
         value: studio
       - key: JOB_QUEUE_WORKERS
         value: "1"
       - key: RUN_EMBEDDED_WORKER
-        value: "true"
+        value: "false"
       - key: SITE_URL
         value: https://studio.nyptidindustries.com
       - key: PAYPAL_ENV

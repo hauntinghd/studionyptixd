@@ -92,7 +92,9 @@ def test_runpod_short_generate_uses_logged_contract_once(monkeypatch) -> None:
     assert command_ids == ["short-click-1"]
     assert arguments["reference_image"] == "https://example.test/reference.png"
     assert arguments["visual_proof_only"] is True
-    assert context == {"user_id": "user-1", "content_format": "short"}
+    assert context["user_id"] == "user-1"
+    assert context["content_format"] == "short"
+    assert context["session_id"].startswith("direct_")
 
 
 def test_runpod_short_generate_requires_key_without_local_fallback(monkeypatch) -> None:
@@ -253,7 +255,9 @@ def test_enabled_longform_start_uses_logged_contract_once(monkeypatch) -> None:
     assert name == "start_longform_render"
     assert command_ids == ["long-click-1"]
     assert json.loads(arguments["chapters_json"])["title"] == "A Test Documentary"
-    assert context == {"user_id": "user-1", "content_format": "long"}
+    assert context["user_id"] == "user-1"
+    assert context["content_format"] == "long"
+    assert context["session_id"].startswith("direct_")
 
 
 def test_flag_off_longform_mutations_still_use_logged_credit_contract(
@@ -399,15 +403,17 @@ def test_thumbnail_regeneration_uses_logged_local_credit_contract(
     assert response.status_code == 200, response.text
     assert response.json()["custom_prompt_used"] is True
     assert command_ids == ["thumb-1"]
-    assert calls == [(
-        "regenerate_longform_thumbnail",
-        {
-            "job_id": "lf_local",
-            "idx": 1,
-            "custom_prompt": "brighter",
-        },
-        {"user_id": "user-1", "content_format": "long"},
-    )]
+    assert len(calls) == 1
+    name, arguments, context = calls[0]
+    assert name == "regenerate_longform_thumbnail"
+    assert arguments == {
+        "job_id": "lf_local",
+        "idx": 1,
+        "custom_prompt": "brighter",
+    }
+    assert context["user_id"] == "user-1"
+    assert context["content_format"] == "long"
+    assert context["session_id"].startswith("direct_")
 
 
 def test_outline_and_chapter_expansion_send_metering_inputs_under_stable_commands(

@@ -31,9 +31,10 @@ export const isBillingHost = billingHostAliases.has(hostLower) || hostLower.star
 export const STUDIO_SITE_URL = "https://studio.nyptidindustries.com";
 export const BILLING_SITE_URL = STUDIO_SITE_URL;
 export const INVOICER_API_BASE_URL = "https://invoicer.nyptidindustries.com";
-// Keep production traffic on the verified Fly control plane. The api-studio hostname
-// currently passes generation routes through a balance-gated proxy.
-export const PROD_API_BASE_URL = "https://nyptid-studio.fly.dev";
+// Every production route, persistent session, and WebSocket upgrade enters
+// through this one public backend origin. Infrastructure can move behind the
+// hostname without shipping another web or desktop client.
+export const PROD_API_BASE_URL = "https://api-studio.nyptidindustries.com";
 const resolveSafeApiBase = (rawBase: string): string => {
     const cleaned = (rawBase || "").trim().replace(/\/+$/, "");
     if (!cleaned) return "";
@@ -54,63 +55,50 @@ const resolveSafeApiBase = (rawBase: string): string => {
 
 // API routing:
 // - local dev: use VITE_API_BASE_URL / VITE_GENERATION_API_BASE_URL
-// - hosted UI: default to the direct production API because the Studio proxy path can time out on larger authenticated requests
+// - hosted UI: use one canonical production API origin for every backend route
 const rawLocalApi = resolveSafeApiBase(viteEnv.VITE_API_BASE_URL || "");
-const rawProdApi = resolveSafeApiBase(viteEnv.VITE_PROD_API_BASE_URL || "");
-const hostedOrigin = typeof window !== "undefined" ? window.location.origin : "";
-export const API = isLocalDevHost ? rawLocalApi : (rawProdApi || PROD_API_BASE_URL || hostedOrigin);
-export const DIRECT_API = isLocalDevHost ? (rawLocalApi || API) : (rawProdApi || PROD_API_BASE_URL || API);
-/** Hosted agent HTTP stays on the Fly API control plane. */
-export const STUDIO_AGENT_API = isLocalDevHost
-    ? (rawLocalApi || API)
-    : (resolveSafeApiBase(viteEnv.VITE_STUDIO_AGENT_API || "") || PROD_API_BASE_URL || API);
+// Hosted clients fail closed to the reviewed origin. A stale or compromised
+// build-time VITE_PROD_API_BASE_URL must never reroute production commands.
+export const API = isLocalDevHost ? rawLocalApi : PROD_API_BASE_URL;
+export const DIRECT_API = isLocalDevHost ? (rawLocalApi || API) : PROD_API_BASE_URL;
+export const STUDIO_AGENT_API = API;
+export const STUDIO_PERSISTENT_API = API;
+export const STUDIO_CONTROL_PLANE_API = API;
+export const STUDIO_AGENT_WS_API = API;
 
-/** Persistent sessions + agent chat run on Fly disk (never the RunPod queue). */
-export const STUDIO_FLY_SESSIONS_API = "https://nyptid-studio.fly.dev";
-
-/** Fast reads + billing stay on the Fly control plane (never the RunPod queue). */
-export const STUDIO_FLY_API = isLocalDevHost
-    ? (rawLocalApi || API)
-    : (resolveSafeApiBase(viteEnv.VITE_STUDIO_FLY_API || "") || PROD_API_BASE_URL);
-
-/** WebSockets use Fly directly so dictation shares the persistent agent runtime. */
-export const STUDIO_AGENT_WS_API = isLocalDevHost
-    ? (rawLocalApi || API)
-    : (resolveSafeApiBase(viteEnv.VITE_STUDIO_AGENT_WS_API || "") || STUDIO_FLY_SESSIONS_API);
-
-export const FLY_DIRECT_API_PREFIXES = [
-    '/api/health',
-    '/api/config',
-    '/api/me',
-    '/api/studio-agent',
-    '/api/studio-hub',
-    '/api/studio/release-notes',
-    '/api/studio/client-manifest',
-    '/api/youtube',
-    '/api/studio/analytics',
-    '/api/checkout',
-    '/api/billing-portal',
-    '/api/paypal',
-];
-
-/** Routes that must not go through RunPod (429 queue, cold sync, session loss). */
+/** Resolve every production operation through the canonical backend contract. */
 export function resolveStudioBackendUrl(path: string): string {
     const normalized = path.startsWith('/') ? path : `/${path}`;
-    if (isLocalDevHost) return `${API}${normalized}`;
-    // Agent sessions + long-form jobs live on Fly disk — bypass api-studio RunPod proxy.
-    if (
-        normalized.startsWith('/api/studio-agent')
-        || normalized.startsWith('/api/long-form')
-    ) {
-        return `${STUDIO_FLY_SESSIONS_API}${normalized}`;
-    }
-    if (FLY_DIRECT_API_PREFIXES.some((prefix: string) => normalized.startsWith(prefix))) {
-        return `${STUDIO_FLY_API}${normalized}`;
-    }
     return `${API}${normalized}`;
 }
 
-/** WebSocket upgrade must bypass the worker (see STUDIO_AGENT_WS_API). */
+// Cloudflare Workers cannot accept the multi-hundred-MB to multi-GB request
+// bodies used by these four browser upload routes. They still terminate at the
+// same Contabo API process, but enter through Caddy directly so the body is not
+// buffered or rejected at the Worker edge.
+export const STUDIO_DIRECT_UPLOAD_BASE_URL = "https://studio.82.197.67.155.sslip.io";
+const STUDIO_DIRECT_UPLOAD_PATHS = [
+    /^\/api\/cliplab\/ingest\/upload$/,
+    /^\/api\/catalyst\/hub\/reference-video-analysis\/manual$/,
+    /^\/api\/studio-agent\/sessions\/[^/]+\/attachments\/video$/,
+    /^\/api\/thumbnails\/upload-video$/,
+];
+
+/**
+ * Resolve only a reviewed large-body upload route through direct Contabo
+ * ingress. Authenticated commands, sessions, polling, SSE, WebSockets, and all
+ * other API requests must continue to use resolveStudioBackendUrl().
+ */
+export function resolveStudioUploadUrl(path: string): string {
+    const normalized = path.startsWith('/') ? path : `/${path}`;
+    if (!STUDIO_DIRECT_UPLOAD_PATHS.some((pattern) => pattern.test(normalized))) {
+        throw new Error(`Direct Studio upload route is not allowed: ${normalized}`);
+    }
+    const base = isLocalDevHost ? API : STUDIO_DIRECT_UPLOAD_BASE_URL;
+    return `${base}${normalized}`;
+}
+
+/** WebSocket upgrades use the same canonical origin as HTTP production commands. */
 export function resolveStudioWsUrl(path: string, query?: Record<string, string>): string {
     const normalized = path.startsWith('/') ? path : `/${path}`;
     const base = isLocalDevHost ? (API || STUDIO_AGENT_WS_API) : STUDIO_AGENT_WS_API;
@@ -138,7 +126,7 @@ export const studioAgentOAuthReturnUrl = (): string => {
     return u.toString();
 };
 
-/** Authenticated fetch to Studio/Fly-backed routes (agent, YouTube, analytics). */
+/** Authenticated fetch through the canonical Studio backend. */
 export async function studioAgentFetch(
     path: string,
     accessToken: string,
@@ -154,7 +142,7 @@ export async function studioAgentFetch(
     });
 }
 const rawGenerationApi = resolveSafeApiBase(
-    (isLocalDevHost ? viteEnv.VITE_GENERATION_API_BASE_URL : viteEnv.VITE_PROD_GENERATION_API_BASE_URL) || ""
+    isLocalDevHost ? (viteEnv.VITE_GENERATION_API_BASE_URL || "") : ""
 );
 const FIREFOX_HOTFIX_TAG = "ff-hotfix-1";
 const BOOT_CONFIG_TIMEOUT_MS = 12000;
@@ -172,12 +160,9 @@ const OWNER_EMAILS = new Set(
 export const isOwnerEmail = (email?: string | null): boolean => {
     return Boolean(email && OWNER_EMAILS.has(String(email).trim().toLowerCase()));
 };
-export const GENERATION_API = (() => {
-    if (!rawGenerationApi) {
-        return API || (isLocalDevHost ? `${window.location.protocol}//${window.location.hostname}:8091` : hostedOrigin || PROD_API_BASE_URL);
-    }
-    return rawGenerationApi;
-})();
+export const GENERATION_API = isLocalDevHost
+    ? (rawGenerationApi || API || `${window.location.protocol}//${window.location.hostname}:8091`)
+    : PROD_API_BASE_URL;
 if (typeof window !== "undefined" && /firefox/i.test(window.navigator.userAgent)) {
     (window as any).__NYPTID_FIREFOX_HOTFIX__ = FIREFOX_HOTFIX_TAG;
 }

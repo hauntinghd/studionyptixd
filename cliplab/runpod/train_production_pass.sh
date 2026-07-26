@@ -63,26 +63,5 @@ log "Train reframe ($R_EPOCHS epochs lr=$R_LR)"
   --batch-size "$R_BATCH" \
   --lr "$R_LR"
 
-# Flip registry to latest pass
-REG="$ROOT/cliplab/models/model_registry.json"
-if [[ -f "$REG" ]]; then
-  "$PY" -c "
-import json
-from pathlib import Path
-p = Path('$REG')
-d = json.loads(p.read_text())
-d['virality_scorer']['active'] = 'runpod_custom_${PASS}'
-d['face_reframe']['active'] = 'runpod_face_${PASS}'
-d['virality_scorer']['checkpoints']['runpod_custom_${PASS}'] = {
-    'path': 'virality/${PASS#v}/model.pt', 'config': 'virality/${PASS#v}/config.json', 'status': 'ready'
-}
-d['face_reframe']['checkpoints']['runpod_face_${PASS}'] = {
-    'path': 'reframe/${PASS#v}/tracker.pt', 'config': 'reframe/${PASS#v}/config.json', 'status': 'ready'
-}
-p.write_text(json.dumps(d, indent=2) + '\n')
-print('registry -> ${PASS}')
-"
-fi
-
-log "=== ClipLab PASS $PASS COMPLETE ==="
+log "=== ClipLab PASS $PASS COMPLETE (artifacts not activated) ==="
 ls -lh "$OUT_V/model.pt" "$OUT_R/tracker.pt"

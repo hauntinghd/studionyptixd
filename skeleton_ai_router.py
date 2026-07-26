@@ -167,21 +167,37 @@ def _begin_skeleton_command(
         authorize_production_mutation,
         production_command_scope,
     )
+    from studio_agent.production_command_service import (
+        compile_direct_authorized_mutation,
+        direct_session_id,
+    )
 
     public_arguments = _receipt_arguments(dict(arguments or {}))
+    backend_session_id = direct_session_id(user_id=user_id)
     with production_command_scope(
         command_id,
         user_id=user_id,
-        session_id="",
+        session_id=backend_session_id,
         source="server_workflow",
         user_text=f"direct:{operation}",
-    ):
+    ) as authority:
         authorized, mutation = authorize_production_mutation(
             operation,
             dict(public_arguments),
             user_id=user_id,
-            session_id="",
+            session_id=backend_session_id,
         )
+        if mutation is not None:
+            envelope = compile_direct_authorized_mutation(
+                authority=authority.as_dict(),
+                mutation=mutation.as_dict(),
+                arguments=authorized,
+            )
+            authorized = dict(authorized)
+            authorized["_production_command_envelope"] = envelope.model_dump(
+                mode="json",
+                exclude_none=True,
+            )
     if mutation is None:  # pragma: no cover - strict production mode always issues one
         raise HTTPException(503, "Skeleton production authority could not be issued.")
 
@@ -223,11 +239,14 @@ def _skeleton_execution(claim: _SkeletonCommandClaim) -> Iterator[None]:
         authorize_production_mutation,
         production_command_scope,
     )
+    from studio_agent.production_command_service import direct_session_id
+
+    backend_session_id = direct_session_id(user_id=claim.user_id)
 
     with production_command_scope(
         claim.command_id,
         user_id=claim.user_id,
-        session_id="",
+        session_id=backend_session_id,
         source="server_workflow",
         user_text=f"direct:{claim.operation}",
     ):
@@ -235,7 +254,7 @@ def _skeleton_execution(claim: _SkeletonCommandClaim) -> Iterator[None]:
             claim.operation,
             dict(claim.arguments),
             user_id=claim.user_id,
-            session_id="",
+            session_id=backend_session_id,
         )
         if mutation is None or mutation.mutation_id != claim.mutation_id:
             raise ProductionCommandViolation(

@@ -22,6 +22,10 @@ edge-tts
 # Skeleton AI short-form pipeline (Seedance i2v + Kling premium upgrade).
 # i2v_engine.py imports fal_client at module level.
 fal-client
+# Verify Tauri's base64-wrapped Minisign updater artifacts before the backend
+# advertises or serves them. Keep this explicit rather than relying on an
+# unrelated package to install PyNaCl transitively.
+PyNaCl==1.5.0
 # json-repair: tolerant JSON parser that recovers from LLM output mistakes
 # (unescaped quotes inside strings, trailing commas, smart quotes, missing
 # delimiters). Used by zerotier_private + alt_history_private + long_form

@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import time
 from typing import Any
 
 from studio_agent.command_contract import (
@@ -26,6 +25,7 @@ from studio_agent.command_contract import (
     ExpandExistingShortRequest,
     ExpandLongformChapterOperation,
     ExpandLongformOperation,
+    ExecuteBackendWorkflowOperation,
     FinalizeOperation,
     GenerateLongformOutlineOperation,
     GenerateThumbnailOperation,
@@ -43,6 +43,74 @@ from studio_agent.command_contract import (
     StartProductAdOperation,
     StartShortOperation,
 )
+
+_COMPILED_ACTIONS = frozenset(
+    {
+        "analyze_reference",
+        "retry_reference_analysis",
+        "generate_longform_outline",
+        "expand_longform_chapter",
+        "start_short",
+        "start_longform",
+        "start_product_ad",
+        "expand_existing_short",
+        "expand_longform",
+        "audit_and_repair_scenes",
+        "approve_scenes",
+        "animate_scenes",
+        "finalize",
+        "cancel",
+        "generate_thumbnail",
+        "start_cliplab",
+        "analyze_cliplab",
+        "render_cliplab",
+    }
+)
+
+
+def direct_session_id(*, user_id: str) -> str:
+    """Return the backend-derived V2 owner for a sessionless authenticated panel."""
+
+    normalized = str(user_id or "").strip()
+    if not normalized:
+        raise ValueError("direct production requires an authenticated user")
+    digest = hashlib.sha256(
+        f"studio-direct-production-v2:{normalized}".encode("utf-8")
+    ).hexdigest()
+    return f"direct_{digest[:32]}"
+
+
+def is_direct_session_id(session_id: str, *, user_id: str) -> bool:
+    try:
+        return str(session_id or "").strip() == direct_session_id(user_id=user_id)
+    except ValueError:
+        return False
+
+
+def direct_session_snapshot(
+    *,
+    session_id: str,
+    user_id: str,
+    arguments: dict[str, Any],
+) -> dict[str, Any]:
+    """Build the immutable route/revision snapshot used by direct V2 commands."""
+
+    if not is_direct_session_id(session_id, user_id=user_id):
+        raise ValueError("direct production session binding is invalid")
+    return {
+        "session_id": session_id,
+        "user_id": str(user_id or "").strip(),
+        "production_view_revision": 1,
+        "production_command_revision": 0,
+        "media_route_revision": int(arguments.get("_media_route_revision") or 1),
+        "image_model": str(
+            arguments.get("image_model_id")
+            or arguments.get("image_model")
+            or ""
+        ),
+        "video_model": str(arguments.get("video_model") or ""),
+        "speech_model": str(arguments.get("speech_model") or "fal_minimax"),
+    }
 
 
 def _scene_numbers(arguments: dict[str, Any]) -> list[int]:
@@ -314,26 +382,7 @@ def compile_authorized_mutation(
     action = str(mutation.get("action") or "").strip()
     if tool_name == "start_shortform_generate" and arguments.get("product_reference_id"):
         action = "start_product_ad"
-    if action not in {
-        "analyze_reference",
-        "retry_reference_analysis",
-        "generate_longform_outline",
-        "expand_longform_chapter",
-        "start_short",
-        "start_longform",
-        "start_product_ad",
-        "expand_existing_short",
-        "expand_longform",
-        "audit_and_repair_scenes",
-        "approve_scenes",
-        "animate_scenes",
-        "finalize",
-        "cancel",
-        "generate_thumbnail",
-        "start_cliplab",
-        "analyze_cliplab",
-        "render_cliplab",
-    }:
+    if action not in _COMPILED_ACTIONS:
         raise ValueError(f"{tool_name} is not mapped to production-command-v2")
 
     target_job_id = str(mutation.get("target_id") or "").strip()
@@ -413,7 +462,112 @@ def compile_authorized_mutation(
         expected_postconditions=_postconditions(action, scenes),
         idempotency_key=str(mutation.get("mutation_id") or ""),
         source_text_sha256=str(authority.get("request_sha256") or ""),
-        created_at=float(mutation.get("authorized_at") or time.time()),
+        # Idempotency receipts compare the complete envelope. A wall-clock
+        # value would make an otherwise exact retry look like a new command.
+        created_at=0.0,
+    )
+
+
+def compile_direct_authorized_mutation(
+    *,
+    authority: dict[str, Any],
+    mutation: dict[str, Any],
+    arguments: dict[str, Any],
+) -> ProductionCommandEnvelopeV2:
+    """Compile any authenticated direct-panel mutation beneath V2.
+
+    First-class creator actions retain their semantic operation model. Legacy
+    paid panels use a typed compatibility operation containing the exact
+    backend tool and the already-authorized argument fingerprint.
+    """
+
+    user_id = str(authority.get("user_id") or "").strip()
+    session_id = str(authority.get("session_id") or "").strip()
+    if not is_direct_session_id(session_id, user_id=user_id):
+        raise ValueError("direct production authority has an invalid owner binding")
+    session = direct_session_snapshot(
+        session_id=session_id,
+        user_id=user_id,
+        arguments=arguments,
+    )
+    action = str(mutation.get("action") or "").strip()
+    if action in _COMPILED_ACTIONS:
+        return compile_authorized_mutation(
+            authority=authority,
+            mutation=mutation,
+            arguments=arguments,
+            session=session,
+        )
+
+    tool_name = str(mutation.get("tool_name") or "").strip()
+    mutation_id = str(mutation.get("mutation_id") or "").strip()
+    turn_id = str(authority.get("command_id") or "").strip()
+    arguments_sha256 = str(mutation.get("arguments_sha256") or "").strip()
+    if not tool_name or not mutation_id or not turn_id or len(arguments_sha256) != 64:
+        raise ValueError("direct production mutation is missing exact backend bindings")
+    raw_target_id = str(mutation.get("target_id") or "").strip()
+    requested_kind = str(mutation.get("target_kind") or "").strip()
+    recognized_kind = (
+        requested_kind
+        if requested_kind
+        in {"shortform", "longform", "product_ad", "cliplab", "reference_analysis"}
+        else ""
+    )
+    target_job_id = raw_target_id if recognized_kind and len(raw_target_id) <= 48 else ""
+    kind = recognized_kind or "shortform"
+    route = {
+        "revision": int(session.get("media_route_revision") or 1),
+        "image_model": str(session.get("image_model") or ""),
+        "video_model": str(session.get("video_model") or ""),
+        "speech_model": str(session.get("speech_model") or "fal_minimax"),
+    }
+    route_sha = hashlib.sha256(
+        json.dumps(route, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    quote = str(authority.get("execution_quote") or "").strip()
+    if not quote:
+        quote = f"Explicit backend {authority.get('source') or 'workflow'} action."
+    return ProductionCommandEnvelopeV2(
+        command_id=mutation_id,
+        turn_id=turn_id,
+        session_id=session_id,
+        user_id=user_id,
+        state_revision="view:1:command:0",
+        action="execute_backend_workflow",
+        target=ProductionCommandTargetV2(
+            source="explicit_job_id" if target_job_id else "none",
+            job_id=target_job_id,
+            kind=kind,
+            owner_session_id=session_id if target_job_id else "",
+            owner_user_id=user_id if target_job_id else "",
+            expected_job_revision="1" if target_job_id else "",
+        ),
+        operation=ExecuteBackendWorkflowOperation(
+            tool_name=tool_name,
+            arguments_sha256=arguments_sha256,
+            target_kind=requested_kind,
+            target_id=raw_target_id,
+        ),
+        authorization=ProductionAuthorizationV2(
+            execution_requested=True,
+            execution_quote=quote,
+            confirmation_required=False,
+            confirmed=bool(authority.get("source") in {"approval", "server_workflow"}),
+            confirmation_id=(
+                turn_id
+                if authority.get("source") in {"approval", "server_workflow"}
+                else ""
+            ),
+        ),
+        media_route=ProductionMediaRouteV2(**route, route_sha256=route_sha),
+        expected_postconditions=[
+            ProductionPostconditionV2(
+                kind="job_updated" if target_job_id else "job_created"
+            )
+        ],
+        idempotency_key=mutation_id,
+        source_text_sha256=str(authority.get("request_sha256") or ""),
+        created_at=0.0,
     )
 
 
@@ -488,8 +642,15 @@ def compile_ship_existing_short_workflow(
         expected_postconditions=postconditions,
         idempotency_key=command_id,
         source_text_sha256=str(authority.get("request_sha256") or ""),
-        created_at=float(authority.get("issued_at") or time.time()),
+        created_at=0.0,
     )
 
 
-__all__ = ["compile_authorized_mutation", "compile_ship_existing_short_workflow"]
+__all__ = [
+    "compile_authorized_mutation",
+    "compile_direct_authorized_mutation",
+    "compile_ship_existing_short_workflow",
+    "direct_session_id",
+    "direct_session_snapshot",
+    "is_direct_session_id",
+]

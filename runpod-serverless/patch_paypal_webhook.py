@@ -1,6 +1,6 @@
 """
-Patch the existing PayPal webhook registration to point at the new Cloudflare
-Worker URL (api.studio.nyptidindustries.com) instead of the old Render domain.
+Patch the existing PayPal webhook registration to point at the canonical Studio
+API URL (api-studio.nyptidindustries.com) instead of a legacy backend domain.
 
 Idempotent — safe to run repeatedly. Reads creds from .env at repo root.
 

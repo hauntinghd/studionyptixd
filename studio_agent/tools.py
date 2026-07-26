@@ -10074,6 +10074,7 @@ def execute_tool_logged(
     authorized_mutation = None
     authorized_mutation_payload: dict[str, Any] | None = None
     command_authority = None
+    command_session_persisted = False
     if str(name or "").strip() in PRODUCTION_COMMAND_PROTECTED_TOOLS:
         # Validate the authenticated principal before even resolving implicit
         # scene scope. Some legacy status readers can reconcile stale jobs, so
@@ -10114,23 +10115,42 @@ def execute_tool_logged(
                 reconcile_jobs=False,
                 _prune_active_jobs=False,
             )
-            if not exact_session:
+            from studio_agent.production_command_service import (
+                compile_authorized_mutation,
+                compile_direct_authorized_mutation,
+                is_direct_session_id,
+            )
+
+            if exact_session:
+                envelope = compile_authorized_mutation(
+                    authority=command_authority.as_dict(),
+                    mutation=authorized_mutation_payload,
+                    arguments=dict(arguments or {}),
+                    session=exact_session,
+                )
+                command_session_persisted = True
+            elif is_direct_session_id(str(session_id), user_id=str(user_id or "")):
+                envelope = compile_direct_authorized_mutation(
+                    authority=command_authority.as_dict(),
+                    mutation=authorized_mutation_payload,
+                    arguments=dict(arguments or {}),
+                )
+            else:
                 raise RuntimeError(
                     f"{name} rejected: production command session ownership could not be verified"
                 )
-            from studio_agent.production_command_service import compile_authorized_mutation
-
-            envelope = compile_authorized_mutation(
-                authority=command_authority.as_dict(),
-                mutation=authorized_mutation_payload,
-                arguments=dict(arguments or {}),
-                session=exact_session,
-            )
-            authorized_mutation_payload["command_envelope"] = envelope.model_dump(
+            envelope_payload = envelope.model_dump(
                 mode="json",
                 exclude_none=True,
             )
-        if authorized_mutation is not None and command_authority is not None and session_id:
+            authorized_mutation_payload["command_envelope"] = envelope_payload
+            arguments = dict(arguments or {})
+            arguments["_production_command_envelope"] = envelope_payload
+        if (
+            authorized_mutation is not None
+            and command_authority is not None
+            and command_session_persisted
+        ):
             store.record_production_command_transition(
                 str(session_id),
                 authority=command_authority.as_dict(),
@@ -10202,7 +10222,11 @@ def execute_tool_logged(
                 user_id=str(user_id or ""),
             )
             if replay is not None:
-                if authorized_mutation is not None and command_authority is not None and session_id:
+                if (
+                    authorized_mutation is not None
+                    and command_authority is not None
+                    and command_session_persisted
+                ):
                     store.record_production_command_transition(
                         str(session_id),
                         authority=command_authority.as_dict(),
@@ -10719,7 +10743,11 @@ def execute_tool_logged(
             )
         except Exception:
             pass
-        if authorized_mutation is not None and command_authority is not None and session_id:
+        if (
+            authorized_mutation is not None
+            and command_authority is not None
+            and command_session_persisted
+        ):
             try:
                 store.record_production_command_transition(
                     str(session_id),
@@ -10761,7 +10789,11 @@ def execute_tool_logged(
         )
     except Exception:
         pass
-    if authorized_mutation is not None and command_authority is not None and session_id:
+    if (
+        authorized_mutation is not None
+        and command_authority is not None
+        and command_session_persisted
+    ):
         try:
             parsed_status = ""
             try:

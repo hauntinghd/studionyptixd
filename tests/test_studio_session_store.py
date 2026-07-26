@@ -232,6 +232,119 @@ def test_stream_persists_terminal_assistant_result_after_job_prune(tmp_path, mon
     assert saved_session["messages"][-1]["content"] == "The repair ran, but Scenes 4-6 still need attention."
 
 
+def test_disconnected_stream_worker_heartbeats_past_stale_window_and_keeps_gate(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    session = _create_session(tmp_path, monkeypatch)
+    session_id = session["session_id"]
+    run = store.create_run(
+        session_id,
+        user_text="Repair Scene 1",
+        request_id="disconnect-worker-heartbeat",
+    )
+    monkeypatch.setattr(store, "STALE_RUN_AFTER_SEC", 0.01)
+    monkeypatch.setattr(store, "RUN_WORKER_HEARTBEAT_SEC", 0.02)
+    monkeypatch.setattr(store, "RUN_WORKER_LEASE_SEC", 0.12)
+
+    @asynccontextmanager
+    async def admitted(**_kwargs):
+        yield type("Admission", (), {"mode": "disabled", "as_dict": lambda self: {}})()
+
+    async def scenario() -> None:
+        started = asyncio.Event()
+        release = asyncio.Event()
+        owner: dict[str, str] = {}
+
+        async def fake_turn(
+            current,
+            _user_text,
+            *,
+            emit=None,
+            run_id="",
+            worker_id="",
+            **_kwargs,
+        ):
+            assert emit is not None
+            owner.update({"run_id": run_id, "worker_id": worker_id})
+            claimed = store.claim_production_gate(
+                current["session_id"],
+                command_id="worker-owned-command",
+                job_id="job-one",
+                run_id=run_id,
+                worker_id=worker_id,
+            )
+            assert claimed is not None
+            await emit({
+                "event": "studio_command",
+                "command": {"command_id": "worker-owned-command"},
+            })
+            started.set()
+            await release.wait()
+            store.close_production_gate(
+                current["session_id"],
+                command_id="worker-owned-command",
+                worker_id=worker_id,
+            )
+            return {
+                "session_id": current["session_id"],
+                "assistant_message": "Repair finished.",
+                "pending_actions": [],
+                "active_jobs": [],
+            }
+
+        monkeypatch.setattr(runner, "studio_agent_slot", admitted)
+        monkeypatch.setattr(runner, "_run_turn_impl", fake_turn)
+        stream = runner.stream_turn(
+            session,
+            "Repair Scene 1",
+            run_id=run["run_id"],
+        )
+        first_event = await anext(stream)
+        assert "event: studio_command" in first_event
+        await started.wait()
+        initial = store.get_session(session_id, reconcile_jobs=False)
+        assert initial is not None
+        initial_run = next(row for row in initial["runs"] if row["run_id"] == run["run_id"])
+        initial_lease_expiry = float(initial_run["worker_lease_expires_at"])
+
+        # Closing the HTTP/SSE consumer must detach only the browser. The
+        # backend worker and its heartbeat continue independently.
+        await stream.aclose()
+        await asyncio.sleep(0.18)
+
+        active = store.list_runs(session_id, active_only=True)
+        assert [row["run_id"] for row in active] == [run["run_id"]]
+        persisted = store.get_session(session_id, reconcile_jobs=False)
+        assert persisted is not None
+        persisted_run = next(row for row in persisted["runs"] if row["run_id"] == run["run_id"])
+        assert persisted_run["status"] == "stream_disconnected"
+        assert float(persisted_run["worker_lease_expires_at"]) > initial_lease_expiry
+        assert persisted["active_command_id"] == "worker-owned-command"
+        assert persisted["active_command_run_id"] == owner["run_id"]
+        assert persisted["active_command_worker_id"] == owner["worker_id"]
+        assert store.claim_production_gate(
+            session_id,
+            command_id="second-command",
+            job_id="job-one",
+        ) is None
+
+        release.set()
+        deadline = asyncio.get_running_loop().time() + 2
+        while asyncio.get_running_loop().time() < deadline:
+            finished = store.get_session(session_id, reconcile_jobs=False)
+            finished_run = next(
+                row for row in finished["runs"] if row["run_id"] == run["run_id"]
+            )
+            if finished_run["status"] == "complete":
+                assert finished["production_gate_open"] is False
+                return
+            await asyncio.sleep(0.01)
+        raise AssertionError("detached backend worker did not finish")
+
+    asyncio.run(scenario())
+
+
 def test_run_turn_persists_user_prompt_before_semantic_tool_execution(tmp_path, monkeypatch) -> None:
     session = _create_session(tmp_path, monkeypatch)
     prompt = "Scenes 2-6 do not adhere to the script. Please fix them."

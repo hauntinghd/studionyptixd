@@ -1,8 +1,8 @@
-"""Production-only RunPod Serverless worker.
+"""Archived RunPod worker implementation.
 
-The public ``handler(event)`` accepts only a signed Studio production envelope.
-It is deliberately not an HTTP proxy and has no chat, planning, list, read,
-poll, or status dispatch surface.
+The public ``handler(event)`` now rejects every invocation through the
+unconditional retirement guard. Legacy signed-envelope and durable-receipt
+helpers remain for compatibility tests and historical evidence parsing.
 """
 from __future__ import annotations
 
@@ -16,6 +16,7 @@ from typing import Any, Callable
 
 from studio_agent.runpod_contract import (
     RunPodContractError,
+    assert_runpod_execution_retired,
     normalize_tool_arguments,
     verify_signed_envelope,
 )
@@ -389,6 +390,11 @@ def _rejection(code: str, message: str) -> dict[str, Any]:
 
 def handler(event: Any) -> dict[str, Any]:
     """Run exactly one authenticated production tool call, at most once durably."""
+
+    try:
+        assert_runpod_execution_retired()
+    except RunPodContractError as exc:
+        return _rejection(exc.code, str(exc))
 
     try:
         data_root = prepare_worker_environment()

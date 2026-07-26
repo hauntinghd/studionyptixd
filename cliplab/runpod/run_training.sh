@@ -7,7 +7,7 @@ REPO_ROOT="${REPO_ROOT:-/workspace/repo}"
 export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH:-}"
 cd "${REPO_ROOT}"
 
-pip install -q torch torchvision opencv-python-headless sentence-transformers runpod
+pip install -q torch torchvision opencv-python-headless sentence-transformers
 
 bash cliplab/runpod/setup_volume.sh
 
@@ -24,9 +24,5 @@ python cliplab/runpod/train_face_reframe.py \
   --out "${STUDIO_APP_DATA_DIR}/cliplab/models/reframe/v1" \
   --epochs "${REFRAME_EPOCHS:-10}"
 
-python cliplab/runpod/activate_registry.py
-
-echo "Training complete. Flip Studio env:"
-echo "  CLIPLAB_VIRALITY_BACKEND=runpod_custom_v1"
-echo "  CLIPLAB_REFRAME_BACKEND=runpod_face_v1"
-echo "  RUNPOD_CLIPLAB_ENDPOINT_ID=<cliplab-inference-endpoint>"
+echo "Offline training complete. Artifacts were not activated for production."
+echo "Studio and ClipLab production execution remain Contabo-owned."

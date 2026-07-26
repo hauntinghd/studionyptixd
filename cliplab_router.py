@@ -12,9 +12,9 @@ import json
 import logging
 import time
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable
 
-from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 
 from cliplab.config import (
@@ -30,6 +30,7 @@ from cliplab.pipeline import (
     run_analyze_pipeline,
     run_ingest_pipeline,
     run_render_pipeline,
+    save_job_state,
     resolve_owned_clip_path,
     user_owns_video,
     _safe_user_dir,
@@ -49,12 +50,57 @@ def build_cliplab_router(
     *,
     require_auth: Callable,
     jobs: dict[str, dict[str, Any]],
+    enqueue_job: Callable[[str, str, dict[str, Any]], Awaitable[None]],
     fal_json_completion: Callable,
     fal_ai_key: str = "",
     debit_credits: Callable | None = None,
     refund_credits: Callable | None = None,
 ) -> APIRouter:
     router = APIRouter(tags=["cliplab"])
+    if not callable(enqueue_job):
+        raise RuntimeError("ClipLab requires the durable production queue")
+
+    async def _admit(
+        job_id: str,
+        *,
+        user: dict[str, Any],
+        state: dict[str, Any],
+        descriptor: dict[str, Any],
+    ) -> None:
+        """Persist the complete descriptor before returning an accepted receipt."""
+
+        row = {
+            **dict(state or {}),
+            "status": "queued",
+            "progress": 0,
+            "lane": "cliplab",
+            "queue_descriptor": dict(descriptor or {}),
+            "created_at": float(state.get("created_at") or time.time()),
+            "updated_at": time.time(),
+        }
+        jobs[job_id] = row
+        save_job_state(job_id, row)
+        plan = str(
+            (user or {}).get("plan")
+            or (user or {}).get("subscription_tier")
+            or "free"
+        ).strip().lower()
+        try:
+            await enqueue_job(job_id, plan, dict(descriptor or {}))
+        except Exception as exc:
+            failed = {
+                **row,
+                "status": "error",
+                "progress": 100,
+                "error": f"durable_queue_admission_failed: {str(exc)[:300]}",
+                "updated_at": time.time(),
+            }
+            jobs[job_id] = failed
+            save_job_state(job_id, failed)
+            raise HTTPException(
+                503,
+                "ClipLab production queue is unavailable; no job was accepted.",
+            ) from exc
 
     @router.get("/api/cliplab/status")
     async def cliplab_status(user: dict = Depends(require_auth)):
@@ -62,7 +108,6 @@ def build_cliplab_router(
 
     @router.post("/api/cliplab/ingest/upload")
     async def cliplab_upload(
-        background_tasks: BackgroundTasks,
         request: Request,
         file: UploadFile = File(...),
         user: dict = Depends(require_auth),
@@ -119,21 +164,34 @@ def build_cliplab_router(
                     raise HTTPException(402, f"Need {credit_cost} credits ({credit_cost} min @ 1 cr/min)")
 
             job_id = new_job_id("clipi")
-            jobs[job_id] = {
-                "status": "queued",
-                "progress": 0,
+            descriptor = {
+                "operation": "ingest",
+                "video_path": str(dest),
+                "video_id": upload_id,
+                "vtt_path": "",
+                "user_id": user_id,
+            }
+            state = {
                 "type": "cliplab_ingest",
-                "lane": "cliplab",
                 "upload_id": upload_id,
+                "video_id": upload_id,
+                "video_path": str(dest),
                 "credit_cost": credit_cost,
                 "user_id": user_id,
                 "created_at": time.time(),
             }
-            background_tasks.add_task(
-                run_ingest_pipeline,
-                job_id, jobs, user,
-                video_path=str(dest), video_id=upload_id, fal_key=fal_ai_key,
-            )
+            try:
+                await _admit(job_id, user=user, state=state, descriptor=descriptor)
+            except Exception:
+                if debit_credits and refund_credits and user_id and credit_cost:
+                    refund_credits(
+                        user_id,
+                        credit_cost,
+                        "cliplab_queue_admission_refund",
+                        {"job_id": job_id, "upload_id": upload_id},
+                    )
+                dest.unlink(missing_ok=True)
+                raise
             return command.complete({
                 "status": "accepted",
                 "job_id": job_id,
@@ -147,7 +205,6 @@ def build_cliplab_router(
     async def cliplab_youtube(
         req: ClipLabIngestRequest,
         request: Request,
-        background_tasks: BackgroundTasks,
         user: dict = Depends(require_auth),
     ):
         url = str(req.youtube_url or "").strip()
@@ -209,15 +266,39 @@ def build_cliplab_router(
                     raise HTTPException(402, f"Need {credit_cost} credits")
 
             job_id = new_job_id("clipi")
-            jobs[job_id] = {
-                "status": "queued", "progress": 0, "type": "cliplab_ingest", "lane": "cliplab",
-                "video_id": upload_id, "credit_cost": credit_cost, "user_id": user_id,
+            vtt_path = ""
+            if vtt_text:
+                subtitle_path = dest.with_suffix(".source.vtt")
+                subtitle_path.write_text(vtt_text, encoding="utf-8")
+                vtt_path = str(subtitle_path)
+            descriptor = {
+                "operation": "ingest",
+                "video_path": str(dest),
+                "video_id": upload_id,
+                "vtt_path": vtt_path,
+                "user_id": user_id,
             }
-            background_tasks.add_task(
-                run_ingest_pipeline,
-                job_id, jobs, user,
-                video_path=str(dest), video_id=upload_id, vtt_text=vtt_text, fal_key=fal_ai_key,
-            )
+            state = {
+                "type": "cliplab_ingest",
+                "video_id": upload_id,
+                "video_path": str(dest),
+                "credit_cost": credit_cost,
+                "user_id": user_id,
+            }
+            try:
+                await _admit(job_id, user=user, state=state, descriptor=descriptor)
+            except Exception:
+                if debit_credits and refund_credits and user_id and credit_cost:
+                    refund_credits(
+                        user_id,
+                        credit_cost,
+                        "cliplab_queue_admission_refund",
+                        {"job_id": job_id, "video_id": upload_id},
+                    )
+                dest.unlink(missing_ok=True)
+                if vtt_path:
+                    Path(vtt_path).unlink(missing_ok=True)
+                raise
             return command.complete({
                 "status": "accepted",
                 "job_id": job_id,
@@ -229,7 +310,6 @@ def build_cliplab_router(
     async def cliplab_analyze(
         req: ClipLabAnalyzeRequest,
         request: Request,
-        background_tasks: BackgroundTasks,
         user: dict = Depends(require_auth),
     ):
         user_id = str(user.get("id") or "").strip()
@@ -249,17 +329,22 @@ def build_cliplab_router(
             if command.replay is not None:
                 return command.replay
             job_id = new_job_id("clipa")
-            jobs[job_id] = {
-                "status": "queued", "progress": 0, "type": "cliplab_analyze", "lane": "cliplab",
-                "video_id": req.video_id, "user_id": user_id,
+            descriptor = {
+                "operation": "analyze",
+                "video_id": req.video_id,
+                "prompt": req.prompt,
+                "max_segments": req.max_segments,
+                "user_id": user_id,
             }
-            background_tasks.add_task(
-                run_analyze_pipeline,
-                job_id, jobs,
-                video_id=req.video_id, prompt=req.prompt, max_segments=req.max_segments,
-                json_completion=fal_json_completion,
-                user_id=user_id,
-                source="cliplab_api",
+            await _admit(
+                job_id,
+                user=user,
+                state={
+                    "type": "cliplab_analyze",
+                    "video_id": req.video_id,
+                    "user_id": user_id,
+                },
+                descriptor=descriptor,
             )
             return command.complete({"status": "accepted", "job_id": job_id})
 
@@ -267,7 +352,6 @@ def build_cliplab_router(
     async def cliplab_render(
         req: ClipLabRenderRequest,
         request: Request,
-        background_tasks: BackgroundTasks,
         user: dict = Depends(require_auth),
     ):
         user_id = str(user.get("id") or "").strip()
@@ -300,19 +384,23 @@ def build_cliplab_router(
             if command.replay is not None:
                 return command.replay
             job_id = new_job_id("clipr")
-            jobs[job_id] = {
-                "status": "queued", "progress": 0, "type": "cliplab_render", "lane": "cliplab",
-                "video_id": req.video_id, "user_id": user_id,
+            descriptor = {
+                "operation": "render",
+                "video_id": req.video_id,
+                "analyze_job_id": req.prompt_run_id,
+                "segment_indices": indices,
+                "burn_captions": req.burn_captions,
+                "user_id": user_id,
             }
-            background_tasks.add_task(
-                run_render_pipeline,
-                job_id, jobs,
-                video_id=req.video_id,
-                analyze_job_id=req.prompt_run_id,
-                segment_indices=indices,
-                burn_captions=req.burn_captions,
-                user_id=user_id,
-                source="cliplab_api",
+            await _admit(
+                job_id,
+                user=user,
+                state={
+                    "type": "cliplab_render",
+                    "video_id": req.video_id,
+                    "user_id": user_id,
+                },
+                descriptor=descriptor,
             )
             return command.complete({"status": "accepted", "job_id": job_id})
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import uuid
 
 import pytest
@@ -9,6 +10,7 @@ import unified_credits
 from studio_agent import (
     production_budget,
     runpod_bridge,
+    runpod_contract,
     runpod_storage,
     tools,
     training_capture,
@@ -18,6 +20,30 @@ from studio_agent.execution_context import current_production_command, productio
 
 @pytest.fixture(autouse=True)
 def _quiet_execution_side_effects(monkeypatch):
+    def legacy_flag(name: str) -> bool:
+        return str(os.getenv(name) or "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+            "enabled",
+        }
+
+    monkeypatch.setattr(
+        tools,
+        "runpod_production_enabled",
+        lambda: legacy_flag("STUDIO_RUNPOD_PRODUCTION_ENABLED"),
+    )
+    monkeypatch.setattr(
+        tools,
+        "runpod_longform_enabled",
+        lambda: legacy_flag("STUDIO_RUNPOD_LONGFORM_ENABLED"),
+    )
+    monkeypatch.setattr(
+        runpod_contract,
+        "runpod_production_enabled",
+        lambda: legacy_flag("STUDIO_RUNPOD_PRODUCTION_ENABLED"),
+    )
     monkeypatch.setattr(tools.telemetry, "record_tool_call", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(training_capture, "capture_event", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(production_budget, "enforce_budget", lambda *_args, **_kwargs: None)

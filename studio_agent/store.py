@@ -414,6 +414,14 @@ MAX_SYNC_PENDING_SCAN = 400
 MAX_RUN_EVENTS = 120
 ACTIVE_RUN_STATUSES = {"queued", "running", "stream_disconnected"}
 STALE_RUN_AFTER_SEC = int(__import__("os").environ.get("STUDIO_AGENT_STALE_RUN_SEC", "180") or "180")
+RUN_WORKER_HEARTBEAT_SEC = max(
+    1.0,
+    float(__import__("os").environ.get("STUDIO_AGENT_RUN_HEARTBEAT_SEC", "30") or "30"),
+)
+RUN_WORKER_LEASE_SEC = max(
+    RUN_WORKER_HEARTBEAT_SEC * 3,
+    float(__import__("os").environ.get("STUDIO_AGENT_RUN_LEASE_SEC", "120") or "120"),
+)
 # The current session store is process-local JSON on disk. Serialize the tiny
 # create-or-return critical section so concurrent HTTP retries with the same
 # request ID cannot both observe absence and create separate runs.
@@ -3592,6 +3600,9 @@ def create_session(
         "interaction_state": "plan",
         "production_gate_open": False,
         "active_command_id": "",
+        "active_command_job_id": "",
+        "active_command_run_id": "",
+        "active_command_worker_id": "",
         "provider_policy_version": provider_policy.POLICY_VERSION,
         "provider_policy_migrated_at": _now(),
         "provider_policy_migrations": [],
@@ -3648,6 +3659,53 @@ def _run_command_id(run: dict[str, Any]) -> str:
     return ""
 
 
+def _find_run(session: dict[str, Any], run_id: str) -> dict[str, Any] | None:
+    normalized = str(run_id or "").strip()
+    if not normalized:
+        return None
+    return next(
+        (
+            run
+            for run in _normalize_runs(session)
+            if str(run.get("run_id") or "").strip() == normalized
+        ),
+        None,
+    )
+
+
+def _run_worker_lease_is_live(
+    run: dict[str, Any] | None,
+    *,
+    worker_id: str = "",
+    now: float | None = None,
+) -> bool:
+    if not isinstance(run, dict):
+        return False
+    owner = str(run.get("worker_id") or "").strip()
+    expected_owner = str(worker_id or "").strip()
+    if not owner or (expected_owner and owner != expected_owner):
+        return False
+    return float(run.get("worker_lease_expires_at") or 0.0) > float(
+        _now() if now is None else now
+    )
+
+
+def run_worker_lease_is_live(
+    session: dict[str, Any],
+    *,
+    run_id: str,
+    worker_id: str = "",
+    now: float | None = None,
+) -> bool:
+    """Return whether the exact backend worker still owns a durable run lease."""
+
+    return _run_worker_lease_is_live(
+        _find_run(session, run_id),
+        worker_id=worker_id,
+        now=now,
+    )
+
+
 def _terminal_run_owns_production_gate(session: dict[str, Any], command_id: str) -> bool:
     """Whether a deploy-disconnected run left behind this exact gate lease.
 
@@ -3660,6 +3718,20 @@ def _terminal_run_owns_production_gate(session: dict[str, Any], command_id: str)
 
     normalized = str(command_id or "").strip()
     if not normalized:
+        return False
+    gate_run_id = str(session.get("active_command_run_id") or "").strip()
+    gate_worker_id = str(session.get("active_command_worker_id") or "").strip()
+    if (
+        gate_run_id
+        and gate_worker_id
+        and run_worker_lease_is_live(
+            session,
+            run_id=gate_run_id,
+            worker_id=gate_worker_id,
+        )
+    ):
+        # The browser stream is not the command owner. A live backend worker
+        # retains the gate even if a stale HTTP snapshot says its run is done.
         return False
     for workflow in list(session.get("production_workflows") or []):
         if not isinstance(workflow, dict):
@@ -3677,13 +3749,16 @@ def _terminal_run_owns_production_gate(session: dict[str, Any], command_id: str)
     return False
 
 
-def reconcile_stale_runs(session: dict[str, Any]) -> dict[str, Any]:
-    """Mark deploy-killed/disconnected chat runs terminal so UI does not spin forever."""
-    now = _now()
+def _reconcile_stale_runs_in_memory(session: dict[str, Any], *, now: float) -> bool:
     changed = False
     for run in _normalize_runs(session):
         status = str(run.get("status") or "running")
         if status not in ACTIVE_RUN_STATUSES:
+            continue
+        if _run_worker_lease_is_live(run, now=now):
+            # A stream disconnect only detaches the browser. The independently
+            # heartbeating backend worker remains authoritative until its lease
+            # expires or it explicitly releases/completes the run.
             continue
         updated = float(run.get("updated_at") or run.get("created_at") or 0)
         if updated and now - updated <= STALE_RUN_AFTER_SEC:
@@ -3713,9 +3788,30 @@ def reconcile_stale_runs(session: dict[str, Any]) -> dict[str, Any]:
                 "production_gate_open": False,
                 "active_command_id": "",
                 "active_command_job_id": "",
+                "active_command_run_id": "",
+                "active_command_worker_id": "",
             })
-        _save(session)
-    return session
+    return changed
+
+
+def reconcile_stale_runs(session: dict[str, Any]) -> dict[str, Any]:
+    """Interrupt only runs whose backend worker lease and event age are stale.
+
+    Re-read and reconcile the latest persisted session under the write lock.
+    Callers commonly hold an HTTP-era snapshot, which must never overwrite a
+    heartbeat written by the still-running backend worker.
+    """
+
+    session_id = str(session.get("session_id") or "").strip()
+    if not session_id:
+        _reconcile_stale_runs_in_memory(session, now=_now())
+        return session
+    with _session_write_lock(session_id), _session_write_file_lock(session_id):
+        latest = _read_session_file(_session_path(session_id))
+        current = latest if isinstance(latest, dict) else session
+        if _reconcile_stale_runs_in_memory(current, now=_now()):
+            _write_session_unlocked(current)
+        return current
 
 
 def create_run(
@@ -3755,6 +3851,102 @@ def create_run(
         session["runs"] = runs[-80:]
         _write_session_unlocked(session)
         return {**run, "idempotent_replay": False}
+
+
+def claim_run_worker(
+    session_id: str,
+    run_id: str,
+    *,
+    worker_id: str,
+    lease_seconds: float | None = None,
+) -> bool:
+    """Atomically bind one backend worker to an active durable chat run."""
+
+    normalized_worker = str(worker_id or "").strip()
+    if not normalized_worker:
+        return False
+    ttl = max(1.0, float(RUN_WORKER_LEASE_SEC if lease_seconds is None else lease_seconds))
+    with _session_write_lock(session_id), _session_write_file_lock(session_id):
+        session = _read_session_file(_session_path(session_id))
+        if not session:
+            return False
+        run = _find_run(session, run_id)
+        if not run or str(run.get("status") or "running") not in ACTIVE_RUN_STATUSES:
+            return False
+        now = _now()
+        current_owner = str(run.get("worker_id") or "").strip()
+        if (
+            current_owner
+            and current_owner != normalized_worker
+            and _run_worker_lease_is_live(run, now=now)
+        ):
+            return False
+        run["worker_id"] = normalized_worker
+        run.setdefault("worker_started_at", now)
+        run["worker_heartbeat_at"] = now
+        run["worker_lease_expires_at"] = now + ttl
+        run.pop("worker_released_at", None)
+        run["updated_at"] = now
+        _write_session_unlocked(session)
+        return True
+
+
+def heartbeat_run_worker(
+    session_id: str,
+    run_id: str,
+    *,
+    worker_id: str,
+    lease_seconds: float | None = None,
+) -> bool:
+    """Renew only the exact live worker's persisted run lease."""
+
+    normalized_worker = str(worker_id or "").strip()
+    if not normalized_worker:
+        return False
+    ttl = max(1.0, float(RUN_WORKER_LEASE_SEC if lease_seconds is None else lease_seconds))
+    with _session_write_lock(session_id), _session_write_file_lock(session_id):
+        session = _read_session_file(_session_path(session_id))
+        if not session:
+            return False
+        run = _find_run(session, run_id)
+        if (
+            not run
+            or str(run.get("status") or "running") not in ACTIVE_RUN_STATUSES
+            or str(run.get("worker_id") or "").strip() != normalized_worker
+        ):
+            return False
+        now = _now()
+        run["worker_heartbeat_at"] = now
+        run["worker_lease_expires_at"] = now + ttl
+        run["updated_at"] = now
+        _write_session_unlocked(session)
+        return True
+
+
+def release_run_worker(
+    session_id: str,
+    run_id: str,
+    *,
+    worker_id: str,
+) -> bool:
+    """Release a run lease without permitting another worker to release it."""
+
+    normalized_worker = str(worker_id or "").strip()
+    if not normalized_worker:
+        return False
+    with _session_write_lock(session_id), _session_write_file_lock(session_id):
+        session = _read_session_file(_session_path(session_id))
+        if not session:
+            return False
+        run = _find_run(session, run_id)
+        if not run or str(run.get("worker_id") or "").strip() != normalized_worker:
+            return False
+        now = _now()
+        run["worker_released_at"] = now
+        run["worker_lease_expires_at"] = now
+        run["updated_at"] = now
+        _write_session_unlocked(session)
+        return True
 
 
 def record_production_command_transition(
@@ -4076,9 +4268,8 @@ def create_shortform_ship_workflow(
     normalized_job = str(job_id or "").strip()
     if not all((normalized_session, normalized_command, normalized_user, normalized_job)):
         raise ValueError("shortform ship workflow requires session, command, user, and job")
-    workflow_id = f"ship_{hashlib.sha256(
-        f'{normalized_command}:{normalized_job}'.encode('utf-8')
-    ).hexdigest()[:32]}"
+    workflow_identity = f"{normalized_command}:{normalized_job}".encode("utf-8")
+    workflow_id = f"ship_{hashlib.sha256(workflow_identity).hexdigest()[:32]}"
     exact_scenes = sorted({int(value) for value in scene_indices if int(value) >= 0})
     exact_animation_scenes = sorted({
         int(value) for value in animation_scene_indices if int(value) >= 0
@@ -4398,6 +4589,8 @@ def finish_production_workflow(
                     "production_gate_open": False,
                     "active_command_id": "",
                     "active_command_job_id": "",
+                    "active_command_run_id": "",
+                    "active_command_worker_id": "",
                 })
             job_id = str(row.get("job_id") or "")
             active_jobs = [
@@ -4784,6 +4977,53 @@ def _save(session: dict[str, Any]) -> None:
                 int(session.get("production_view_revision") or 0),
                 int(existing.get("production_view_revision") or 0),
             )
+            existing_runs = {
+                str(run.get("run_id") or ""): dict(run)
+                for run in _normalize_runs(existing)
+                if isinstance(run, dict) and str(run.get("run_id") or "").strip()
+            }
+            merged_runs: list[dict[str, Any]] = []
+            seen_run_ids: set[str] = set()
+            for incoming_run in _normalize_runs(session):
+                if not isinstance(incoming_run, dict):
+                    continue
+                run_id = str(incoming_run.get("run_id") or "").strip()
+                persisted_run = existing_runs.get(run_id)
+                if persisted_run and float(persisted_run.get("updated_at") or 0.0) > float(
+                    incoming_run.get("updated_at") or 0.0
+                ):
+                    merged_runs.append(persisted_run)
+                else:
+                    merged_runs.append(dict(incoming_run))
+                if run_id:
+                    seen_run_ids.add(run_id)
+            for run_id, persisted_run in existing_runs.items():
+                if run_id not in seen_run_ids:
+                    merged_runs.append(persisted_run)
+            session["runs"] = merged_runs[-80:]
+            existing_gate_run = str(existing.get("active_command_run_id") or "").strip()
+            existing_gate_worker = str(existing.get("active_command_worker_id") or "").strip()
+            if (
+                existing.get("production_gate_open")
+                and existing_gate_run
+                and existing_gate_worker
+                and run_worker_lease_is_live(
+                    existing,
+                    run_id=existing_gate_run,
+                    worker_id=existing_gate_worker,
+                )
+            ):
+                # A stale whole-session save cannot detach the live worker from
+                # its command gate. Only owner-close or lease expiry can do so.
+                for key in (
+                    "interaction_state",
+                    "production_gate_open",
+                    "active_command_id",
+                    "active_command_job_id",
+                    "active_command_run_id",
+                    "active_command_worker_id",
+                ):
+                    session[key] = existing.get(key)
             existing_route = media_route_snapshot(existing)
             incoming_route = media_route_snapshot(session)
             existing_is_newer = (
@@ -4818,18 +5058,38 @@ def claim_production_gate(
     *,
     command_id: str,
     job_id: str,
+    run_id: str = "",
+    worker_id: str = "",
 ) -> dict[str, Any] | None:
-    """Atomically claim a session's spend-capable gate for one command."""
+    """Atomically claim a session's spend-capable gate for one backend worker."""
 
     normalized_command = str(command_id or "").strip()
     normalized_job = str(job_id or "").strip()
+    normalized_run = str(run_id or "").strip()
+    normalized_worker = str(worker_id or "").strip()
     if not normalized_command or not normalized_job:
+        return None
+    if bool(normalized_run) != bool(normalized_worker):
         return None
     with _session_write_lock(session_id), _session_write_file_lock(session_id):
         session = _read_session_file(_session_path(session_id))
         if not session:
             raise KeyError(session_id)
+        if normalized_run and not run_worker_lease_is_live(
+            session,
+            run_id=normalized_run,
+            worker_id=normalized_worker,
+        ):
+            return None
         current_command = str(session.get("active_command_id") or "").strip()
+        current_run = str(session.get("active_command_run_id") or "").strip()
+        current_worker = str(session.get("active_command_worker_id") or "").strip()
+        if session.get("production_gate_open") and current_command == normalized_command:
+            if current_run and current_run != normalized_run:
+                return None
+            if current_worker and current_worker != normalized_worker:
+                return None
+            return session
         if session.get("production_gate_open") and current_command not in {"", normalized_command}:
             if _terminal_run_owns_production_gate(session, current_command):
                 # A terminal run (including an interrupted deploy) is not an
@@ -4840,6 +5100,8 @@ def claim_production_gate(
                     "production_gate_open": False,
                     "active_command_id": "",
                     "active_command_job_id": "",
+                    "active_command_run_id": "",
+                    "active_command_worker_id": "",
                 })
             else:
                 return None
@@ -4849,6 +5111,8 @@ def claim_production_gate(
             "production_gate_open": True,
             "active_command_id": normalized_command,
             "active_command_job_id": normalized_job,
+            "active_command_run_id": normalized_run,
+            "active_command_worker_id": normalized_worker,
         })
         _write_session_unlocked(session)
         return session
@@ -4858,23 +5122,30 @@ def close_production_gate(
     session_id: str,
     *,
     command_id: str,
+    worker_id: str = "",
     interaction_state: str = "verification",
 ) -> dict[str, Any] | None:
-    """Close only the gate owned by ``command_id``; never clear a newer claim."""
+    """Close only the gate owned by this command and backend worker."""
 
     normalized_command = str(command_id or "").strip()
+    normalized_worker = str(worker_id or "").strip()
     with _session_write_lock(session_id), _session_write_file_lock(session_id):
         session = _read_session_file(_session_path(session_id))
         if not session:
             return None
         current_command = str(session.get("active_command_id") or "").strip()
+        current_worker = str(session.get("active_command_worker_id") or "").strip()
         if current_command and current_command != normalized_command:
+            return session
+        if current_worker and current_worker != normalized_worker:
             return session
         session.update({
             "interaction_state": str(interaction_state or "verification"),
             "production_gate_open": False,
             "active_command_id": "",
             "active_command_job_id": "",
+            "active_command_run_id": "",
+            "active_command_worker_id": "",
         })
         _write_session_unlocked(session)
         return session
@@ -4884,6 +5155,30 @@ def _update_session_locked(session: dict[str, Any], **fields: Any) -> dict[str, 
     """Apply fields to the latest on-disk value under the session file lock."""
 
     _migrate_session_provider_policy(session)
+    gate_run_id = str(session.get("active_command_run_id") or "").strip()
+    gate_worker_id = str(session.get("active_command_worker_id") or "").strip()
+    if (
+        session.get("production_gate_open")
+        and gate_run_id
+        and gate_worker_id
+        and run_worker_lease_is_live(
+            session,
+            run_id=gate_run_id,
+            worker_id=gate_worker_id,
+        )
+    ):
+        # Generic session bookkeeping (including a concurrent clarification
+        # turn) cannot revoke another worker's spend authority. The owner must
+        # use close_production_gate; expired leases are reclaimed separately.
+        for key in (
+            "interaction_state",
+            "production_gate_open",
+            "active_command_id",
+            "active_command_job_id",
+            "active_command_run_id",
+            "active_command_worker_id",
+        ):
+            fields[key] = session.get(key)
     previous_route = media_route_snapshot(session)
     if "model" in fields:
         requested_model = str(fields.get("model") or "").strip()

@@ -359,10 +359,14 @@ def _cliplab_app(user_id: str) -> FastAPI:
     async def completion(*args: Any, **kwargs: Any) -> dict:
         return {"segments": []}
 
+    async def enqueue_job(_job_id: str, _plan: str, _descriptor: dict) -> None:
+        return None
+
     app.include_router(
         build_cliplab_router(
             require_auth=require_auth,
             jobs={},
+            enqueue_job=enqueue_job,
             fal_json_completion=completion,
         )
     )

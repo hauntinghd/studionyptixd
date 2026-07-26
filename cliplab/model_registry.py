@@ -1,4 +1,4 @@
-"""Load trained ClipLab weights from RunPod volume."""
+"""Load archived ClipLab model metadata from Studio-owned persistent data."""
 from __future__ import annotations
 
 import json

@@ -67,13 +67,13 @@ import {
     reduceProductionViewV1,
     type ProductionViewStateV1,
 } from '../lib/productionView';
-import { AuthContext, resolveStudioBackendUrl } from '../shared';
+import { AuthContext, resolveStudioBackendUrl, resolveStudioUploadUrl } from '../shared';
 import { loadStudioHubState } from '../lib/studioHubState';
 import AgentModelPicker, { type AgentModelOption } from './AgentModelPicker';
 
 type ApprovalMode = 'auto' | 'confirm';
 
-/** Large chats + job reconcile can exceed 60s on Fly; allow retries on timeout and blips. */
+/** Large chats + job reconciliation can exceed 60s; allow retries on timeout and blips. */
 const SESSION_LOAD_TIMEOUT_MS = 120_000;
 const SESSION_LOAD_RETRIES = 2;
 const NETWORK_BLIP_RETRY_MS = 1800;
@@ -1444,7 +1444,7 @@ function friendlyApiError(status: number, data: Record<string, unknown>, fallbac
         return (
             'Studio Agent returned 404. If you were approving an action, refresh the chat and '
             + 'ask the agent to propose the step again (the pending action may have expired). '
-            + 'Otherwise redeploy nyptid-studio on Fly and the api-studio Cloudflare worker.'
+            + 'Otherwise verify the canonical Studio backend deployment and API route.'
         );
     }
     if (status === 503) {
@@ -1459,13 +1459,13 @@ function friendlyApiError(status: number, data: Record<string, unknown>, fallbac
     if (status === 524 || status === 504) {
         return (
             detail
-            || 'Studio Agent timed out at the edge proxy before Fly responded. Your chat is preserved server-side — press Resume in a few seconds.'
+            || 'Studio Agent timed out before the backend responded. Your chat is preserved server-side — press Resume in a few seconds.'
         );
     }
     if (status === 429) {
         if (/queue/i.test(detail)) {
             return (
-                `${detail} — Chat runs on the Fly control plane and does not enter the RunPod production queue. Use Sync chat, then retry.`
+                `${detail} — Chat and production commands use the same Studio backend contract. Use Sync chat, then retry.`
             );
         }
         return detail || 'Too many requests — wait a moment and retry.';
@@ -4367,7 +4367,7 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                 const tok = await getToken();
                 const form = new FormData();
                 form.append('file', file);
-                const res = await fetch(resolveStudioBackendUrl(`/api/studio-agent/sessions/${sessionId}/attachments/video`), {
+                const res = await fetch(resolveStudioUploadUrl(`/api/studio-agent/sessions/${sessionId}/attachments/video`), {
                     method: 'POST',
                     headers: { Authorization: `Bearer ${tok}` },
                     body: form,

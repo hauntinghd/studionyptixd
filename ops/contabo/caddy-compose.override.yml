@@ -1,0 +1,7 @@
+# Apply this override to the existing ClipLab/Caddy Compose project. It exposes
+# only the Worker-to-origin token to Caddy; the Studio API never receives it.
+services:
+  caddy:
+    environment:
+      STUDIO_ORIGIN_TOKEN: ${STUDIO_ORIGIN_TOKEN:?STUDIO_ORIGIN_TOKEN is required}
+      STUDIO_ORIGIN_TOKEN_PREVIOUS: ${STUDIO_ORIGIN_TOKEN_PREVIOUS:-}

@@ -70,6 +70,7 @@ _PRODUCTION_QUEUE_TASK_NAMES = frozenset(
         "_run_creative_pipeline",
         "_run_longform_pipeline",
         "run_clone_pipeline",
+        "_run_cliplab_pipeline",
     }
 )
 _TERMINAL_JOB_STATUSES = {

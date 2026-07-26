@@ -1,6 +1,6 @@
 [package]
 name = "nyptid-studio"
-version = "1.0.1"
+version = "1.0.2"
 description = "NYPTID Studio desktop application"
 authors = ["NYPTID Industries"]
 license = ""
@@ -33,3 +33,7 @@ tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_UI_Input_KeyboardAndMouse"] }
+
+[dev-dependencies]
+base64 = "0.22"
+minisign-verify = "0.2.5"

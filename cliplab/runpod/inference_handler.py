@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""
-RunPod serverless handler for ClipLab custom models.
+"""Archived ClipLab model inference source.
 
-Deploy as a SEPARATE RunPod endpoint from the main Studio API.
-Mount the same network volume at /runpod-volume/studio.
+The exported handler permanently rejects serverless execution. Model-loading
+and inference helpers remain available as offline research source.
 """
 from __future__ import annotations
 
@@ -209,7 +208,7 @@ def _reframe_trajectory(inp: dict[str, Any]) -> dict[str, Any]:
     return {"trajectory": trajectory}
 
 
-def handler(event: dict) -> dict:
+def _legacy_inference_handler(event: dict) -> dict:
     inp = dict(event.get("input") or event or {})
     task = str(inp.get("task") or "health").strip().lower()
 
@@ -245,6 +244,17 @@ def _bootstrap_weights(inp: dict[str, Any]) -> dict[str, Any]:
         dest.write_bytes(base64.b64decode(b64))
         written.append(str(dest))
     return {"ok": True, "written": written}
+
+
+def handler(_event: dict) -> dict:
+    """Reject every legacy serverless invocation without inspecting its input."""
+
+    return {
+        "ok": False,
+        "status": "rejected",
+        "error": "runpod_retired",
+        "detail": "ClipLab RunPod execution is permanently retired; production is Contabo-owned.",
+    }
 
 
 if __name__ == "__main__":

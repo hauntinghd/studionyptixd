@@ -2,17 +2,25 @@ from __future__ import annotations
 
 import threading
 import time
+import os
 
 import pytest
 
 import unified_credits
 from studio_agent import jobs, runpod_bridge, runpod_reconciliation, runpod_storage
+from studio_agent import runpod_contract
 
 
 @pytest.fixture(autouse=True)
 def _isolated_ledgers(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     monkeypatch.setenv("RUNPOD_RECONCILIATION_LEDGER_DIR", str(tmp_path / "reconciliation"))
     monkeypatch.setenv("RUNPOD_DISPATCH_LEDGER_DIR", str(tmp_path / "dispatch"))
+    monkeypatch.setattr(
+        runpod_contract,
+        "runpod_production_enabled",
+        lambda: str(os.getenv("STUDIO_RUNPOD_PRODUCTION_ENABLED") or "").strip().lower()
+        in {"1", "true", "yes", "on", "enabled"},
+    )
 
 
 def _receipt() -> dict:

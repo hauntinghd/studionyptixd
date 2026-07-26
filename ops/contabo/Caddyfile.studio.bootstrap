@@ -1,0 +1,38 @@
+# TRANSIENT ROLLOUT CONFIG ONLY.
+#
+# Use this site block while deploying the token-sending Worker. It preserves
+# the existing open sslip behavior but strips the new private header before it
+# reaches the API. Replace it with Caddyfile.studio immediately after the
+# canonical Worker is healthy; this file is not the production access policy.
+studio.82.197.67.155.sslip.io {
+	request_body {
+		max_size 30GB
+	}
+
+	reverse_proxy studio-api:10000 {
+		flush_interval -1
+		header_up Host api-studio.nyptidindustries.com
+		header_up -X-NYPTID-Studio-Origin-Token
+		transport http {
+			dial_timeout 10s
+			response_header_timeout 1h
+		}
+	}
+
+	encode zstd gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		-Server
+	}
+
+	log {
+		output stdout
+		format filter {
+			request>headers>X-Nyptid-Studio-Origin-Token delete
+			wrap console
+		}
+	}
+}

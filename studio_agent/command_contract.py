@@ -41,6 +41,7 @@ ProductionCommandAction = Literal[
     "render_cliplab",
     "analyze_reference",
     "retry_reference_analysis",
+    "execute_backend_workflow",
 ]
 ProductionKind = Literal[
     "shortform",
@@ -869,6 +870,21 @@ class RetryReferenceAnalysisOperation(ContractModel):
     stages: list[str] = Field(default_factory=list, max_length=12)
 
 
+class ExecuteBackendWorkflowOperation(ContractModel):
+    """Typed compatibility operation for trusted non-chat production routes.
+
+    The backend still owns the exact tool, target, and argument fingerprint.
+    This keeps legacy panels beneath the same V2 envelope while their
+    creator-facing actions are progressively promoted to first-class models.
+    """
+
+    action: Literal["execute_backend_workflow"] = "execute_backend_workflow"
+    tool_name: str = Field(min_length=1, max_length=128)
+    arguments_sha256: str = Field(min_length=64, max_length=64)
+    target_kind: str = Field(default="", max_length=64)
+    target_id: str = Field(default="", max_length=256)
+
+
 ProductionOperationV2 = Annotated[
     GenerateLongformOutlineOperation
     | ExpandLongformChapterOperation
@@ -888,7 +904,8 @@ ProductionOperationV2 = Annotated[
     | AnalyzeClipLabOperation
     | RenderClipLabOperation
     | AnalyzeReferenceOperation
-    | RetryReferenceAnalysisOperation,
+    | RetryReferenceAnalysisOperation
+    | ExecuteBackendWorkflowOperation,
     Field(discriminator="action"),
 ]
 
@@ -935,8 +952,10 @@ class ProductionCommandEnvelopeV2(ContractModel):
             "expand_longform_chapter",
             "analyze_reference",
         }
-        creates_new_target = self.action in start_actions | targetless_actions or (
-            self.action == "generate_thumbnail" and not self.target.job_id
+        creates_new_target = (
+            self.action in start_actions | targetless_actions
+            or (self.action == "generate_thumbnail" and not self.target.job_id)
+            or (self.action == "execute_backend_workflow" and not self.target.job_id)
         )
         if creates_new_target:
             if self.target.job_id:

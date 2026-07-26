@@ -1,0 +1,194 @@
+name: ${COMPOSE_PROJECT_NAME:-nyptid-studio}
+
+services:
+  redis:
+    image: redis:7.4.2-alpine@sha256:02419de7eddf55aa5bcf49efb74e88fa8d931b4d77c07eff8a6b2144472b6952
+    container_name: nyptid-studio-redis
+    restart: unless-stopped
+    init: true
+    user: "999:999"
+    command:
+      - /bin/sh
+      - -ec
+      - >-
+        exec redis-server
+        --appendonly yes
+        --appendfsync everysec
+        --aof-use-rdb-preamble yes
+        --save 900 1
+        --save 300 10
+        --save 60 10000
+        --maxmemory 512mb
+        --maxmemory-policy noeviction
+        --requirepass "$$REDIS_PASSWORD"
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
+    expose:
+      - "6379"
+    volumes:
+      - type: bind
+        source: ${STUDIO_REDIS_DIR:-/opt/studio/redis}
+        target: /data
+    networks:
+      - backend
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - REDISCLI_AUTH="$$REDIS_PASSWORD" redis-cli ping | grep -qx PONG
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 256
+    mem_limit: ${REDIS_MEMORY_LIMIT:-768m}
+    cpus: ${REDIS_CPU_LIMIT:-1.0}
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  studio-api:
+    image: ${STUDIO_IMAGE:?STUDIO_IMAGE must be an immutable locally-built candidate}
+    pull_policy: never
+    container_name: nyptid-studio-api
+    restart: unless-stopped
+    init: true
+    depends_on:
+      redis:
+        condition: service_healthy
+        restart: true
+    env_file:
+      - ${STUDIO_ENV_FILE:-/opt/studio/shared/studio.env}
+    environment:
+      PORT: "10000"
+      STUDIO_ENVIRONMENT: production
+      STUDIO_DEPLOYMENT_TARGET: contabo
+      STUDIO_RELEASE_ID: ${EXPECTED_BUILD_ID:?EXPECTED_BUILD_ID is required}
+      STUDIO_INSTANCE_ID: ${STUDIO_INSTANCE_ID:-studio-contabo-primary}
+      WEB_CONCURRENCY: "1"
+      RUN_EMBEDDED_WORKER: "true"
+      JOB_QUEUE_WORKERS: "1"
+      EMBEDDED_WORKER_SHUTDOWN_GRACE_SEC: "110"
+      REDIS_URL: redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@redis:6379/0
+      REDIS_QUEUE_ENABLED: "true"
+      REDIS_QUEUE_PREFIX: studio
+      FRONTEND_DIST_DIR: /app/ViralShorts-App/dist
+      APP_DATA_DIR: /var/data
+      STUDIO_APP_DATA_DIR: /var/data
+      STUDIO_AGENT_SESSIONS_DIR: /var/data/studio_agent_sessions
+      STUDIO_AGENT_TELEMETRY_DIR: /var/data/studio_agent_telemetry
+      STUDIO_TRAINING_CAPTURE_DIR: /var/data/training_capture
+      STUDIO_TRAINING_CONSENT_VERSION: 2026-06-v1
+      STUDIO_TRAINING_COMPILER_INTERVAL_SEC: "21600"
+      STUDIO_TRAINING_SUPABASE_SYNC_ENABLED: "false"
+      STUDIO_AGENT_COMPETITOR_DIR: /var/data/competitor_analysis
+      STUDIO_AGENT_ARCHIVAL_DIR: /var/data/archival_manifests
+      OUTPUT_DIR: /var/data/generated_videos
+      TEMP_DIR: /var/data/temp_assets
+      TRAINING_DATA_DIR: /var/data/training_data
+      THUMBNAIL_DIR: /var/data/thumbnails
+      DEMO_UPLOAD_DIR: /var/data/demo_uploads
+      SKELETON_AI_OUTPUT_ROOT: /var/data/skeleton_output
+      STUDIO_AGENT_QUEUE_ENABLED: "true"
+      STUDIO_AGENT_MAX_CONCURRENT: "30"
+      STUDIO_AGENT_MAX_QUEUE_DEPTH: "500"
+      STUDIO_AGENT_QUEUE_MAX_WAIT_SEC: "900"
+      STUDIO_PRODUCTION_RENDER_SLOTS: "6"
+      STUDIO_PRODUCTION_STILLS_SLOTS: "12"
+      STUDIO_PRODUCTION_I2V_SLOTS: "4"
+      STUDIO_PRODUCTION_I2V_PREMIUM_SLOTS: "1"
+      STUDIO_PRODUCTION_AUDIO_SLOTS: "8"
+      STUDIO_PRODUCTION_COMPOSE_SLOTS: "4"
+      STUDIO_PRODUCTION_SLOT_MAX_WAIT_SEC: "1800"
+      SHORTFORM_JOB_STALE_SEC: "3600"
+      STUDIO_FINALIZE_QA_REQUIRED: "true"
+      STUDIO_LONGFORM_MAX_SCENES: "144"
+      STUDIO_MODELS_CACHE_SEC: "900"
+      SITE_URL: https://studio.nyptidindustries.com
+      API_PUBLIC_URL: https://api-studio.nyptidindustries.com
+      BILLING_SITE_URL: https://studio.nyptidindustries.com
+      PAYPAL_ENV: live
+      IMAGE_PROVIDER_ORDER: fal
+      XAI_API_KEY: ""
+      USE_XAI_VIDEO: "false"
+      XAI_PUBLIC_RENDERS_ENABLED: "false"
+      USE_FAL_GROK_IMAGE: "false"
+      XAI_IMAGE_FALLBACK_ENABLED: "false"
+      HIDREAM_ENABLED: "false"
+      HIDREAM_EDIT_ENABLED: "false"
+      SKELETON_REQUIRE_WAN22: "false"
+      SKELETON_USE_SEEDREAM_EDIT: "true"
+      SKELETON_GLOBAL_REFERENCE_IMAGE_URL: https://studio.nyptidindustries.com/canonical-skeleton-master-hires.png
+      RUNPOD_IMAGE_FEEDBACK_ENABLED: "false"
+      RUNPOD_COMPOSITOR_ENABLED: "false"
+      STUDIO_RUNPOD_PRODUCTION_ENABLED: "false"
+      STUDIO_RUNPOD_LONGFORM_ENABLED: "false"
+      RUNPOD_API_KEY: ""
+      RUNPOD_CLIPLAB_ENDPOINT_ID: ""
+      CLIPLAB_VIRALITY_BACKEND: local_llm
+      CLIPLAB_REFRAME_BACKEND: opencv_face
+      RUNPOD_DISPATCH_MAX_QUEUE_DEPTH: "1"
+      CHATSTORY_FORCE_LOCAL_TTS: "false"
+      CHATSTORY_ELEVENLABS_MODEL_ID: eleven_multilingual_v2
+      WAITLIST_ONLY_MODE: "false"
+      WAITLIST_REQUIRE_STRIPE_PAYMENT: "false"
+      ALGROW_API_BASE_URL: https://api.algrow.online
+      CATALYST_BACKFILL_AUTO_ENABLED: "true"
+      CATALYST_BACKFILL_AUTO_INTERVAL_SEC: "21600"
+      STUDIO_CATALYST_AUTO_ENABLED: "true"
+      STUDIO_CATALYST_TICK_INTERVAL_SEC: "600"
+      STUDIO_CATALYST_NICHE_WARM_MAX: "6"
+      STUDIO_CATALYST_CHANNEL_SYNC_MAX: "8"
+      STUDIO_REFERENCE_VISION_PROVIDER_ORDER: anthropic
+      STUDIO_REFERENCE_ANALYSIS_PROVIDER_ORDER: anthropic
+      STUDIO_REFERENCE_STT_PROVIDER_ORDER: fal
+      STUDIO_REFERENCE_VISION_MODEL: claude-haiku-4-5-20251001
+      STUDIO_REFERENCE_ANALYSIS_MODEL: claude-haiku-4-5-20251001
+      STUDIO_SHORTS_ONLY: "false"
+      EXPECTED_GIT_SHA: ${EXPECTED_GIT_SHA:?EXPECTED_GIT_SHA is required}
+      EXPECTED_BUILD_ID: ${EXPECTED_BUILD_ID:?EXPECTED_BUILD_ID is required}
+    ports:
+      - 127.0.0.1:${STUDIO_LOOPBACK_PORT:-10000}:10000
+    volumes:
+      - type: bind
+        source: ${STUDIO_DATA_DIR:-/opt/studio/data}
+        target: /var/data
+    networks:
+      - backend
+      - proxy
+    stop_grace_period: 120s
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - /app/ops/contabo/container_healthcheck.py
+      interval: 20s
+      timeout: 10s
+      retries: 3
+      start_period: 90s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 2048
+    mem_limit: ${STUDIO_MEMORY_LIMIT:-4g}
+    cpus: ${STUDIO_CPU_LIMIT:-4.0}
+    deploy:
+      replicas: 1
+    logging:
+      driver: local
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+networks:
+  backend:
+    driver: bridge
+  proxy:
+    external: true
+    name: ${CADDY_NETWORK:-deploy_default}

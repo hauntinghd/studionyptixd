@@ -1,18 +1,9 @@
-"""Strict RunPod dispatch for durable Studio production work.
+"""Retired RunPod bridge with read-only local receipt compatibility.
 
-This module is deliberately *not* a generic HTTP-to-RunPod proxy.  Planning,
-chat, reads, job polling, and status requests must stay on the API service.
-Only an allowlisted top-level production tool may create a RunPod queue item.
-
-The public dispatch flow is intentionally small:
-
-1. validate and sign one deterministic production envelope;
-2. call RunPod's read-only ``/health`` endpoint;
-3. submit that envelope exactly once to async ``/run``.
-
-The Studio executor calls this bridge only when the explicit production flag
-is enabled. Keeping this module isolated makes the enqueue policy independently
-testable and prevents generic HTTP traffic from reaching RunPod.
+Public configuration, preflight, status, and dispatch functions fail through
+the unconditional retirement guard before credentials or network are touched.
+Local receipt readers and archived normalization helpers remain available for
+safe migration and historical inspection.
 """
 from __future__ import annotations
 
@@ -32,6 +23,7 @@ from .runpod_contract import (
     RUNPOD_ENVELOPE_SCHEMA,
     RUNPOD_PRODUCTION_TOOL_ALLOWLIST,
     RunPodContractError,
+    assert_runpod_execution_retired,
     build_signed_envelope,
 )
 
@@ -101,13 +93,9 @@ def runpod_dispatch_secret() -> str:
 
 
 def runpod_configured() -> bool:
-    """Return whether strict signed production dispatch can run."""
+    """Return the effective configuration, independent of stale secrets."""
 
-    return bool(
-        runpod_api_key()
-        and runpod_endpoint_id()
-        and len(runpod_dispatch_secret().encode("utf-8")) >= 32
-    )
+    return False
 
 
 def dispatch_ledger_dir() -> Path:
@@ -540,6 +528,10 @@ def _request_json(
     body: dict[str, Any] | None = None,
     timeout_sec: float,
 ) -> tuple[dict[str, Any], str]:
+    try:
+        assert_runpod_execution_retired()
+    except RunPodContractError as exc:
+        raise RunPodConfigurationError(str(exc)) from exc
     api_key, resolved_endpoint = _resolved_credentials(endpoint_id)
     encoded = None if body is None else json.dumps(body, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
     request_url = _require_runpod_https_url(_endpoint_base(resolved_endpoint) + path)
@@ -625,6 +617,10 @@ def preflight_runpod_endpoint(
     payment, and backlog failures, but does not require an idle worker.
     """
 
+    try:
+        assert_runpod_execution_retired()
+    except RunPodContractError as exc:
+        raise RunPodConfigurationError(str(exc)) from exc
     queue_cap = _configured_max_queue_depth(max_queue_depth)
     health, resolved_endpoint = _request_json(
         method="GET",
@@ -781,6 +777,10 @@ def get_runpod_job_status(
 ) -> dict[str, Any]:
     """Read one RunPod job status; this function can never enqueue work."""
 
+    try:
+        assert_runpod_execution_retired()
+    except RunPodContractError as exc:
+        raise RunPodConfigurationError(str(exc)) from exc
     normalized_job_id = str(runpod_job_id or "").strip()
     if not _RUNPOD_JOB_ID_RE.fullmatch(normalized_job_id):
         raise RunPodDispatchPolicyError("runpod_job_id is malformed")
@@ -818,6 +818,10 @@ def dispatch_production_tool(
     smuggled through this function.
     """
 
+    try:
+        assert_runpod_execution_retired()
+    except RunPodContractError as exc:
+        raise RunPodConfigurationError(str(exc)) from exc
     normalized_tool = str(tool or "").strip()
     if normalized_tool not in RUNPOD_PRODUCTION_TOOL_ALLOWLIST:
         raise RunPodDispatchPolicyError(

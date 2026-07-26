@@ -56,6 +56,7 @@ from long_form.pipeline import (  # noqa: E402
 )
 from long_form.prompts.channels import CHANNELS, channel_outline_prompt_extras  # noqa: E402
 from long_form.scripting import generate_outline  # noqa: E402
+from studio_agent import provider_policy  # noqa: E402
 
 OUTPUT_ROOT = Path(os.environ.get("HR_OUTPUT_ROOT", "D:/recaps/history_rewind"))
 XAI_BASE = "https://api.x.ai/v1"
@@ -73,6 +74,7 @@ class XAIClient:
     """Thin xAI chat wrapper — same .complete() shape as GrokClient."""
 
     def __init__(self, model: str | None = None) -> None:
+        provider_policy.assert_provider_allowed("xai", provider_policy.RUNNER_CAPABILITY)
         key = (os.environ.get("XAI_API_KEY") or "").strip()
         if not key:
             sys.exit("XAI_API_KEY missing — set in D:/Games/asd/.env")
@@ -126,6 +128,7 @@ def _visual_prefix(channel: dict) -> str:
 
 def gen_grok_image(prompt: str, out_path: Path, *, stats: dict) -> Path:
     """Grok Imagine Quality 1K still."""
+    provider_policy.assert_provider_allowed("xai", provider_policy.IMAGE_CAPABILITY)
     if out_path.exists() and out_path.stat().st_size > 8_000:
         print(f"  [img] cached {out_path.name}")
         return out_path

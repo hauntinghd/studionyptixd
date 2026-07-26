@@ -14,6 +14,7 @@ from backend_settings import (
     IMAGE_PROVIDER_WAN_SKIP_IF_UNAVAILABLE,
     REDIS_QUEUE_ENABLED,
     REDIS_URL,
+    studio_deployment_identity,
 )
 
 
@@ -115,6 +116,7 @@ def build_health_payload(
         wan_t2i_unet = str(wan22_t2i_availability_cache.get("unet_name", "") or "")
         provider_label = " > ".join(provider_order)
         backend_commit, frontend_bundle = read_deploy_meta()
+        deployment_identity = studio_deployment_identity()
         queue_consumer = _public_queue_consumer_health(queue_runtime_health()) if queue_runtime_health else {
             "required": False,
             "running": False,
@@ -125,22 +127,9 @@ def build_health_payload(
         runpod_longform = False
         runpod_control_ready = False
         runpod_storage_ready = False
-        try:
-            from studio_agent.runpod_bridge import runpod_configured
-            from studio_agent.runpod_contract import (
-                runpod_longform_enabled,
-                runpod_production_enabled,
-            )
-            from studio_agent.runpod_storage import configured as runpod_storage_configured
-
-            runpod_production = bool(runpod_production_enabled())
-            runpod_longform = bool(runpod_longform_enabled())
-            runpod_control_ready = bool(runpod_configured())
-            runpod_storage_ready = bool(runpod_storage_configured())
-        except Exception:
-            # Health must remain available even when the optional RunPod plane
-            # is intentionally disabled or only partially configured.
-            pass
+        cliplab_virality_backend = "local_llm"
+        cliplab_reframe_backend = "opencv_face"
+        cliplab_runpod_configured = False
         fal_video_enabled = bool(FAL_AI_KEY)
         if fal_video_enabled:
             video_engine = "FalAI Kling 2.1"
@@ -192,6 +181,7 @@ def build_health_payload(
             "template_adapter_routes": [],
             "backend_commit": backend_commit,
             "frontend_bundle": frontend_bundle,
+            **deployment_identity,
             "queue_mode": "redis" if (REDIS_QUEUE_ENABLED and bool(REDIS_URL)) else "inprocess",
             "queue_consumer": queue_consumer,
             "queue_consumer_running": bool(queue_consumer.get("running", False)),
@@ -202,6 +192,9 @@ def build_health_payload(
             "runpod_control_configured": runpod_control_ready,
             "runpod_storage_configured": runpod_storage_ready,
             "runpod_configured": bool(runpod_control_ready and runpod_storage_ready),
+            "cliplab_virality_backend": cliplab_virality_backend,
+            "cliplab_reframe_backend": cliplab_reframe_backend,
+            "cliplab_runpod_configured": cliplab_runpod_configured,
         }
 
     return health_payload

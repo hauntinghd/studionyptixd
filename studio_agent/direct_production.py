@@ -57,9 +57,30 @@ def require_idempotency_key(request: Request) -> str:
     command_id = str(request.headers.get("x-idempotency-key") or "").strip()
     if not command_id:
         raise HTTPException(400, "X-Idempotency-Key is required for Studio production mutations.")
-    if len(command_id) > 512:
+    if len(command_id) > 128:
         raise HTTPException(400, "X-Idempotency-Key is too long.")
     return command_id
+
+
+def _direct_contract_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
+    """Expose a legacy route's backend-decoded body to the V2 compiler.
+
+    Route adapters retain their historical ``{"legacy_route", "payload"}``
+    receipt shape, but semantic commands such as scene repair need the exact
+    job and scene scope found inside that decoded payload.  Only public fields
+    are promoted, and route-owned top-level values always win.
+    """
+
+    normalized = dict(arguments or {})
+    payload = normalized.get("payload")
+    if not isinstance(payload, dict):
+        return normalized
+    for raw_key, value in payload.items():
+        key = str(raw_key or "").strip()
+        if not key or key.startswith("_") or key in normalized:
+            continue
+        normalized[key] = value
+    return normalized
 
 
 async def upload_content_contract(
@@ -168,26 +189,41 @@ def claim_direct_production(
         authorize_production_mutation,
         production_command_scope,
     )
+    from studio_agent.production_command_service import (
+        compile_direct_authorized_mutation,
+        direct_session_id,
+    )
 
     claim = None
+    backend_session_id = direct_session_id(user_id=normalized_user_id)
     with production_command_scope(
         command_id,
         user_id=normalized_user_id,
-        session_id="",
+        session_id=backend_session_id,
         source="server_workflow",
         user_text=f"direct:{name}",
-    ):
+    ) as authority:
         try:
             authorized_arguments, mutation = authorize_production_mutation(
                 name,
-                dict(arguments or {}),
+                _direct_contract_arguments(arguments),
                 user_id=normalized_user_id,
-                session_id="",
+                session_id=backend_session_id,
             )
             if mutation is None:
                 raise RuntimeError(
                     f"{name} rejected: backend command authorization was not created"
                 )
+            envelope = compile_direct_authorized_mutation(
+                authority=authority.as_dict(),
+                mutation=mutation.as_dict(),
+                arguments=authorized_arguments,
+            )
+            authorized_arguments = dict(authorized_arguments)
+            authorized_arguments["_production_command_envelope"] = envelope.model_dump(
+                mode="json",
+                exclude_none=True,
+            )
             claim, replay = idempotent_mutations.begin(
                 tool_name=name,
                 arguments=authorized_arguments,
@@ -234,6 +270,12 @@ async def execute_logged_production(
     dispatched_arguments = dict(arguments or {})
     from studio_agent import tools
     from studio_agent.execution_context import production_command_scope
+    from studio_agent.production_command_service import direct_session_id
+
+    normalized_user_id = str(user_id or "").strip()
+    if not normalized_user_id:
+        raise HTTPException(401, "auth_required")
+    backend_session_id = direct_session_id(user_id=normalized_user_id)
 
     try:
         # Direct production panels use the same backend-issued authority as
@@ -241,8 +283,8 @@ async def execute_logged_production(
         # cannot inject provider identity, target ownership, or mutation ids.
         with production_command_scope(
             command_id,
-            user_id=str(user_id or ""),
-            session_id="",
+            user_id=normalized_user_id,
+            session_id=backend_session_id,
             source="server_workflow",
             user_text=f"direct:{name}",
         ):
@@ -250,8 +292,9 @@ async def execute_logged_production(
                 tools.execute_tool_logged,
                 name,
                 dispatched_arguments,
-                user_id=str(user_id or ""),
+                user_id=normalized_user_id,
                 content_format=str(content_format or ""),
+                session_id=backend_session_id,
             )
     except HTTPException:
         raise

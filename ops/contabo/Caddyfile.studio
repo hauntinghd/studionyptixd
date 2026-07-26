@@ -1,0 +1,96 @@
+# Merge this site block into the Caddyfile already used by the VPS Caddy
+# container. The Caddy container and studio-api must share CADDY_NETWORK
+# (deploy_default on the current VPS). Caddy handles WebSocket upgrades
+# automatically; flush_interval -1 keeps SSE/token streams unbuffered.
+#
+# STUDIO_ORIGIN_TOKEN is required in the Caddy container environment and must
+# equal the Cloudflare Worker secret of the same name. The optional
+# STUDIO_ORIGIN_TOKEN_PREVIOUS permits a zero-downtime token rotation. Empty or
+# malformed values cannot satisfy either authenticated matcher.
+studio.82.197.67.155.sslip.io {
+	request_body {
+		max_size 30GB
+	}
+
+	@workerCurrent {
+		header X-NYPTID-Studio-Origin-Token v1.{$STUDIO_ORIGIN_TOKEN}
+		header_regexp workerCurrentToken X-NYPTID-Studio-Origin-Token ^v1\.[A-Za-z0-9_-]{43,128}$
+	}
+
+	@workerPrevious {
+		header X-NYPTID-Studio-Origin-Token v1.{$STUDIO_ORIGIN_TOKEN_PREVIOUS}
+		header_regexp workerPreviousToken X-NYPTID-Studio-Origin-Token ^v1\.[A-Za-z0-9_-]{43,128}$
+	}
+
+	# These are the only browser-to-origin bypass routes. POST carries the
+	# large body and OPTIONS permits the browser's authenticated CORS preflight.
+	# Every other path/method must arrive through the authenticated Worker.
+	@directLargeUpload {
+		method POST OPTIONS
+		path /api/cliplab/ingest/upload
+		path /api/catalyst/hub/reference-video-analysis/manual
+		path /api/studio-agent/sessions/*/attachments/video
+		path /api/thumbnails/upload-video
+	}
+
+	handle @workerCurrent {
+		reverse_proxy studio-api:10000 {
+			flush_interval -1
+			header_up Host api-studio.nyptidindustries.com
+			header_up -X-NYPTID-Studio-Origin-Token
+			transport http {
+				dial_timeout 10s
+				response_header_timeout 1h
+			}
+		}
+	}
+
+	handle @workerPrevious {
+		reverse_proxy studio-api:10000 {
+			flush_interval -1
+			header_up Host api-studio.nyptidindustries.com
+			header_up -X-NYPTID-Studio-Origin-Token
+			transport http {
+				dial_timeout 10s
+				response_header_timeout 1h
+			}
+		}
+	}
+
+	handle @directLargeUpload {
+		reverse_proxy studio-api:10000 {
+			flush_interval -1
+			header_up Host api-studio.nyptidindustries.com
+			header_up -X-NYPTID-Studio-Origin-Token
+			transport http {
+				dial_timeout 10s
+				response_header_timeout 1h
+			}
+		}
+	}
+
+	handle {
+		header {
+			Content-Type "application/json; charset=utf-8"
+			Cache-Control "no-store"
+		}
+		respond `{"error":"direct_origin_forbidden","message":"Use the canonical Studio API."}` 403
+	}
+
+	encode zstd gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		-Server
+	}
+
+	log {
+		output stdout
+		format filter {
+			request>headers>X-Nyptid-Studio-Origin-Token delete
+			wrap console
+		}
+	}
+}

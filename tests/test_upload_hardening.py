@@ -322,11 +322,15 @@ def test_cliplab_route_caps_and_removes_partial_video(tmp_path: Path, monkeypatc
         "_LEDGER",
         FileExecutionLedger(tmp_path / "command-ledger"),
     )
+    async def enqueue_job(_job_id: str, _plan: str, _descriptor: dict) -> None:
+        return None
+
     app = FastAPI()
     app.include_router(
         cliplab_router.build_cliplab_router(
             require_auth=_owner_dependency(),
             jobs={},
+            enqueue_job=enqueue_job,
             fal_json_completion=lambda *args, **kwargs: {},
         )
     )

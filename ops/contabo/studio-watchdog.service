@@ -1,0 +1,15 @@
+[Unit]
+Description=NYPTID Studio single-consumer health watchdog
+Requires=docker.service
+After=docker.service network-online.target
+ConditionPathExists=/opt/studio/shared/active.env
+ConditionPathExists=!/opt/studio/shared/consumer.disabled
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+WorkingDirectory=/opt/studio/current
+ExecStart=/usr/bin/bash /opt/studio/current/ops/contabo/watchdog.sh
+UMask=0077
+TimeoutStartSec=5m

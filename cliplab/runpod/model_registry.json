@@ -27,9 +27,9 @@
     }
   },
   "volume_layout": {
-    "root": "/runpod-volume/studio/cliplab",
-    "models": "/runpod-volume/studio/cliplab/models",
-    "datasets": "/runpod-volume/studio/cliplab/datasets",
-    "exports": "/runpod-volume/studio/cliplab/exports"
+    "root": "/var/data/cliplab",
+    "models": "/var/data/cliplab/models",
+    "datasets": "/var/data/cliplab/datasets",
+    "exports": "/var/data/cliplab/exports"
   }
 }

@@ -6197,6 +6197,8 @@ async def _apply_model_agnostic_studio_command(
     approval_mode: str,
     reasoning_depth: str,
     reply_to: dict | None = None,
+    run_id: str = "",
+    worker_id: str = "",
 ) -> dict[str, Any] | None:
     """Compile, validate, execute, and verify typed production commands.
 
@@ -6514,10 +6516,16 @@ async def _apply_model_agnostic_studio_command(
     tool_args = action.arguments.as_legacy_dict()
     # A validated, confirmed command is the only transition that opens the
     # production gate. Clarification turns above close it and stay resource-free.
+    gate_worker = (
+        {"run_id": run_id, "worker_id": worker_id}
+        if run_id and worker_id
+        else {}
+    )
     claimed_session = store.claim_production_gate(
         sid,
         command_id=command.command_id,
         job_id=candidate,
+        **gate_worker,
     )
     if claimed_session is None:
         fresh = store.get_session(sid) or session
@@ -6555,6 +6563,18 @@ async def _apply_model_agnostic_studio_command(
             current.get("production_gate_open")
             and str(current.get("interaction_state") or "") == "production"
             and str(current.get("active_command_id") or "") == command.command_id
+            and (
+                not worker_id
+                or (
+                    str(current.get("active_command_run_id") or "") == run_id
+                    and str(current.get("active_command_worker_id") or "") == worker_id
+                    and store.run_worker_lease_is_live(
+                        current,
+                        run_id=run_id,
+                        worker_id=worker_id,
+                    )
+                )
+            )
         )
         if not gate_matches:
             return {
@@ -6607,6 +6627,7 @@ async def _apply_model_agnostic_studio_command(
             sid,
             command_id=command.command_id,
             interaction_state="verification",
+            **({"worker_id": worker_id} if worker_id else {}),
         )
         raise
 
@@ -6616,6 +6637,7 @@ async def _apply_model_agnostic_studio_command(
         sid,
         command_id=command.command_id,
         interaction_state="verification",
+        **({"worker_id": worker_id} if worker_id else {}),
     )
     tool_status = "ok" if receipt.status in {"accepted", "completed", "duplicate"} else "error"
     await _fire_tool_end(
@@ -10749,6 +10771,7 @@ async def stream_turn(
         return f"event: {event}\ndata: {_json.dumps(data, default=str)}\n\n"
 
     queue: asyncio.Queue[tuple[str, dict[str, Any] | None]] = asyncio.Queue()
+    worker_id = f"worker_{uuid.uuid4().hex}" if run_id else ""
 
     async def emit(payload: dict[str, Any]) -> None:
         if run_id:
@@ -10763,7 +10786,7 @@ async def stream_turn(
                 pass
         await queue.put(("event", payload))
 
-    async def worker() -> None:
+    async def _worker_body() -> None:
         try:
             async with studio_agent_slot(
                 user_id=user_id,
@@ -10788,6 +10811,8 @@ async def stream_turn(
                         reply_to=reply_to,
                         attachments=attachments,
                         agent_mode=agent_mode,
+                        run_id=str(run_id or ""),
+                        worker_id=worker_id,
                     )
                 if admission.mode != "disabled":
                     result["queue"] = admission.as_dict()
@@ -10840,22 +10865,72 @@ async def stream_turn(
                     pass
             await queue.put(("error", {"message": str(exc)}))
 
+    async def _heartbeat_worker() -> None:
+        while True:
+            await asyncio.sleep(max(0.05, float(store.RUN_WORKER_HEARTBEAT_SEC)))
+            try:
+                if not store.heartbeat_run_worker(
+                    session["session_id"],
+                    str(run_id or ""),
+                    worker_id=worker_id,
+                ):
+                    return
+            except Exception:
+                # A transient filesystem error gets another chance while the
+                # multi-interval lease remains valid.
+                continue
+
+    async def worker() -> None:
+        heartbeat_task: asyncio.Task[None] | None = None
+        if run_id:
+            try:
+                claimed = store.claim_run_worker(
+                    session["session_id"],
+                    run_id,
+                    worker_id=worker_id,
+                )
+            except Exception:
+                claimed = False
+            if not claimed:
+                await queue.put((
+                    "error",
+                    {
+                        "message": (
+                            "This Studio run is already owned by another live backend worker; "
+                            "no duplicate command was started."
+                        ),
+                        "resume_required": True,
+                    },
+                ))
+                return
+            heartbeat_task = asyncio.create_task(_heartbeat_worker())
+        try:
+            await _worker_body()
+        finally:
+            if heartbeat_task is not None:
+                heartbeat_task.cancel()
+                try:
+                    await heartbeat_task
+                except asyncio.CancelledError:
+                    pass
+            if run_id:
+                try:
+                    store.release_run_worker(
+                        session["session_id"],
+                        run_id,
+                        worker_id=worker_id,
+                    )
+                except Exception:
+                    pass
+
     task = asyncio.create_task(worker())
-    last_persisted_heartbeat = 0.0
+    stream_completed = False
     try:
         while True:
             try:
                 kind, payload = await asyncio.wait_for(queue.get(), timeout=15.0)
             except asyncio.TimeoutError:
                 heartbeat = {"event": "status", "message": "Still working..."}
-                if run_id:
-                    try:
-                        now = time.time()
-                        if now - last_persisted_heartbeat >= 60:
-                            store.append_run_event(session["session_id"], run_id, "status", heartbeat)
-                            last_persisted_heartbeat = now
-                    except Exception:
-                        pass
                 yield _sse("status", heartbeat)
                 continue
             if kind == "event" and payload:
@@ -10863,9 +10938,11 @@ async def stream_turn(
                 yield _sse(ev, payload)
                 continue
             if kind == "done" and payload:
+                stream_completed = True
                 yield _sse("done", payload)
                 break
             if kind == "error":
+                stream_completed = True
                 yield _sse("error", payload or {"message": "Agent turn failed"})
                 break
     finally:
@@ -10874,7 +10951,7 @@ async def stream_turn(
         # worker still saves the transcript when it finishes, and the UI can
         # reload the session/history. Cancelling here was making Studio Agent
         # look like it "did nothing" after a frontend timeout.
-        if run_id and not task.done():
+        if run_id and not stream_completed and not task.done():
             try:
                 store.append_run_event(
                     session["session_id"],
@@ -10933,6 +11010,8 @@ async def _run_turn_impl(
     reply_to: dict | None = None,
     attachments: list[dict[str, Any]] | None = None,
     agent_mode: str = "studio",
+    run_id: str = "",
+    worker_id: str = "",
 ) -> dict[str, Any]:
     sid = session["session_id"]
     user_id = session["user_id"]
@@ -11173,6 +11252,8 @@ async def _run_turn_impl(
             approval_mode=approval_mode,
             reasoning_depth=reasoning_depth,
             reply_to=reply_to,
+            run_id=run_id,
+            worker_id=worker_id,
         )
         if semantic_command is not None:
             return semantic_command

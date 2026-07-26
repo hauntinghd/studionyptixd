@@ -174,7 +174,7 @@ export default function CreatePanel({
     // Fetch voices once we have an auth token (voices route is auth-gated).
     useEffect(() => {
         if (!accessToken) return;
-        fetch('/api/skeleton-ai/voices', {
+        fetch(resolveStudioBackendUrl('/api/skeleton-ai/voices'), {
             headers: { Authorization: `Bearer ${accessToken}` },
         })
             .then((r) => r.json())
@@ -197,7 +197,7 @@ export default function CreatePanel({
         try {
             const form = new FormData();
             form.append('reference_image', file);
-            const r = await fetch('/api/skeleton-ai/reference', {
+            const r = await fetch(resolveStudioBackendUrl('/api/skeleton-ai/reference'), {
                 method: 'POST',
                 headers: { Authorization: `Bearer ${accessToken}` },
                 body: form,
@@ -239,7 +239,7 @@ export default function CreatePanel({
             `${scenesJobId}-${scene.beat_index}`,
         );
         try {
-            const r = await fetch('/api/skeleton-ai/scenes/regenerate', {
+            const r = await fetch(resolveStudioBackendUrl('/api/skeleton-ai/scenes/regenerate'), {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -311,7 +311,7 @@ export default function CreatePanel({
         let terminalResponse = false;
 
         try {
-            const r = await fetch('/api/skeleton-ai/scenes', {
+            const r = await fetch(resolveStudioBackendUrl('/api/skeleton-ai/scenes'), {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -416,7 +416,7 @@ export default function CreatePanel({
             `${activeCategory}-${script.length}-${imageModel}-${videoModel}`,
         );
         try {
-            const r = await fetch('/api/skeleton-ai/generate', {
+            const r = await fetch(resolveStudioBackendUrl('/api/skeleton-ai/generate'), {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -1001,7 +1001,7 @@ function CategorySelector({
     useEffect(() => {
         const headers: Record<string, string> = {};
         if (accessToken) headers.Authorization = `Bearer ${accessToken}`;
-        fetch('/api/skeleton-ai/categories', { headers })
+        fetch(resolveStudioBackendUrl('/api/skeleton-ai/categories'), { headers })
             .then((r) => r.json())
             .then((d) => Array.isArray(d.categories) && setCategories(d.categories))
             .catch(() => setCategories([]));
@@ -1239,7 +1239,7 @@ function IdeaModal({
     const loadCategories = useCallback(() => {
         const headers: Record<string, string> = {};
         if (accessToken) headers.Authorization = `Bearer ${accessToken}`;
-        return fetch('/api/skeleton-ai/categories', { headers })
+        return fetch(resolveStudioBackendUrl('/api/skeleton-ai/categories'), { headers })
             .then((r) => r.json())
             .then((d) => {
                 if (Array.isArray(d.categories)) setCategories(d.categories);
@@ -1269,7 +1269,7 @@ function IdeaModal({
             // ("labsserman of vs" etc.). The /script endpoint returns clean
             // {script: "..."} when stream=false, so use that and reveal the
             // result in one write.
-            const r = await fetch('/api/skeleton-ai/script', {
+            const r = await fetch(resolveStudioBackendUrl('/api/skeleton-ai/script'), {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -1394,7 +1394,7 @@ function IdeaModal({
                                 setCreateError('');
                                 setBusy(true);
                                 try {
-                                    const r = await fetch('/api/skeleton-ai/categories', {
+                                    const r = await fetch(resolveStudioBackendUrl('/api/skeleton-ai/categories'), {
                                         method: 'POST',
                                         headers: {
                                             'Content-Type': 'application/json',

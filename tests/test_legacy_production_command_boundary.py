@@ -131,6 +131,19 @@ def test_direct_adapter_rejects_an_unregistered_production_tool(monkeypatch) -> 
     assert calls == []
 
 
+def test_direct_adapter_rejects_idempotency_keys_outside_v2_contract() -> None:
+    calls = {"regenerate": 0, "chatstory": 0, "clone": 0}
+    response = _media_client(calls).post(
+        "/api/auto/regenerate-scene-image",
+        json={"job_id": "job-1", "scene_index": 0},
+        headers=_headers("x" * 129),
+    )
+
+    assert response.status_code == 400
+    assert "too long" in response.text
+    assert calls["regenerate"] == 0
+
+
 def _media_client(calls: dict[str, int]) -> TestClient:
     async def auto_scene(*_args, **_kwargs):
         return {"ok": True}

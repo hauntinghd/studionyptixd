@@ -151,6 +151,71 @@ def test_consumer_executes_only_whitelisted_task_then_acks(monkeypatch) -> None:
     assert persisted == [("job-2", "processing"), ("job-2", "complete")]
 
 
+def test_cliplab_descriptor_uses_same_recoverable_consumer(monkeypatch) -> None:
+    jobs: dict[str, dict] = {}
+    backend_queue.init_queue_runtime(jobs)
+    stop = asyncio.Event()
+    descriptor = {
+        "operation": "analyze",
+        "video_id": "vid-1",
+        "prompt": "Find hooks",
+        "max_segments": 12,
+        "user_id": "creator-1",
+    }
+    payloads = [
+        {
+            "job_id": "clipa-recovered",
+            "task_name": "_run_cliplab_pipeline",
+            "args": ["clipa-recovered", descriptor],
+            backend_queue._QUEUE_RECEIPT_FIELD: "raw-cliplab",
+        }
+    ]
+    acknowledgements: list[str] = []
+    executed: list[tuple[str, dict]] = []
+
+    monkeypatch.setattr(backend_queue, "_redis_enabled", lambda: True)
+
+    async def dequeue():
+        return payloads.pop(0) if payloads else None
+
+    async def get_state(_job_id):
+        return {
+            "status": "queued",
+            "type": "cliplab_analyze",
+            "user_id": "creator-1",
+            "queue_descriptor": descriptor,
+        }
+
+    async def persist(_job_id, _state):
+        return True
+
+    async def acknowledge(payload):
+        acknowledgements.append(str(payload.get("job_id") or ""))
+        return True
+
+    async def run_cliplab(job_id, queued_descriptor):
+        executed.append((job_id, dict(queued_descriptor)))
+        jobs[job_id]["status"] = "complete"
+        stop.set()
+
+    monkeypatch.setattr(backend_queue, "dequeue_generation_job", dequeue)
+    monkeypatch.setattr(backend_queue, "get_persisted_job_state", get_state)
+    monkeypatch.setattr(backend_queue, "persist_job_state", persist)
+    monkeypatch.setattr(backend_queue, "persist_terminal_job_state", persist)
+    monkeypatch.setattr(backend_queue, "acknowledge_generation_job", acknowledge)
+
+    asyncio.run(
+        backend_queue.run_generation_consumer(
+            {"_run_cliplab_pipeline": run_cliplab},
+            stop_event=stop,
+            recover_inflight=False,
+        )
+    )
+
+    assert executed == [("clipa-recovered", descriptor)]
+    assert acknowledgements == ["clipa-recovered"]
+
+
 def test_consumer_never_acks_when_every_terminal_store_fails(monkeypatch) -> None:
     jobs: dict[str, dict] = {}
     backend_queue.init_queue_runtime(jobs)
@@ -311,6 +376,9 @@ def test_api_health_fails_when_required_consumer_is_not_ready(monkeypatch) -> No
         return {
             "status": "degraded",
             "backend_commit": "test-sha",
+            "deployment_target": "contabo",
+            "release_id": "studio-release-test",
+            "instance_id": "studio-api-01",
             "queue_consumer_ready": False,
             "queue_consumer": {"required": True, "running": False, "ready": False},
         }
@@ -322,3 +390,6 @@ def test_api_health_fails_when_required_consumer_is_not_ready(monkeypatch) -> No
 
     assert caught.value.status_code == 503
     assert caught.value.detail["queue_consumer"]["running"] is False
+    assert caught.value.detail["deployment_target"] == "contabo"
+    assert caught.value.detail["release_id"] == "studio-release-test"
+    assert caught.value.detail["instance_id"] == "studio-api-01"

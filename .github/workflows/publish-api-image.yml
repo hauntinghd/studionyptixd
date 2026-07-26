@@ -13,9 +13,8 @@ on:
     paths:
       - Dockerfile
       - .dockerignore
-      - fly.toml
       - requirements.txt
-      - "**/*.py"      # recursive so zerotier_private/, skeleton_ai/, long_form/ subpackage edits trigger the rebuild
+      - "**/*.py"
       - client_secrets.json
       - ops/**
       - cliplab/**
@@ -41,12 +40,12 @@ jobs:
   verify-candidate:
     name: Verify exact release candidate
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - name: Checkout exact candidate
         uses: actions/checkout@v4
 
-      - name: Set up Python 3.11
+      - name: Set up production Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -57,6 +56,18 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt pytest
+
+      - name: Compile all production Python with the image runtime
+        run: |
+          python -m compileall -q \
+            *.py \
+            cliplab \
+            long_form \
+            media_sources \
+            skeleton_ai \
+            studio \
+            studio_agent \
+            zerotier_private
 
       - name: Run release-critical backend suites
         run: |
@@ -88,6 +99,12 @@ jobs:
             tests/test_production_command_authority.py \
             tests/test_production_command_v2.py \
             tests/test_production_workflows.py \
+            tests/test_contabo_release_contract.py \
+            tests/test_fly_cutover_evidence.py \
+            tests/test_embedded_generation_queue.py \
+            tests/test_frontend_static.py \
+            tests/test_xai_runtime_hard_disable.py \
+            tests/test_desktop_release_channel.py \
             tests/test_skeleton_command_boundary.py \
             tests/test_cliplab_command_boundary.py \
             tests/test_runpod_direct_routes.py \
@@ -108,16 +125,66 @@ jobs:
         working-directory: ViralShorts-App
         run: npm run build
 
+      - name: Verify Cloudflare-to-Contabo streaming ingress contract
+        working-directory: runpod-serverless
+        run: node --test worker-proxy.test.mjs
+
+      - name: Install Tauri Linux test prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            libxdo-dev \
+            patchelf
+
+      - name: Set up stable Rust with formatting support
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Cache locked Rust dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ViralShorts-App/src-tauri/target
+          key: ${{ runner.os }}-studio-tauri-${{ hashFiles('ViralShorts-App/src-tauri/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-studio-tauri-
+
+      - name: Verify desktop updater trust anchor and Rust release contract
+        working-directory: ViralShorts-App/src-tauri
+        run: |
+          cargo fmt --all --check
+          cargo test --locked --test updater_release
+
   build-and-publish:
-    name: Publish and deploy verified candidate
+    name: Publish exact-SHA distribution image
     needs: verify-candidate
     if: ${{ github.event_name != 'pull_request' }}
     runs-on: ubuntu-latest
+    outputs:
+      build_id: ${{ steps.release_identity.outputs.build_id }}
+      image_ref: ${{ steps.immutable_image.outputs.image_ref }}
     env:
       DOCKERHUB_IMAGE: docker.io/nyptid/nyptid-studio-api
     steps:
-      - name: Checkout
+      - name: Checkout exact candidate
         uses: actions/checkout@v4
+
+      - name: Define deterministic release identity
+        id: release_identity
+        run: |
+          set -euo pipefail
+          commit_epoch="$(git show -s --format=%ct "${GITHUB_SHA}")"
+          release_timestamp="$(date -u -d "@${commit_epoch}" +%Y%m%dT%H%M%SZ)"
+          build_id="studio-${release_timestamp}-${GITHUB_SHA:0:12}"
+          echo "build_id=${build_id}" >>"${GITHUB_OUTPUT}"
+          printf 'Release identity: %s / %s\n' "${GITHUB_SHA}" "${build_id}"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -128,97 +195,48 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Build and push API image
+      - name: Build and push immutable API image
+        id: build_push
         uses: docker/build-push-action@v6
         with:
           context: .
           push: true
           build-args: |
             GIT_SHA=${{ github.sha }}
-            FRONTEND_BUILD_ID=${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+            FRONTEND_BUILD_ID=${{ steps.release_identity.outputs.build_id }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.version=${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+            org.opencontainers.image.version=${{ steps.release_identity.outputs.build_id }}
           tags: |
             ${{ env.DOCKERHUB_IMAGE }}:${{ github.sha }}
 
-      # Auto-deploy from this checkout using fly.toml so Fly receives the same
-      # app config, VM sizing, mounts, and release behavior as local deploys.
-      # Do not deploy the Docker Hub image directly: that path has previously
-      # wedged the volume-backed machine in `replacing` and bypassed config.
-      #
-      # PRIOR BUG (fixed in this commit): the previous guard
-      #   if: ${{ github.ref == 'refs/heads/master' && env.FLY_API_TOKEN != '' }}
-      # silently skipped both Setup flyctl AND Deploy to Fly.io because
-      # secret-derived job-level env vars don't reliably populate the
-      # `env` context inside `if:` expressions. This caused PR #117 / #118 /
-      # #119 / #120 / #121 to all push fresh images to Docker Hub but never
-      # update Fly — Fly stayed pinned to whatever Casey last `flyctl deploy`'d
-      # manually. Replaced with a step-output check so the condition
-      # evaluates against an explicit shell-tested value. The token is exposed
-      # only to the two steps that need it, never to the job-level `if` context.
-      - name: Check Fly token availability
-        id: fly_token_check
+      - name: Bind release to the exact published manifest digest
+        id: immutable_image
         env:
-          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
-        run: |
-          if [ -z "${FLY_API_TOKEN:-}" ]; then
-            echo "has_token=false" >> "$GITHUB_OUTPUT"
-            if [ "$GITHUB_REF" = "refs/heads/master" ]; then
-              echo "::error::FLY_API_TOKEN is unset; refusing to report a successful master release without deploying it."
-              exit 1
-            fi
-            echo "::notice::FLY_API_TOKEN is unset; this non-production candidate will be built but not deployed."
-          else
-            echo "has_token=true" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Setup flyctl
-        if: ${{ github.ref == 'refs/heads/master' && steps.fly_token_check.outputs.has_token == 'true' }}
-        uses: superfly/flyctl-actions/setup-flyctl@master
-
-      - name: Deploy to Fly.io
-        if: ${{ github.ref == 'refs/heads/master' && steps.fly_token_check.outputs.has_token == 'true' }}
-        env:
-          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
-        run: |
-          flyctl deploy \
-            --remote-only \
-            --config fly.toml \
-            -a nyptid-studio \
-            --build-arg GIT_SHA="${GITHUB_SHA}" \
-            --build-arg FRONTEND_BUILD_ID="${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
-            --strategy immediate \
-            --wait-timeout 180
-
-      - name: Verify deployed release provenance
-        if: ${{ github.ref == 'refs/heads/master' && steps.fly_token_check.outputs.has_token == 'true' }}
+          IMAGE_DIGEST: ${{ steps.build_push.outputs.digest }}
         run: |
           set -euo pipefail
-          expected_bundle="${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          actual_sha=""
-          actual_bundle=""
-          for attempt in $(seq 1 18); do
-            health="$(curl --fail --silent --show-error --connect-timeout 3 --max-time 5 https://nyptid-studio.fly.dev/api/health || true)"
-            actual_sha="$(printf '%s' "$health" | jq -r '.backend_commit // ""' 2>/dev/null || true)"
-            actual_bundle="$(printf '%s' "$health" | jq -r '.frontend_bundle // ""' 2>/dev/null || true)"
-            if [ "$actual_sha" = "$GITHUB_SHA" ] && [ "$actual_bundle" = "$expected_bundle" ]; then
-              break
-            fi
-            echo "Waiting for release provenance (attempt ${attempt}/18): sha=${actual_sha:-missing} bundle=${actual_bundle:-missing}"
-            sleep 5
-          done
-          test "$actual_sha" = "$GITHUB_SHA"
-          test "$actual_bundle" = "$expected_bundle"
-          printf 'Verified Fly release sha=%s bundle=%s\n' "$actual_sha" "$actual_bundle"
+          [[ "${IMAGE_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+            echo "::error::Docker publish did not return an immutable manifest digest"
+            exit 1
+          }
+          image_ref="${DOCKERHUB_IMAGE}@${IMAGE_DIGEST}"
+          echo "image_ref=${image_ref}" >>"${GITHUB_OUTPUT}"
+          printf 'Immutable image: %s\n' "${image_ref}"
 
-      # `latest` means "verified production", never merely "most recently
-      # built". Candidate branches retain their immutable commit-SHA tag.
-      - name: Promote verified image to latest
-        if: ${{ github.ref == 'refs/heads/master' && steps.fly_token_check.outputs.has_token == 'true' }}
-        run: |
-          docker buildx imagetools create \
-            --tag "${DOCKERHUB_IMAGE}:latest" \
-            "${DOCKERHUB_IMAGE}:${GITHUB_SHA}"
-# Force rebuild Mon Apr 13 09:21:18 EDT 2026
+  deploy-production:
+    name: Deploy exact candidate to Contabo
+    needs: build-and-publish
+    if: ${{ github.ref == 'refs/heads/master' }}
+    uses: ./.github/workflows/deploy-studio.yml
+    with:
+      git_sha: ${{ github.sha }}
+      build_id: ${{ needs.build-and-publish.outputs.build_id }}
+      image_ref: ${{ needs.build-and-publish.outputs.image_ref }}
+    secrets:
+      CONTABO_SSH_HOST: ${{ secrets.CONTABO_SSH_HOST }}
+      CONTABO_SSH_USER: ${{ secrets.CONTABO_SSH_USER }}
+      CONTABO_SSH_PORT: ${{ secrets.CONTABO_SSH_PORT }}
+      CONTABO_SSH_KEY: ${{ secrets.CONTABO_SSH_KEY }}
+      CONTABO_SSH_KNOWN_HOSTS: ${{ secrets.CONTABO_SSH_KNOWN_HOSTS }}

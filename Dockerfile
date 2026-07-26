@@ -10,7 +10,8 @@ RUN test -n "${FRONTEND_BUILD_ID}" \
     && test -n "${GIT_SHA}" \
     && test "${GIT_SHA}" != "unknown" \
     && echo "frontend build ${FRONTEND_BUILD_ID} git=${GIT_SHA}" \
-    && npm run build
+    && VITE_STUDIO_BUILD_ID="${FRONTEND_BUILD_ID}" npm run build \
+    && grep -R -F -q -- "${FRONTEND_BUILD_ID}" dist
 
 FROM python:3.11-slim
 
@@ -55,6 +56,22 @@ COPY studio/channels ./studio/channels
 COPY --from=frontend-builder /frontend/dist/ ./ViralShorts-App/dist/
 COPY ViralShorts-App/public/ ./ViralShorts-App/public/
 COPY ViralShorts-App/src/studio/lib/storyArtStyles.json ./ViralShorts-App/src/studio/lib/storyArtStyles.json
+# The release API reads the same Minisign trust anchor embedded in the desktop
+# application. If this file is absent or malformed, release publication fails
+# closed.
+COPY ViralShorts-App/src-tauri/tauri.conf.json ./ViralShorts-App/src-tauri/tauri.conf.json
+
+# Fail the image build before it can ever reach production if source syntax
+# is not compatible with the exact Python runtime used by this image.
+RUN python -m compileall -q \
+    *.py \
+    cliplab \
+    long_form \
+    media_sources \
+    skeleton_ai \
+    studio \
+    studio_agent \
+    zerotier_private
 
 RUN sed -i 's/\r$//' ./ops/run_render_service.sh \
     && chmod +x ./ops/run_render_service.sh
