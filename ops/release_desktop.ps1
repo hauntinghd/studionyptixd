@@ -57,6 +57,17 @@ function Assert-Native([string]$Step) {
     if ($LASTEXITCODE -ne 0) { throw "$Step failed with exit code $LASTEXITCODE" }
 }
 
+# Native tools (tauri, cargo, ssh, scp) write progress to stderr. Under
+# $ErrorActionPreference='Stop' PowerShell turns each stderr line into a
+# terminating error, which aborts the build on the first "Info ..." line.
+# Run native commands with error-action relaxed and gate on the real exit code.
+function Invoke-Native([scriptblock]$Script, [string]$Step) {
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try { & $Script } finally { $ErrorActionPreference = $prev }
+    if ($LASTEXITCODE -ne 0) { throw "$Step failed with exit code $LASTEXITCODE" }
+}
+
 function Get-JsonVersion([string]$Path) {
     (Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json).version
 }
@@ -110,8 +121,7 @@ try {
     $env:TAURI_SIGNING_PRIVATE_KEY = (Get-Content -LiteralPath $KeyPath -Raw)
     $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = $signingPassword
     Write-Host "==> tauri build --bundles nsis (frontend build runs via beforeBuildCommand)"
-    & npx.cmd --no-install tauri build --bundles nsis
-    Assert-Native "tauri build"
+    Invoke-Native { & npx.cmd --no-install tauri build --bundles nsis } "tauri build"
 } finally {
     $env:TAURI_SIGNING_PRIVATE_KEY = $null
     $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = $null
@@ -129,8 +139,7 @@ $env:NYPTID_UPDATER_VERIFY_ARTIFACT = $builtExe.FullName
 $env:NYPTID_UPDATER_VERIFY_SIGNATURE = $builtSig
 Push-Location $SrcTauri
 try {
-    & cargo test --locked --test updater_release
-    Assert-Native "updater signature verification (cargo test updater_release)"
+    Invoke-Native { & cargo test --locked --test updater_release } "updater signature verification (cargo test updater_release)"
 } finally {
     $env:NYPTID_UPDATER_VERIFY_ARTIFACT = $null
     $env:NYPTID_UPDATER_VERIFY_SIGNATURE = $null
@@ -167,10 +176,8 @@ $sshArgs = @("-F", $SshConfig, "-o", "BatchMode=yes", "-o", "StrictHostKeyChecki
 $remoteStaging = "studio-desktop-release-$Version"
 
 Write-Host "==> Uploading to $SshAlias staging (~/$remoteStaging)"
-& ssh @sshArgs "rm -rf `"$remoteStaging`" && mkdir -p `"$remoteStaging`""
-Assert-Native "prepare remote staging"
-& scp -F $SshConfig -o BatchMode=yes $exeOut $sigOut $shaOut "${SshAlias}:$remoteStaging/"
-Assert-Native "scp artifacts"
+Invoke-Native { & ssh @sshArgs "rm -rf '$remoteStaging' && mkdir -p '$remoteStaging'" } "prepare remote staging"
+Invoke-Native { & scp -F $SshConfig -o BatchMode=yes $exeOut $sigOut $shaOut "${SshAlias}:$remoteStaging/" } "scp artifacts"
 
 $publishScript = @"
 set -Eeuo pipefail
@@ -188,8 +195,7 @@ as_root install -m 0644 "`$stg/`$exe.sha256" "`$dst/`$exe.sha256"
 $( if (-not $KeepStaging) { 'rm -rf "$stg"' } )
 echo "PUBLISHED `$dst/`$exe"
 "@
-$publishScript | & ssh @sshArgs "bash -s"
-Assert-Native "publish to $RemoteReleaseDir"
+Invoke-Native { $publishScript | & ssh @sshArgs "bash -s" } "publish to $RemoteReleaseDir"
 
 if (-not $KeepStaging) { Remove-Item $stage -Recurse -Force }
 
