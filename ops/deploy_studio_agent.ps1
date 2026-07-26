@@ -145,7 +145,7 @@ else
   printf '__STUDIO_ACTIVE__=0\n'
 fi
 '@
-$activeOutput = @(($activeProbe -replace "\r","") | & $ssh @sshArgs "bash -s")
+$activeOutput = @(($activeProbe -replace "\r","") | & $ssh @sshArgs "tr -d '\r' | bash -s")
 Assert-NativeSuccess "Contabo ownership probe"
 $hadActive = $activeOutput -contains "__STUDIO_ACTIVE__=1"
 
@@ -207,7 +207,7 @@ as_root chmod -R a-w "${release_dir}"
 '@
 
 Write-Host "==> Staging immutable Contabo candidate $buildId ($gitSha)"
-$stageCommand = "bash -s -- '$gitSha' '$buildId' '$repoUrl'"
+$stageCommand = "tr -d '\r' | bash -s -- '$gitSha' '$buildId' '$repoUrl'"
 ($remoteStageScript -replace "\r","") | & $ssh @sshArgs $stageCommand
 Assert-NativeSuccess "Contabo release stage"
 
@@ -234,7 +234,7 @@ as_root bash "${release_dir}/ops/contabo/deploy.sh" \
   activate \
   --candidate "${candidate}"
 '@
-$activateCommand = "bash -s -- '$gitSha' '$buildId'"
+$activateCommand = "tr -d '\r' | bash -s -- '$gitSha' '$buildId'"
 ($remoteActivateScript -replace "\r","") | & $ssh @sshArgs $activateCommand
 Assert-NativeSuccess "Contabo release activation"
 

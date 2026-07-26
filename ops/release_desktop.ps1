@@ -200,7 +200,7 @@ $( if (-not $KeepStaging) { 'rm -rf "$stg"' } )
 echo "PUBLISHED `$dst/`$exe"
 "@
 # Strip CR so CRLF here-string line endings do not break bash on the server.
-Invoke-Native { ($publishScript -replace "\r","") | & ssh @sshArgs "bash -s" } "publish to $RemoteReleaseDir"
+Invoke-Native { ($publishScript -replace "\r","") | & ssh @sshArgs "tr -d '\r' | bash -s" } "publish to $RemoteReleaseDir"
 
 if (-not $KeepStaging) { Remove-Item $stage -Recurse -Force }
 
