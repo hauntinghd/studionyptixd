@@ -122,6 +122,9 @@ def test_ci_deploys_the_exact_published_manifest_digest() -> None:
     assert "test_studio_agent_render_qa.py" in release_tests
     assert "test_unified_credits.py" in release_tests
     assert "cargo test --locked --test updater_release" in publish
+    assert publish.index("sudo apt-get install --no-install-recommends -y ffmpeg") < publish.index(
+        "python -m pytest -q"
+    )
 
     assert "docker\\.io/nyptid/nyptid-studio-api@sha256:[0-9a-f]{64}" in deploy_workflow
     assert '--image-ref "${image_ref}"' in deploy_workflow
