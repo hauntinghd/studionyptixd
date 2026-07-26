@@ -20,7 +20,7 @@ SIGNED_FIXTURE_PATH = ROOT / "tests" / "fixtures" / "desktop_release_test_artifa
 SIGNED_FIXTURE_SIGNATURE_PATH = SIGNED_FIXTURE_PATH.with_suffix(
     f"{SIGNED_FIXTURE_PATH.suffix}.sig"
 )
-RELEASE_VERSION = "1.0.2"
+RELEASE_VERSION = "1.0.3"
 RELEASE_FILENAME = f"NYPTID-Studio_{RELEASE_VERSION}_x64-setup.exe"
 RELEASE_BYTES = SIGNED_FIXTURE_PATH.read_bytes()
 RELEASE_SIGNATURE = SIGNED_FIXTURE_SIGNATURE_PATH.read_text(encoding="utf-8").strip()

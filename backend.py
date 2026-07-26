@@ -741,18 +741,18 @@ app = FastAPI(
 app.add_middleware(MultipartContentLengthLimitMiddleware)
 configure_backend_runtime(app)
 
-DESKTOP_RELEASE_VERSION = "1.0.2"
+DESKTOP_RELEASE_VERSION = "1.0.3"
 DESKTOP_RELEASE_DIR = Path(str(os.getenv("APP_DATA_DIR") or TEMP_DIR)) / "studio_releases"
 DESKTOP_RELEASE_FILENAME = f"NYPTID-Studio_{DESKTOP_RELEASE_VERSION}_x64-setup.exe"
 DESKTOP_UPDATER_CONFIG_PATH = (
     Path(__file__).resolve().parent / "ViralShorts-App" / "src-tauri" / "tauri.conf.json"
 )
 DESKTOP_RELEASE_NOTES = (
-    "NYPTID Studio 1.0.2: canonical Contabo API and signed-updater cutover. Desktop API, "
-    "release checks, downloads, and future in-app updates use api-studio.nyptidindustries.com, "
-    "while the reviewed bundled UI retains the 1.0.1 Windows and Razer mouse safeguards. "
-    "Because 1.0.2 deliberately rotates updater trust, 1.0.0 and 1.0.1 require this one "
-    "manual installer; 1.0.2 and later resume signed in-app updates."
+    "NYPTID Studio 1.0.3: brings the desktop app in sync with the current web release. "
+    "Includes the Studio Agent connectivity/reliability rework (resilient boot resume-or-create, "
+    "automatic reconnect, and clearer recovery) plus every fix shipped to web since 1.0.2. "
+    "This is a normal signed in-app update: 1.0.2 clients update automatically on next launch, "
+    "while 1.0.0 and 1.0.1 require this one manual installer from the 1.0.2 trust cutover."
 )
 
 
