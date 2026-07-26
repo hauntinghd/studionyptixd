@@ -604,7 +604,12 @@ def test_data_manifest_and_fly_copy_only_runbook_fail_closed() -> None:
     assert "--restart=no" in readme
     assert "--skip-health-checks" in readme
     assert "rsync --archive --delete --partial" in readme
-    assert "/var/data/ root@82.197.67.155:/opt/studio/data/" in readme
+    assert (
+        'restrict,command="/usr/bin/rrsync -wo /opt/studio/data" ssh-ed25519'
+        in readme
+    )
+    assert "/var/data/ root@82.197.67.155:/\"" in readme
+    assert "/var/data/ root@82.197.67.155:/opt/studio/data/" not in readme
     assert "data_manifest.py attest" in readme
     assert 'fly machine stop "$FLY_MACHINE_ID"' in readme
     assert "machine-list-before.json" in _read("capture_fly_cutover_evidence.sh")

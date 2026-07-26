@@ -308,9 +308,18 @@ fly ssh console --machine "$FLY_MACHINE_ID" --app "$STUDIO_APP" --command \
 ```
 
 Use a one-cutover SSH key authorized only for `/opt/studio/data`, plus a pinned
-Contabo host-key file. Install `rsync` and OpenSSH in the copy-only machine's
-ephemeral root, upload those two files, and run the final sync directly from
-the mounted Fly volume. This is intentionally a second, deletion-capable pass
+Contabo host-key file. The VPS `authorized_keys` entry must use OpenSSH's
+`restrict` option and Debian's `rrsync` wrapper; a plain root key is forbidden:
+
+```text
+restrict,command="/usr/bin/rrsync -wo /opt/studio/data" ssh-ed25519 <cutover-public-key> <cutover-comment>
+```
+
+`rrsync` changes into `/opt/studio/data`, so the client destination below is
+the restricted root (`:/`), not the host's literal filesystem path. Install
+`rsync` and OpenSSH in the copy-only machine's ephemeral root, upload the
+private key and pinned host file, and run the final sync directly from the
+mounted Fly volume. This is intentionally a second, deletion-capable pass
 after the earlier seed, so it transfers only the final delta:
 
 ```bash
@@ -325,7 +334,7 @@ fly ssh console --machine "$FLY_MACHINE_ID" --app "$STUDIO_APP" --command \
   -e 'ssh -i /tmp/studio-migration-key \
   -o UserKnownHostsFile=/tmp/contabo-known-hosts \
   -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes' \
-  /var/data/ root@82.197.67.155:/opt/studio/data/"
+  /var/data/ root@82.197.67.155:/"
 
 fly ssh sftp get /tmp/fly-final.manifest \
   "$LOCAL_CUTOVER_ROOT/fly-final.manifest" \
