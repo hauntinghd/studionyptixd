@@ -31,6 +31,9 @@ EVIDENCE_FILES = {
     "machine_list_after": "machine-list-after.json",
 }
 
+COPY_ONLY_MODE = "copy_only"
+CORDONED_STOPPED_MODE = "cordoned_stopped"
+
 
 def _strict_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     result: dict[str, Any] = {}
@@ -69,7 +72,7 @@ def _verify_machine_list(
     *,
     machine_id: str,
     require_stopped: bool,
-) -> None:
+) -> set[str]:
     machines: Any = payload
     if isinstance(payload, dict):
         machines = payload.get("machines", payload.get("Machines"))
@@ -82,7 +85,7 @@ def _verify_machine_list(
     machine = machines[0]
     if not isinstance(machine, dict):
         raise EvidenceError("Fly machine-list entry is malformed")
-    _verify_machine(
+    return _verify_machine(
         machine,
         machine_id=machine_id,
         require_stopped=require_stopped,
@@ -118,7 +121,7 @@ def _verify_machine(
     *,
     machine_id: str,
     require_stopped: bool,
-) -> None:
+) -> set[str]:
     machine = _machine(payload)
     actual_id = str(_value(machine, "id", "ID", "machine_id") or "")
     if actual_id != machine_id:
@@ -129,6 +132,31 @@ def _verify_machine(
     config = _value(machine, "config", "Config")
     if not isinstance(config, dict):
         raise EvidenceError("Fly machine config is missing")
+    _verify_data_mount(config)
+
+    modes: set[str] = set()
+    strict_error: EvidenceError | None = None
+    try:
+        _verify_copy_only_config(config)
+    except EvidenceError as exc:
+        strict_error = exc
+    else:
+        modes.add(COPY_ONLY_MODE)
+
+    if _has_newest_cordon_event(machine):
+        modes.add(CORDONED_STOPPED_MODE)
+
+    if not modes:
+        if strict_error is not None:
+            raise EvidenceError(
+                f"{strict_error}; newest Fly machine event is not an exact "
+                "user cordon with stopped status"
+            ) from strict_error
+        raise EvidenceError("Fly machine evidence has no accepted retirement mode")
+    return modes
+
+
+def _verify_copy_only_config(config: dict[str, Any]) -> None:
     services = config.get("services", [])
     if services not in (None, [], {}):
         raise EvidenceError("Fly machine still exposes service admission")
@@ -154,6 +182,9 @@ def _verify_machine(
         raise EvidenceError("Fly machine restart policy is not no")
     if config.get("auto_destroy") not in (False, None):
         raise EvidenceError("Fly copy-only machine unexpectedly auto-destroys")
+
+
+def _verify_data_mount(config: dict[str, Any]) -> None:
     mounts = config.get("mounts")
     if not isinstance(mounts, list) or not any(
         isinstance(item, dict)
@@ -163,16 +194,54 @@ def _verify_machine(
         raise EvidenceError("Fly machine evidence does not retain /var/data")
 
 
+def _has_newest_cordon_event(machine: dict[str, Any]) -> bool:
+    events = _value(machine, "events", "Events")
+    if not isinstance(events, list) or not events:
+        return False
+    timestamped: list[tuple[int, dict[str, Any]]] = []
+    for event in events:
+        if not isinstance(event, dict):
+            return False
+        timestamp = _value(event, "timestamp", "Timestamp")
+        if (
+            isinstance(timestamp, bool)
+            or not isinstance(timestamp, int)
+            or timestamp < 1_000_000_000_000
+            or timestamp > 9_999_999_999_999
+        ):
+            return False
+        timestamped.append((timestamp, event))
+    newest_timestamp = max(timestamp for timestamp, _event in timestamped)
+    newest = [
+        event for timestamp, event in timestamped if timestamp == newest_timestamp
+    ]
+    if len(newest) != 1:
+        return False
+    event = newest[0]
+    return (
+        _value(event, "type", "Type") == "cordon"
+        and _value(event, "status", "Status") == "stopped"
+        and _value(event, "source", "Source") == "user"
+    )
+
+
 def _app_config(payload: dict[str, Any]) -> dict[str, Any]:
     nested = payload.get("config")
     return nested if isinstance(nested, dict) else payload
 
 
-def _verify_app_config(payload: dict[str, Any], *, app: str) -> None:
+def _verify_app_config(
+    payload: dict[str, Any],
+    *,
+    app: str,
+    evidence_mode: str,
+) -> None:
     named = str(payload.get("app") or payload.get("app_name") or "")
     if named and named != app:
         raise EvidenceError("Fly app config targets a different app")
     config = _app_config(payload)
+    if evidence_mode == CORDONED_STOPPED_MODE:
+        return
     declarations: list[dict[str, Any]] = []
     http_service = config.get("http_service")
     if isinstance(http_service, dict):
@@ -342,27 +411,44 @@ def verify(
     ):
         if not isinstance(payloads[key], dict):
             raise EvidenceError(f"{EVIDENCE_FILES[key]} root is not an object")
-    _verify_machine_list(
-        payloads["machine_list_before"],
-        machine_id=machine_id,
-        require_stopped=True,
+    machine_modes = [
+        _verify_machine_list(
+            payloads["machine_list_before"],
+            machine_id=machine_id,
+            require_stopped=True,
+        ),
+        _verify_machine(
+            payloads["machine_before"],
+            machine_id=machine_id,
+            require_stopped=True,
+        ),
+        _verify_machine(
+            payloads["machine_after"],
+            machine_id=machine_id,
+            require_stopped=True,
+        ),
+        _verify_machine_list(
+            payloads["machine_list_after"],
+            machine_id=machine_id,
+            require_stopped=True,
+        ),
+    ]
+    unanimous_modes = set.intersection(*machine_modes)
+    if CORDONED_STOPPED_MODE in unanimous_modes:
+        evidence_mode = CORDONED_STOPPED_MODE
+    elif COPY_ONLY_MODE in unanimous_modes:
+        evidence_mode = COPY_ONLY_MODE
+    else:
+        raise EvidenceError(
+            "Fly machine snapshots mix retirement modes; all four must prove "
+            "exact copy-only configuration or all four must prove the newest "
+            "event is an exact user cordon with stopped status"
+        )
+    _verify_app_config(
+        payloads["app_config"],
+        app=app,
+        evidence_mode=evidence_mode,
     )
-    _verify_machine(
-        payloads["machine_before"],
-        machine_id=machine_id,
-        require_stopped=True,
-    )
-    _verify_machine(
-        payloads["machine_after"],
-        machine_id=machine_id,
-        require_stopped=True,
-    )
-    _verify_machine_list(
-        payloads["machine_list_after"],
-        machine_id=machine_id,
-        require_stopped=True,
-    )
-    _verify_app_config(payloads["app_config"], app=app)
     probe_at = _verify_origin_probe(
         payloads["origin_probe"],
         app=app,
@@ -393,6 +479,7 @@ def verify(
     ).encode("ascii")
     result = {
         "EVIDENCE_FORMAT": "2",
+        "EVIDENCE_MODE": evidence_mode,
         "APP": app,
         "MACHINE_ID": machine_id,
         "ORIGIN": origin,

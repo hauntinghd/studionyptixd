@@ -409,6 +409,18 @@ the one expected stopped machine, and both extracted status documents must
 contain the exact inert command, no services/checks, restart `no`, and
 `/var/data`.
 
+If Fly billing prevents the reviewed copy-only machine update, the verifier
+also accepts Fly's cordon as a narrow fail-closed fallback. All four raw
+machine snapshots must independently report the retained machine as stopped,
+and the uniquely newest timestamped event in every snapshot must be exactly a
+user-sourced `cordon` with `stopped` status. The failed origin probes, drained
+queue, file quiescence, single-machine identity, and `/var/data` checks remain
+mandatory. A missing, superseded, malformed, or mixed cordon proof fails.
+Only this unanimous `cordoned_stopped` evidence mode permits the unchanged app
+config to retain services/autostart; normal `copy_only` evidence still requires
+the strict service and autostart constraints. The verifier summary emits the
+selected `EVIDENCE_MODE`.
+
 ### 5. VPS: issue and consume the hash-bound fence
 
 ```bash
