@@ -333,6 +333,7 @@ def test_smoke_and_rollback_fail_closed() -> None:
 
 def test_caddy_authenticates_worker_and_exposes_only_large_upload_bypasses() -> None:
     caddy = _read("Caddyfile.studio")
+    readme = _read("README.md")
     assert "api-studio.nyptidindustries.com" in caddy
     assert "studio.82.197.67.155.sslip.io" in caddy
     assert "api-studio.nyptidindustries.com, studio." not in caddy
@@ -361,6 +362,9 @@ def test_caddy_authenticates_worker_and_exposes_only_large_upload_bypasses() -> 
     assert '"direct_origin_forbidden"' in caddy
     assert "respond `" in caddy
     assert "` 403" in caddy
+    assert "up -d --force-recreate --no-deps caddy" in readme
+    assert "bind mount still" in readme
+    assert "docker exec cliplab-caddy sha256sum /etc/caddy/Caddyfile" in readme
 
     bootstrap = _read("Caddyfile.studio.bootstrap")
     assert "TRANSIENT ROLLOUT CONFIG ONLY" in bootstrap

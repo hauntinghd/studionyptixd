@@ -138,7 +138,7 @@ docker compose \
   --env-file /opt/studio/shared/caddy.env \
   -f docker-compose.yml \
   -f /opt/studio/current/ops/contabo/caddy-compose.override.yml \
-  up -d --no-deps caddy
+  up -d --force-recreate --no-deps caddy
 ```
 
 Use this ordering to avoid a Worker/Caddy token-mismatch outage:
@@ -162,13 +162,27 @@ Use this ordering to avoid a Worker/Caddy token-mismatch outage:
    ```
 
 3. Replace only the temporary Studio site block with `Caddyfile.studio`, then
-   validate and reload Caddy:
+   force-recreate Caddy before validating it. The replacement helper commits
+   the host Caddyfile with an atomic rename; a container whose bind mount still
+   references the old inode would otherwise reload the obsolete bootstrap
+   configuration.
 
    ```bash
+   python3 /opt/studio/current/ops/contabo/replace_caddy_site.py \
+     --caddyfile /opt/cliplab/deploy/Caddyfile \
+     --site-block /opt/studio/current/ops/contabo/Caddyfile.studio \
+     --hostname studio.82.197.67.155.sslip.io \
+     --backup-dir /opt/studio/shared/caddy-backups
+   cd /opt/cliplab/deploy
+   docker compose \
+     --env-file /opt/studio/shared/caddy.env \
+     -f docker-compose.yml \
+     -f /opt/studio/current/ops/contabo/caddy-compose.override.yml \
+     up -d --force-recreate --no-deps caddy
    docker exec cliplab-caddy caddy validate \
      --config /etc/caddy/Caddyfile --adapter caddyfile
-   docker exec cliplab-caddy caddy reload \
-     --config /etc/caddy/Caddyfile --adapter caddyfile
+   test "$(sha256sum /opt/cliplab/deploy/Caddyfile | awk '{print $1}')" = \
+     "$(docker exec cliplab-caddy sha256sum /etc/caddy/Caddyfile | awk '{print $1}')"
    ```
 
 4. Prove the boundary without browser control:
