@@ -983,6 +983,14 @@ def test_remake_all_scenes_directive_acts_on_active_job_without_asking_for_id():
     # A clear directive must execute, not ask for a job id that is already known.
     assert command.authorization.execution_requested is True
     assert command.clarification_question == ""
+    # And the validator must accept "all 6 scenes" as grounding every scene,
+    # not reject it as ungrounded (the failure this test guards against).
+    validation = validate_studio_command(command, state, user_text=text)
+    assert not (
+        validation.clarification is not None
+        and validation.clarification.code == "ungrounded_scene_selection"
+    ), validation.clarification
+    assert command.repair.scene_numbers == [1, 2, 3, 4, 5, 6]
 
 
 def test_remake_directive_still_deferred_when_negated():

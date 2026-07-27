@@ -276,7 +276,11 @@ def extract_scene_numbers_request(
     selected: set[int] = set()
     all_selected = bool(
         re.search(
-            r"\b(?:all|every|each)\s+(?:of\s+the\s+)?scenes?\b|"
+            # "all scenes", "all 6 scenes", "all of the scenes", "every scene",
+            # "each scene". The optional count restates how many exist; "all"
+            # governs, so it means every scene in the job.
+            r"\b(?:all|every|each)\s+(?:\d{1,3}\s+)?(?:of\s+(?:the|these|those)\s+)?scenes?\b|"
+            r"\ball\s+(?:\d{1,3}\s+)?(?:of\s+)?(?:the|them|these|those)\b(?=[^.!?]*\bscenes?\b)|"
             r"\bscenes?\s+(?:all|every|each)\b",
             low,
         )
