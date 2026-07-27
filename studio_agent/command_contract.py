@@ -153,13 +153,14 @@ _SCENE_COUNT_TOKEN = (
 _SCENE_REPAIR_SUBJECT_RE = re.compile(
     r"\b(?:scenes?|stills?|frames?|shots?|visuals?|images?|clips?|animations?|"
     r"prompts?|scripts?|narrations?|story\s+beats?|settings?|backgrounds?|"
-    r"those|these|they)\b",
+    r"those|these|they|them)\b",
     re.IGNORECASE,
 )
 _SCENE_REPAIR_ACTION_RE = re.compile(
     r"\b(?:(?:can|could|would|will)\s+you\s+|please\s+)?"
-    r"(?:fix|repair|correct|redo|rebuild|regenerate|rerender|re-render|reanimate|"
-    r"re-animate|revise|restage|re-stage)\b",
+    r"(?:fix|repair|correct|redo|re-do|rebuild|re-build|regenerate|re-generate|"
+    r"rerender|re-render|reanimate|re-animate|remake|remade|remaking|re-make|"
+    r"recreate|re-create|reproduce|re-produce|revise|restage|re-stage)\b",
     re.IGNORECASE,
 )
 _SCENE_REPAIR_DEFECT_RE = re.compile(
@@ -179,8 +180,9 @@ _SCENE_REPAIR_DEFECT_RE = re.compile(
 )
 _SCENE_REPAIR_NEGATED_ACTION_RE = re.compile(
     r"\b(?:do\s+not|don'?t|never|stop)\s+(?:please\s+)?"
-    r"(?:fix|repair|correct|redo|rebuild|regenerate|rerender|re-render|reanimate|"
-    r"re-animate|change|update|revise|restage|re-stage|touch|modify)\b"
+    r"(?:fix|repair|correct|redo|re-do|rebuild|re-build|regenerate|re-generate|"
+    r"rerender|re-render|reanimate|re-animate|remake|remade|remaking|re-make|"
+    r"recreate|re-create|reproduce|re-produce|change|update|revise|restage|re-stage|touch|modify)\b"
     r"|\b(?:do\s+not|don'?t)\s+(?:do|make)\s+anything\s+(?:to|with)\b"
     r"|\b(?:leave|keep)\s+(?:the\s+)?(?:scenes?|stills?|clips?)\s+(?:alone|unchanged|as\s+is)\b",
     re.IGNORECASE,
@@ -408,7 +410,7 @@ def infer_scene_repair_scope(text: str) -> RepairScope:
         low,
     ))
     animation = bool(re.search(
-        r"\b(?:animation|animated|clip|motion|movement|i2v|flicker|morph|warping|drift)\w*\b",
+        r"\b(?:animat|clip|motion|movement|i2v|flicker|morph|warping|drift)\w*\b",
         low,
     ))
     visual = bool(re.search(
@@ -416,6 +418,15 @@ def infer_scene_repair_scope(text: str) -> RepairScope:
         r"lighting|pose|prop|composition)\w*\b",
         low,
     ))
+    # "Remake / redo / rebuild from scratch" is a full still regeneration, not a
+    # light touch-up, so treat it as a visual (still) signal. Paired with an
+    # animation request it correctly resolves to full_quality below.
+    remake = bool(re.search(
+        r"\b(?:remake|remade|remaking|re-?make|recreate|re-?create|reproduce|re-?produce|"
+        r"rebuild|re-?build|redo|re-?do|regenerat\w*|from\s+scratch|start\s+over)\b",
+        low,
+    ))
+    visual = visual or remake
     if sum((narrative, animation, visual)) > 1:
         return "full_quality"
     if narrative:
