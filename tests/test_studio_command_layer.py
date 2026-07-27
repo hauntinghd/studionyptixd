@@ -952,3 +952,55 @@ def test_postcondition_fails_when_preserved_scene_changes():
     )
     assert verdict.status == "failed"
     assert verdict.safe_claim == "none"
+
+
+def test_remake_all_scenes_directive_acts_on_active_job_without_asking_for_id():
+    # The active production is already in studio_state; a present-tense remake
+    # directive must act on it (Claude authoritative) instead of downgrading to
+    # a "which job / give me the job id" clarification.
+    text = "all 6 scenes need to be fully remade so please do that then animate them"
+    state = _state(_snapshot(scene_count=6), repairable=True)
+    command = _plan(
+        text,
+        _tool_response(
+            _proposal(
+                action="audit_and_repair_scenes",
+                target_source="active_job",
+                repair_scene_numbers=[1, 2, 3, 4, 5, 6],
+                repair_scope="full_quality",
+                repair_instruction=text,
+                execution_requested=True,
+                confidence=0.95,
+            )
+        ),
+        state=state,
+    )
+    assert command.action == "audit_and_repair_scenes"
+    assert command.target.source == "active_job"
+    assert command.repair is not None
+    # "fully remade" + "animate them" => regenerate stills AND re-animate.
+    assert command.repair.scope == "full_quality"
+    # A clear directive must execute, not ask for a job id that is already known.
+    assert command.authorization.execution_requested is True
+    assert command.clarification_question == ""
+
+
+def test_remake_directive_still_deferred_when_negated():
+    # Trusting the model must not defeat negation safety.
+    text = "do not remake the scenes"
+    state = _state(_snapshot(scene_count=6), repairable=True)
+    command = _plan(
+        text,
+        _tool_response(
+            _proposal(
+                action="audit_and_repair_scenes",
+                target_source="active_job",
+                repair_scene_numbers=[1, 2, 3, 4, 5, 6],
+                repair_scope="full_quality",
+                execution_requested=True,
+            )
+        ),
+        state=state,
+    )
+    assert command.authorization.execution_requested is False
+    assert command.clarification_question != ""

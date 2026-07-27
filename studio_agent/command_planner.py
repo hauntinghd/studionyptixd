@@ -366,6 +366,17 @@ def _ground_proposal(
                     if str(number).isdigit() and 1 <= int(number) <= total_scenes
                 ]
             selected = sorted(dict.fromkeys(selected))
+            if not selected:
+                # Trust the model's scene selection (Claude can read the active
+                # job's scene list) when the deterministic parser finds none,
+                # e.g. "all 6 scenes" / "remake them all". Clamp to the real
+                # scene count so a model can never target scenes that do not exist.
+                model_scenes = [
+                    int(number)
+                    for number in (getattr(proposal, "repair_scene_numbers", []) or [])
+                    if str(number).lstrip("-").isdigit() and 1 <= int(number) <= total_scenes
+                ]
+                selected = sorted(dict.fromkeys(model_scenes))
             blocked = scene_repair_block_reason(user_text)
             direct_evidence = scene_repair_authorization_evidence(user_text)
             confirmation = contextual_confirmation_evidence(user_text) if pending_repair else ""
@@ -396,15 +407,22 @@ def _ground_proposal(
             }:
                 repair_scope = "general_scene_quality"
 
+            # Trust the model's read of a present-tense directive. The compiler
+            # (Claude) sets execution_requested from natural language; a missing
+            # regex execution quote must not veto a clear "remake them / do it"
+            # when the turn is not a blocked negation/question. The downstream
+            # confirm + budget gate remains the authority on spending.
+            model_exec = bool(getattr(proposal, "execution_requested", False)) and not blocked
+            execute_now = bool(execution_quote) or model_exec
             if blocked:
                 clarification = (
                     "Do you want me to audit and repair those scenes now, or are you only asking about them?"
                 )
-            elif len(repair_jobs) != 1:
+            elif len(repair_jobs) != 1 and not (state.reply_target_job_id or (pending_repair is not None and pending_repair.target_job_id)):
                 clarification = "Which short should I repair? Reply to its production card."
             elif not selected:
                 clarification = "Which scene or scene range should I audit and repair?"
-            elif not execution_quote:
+            elif not execute_now:
                 human = ", ".join(str(number) for number in selected)
                 clarification = f"Do you want me to audit and repair Scene(s) {human} now?"
             else:
@@ -427,8 +445,8 @@ def _ground_proposal(
                     "repair_instruction": instruction,
                     "existing_work_approved": False,
                     "approval_evidence": "",
-                    "execution_requested": bool(execution_quote),
-                    "execution_evidence": execution_quote,
+                    "execution_requested": execute_now,
+                    "execution_evidence": execution_quote or (str(user_text or "").strip()[:300] if model_exec else ""),
                     "clarification_question": clarification,
                     "confidence": max(0.9 if selected else 0.72, proposal.confidence),
                 }
@@ -524,11 +542,23 @@ async def plan_studio_command(
                 "You are Studio's semantic command compiler. Emit exactly one emit_studio_command call. "
                 "Do not call production tools. Scene numbers are human-facing and 1-based. Distinguish "
                 "additional scenes from total scenes. Resolve 'them' to the closest mentioned scene set. "
-                "Negation wins: 'do not animate them' means animation_scope=none. Evidence fields must "
-                "be exact substrings of the user message. For scene-quality complaints, use "
-                "audit_and_repair_scenes, preserve human-facing 1-based scene numbers, and distinguish "
-                "narrative alignment from still/animation defects. A question or hypothetical is not "
-                "permission to mutate. Use clarify instead of guessing a target, scene range, or intent."
+                "TARGET RESOLUTION: studio_state.jobs lists the creator's active productions with their "
+                "job_id, scene_count, status and per-scene state. When the user refers to the current "
+                "production ('the scenes', 'them', 'this short', 'all N scenes', 'the video') and exactly "
+                "one active job fits, set target.source='active_job' and act on it. NEVER ask the user for "
+                "a job_id that is already present in studio_state.jobs. Only use action='clarify' when the "
+                "target, scene range, or intent is genuinely ambiguous (e.g. multiple candidate jobs). "
+                "INTENT: any clear directive to remake, redo, re-create, rebuild, regenerate, or start over "
+                "on scenes is action='audit_and_repair_scenes'; select the exact 1-based scene numbers "
+                "referenced ('all N' = every scene in that job). If the same turn also asks to animate, set "
+                "repair.scope='full_quality'. For scene-quality complaints, also use audit_and_repair_scenes "
+                "and distinguish narrative alignment from still/animation defects. "
+                "AUTHORIZATION: set execution_requested=true when the user gives a present-tense directive to "
+                "act ('remake them', 'do that', 'please do it', 'go ahead', 'make the rest'); a spend/confirm "
+                "gate downstream still protects the creator, so do not withhold execution merely because a "
+                "job_id was not restated. Negation wins ('do not animate them' => animation_scope=none), and a "
+                "question or hypothetical ('should I...', 'what if...', 'are the scenes...') is NOT permission "
+                "to mutate. Evidence quote fields, when set, must be exact substrings of the user message."
             ),
         },
         {
