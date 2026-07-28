@@ -2888,6 +2888,30 @@ def _resolve_narration_duration_sec(narration: Path, *, job_id: str | None = Non
     return best
 
 
+def _ken_burns_motion_filter(
+    per_scene: float, fps: int, *, light_shake_enabled: bool = False
+) -> str:
+    """Ken Burns zoompan segment for the long-form slideshow.
+
+    CRITICAL: zoompan emits exactly ``d`` OUTPUT frames per INPUT still, so each
+    still must be held for its full slideshow interval: ``d = per_scene * fps``.
+    ``d=1`` was the long-form bug — every still collapsed to a single frame, the
+    whole gallery flashed by in ``scene_count/fps`` seconds, and ``-t narration``
+    stretched the LAST frame across the entire runtime. Motion is driven by
+    output-frame time ``on`` (all ``d`` frames of one still share one input
+    timestamp ``it``, so ``it``-based motion would freeze per still).
+    """
+    frames_per_still = max(1, round(float(per_scene) * int(fps)))
+    phase = f"(mod(on,{frames_per_still})/{frames_per_still})"  # 0..1 within each still
+    gt = f"(on/{fps})"  # continuous output-time for gentle drift
+    shake = f"+if(lt(mod({gt},180),0.7),sin({gt}*20)*2,0)" if light_shake_enabled else ""
+    return (
+        f"zoompan=z='1.02+0.055*(0.5-0.5*cos(2*PI*{phase}))':"
+        f"x='(iw-iw/zoom)/2+sin({gt}/7)*8{shake}':"
+        f"y='(ih-ih/zoom)/2+cos({gt}/9)*5{shake}':d={frames_per_still}:s=1920x1080:fps={fps},"
+    )
+
+
 def _compose_slideshow(
     stills: list[Path],
     narration: Path,
@@ -2983,13 +3007,8 @@ def _compose_slideshow(
         "crop=2200:1238,"
     )
     if ken_burns_enabled:
-        # Time-based expressions reset naturally at each still's hold interval.
-        # The optional emphasis is only two pixels and occurs briefly every three minutes.
-        shake = "+if(lt(mod(it,180),0.7),sin(it*20)*2,0)" if light_shake_enabled else ""
-        motion_filter = (
-            f"zoompan=z='1.02+0.055*(0.5-0.5*cos(2*PI*mod(it,{per_scene:.4f})/{per_scene:.4f}))':"
-            f"x='(iw-iw/zoom)/2+sin(it/7)*8{shake}':"
-            f"y='(ih-ih/zoom)/2+cos(it/9)*5{shake}':d=1:s=1920x1080:fps={fps},"
+        motion_filter = _ken_burns_motion_filter(
+            per_scene, fps, light_shake_enabled=light_shake_enabled
         )
     else:
         motion_filter = "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,"
