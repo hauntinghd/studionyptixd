@@ -27,6 +27,38 @@ class ModelPolicyTests(unittest.TestCase):
                 with self.assertRaises(model_registry.ModelDisabledError):
                     model_registry.assert_model_selectable(model_id)
 
+    def test_fable_is_denied_and_excluded_from_catalog(self) -> None:
+        # Fable 5 (and the Mythos family) are usage-based only, not offered as
+        # selectable Studio runners — denied even if the live account lists them.
+        for model_id in ("claude-fable-5", "anthropic/claude-fable-5", "claude-mythos-5"):
+            with self.subTest(model_id=model_id):
+                with self.assertRaises(provider_policy.ProviderPolicyDenied):
+                    provider_policy.assert_runner_model_allowed(model_id)
+        self.assertNotIn("claude-fable-5", openrouter.CURATED_META)
+        self.assertNotIn("claude-fable-5", openrouter.RECOMMENDED_MODELS)
+        catalog = openrouter.build_model_catalog([{"id": "claude-fable-5"}, {"id": "claude-sonnet-5"}])
+        self.assertEqual([r["id"] for r in catalog], ["claude-sonnet-5"])
+
+    def test_premium_runners_surface_first_party_list_price(self) -> None:
+        # Every model the user listed shows a per-token list price in the picker.
+        expected = {
+            "claude-opus-5": (5.0, 25.0),
+            "claude-opus-4-8": (5.0, 25.0),
+            "claude-opus-4-7": (5.0, 25.0),
+            "claude-opus-4-6": (5.0, 25.0),
+            "claude-opus-4-5": (5.0, 25.0),
+            "claude-opus-4-1": (15.0, 75.0),
+            "claude-sonnet-5": (3.0, 15.0),
+            "claude-sonnet-4-6": (3.0, 15.0),
+            "claude-sonnet-4-5": (3.0, 15.0),
+            "claude-haiku-4-5-20251001": (1.0, 5.0),
+        }
+        catalog = openrouter.build_model_catalog([{"id": mid} for mid in expected])
+        priced = {r["id"]: (r["prompt_price_per_m"], r["completion_price_per_m"]) for r in catalog}
+        for model_id, prices in expected.items():
+            with self.subTest(model_id=model_id):
+                self.assertEqual(priced.get(model_id), prices)
+
     def test_sonnet_five_is_default_and_alias_normalizes(self) -> None:
         self.assertEqual(openrouter.DEFAULT_MODEL, "claude-sonnet-5")
         self.assertEqual(openrouter._normalize_anthropic_model("sonnet"), "claude-sonnet-5")
@@ -141,7 +173,13 @@ class OpenRouterIntegrationPolicyTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotIn("claude-opus-4-8", {row["id"] for row in catalog})
         self.assertTrue(all(row["provider"] == "Anthropic" for row in catalog))
-        self.assertTrue(all(row["prompt_price_per_m"] is None for row in catalog))
+        # Curated models surface their first-party list price in the picker even
+        # though Anthropic's /models response omits pricing; a live model with no
+        # curated entry (claude-future-9) still shows no price.
+        priced = {row["id"]: row["prompt_price_per_m"] for row in catalog}
+        self.assertEqual(priced["claude-sonnet-5"], 3.0)
+        self.assertEqual(priced["claude-sonnet-4-6"], 3.0)
+        self.assertIsNone(priced["claude-future-9"])
 
     async def test_no_anthropic_key_returns_empty_without_constructing_client(self) -> None:
         env = {

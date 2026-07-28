@@ -71,6 +71,16 @@ _SONNET_5_ALIASES = {
     "anthropic/claude-sonnet-5",
 }
 
+# Fable 5 is Anthropic usage-based only (no fixed per-token list price), so it
+# is not offered as a selectable Studio runner. Denied here so it is blocked
+# uniformly across catalog, routing, and selection even if an account's live
+# /models response happens to include it.
+DENIED_RUNNER_MODEL_IDS = frozenset({
+    "claude-fable-5",
+    "claude-mythos-5",
+    "claude-mythos-preview",
+})
+
 DENIED_IMAGE_MODEL_IDS = frozenset({
     "grok_imagine",
     "grok_imagine_quality",
@@ -126,7 +136,7 @@ def assert_provider_allowed(provider: Any, capability: str) -> str:
 def model_provider(model_id: Any) -> str:
     model = str(model_id or "").strip().lower()
     if model.startswith("anthropic/") or model.startswith("claude-") or model in {
-        "sonnet", "sonnet-5", "opus", "haiku", "fable",
+        "sonnet", "sonnet-5", "opus", "haiku",
     }:
         return "anthropic"
     if model.startswith(("x-ai/", "xai/", "x.ai/", "grok-")):
@@ -162,6 +172,11 @@ def assert_runner_model_allowed(model_id: Any) -> str:
         raise ProviderPolicyDenied(
             f"Studio provider policy {POLICY_VERSION} requires a direct Claude model; "
             f"{requested or 'empty selection'} is denied."
+        )
+    if direct_id.lower() in DENIED_RUNNER_MODEL_IDS:
+        raise ProviderPolicyDenied(
+            f"Studio provider policy {POLICY_VERSION} denies {direct_id} as a runner "
+            "(usage-based pricing only, not offered as a selectable model)."
         )
     return direct_id
 

@@ -40,13 +40,24 @@ def _normalize_anthropic_model(model: str) -> str:
         "claude-4.5-haiku": "claude-haiku-4-5-20251001",
         "claude-haiku-4.5": "claude-haiku-4-5-20251001",
         "anthropic/claude-haiku-4.5": "claude-haiku-4-5-20251001",
+        "anthropic/claude-opus-5": "claude-opus-5",
+        "opus": "claude-opus-5",
+        "opus-5": "claude-opus-5",
+        "claude-opus-5.0": "claude-opus-5",
         "anthropic/claude-opus-4-8": "claude-opus-4-8",
-        "opus": "claude-opus-4-8",
         "claude-opus-4.8": "claude-opus-4-8",
-        "anthropic/claude-fable-5": "claude-fable-5",
-        "claude-fable-5": "claude-fable-5",
+        "anthropic/claude-opus-4-7": "claude-opus-4-7",
+        "claude-opus-4.7": "claude-opus-4-7",
+        "anthropic/claude-opus-4-6": "claude-opus-4-6",
+        "claude-opus-4.6": "claude-opus-4-6",
+        "anthropic/claude-opus-4-5": "claude-opus-4-5",
+        "claude-opus-4.5": "claude-opus-4-5",
+        "anthropic/claude-opus-4-1": "claude-opus-4-1",
+        "claude-opus-4.1": "claude-opus-4-1",
         "anthropic/claude-sonnet-4-6": "claude-sonnet-4-6",
         "claude-sonnet-4.6": "claude-sonnet-4-6",
+        "anthropic/claude-sonnet-4-5": "claude-sonnet-4-5",
+        "claude-sonnet-4.5": "claude-sonnet-4-5",
         "sonnet": "claude-sonnet-5",
     }
     return aliases.get(model.lower(), model)
@@ -80,21 +91,95 @@ ANTHROPIC_FALLBACK_TOOL_CHAR_BUDGET = int(os.getenv("ANTHROPIC_FALLBACK_TOOL_CHA
 # Preferred order only. Rows are emitted solely when the Anthropic account's
 # live (or same-account last-known-valid) catalog contains the exact model.
 RECOMMENDED_MODELS = [
+    "claude-opus-5",
+    "claude-opus-4-8",
+    "claude-opus-4-7",
+    "claude-opus-4-6",
+    "claude-opus-4-5",
+    "claude-opus-4-1",
     "claude-sonnet-5",
     "claude-sonnet-4-6",
-    "claude-opus-4-8",
+    "claude-sonnet-4-5",
     "claude-haiku-4-5-20251001",
-    "claude-fable-5",
 ]
 
 # Static USD / 1M tokens when the provider /models response omits pricing.
 # Prefer live API pricing when present. Sources: Anthropic + xAI public pricing tables.
 # Display metadata for Studio Agent model picker (merged with live API pricing).
 CURATED_META: dict[str, dict[str, Any]] = {
+    # Anthropic first-party list pricing (USD / 1M tokens: prompt / completion).
+    # Surfaced in the Studio runner picker; only models present in the live
+    # Anthropic account catalog are actually emitted as selectable rows.
+    "claude-opus-5": {
+        "name": "Claude Opus 5",
+        "provider": "Anthropic",
+        "description": "Top-tier Claude runner: deepest reasoning and long-horizon production.",
+        "recommended": True,
+        "intelligence": 5,
+        "speed": 3,
+        "context_length": 1_000_000,
+        "prompt_price_per_m": 5.0,
+        "completion_price_per_m": 25.0,
+    },
+    "claude-opus-4-8": {
+        "name": "Claude Opus 4.8",
+        "provider": "Anthropic",
+        "description": "Highest-depth Opus 4 runner for complex planning and long sessions.",
+        "recommended": True,
+        "intelligence": 5,
+        "speed": 2,
+        "context_length": 1_000_000,
+        "prompt_price_per_m": 5.0,
+        "completion_price_per_m": 25.0,
+    },
+    "claude-opus-4-7": {
+        "name": "Claude Opus 4.7",
+        "provider": "Anthropic",
+        "description": "Autonomous long-horizon Opus runner for planning and production.",
+        "recommended": True,
+        "intelligence": 5,
+        "speed": 2,
+        "context_length": 1_000_000,
+        "prompt_price_per_m": 5.0,
+        "completion_price_per_m": 25.0,
+    },
+    "claude-opus-4-6": {
+        "name": "Claude Opus 4.6",
+        "provider": "Anthropic",
+        "description": "Deep-reasoning Opus runner for complex planning.",
+        "recommended": True,
+        "intelligence": 5,
+        "speed": 2,
+        "context_length": 1_000_000,
+        "prompt_price_per_m": 5.0,
+        "completion_price_per_m": 25.0,
+    },
+    "claude-opus-4-5": {
+        "name": "Claude Opus 4.5",
+        "provider": "Anthropic",
+        "description": "Legacy Opus runner for complex planning (still selectable if enabled).",
+        "recommended": False,
+        "intelligence": 5,
+        "speed": 2,
+        "context_length": 200_000,
+        "prompt_price_per_m": 5.0,
+        "completion_price_per_m": 25.0,
+    },
+    "claude-opus-4-1": {
+        "name": "Claude Opus 4.1",
+        "provider": "Anthropic",
+        "description": "Legacy premium Opus runner (still selectable if enabled).",
+        "recommended": False,
+        "intelligence": 5,
+        "speed": 2,
+        "context_length": 200_000,
+        "prompt_price_per_m": 15.0,
+        "completion_price_per_m": 75.0,
+    },
     "claude-sonnet-5": {
         "name": "Claude Sonnet 5",
         "provider": "Anthropic",
-        "description": "Preferred direct-Anthropic Studio runner when enabled for this API account.",
+        "description": "Preferred balanced Studio runner: near-Opus quality at Sonnet cost.",
         "recommended": True,
         "intelligence": 5,
         "speed": 4,
@@ -105,24 +190,24 @@ CURATED_META: dict[str, dict[str, Any]] = {
     "claude-sonnet-4-6": {
         "name": "Claude Sonnet 4.6",
         "provider": "Anthropic",
-        "description": "Default Studio runner: strong tool use, planning, and production orchestration.",
+        "description": "Balanced Studio runner: strong tool use, planning, and orchestration.",
         "recommended": True,
         "intelligence": 5,
         "speed": 4,
-        "context_length": 200_000,
+        "context_length": 1_000_000,
         "prompt_price_per_m": 3.0,
         "completion_price_per_m": 15.0,
     },
-    "claude-opus-4-8": {
-        "name": "Claude Opus 4.8",
+    "claude-sonnet-4-5": {
+        "name": "Claude Sonnet 4.5",
         "provider": "Anthropic",
-        "description": "Highest-depth Claude runner for complex planning and long production sessions.",
-        "recommended": True,
+        "description": "Legacy balanced Sonnet runner (still selectable if enabled).",
+        "recommended": False,
         "intelligence": 5,
-        "speed": 2,
-        "context_length": 200_000,
-        "prompt_price_per_m": 15.0,
-        "completion_price_per_m": 75.0,
+        "speed": 4,
+        "context_length": 1_000_000,
+        "prompt_price_per_m": 3.0,
+        "completion_price_per_m": 15.0,
     },
     "claude-haiku-4-5-20251001": {
         "name": "Claude Haiku 4.5",
@@ -134,17 +219,6 @@ CURATED_META: dict[str, dict[str, Any]] = {
         "context_length": 200_000,
         "prompt_price_per_m": 1.0,
         "completion_price_per_m": 5.0,
-    },
-    "claude-fable-5": {
-        "name": "Claude Fable 5",
-        "provider": "Anthropic",
-        "description": "Anthropic creative model when enabled for this API account.",
-        "recommended": False,
-        "intelligence": 5,
-        "speed": 3,
-        "context_length": 200_000,
-        "prompt_price_per_m": 3.0,
-        "completion_price_per_m": 15.0,
     },
     # xAI Grok chat models (api.x.ai) — same key as speech dictation / Imagine when configured
     "grok-4.5": {
@@ -369,8 +443,13 @@ def _provider_from_id(model_id: str) -> str:
         "claude-haiku-4-5-20251001": "Anthropic",
         "claude-sonnet-5": "Anthropic",
         "claude-sonnet-4-6": "Anthropic",
+        "claude-sonnet-4-5": "Anthropic",
+        "claude-opus-5": "Anthropic",
         "claude-opus-4-8": "Anthropic",
-        "claude-fable-5": "Anthropic",
+        "claude-opus-4-7": "Anthropic",
+        "claude-opus-4-6": "Anthropic",
+        "claude-opus-4-5": "Anthropic",
+        "claude-opus-4-1": "Anthropic",
     }
     if slug.lower().startswith("claude"):
         return "Anthropic"
@@ -427,10 +506,15 @@ def _infer_intelligence(model_id: str, prompt_ppm: float | None) -> int | None:
 def _catalog_row(mid: str, live_row: dict[str, Any]) -> dict[str, Any]:
     meta = CURATED_META.get(mid, {}) or CURATED_META.get(_normalize_xai_model(mid), {})
     pricing = live_row.get("pricing") if isinstance(live_row.get("pricing"), dict) else {}
-    # Capability payloads report only pricing the provider actually returned.
-    # Static billing metadata must not masquerade as live account catalog data.
+    # Prefer live provider pricing when present. Anthropic's /models response
+    # omits pricing, so fall back to the curated first-party list price
+    # (USD / 1M tokens) — this is what surfaces published rates in the picker.
     prompt_ppm = _price_per_mtok(pricing.get("prompt") or pricing.get("input"))
+    if prompt_ppm is None:
+        prompt_ppm = meta.get("prompt_price_per_m")
     completion_ppm = _price_per_mtok(pricing.get("completion") or pricing.get("output"))
+    if completion_ppm is None:
+        completion_ppm = meta.get("completion_price_per_m")
     ctx = live_row.get("context_length") or live_row.get("context_window") or meta.get("context_length")
     try:
         ctx_i = int(ctx) if ctx is not None else None
