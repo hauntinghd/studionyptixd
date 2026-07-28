@@ -1107,43 +1107,60 @@ def audit_scene_correspondence(
                 labels.append(label)
 
     prompt = (
-        "You are a strict narrative visual director performing scene-correspondence QA for a short video. "
-        "The first image is CURRENT (the approved STILL / frame-zero opening pose). Any following images are labeled in this order: "
-        f"{', '.join(labels[1:]) or 'none'}. The recurring skeleton identity is intentionally shared and MUST NOT "
-        "be treated as duplication. Judge whether CURRENT clearly expresses its own narration through a "
-        "specific physical location, composition, opening body language, head/eye direction, and emotional beat. "
-        "IMPORTANT: CURRENT is a single still, not the finished animation. Do NOT fail because the still lacks "
-        "multi-second motion (weight shifts over time, shrugs, camera pushes, VFX travel, head snap sequences). "
-        "Those belong to image-to-video and are out of scope here. "
-        "Fail only if CURRENT is a generic empty presenter void, wrong location for the narration, or too similar "
-        "to an adjacent frame in setting/composition/pose/emotional beat such that the two scenes feel like the same still. "
-        "Different camera angle alone is not enough. Preserve the skeleton but require scene-specific staging. "
+        "You are QA for AI-generated video stills. Your ONE hard job is to reject GARBAGE — stills that would make "
+        "the finished video look broken. The first image is CURRENT (the approved STILL / frame-zero opening pose). "
+        f"Any following images are labeled in this order: {', '.join(labels[1:]) or 'none'}. The recurring skeleton "
+        "identity is intentionally shared across scenes and MUST NOT be treated as a defect or duplication. "
+        "CURRENT is a single still, not the finished animation; do NOT judge motion (weight shifts, shrugs, camera "
+        "pushes, VFX travel) — that belongs to image-to-video. "
+        "REJECT (pass=false, wrong_or_artifact=true) ONLY for real defects that read as garbage: visible AI artifacts "
+        "(warping, melting, extra or missing limbs, fused or garbled anatomy, distorted hands, garbled text or "
+        "watermarks), the WRONG subject or content (not the intended skeleton scene — e.g. a landscape, or a truly "
+        "empty presenter void), or an otherwise unusable image. "
+        "Do NOT reject for subjective staging: a scene that looks similar to an adjacent one, a clean but 'generic' "
+        "pose, or a pose that doesn't dramatically express the narration are all ACCEPTABLE — record them as advisory "
+        "notes only, never as a failure. "
         f"CURRENT contract: {str(scene_contract or '')[:900]}. "
         f"PREVIOUS contract: {str(previous_contract or '')[:450]}. "
         f"NEXT contract: {str(next_contract or '')[:450]}. "
-        "Return JSON only: {\"pass\":false,\"confidence\":0.0,\"summary\":\"short factual finding\","
-        "\"narrative_mismatch\":false,\"duplicate_adjacent\":false,\"generic_staging\":false,"
-        "\"recommended_restage\":\"brief physical replacement direction\"}. Uncertainty is a fail."
+        "Return JSON only: {\"pass\":true,\"confidence\":0.0,\"summary\":\"short factual finding\","
+        "\"wrong_or_artifact\":false,\"duplicate_adjacent\":false,\"narrative_mismatch\":false,"
+        "\"generic_staging\":false,\"recommended_restage\":\"brief direction (advisory)\"}. "
+        "When unsure whether something is a real artifact, PASS it — only clear garbage fails."
     )
     try:
         vision = _run_semantic_vision(candidates, prompt=prompt) or {}
         parsed = vision.get("parsed") if isinstance(vision.get("parsed"), dict) else {}
         confidence = float(parsed.get("confidence") or 0.0)
-        issues = [
-            field for field in ("narrative_mismatch", "duplicate_adjacent", "generic_staging")
+        # HARD gate: only real garbage (visible artifacts / wrong content / empty
+        # void) blocks a scene. Require reasonable confidence so an "unsure"
+        # judgment never blocks — the bar is "no artifacting", not "flawless".
+        hard_fail = parsed.get("wrong_or_artifact") is True and confidence >= 0.55
+        # Subjective staging is ADVISORY only: recorded for the creator/Catalyst,
+        # never a production failure. (Adjacent similarity and narrative-beat
+        # expression are not artifacts.)
+        advisory = [
+            field for field in ("duplicate_adjacent", "narrative_mismatch", "generic_staging")
             if parsed.get(field) is True
         ]
         if not parsed and vision.get("error"):
-            issues.append("qa_unavailable")
-        passed = parsed.get("pass") is True and confidence >= 0.80 and not issues
+            # The judge itself is unavailable. A transient QA outage must not fail
+            # the whole production — the per-still identity/artifact gate already
+            # guarded generation. Soft-pass and record the gap.
+            advisory.append("qa_unavailable")
+            passed = True
+        else:
+            passed = not hard_fail
+        issues = (["wrong_or_artifact"] if hard_fail else []) + advisory
         return {
             "status": "pass" if passed else "fail",
             "pass": bool(passed),
             "confidence": confidence,
             "summary": str(parsed.get("summary") or vision.get("error") or (
-                "Scene visually expresses its own beat" if passed else "Scene correspondence was not proven"
+                "Artifact-free" if passed else "Rejected: visible artifact or wrong content"
             ))[:500],
             "issues": issues,
+            "advisory": advisory,
             "recommended_restage": str(parsed.get("recommended_restage") or "")[:700],
             "provider": str(vision.get("provider") or ""),
             "model": str(vision.get("model") or ""),
