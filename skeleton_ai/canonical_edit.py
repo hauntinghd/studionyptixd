@@ -367,10 +367,45 @@ def _queue_result(endpoint: str, args: dict[str, Any], *, timeout_sec: int) -> d
         status_name = status.__class__.__name__.lower()
         if status_name == "completed":
             response_url = getattr(handle, "response_url", "")
+            payload = None
             if response_url:
-                response = handle.client.get(response_url, timeout=120)
-                response.raise_for_status()
-                payload = response.json()
+                # FAL can report a job completed and still refuse its result
+                # (observed: HTTP 422 on the result URL for an otherwise finished
+                # Seedream edit). raise_for_status() discards the body, which made
+                # this undiagnosable in production - a whole paid production died
+                # with nothing but "422 Unprocessable Entity". Capture the body,
+                # and do not let one bad result fetch end a job that has already
+                # been paid for: retry briefly, then fall back to the SDK's own
+                # result call before giving up.
+                fetch_error: Exception | None = None
+                detail = ""
+                for fetch_attempt in range(3):
+                    try:
+                        response = handle.client.get(response_url, timeout=120)
+                        if response.status_code >= 400:
+                            detail = (response.text or "")[:600]
+                            raise CanonicalEditError(
+                                f"{endpoint} result fetch returned HTTP "
+                                f"{response.status_code} for {request_id}: {detail}"
+                            )
+                        payload = response.json()
+                        fetch_error = None
+                        break
+                    except CanonicalEditError as exc:
+                        fetch_error = exc
+                        time.sleep(min(5.0, 1.0 + fetch_attempt))
+                    except Exception as exc:  # transport/JSON faults
+                        fetch_error = exc
+                        time.sleep(min(5.0, 1.0 + fetch_attempt))
+                if payload is None:
+                    try:
+                        payload = fal_client.result(endpoint, request_id)
+                    except Exception as exc:
+                        raise CanonicalEditError(
+                            f"{endpoint} completed but its result was unreadable for "
+                            f"{request_id}: {fetch_error or exc}"
+                            + (f" | body: {detail}" if detail else "")
+                        ) from (fetch_error or exc)
             else:
                 payload = fal_client.result(endpoint, request_id)
             if not isinstance(payload, dict):
