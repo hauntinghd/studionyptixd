@@ -588,11 +588,30 @@ UNIFIED_PLANS = {
         "best_value": True,
         "legacy": True,
     },
+    # ------------------------------------------------------------------
+    # Public tier credit volumes target ~70% gross margin.
+    #
+    # One credit buys exactly one cent of raw provider spend
+    # (CREDIT_USD_VALUE=0.01, CREDIT_MARGIN=0.0), so a tier's provider
+    # allowance is monthly_credits / 100 and margin follows directly:
+    #     monthly_credits = 100 * price_usd * (1 - target_margin)
+    # At 70% that is 30 x price_usd, which is what these defaults encode.
+    #
+    # The plan IDs are historical and no longer describe their volumes -
+    # studio_pro_1k grants 750, not 1000. The IDs are deliberately NOT
+    # renamed because existing subscriptions reference them.
+    #
+    # Measured reference: a clean 6-scene animated short is ~$4 of provider
+    # spend on the Kling 2.1 Pro default (was ~$7.6 on Seedance), so the
+    # entry tier buys about two shorts. Long-form runs ~$35 and therefore
+    # needs the $200 tier or above. Plans marked legacy/legacy_public are
+    # intentionally left untouched.
+    # ------------------------------------------------------------------
     "studio_pro_1k": {
         "id": "studio_pro_1k",
         "name": "Studio Pro",
         "price_usd": float(os.getenv("UNIFIED_PLAN_STUDIO_PRO_1K_USD", "25")),
-        "monthly_credits": int(os.getenv("UNIFIED_PLAN_STUDIO_PRO_1K_CREDITS", "1000")),
+        "monthly_credits": int(os.getenv("UNIFIED_PLAN_STUDIO_PRO_1K_CREDITS", "750")),
         "stripe_price_id": os.getenv("UNIFIED_PLAN_STUDIO_PRO_1K_PRICE_ID", "").strip(),
     },
     "studio_pro_2k": {
@@ -607,21 +626,21 @@ UNIFIED_PLANS = {
         "id": "studio_pro_2500",
         "name": "Studio Pro",
         "price_usd": float(os.getenv("UNIFIED_PLAN_STUDIO_PRO_2500_USD", "50")),
-        "monthly_credits": int(os.getenv("UNIFIED_PLAN_STUDIO_PRO_2500_CREDITS", "2500")),
+        "monthly_credits": int(os.getenv("UNIFIED_PLAN_STUDIO_PRO_2500_CREDITS", "1500")),
         "stripe_price_id": os.getenv("UNIFIED_PLAN_STUDIO_PRO_2500_PRICE_ID", "").strip(),
     },
     "studio_pro_5k": {
         "id": "studio_pro_5k",
         "name": "Studio Pro",
         "price_usd": float(os.getenv("UNIFIED_PLAN_STUDIO_PRO_5K_USD", "100")),
-        "monthly_credits": int(os.getenv("UNIFIED_PLAN_STUDIO_PRO_5K_CREDITS", "5000")),
+        "monthly_credits": int(os.getenv("UNIFIED_PLAN_STUDIO_PRO_5K_CREDITS", "3000")),
         "stripe_price_id": os.getenv("UNIFIED_PLAN_STUDIO_PRO_5K_PRICE_ID", "").strip(),
     },
     "studio_pro_11k": {
         "id": "studio_pro_11k",
         "name": "Studio Pro",
         "price_usd": float(os.getenv("UNIFIED_PLAN_STUDIO_PRO_11K_USD", "200")),
-        "monthly_credits": int(os.getenv("UNIFIED_PLAN_STUDIO_PRO_11K_CREDITS", "11000")),
+        "monthly_credits": int(os.getenv("UNIFIED_PLAN_STUDIO_PRO_11K_CREDITS", "6000")),
         "stripe_price_id": os.getenv("UNIFIED_PLAN_STUDIO_PRO_11K_PRICE_ID", "").strip(),
         "best_value": True,
     },
@@ -629,21 +648,21 @@ UNIFIED_PLANS = {
         "id": "studio_pro_17k",
         "name": "Studio Pro",
         "price_usd": float(os.getenv("UNIFIED_PLAN_STUDIO_PRO_17K_USD", "300")),
-        "monthly_credits": int(os.getenv("UNIFIED_PLAN_STUDIO_PRO_17K_CREDITS", "17000")),
+        "monthly_credits": int(os.getenv("UNIFIED_PLAN_STUDIO_PRO_17K_CREDITS", "9000")),
         "stripe_price_id": os.getenv("UNIFIED_PLAN_STUDIO_PRO_17K_PRICE_ID", "").strip(),
     },
     "studio_pro_24k": {
         "id": "studio_pro_24k",
         "name": "Studio Pro",
         "price_usd": float(os.getenv("UNIFIED_PLAN_STUDIO_PRO_24K_USD", "400")),
-        "monthly_credits": int(os.getenv("UNIFIED_PLAN_STUDIO_PRO_24K_CREDITS", "24000")),
+        "monthly_credits": int(os.getenv("UNIFIED_PLAN_STUDIO_PRO_24K_CREDITS", "12000")),
         "stripe_price_id": os.getenv("UNIFIED_PLAN_STUDIO_PRO_24K_PRICE_ID", "").strip(),
     },
     "studio_pro_32k": {
         "id": "studio_pro_32k",
         "name": "Studio Pro",
         "price_usd": float(os.getenv("UNIFIED_PLAN_STUDIO_PRO_32K_USD", "500")),
-        "monthly_credits": int(os.getenv("UNIFIED_PLAN_STUDIO_PRO_32K_CREDITS", "32000")),
+        "monthly_credits": int(os.getenv("UNIFIED_PLAN_STUDIO_PRO_32K_CREDITS", "15000")),
         "stripe_price_id": os.getenv("UNIFIED_PLAN_STUDIO_PRO_32K_PRICE_ID", "").strip(),
     },
     "studio_pro_8k": {
