@@ -520,6 +520,19 @@ def remaining_execution_budget(
     }
 
 
+def job_lifetime_cap_usd() -> float | None:
+    """Whole-job spend ceiling from STUDIO_MAX_JOB_USD, or None when unset."""
+
+    raw = str(os.getenv("STUDIO_MAX_JOB_USD", "") or "").strip()
+    if not raw:
+        return None
+    try:
+        cap = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return cap if cap > 0 else None
+
+
 def enforce_incremental_spend(
     workspace: Path,
     next_estimated_usd: Any,
@@ -529,18 +542,63 @@ def enforce_incremental_spend(
     model: str = "",
     in_flight_usd: float = 0.0,
 ) -> dict[str, Any]:
-    """Fail before each paid dispatch when the approved cap has no room."""
+    """Fail before each paid dispatch when an approved cap has no room."""
+
+    try:
+        estimate = max(0.0, float(Decimal(str(next_estimated_usd or 0))))
+    except Exception:
+        estimate = 0.0
+
+    # A whole-job ceiling, independent of the per-tool approved cap. Every tool
+    # call persists its own max_budget_usd measured from its own cost baseline,
+    # so N calls can each stay inside their cap and still spend N x cap over a
+    # single job's life - which is how a repair loop turns a ~$4 short into
+    # $18+. This is the one chokepoint every paid dispatch passes through, so the
+    # lifetime ceiling is enforced here, and deliberately BEFORE the per-tool
+    # early return: it has to hold even for tools that never approved a cap.
+    lifetime_cap = job_lifetime_cap_usd()
+    lifetime: dict[str, Any] = {}
+    if lifetime_cap is not None:
+        from studio_agent import production_costs
+
+        summary = production_costs.load_summary(Path(workspace))
+        actual = max(
+            0.0,
+            float(summary.get("total_usd_decimal", summary.get("total_usd", 0.0)) or 0.0),
+        )
+        pending = max(0.0, float(in_flight_usd or 0.0))
+        lifetime = {
+            "job_lifetime_cap_usd": round(lifetime_cap, 6),
+            "job_lifetime_spent_usd": round(actual, 6),
+            "job_lifetime_remaining_usd": round(max(0.0, lifetime_cap - actual - pending), 6),
+        }
+        if actual + pending + estimate > lifetime_cap + 1e-9:
+            raise BudgetExceededError(
+                json.dumps(
+                    {
+                        "error": "budget_exceeded_job_lifetime",
+                        "message": (
+                            f"{operation} needs about ${estimate:.4f}, but this job has "
+                            f"already spent ${actual:.4f} of its ${lifetime_cap:.2f} "
+                            "whole-job ceiling (STUDIO_MAX_JOB_USD)."
+                        ),
+                        "provider": str(provider or ""),
+                        "model": str(model or ""),
+                        "next_estimated_usd": round(estimate, 6),
+                        "budget": lifetime,
+                    },
+                    indent=2,
+                )
+            )
 
     state = remaining_execution_budget(
         Path(workspace),
         in_flight_usd=in_flight_usd,
     )
     if not state.get("enforced"):
+        if lifetime:
+            return {**state, **lifetime, "next_estimated_usd": round(estimate, 6)}
         return state
-    try:
-        estimate = max(0.0, float(Decimal(str(next_estimated_usd or 0))))
-    except Exception:
-        estimate = 0.0
     if estimate > float(state.get("remaining_usd") or 0.0) + 1e-9:
         raise BudgetExceededError(
             json.dumps(
@@ -559,7 +617,7 @@ def enforce_incremental_spend(
                 indent=2,
             )
         )
-    return {**state, "next_estimated_usd": round(estimate, 6)}
+    return {**state, **lifetime, "next_estimated_usd": round(estimate, 6)}
 
 
 def _policy_normalize_budget_args(args: dict[str, Any]) -> dict[str, Any]:
