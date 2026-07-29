@@ -320,7 +320,15 @@ def compose_skeleton_still_prompt(
         if outfit and not re.search(r"\bno clothing\b", outfit, re.I):
             bits.append(f"WARDROBE: {outfit}.")
         else:
-            bits.append("No clothes.")
+            # Deliberately "No garments." and not "No clothes."/"nude"/"naked".
+            # FAL's content checker rejected the roster prompt outright with
+            # content_policy_violation / partner_validation_failed when this said
+            # "No clothes." next to a full-body framing instruction - it reads as a
+            # nudity request rather than an anatomical one. That killed whole paid
+            # productions intermittently. The anatomy LOCK clause carries the
+            # actual meaning ("thin glass skin on bones only", "no human skin"),
+            # so the wardrobe bit only has to say no garments exist.
+            bits.append("No garments.")
         bits.append(f"{aspect_ratio}; {'two hosts' if hosts >= 2 else 'one host'}; no text.")
         return bits
 

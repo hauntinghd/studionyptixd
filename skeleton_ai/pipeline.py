@@ -748,7 +748,13 @@ def run(
                 roster_path = stills_dir / f"roster_{beat.index:02d}_{outfit_key[:32].replace(' ', '_')}.png"
                 roster_prompt = build_scene_edit_prompt(
                     topic=topic or cat["label"],
-                    visual_description="Plain neutral studio backdrop, full body front view.",
+                    # "full skeleton ... front-facing", never "full body front
+                    # view": paired with the no-garments wardrobe bit, the latter
+                    # tripped FAL's content checker and failed the roster edit
+                    # with content_policy_violation.
+                    visual_description=(
+                        "Plain neutral studio backdrop, full skeleton visible head to feet, front-facing."
+                    ),
                     outfit=beat.outfit,
                     cast_count=production_cast,
                 )
