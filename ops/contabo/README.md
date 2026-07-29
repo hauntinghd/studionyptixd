@@ -112,6 +112,52 @@ network named by `CADDY_NETWORK`. The snippet permits 30 GB request bodies,
 keeps SSE/token streams unbuffered, and supports WebSockets through Caddy's
 native reverse proxy handling.
 
+### The shared edge is not ours, and that is a production hazard
+
+Studio does **not** own the Caddy that terminates its TLS. That container
+(`cliplab-caddy`) belongs to ClipLab's Compose project in
+`/opt/cliplab/deploy`, and it also serves `yap.nyptid.com`. Three independent
+products share one `Caddyfile`. Consequences, learned the hard way on
+2026-07-29:
+
+- ClipLab's `deploy/push.sh` tars its `deploy/` directory and extracts it over
+  `/opt/cliplab`. It shipped ClipLab's own single-site `Caddyfile`, silently
+  deleting the Yap and Studio blocks. `push.sh` now **excludes**
+  `deploy/Caddyfile` (and `deploy/.env`, for the same reason). The server copy
+  is authoritative and holds every product's block.
+- **The damage is latent.** `docker compose up -d` does not recreate a
+  container just because a bind-mounted file changed, so Caddy keeps serving
+  its last good config from memory. The clobbered file causes no symptom until
+  something restarts Caddy — which can be hours later, and looks unrelated.
+  In the 07-29 incident the file broke before 17:59 and Studio only went down
+  at ~21:44, on an unrelated Caddy restart.
+- The failure presents as Cloudflare **525** (origin TLS handshake failure),
+  because Caddy no longer has a certificate for the origin hostname. Every
+  container reports healthy throughout, and `docker ps` looks perfect.
+- Studio's `STUDIO_ORIGIN_TOKEN` reaches Caddy through
+  `/opt/cliplab/deploy/docker-compose.override.yml`, which Compose auto-loads.
+  That file is deliberately **not** in ClipLab's source tree, so `tar -xzf`
+  during their deploy cannot remove it — extraction only touches archived
+  paths. Without the token, every matcher fails closed and the origin answers
+  `direct_origin_forbidden` for everything.
+
+`ops/contabo/edge_guard.sh` exists for this. It runs on every `watchdog.sh`
+tick — including the healthy-container path, which is what previously returned
+early and hid the outage — and also on its own `studio-edge-guard.timer` every
+60 s. It verifies the site block, the origin token, and public health through
+Cloudflare; it repairs the first two by **appending only Studio's own block**,
+validating with `caddy validate` before installing anything, and never editing
+another product's site. Check current state without changing anything:
+
+```bash
+sudo bash /opt/studio/current/ops/contabo/edge_guard.sh --check-only
+# site_block=1 token=1 public_health=200
+```
+
+When adding a fourth product to this box, add its block to the server's
+`/opt/cliplab/deploy/Caddyfile` and make sure its deploy tooling excludes that
+path.
+
 Generate the initial token on the VPS without writing it to stdout:
 
 ```bash

@@ -21,6 +21,7 @@ assert_candidate_env "${active}"
 count="$(running_api_container_count)"
 (( count <= 1 )) || die "watchdog found multiple Studio API containers and will not guess an owner"
 
+api_was_healthy=0
 if (( count == 0 )); then
   info "Watchdog found no enabled Studio API; starting the recorded single owner"
   create_verified_api_container "${active}"
@@ -39,7 +40,7 @@ else
   health="$(docker inspect --format '{{ if .State.Health }}{{ .State.Health.Status }}{{ end }}' "${container_id}")"
   case "${health}" in
     healthy|starting)
-      exit 0
+      api_was_healthy=1
       ;;
     *)
       info "Watchdog is gracefully restarting the unhealthy single owner"
@@ -49,7 +50,17 @@ else
 fi
 
 release_dir="$(env_value "${active}" RELEASE_DIR)"
-bash "${release_dir}/ops/contabo/smoke.sh" \
-  --candidate "${active}" \
-  --attempts 60 \
-  --check-container-count
+if (( ! api_was_healthy )); then
+  bash "${release_dir}/ops/contabo/smoke.sh" \
+    --candidate "${active}" \
+    --attempts 60 \
+    --check-container-count
+fi
+
+# A healthy API container is NOT the same as a reachable Studio. TLS termination
+# belongs to a Caddy owned by another product's compose project, whose deploy can
+# delete Studio's site block and leave Cloudflare answering 525 while every
+# container still reports healthy. That is precisely the outage this watchdog
+# used to miss, because the healthy branch above returned before any external
+# check ran. The edge guard therefore runs on every tick, healthy path included.
+bash "${release_dir}/ops/contabo/edge_guard.sh"
