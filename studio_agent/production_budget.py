@@ -593,9 +593,9 @@ def _policy_video_model(value: Any) -> str:
     """Migrate persisted non-FAL video choices before quoting them."""
     model = str(value or "").strip().lower()
     if not model:
-        return "seedance"
+        return "kling_pro"
     if any(marker in model for marker in ("grok", "xai", "google", "veo")):
-        return "seedance"
+        return "kling_pro"
     return model
 
 
@@ -1004,7 +1004,7 @@ def _estimate_shortform_start(args: dict[str, Any]) -> tuple[float, dict[str, An
     still_note = image_envelope["pricing_note"]
     requested_seconds = _video_seconds(args, count=scenes, default_per_scene=5.0)
     seconds = requested_seconds if animate else 0.0
-    video_model = _policy_video_model(args.get("video_model") or "seedance")
+    video_model = _policy_video_model(args.get("video_model") or "kling_pro")
     video, video_rate, video_note = _video_cost(video_model, seconds)
     script_chars = max(1000, int(args.get("script_char_count") or len(str(args.get("script") or "")) or scenes * 140))
     if full_auto:
@@ -1138,7 +1138,7 @@ def _estimate_shortform_expand(args: dict[str, Any]) -> tuple[float, dict[str, A
         seconds_per_scene = 5.0
     seconds_per_scene = max(1.0, min(60.0, float(seconds_per_scene)))
     animated_seconds = round(len(animate_scene_indices) * seconds_per_scene, 4)
-    video_model = video_model or "seedance"
+    video_model = video_model or "kling_pro"
     video, video_rate, video_note = _video_cost(video_model, animated_seconds)
     cushion = _cushion_pct()
     total = (stills + video) * (1.0 + cushion)

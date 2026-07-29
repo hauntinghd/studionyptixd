@@ -47,10 +47,10 @@ def test_persisted_legacy_media_routes_migrate_with_versioned_audit(tmp_path, mo
     assert migrated is not None
     assert migrated["model"] == "claude-sonnet-5"
     assert migrated["image_model"] == "seedream_edit"
-    assert migrated["video_model"] == "seedance"
+    assert migrated["video_model"] == provider_policy.DEFAULT_FAL_VIDEO_MODEL
     job = migrated["active_jobs"][0]
     assert job["image_model_id"] == "seedream_edit"
-    assert job["video_model"] == "seedance"
+    assert job["video_model"] == provider_policy.DEFAULT_FAL_VIDEO_MODEL
     assert job["voice_provider"] == "fal_minimax"
     assert job["stt_provider"] == "fal"
     assert job["visual_qa_provider"] == "anthropic"

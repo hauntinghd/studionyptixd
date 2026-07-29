@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from skeleton_ai import compose, i2v_engine, styled_stills
-from studio_agent import dictation, dictation_stream
+from studio_agent import dictation, dictation_stream, provider_policy
 
 
 def test_legacy_image_models_normalize_to_explicit_fal_models() -> None:
@@ -50,15 +50,39 @@ def test_legacy_image_selection_dispatches_only_to_fal(monkeypatch, tmp_path: Pa
     assert result["model_migrated_from"] == "grok_imagine"
 
 
-def test_legacy_video_models_normalize_to_seedance_fal_chain() -> None:
+def test_default_fal_video_model_is_pinned() -> None:
+    """Guard the default motion lane against silent drift.
+
+    Every other test in this area asserts the *invariant* that legacy routes
+    migrate to whatever the default is. That keeps them honest across a model
+    change but cannot catch the default itself moving, so pin it exactly once
+    here. Changing this literal should be a deliberate product decision: motion
+    is roughly three quarters of a short's provider cost.
+    """
+    assert i2v_engine.DEFAULT_FAL_VIDEO_MODEL == "kling_pro"
+    assert provider_policy.DEFAULT_FAL_VIDEO_MODEL == i2v_engine.DEFAULT_FAL_VIDEO_MODEL
+
+
+def test_default_lane_keeps_a_permissive_fallback_hop() -> None:
+    """A content-policy bounce must stay recoverable on the default lane."""
+    chain, _model = i2v_engine.resolve_video_model_chain(
+        video_model=i2v_engine.DEFAULT_FAL_VIDEO_MODEL
+    )
+    assert len(chain) > 1, "the default lane needs a second hop for moderation bounces"
+    assert chain[-1] == i2v_engine.PIXVERSE_V6_ENDPOINT
+
+
+def test_legacy_video_models_normalize_to_default_fal_chain() -> None:
+    default_model = i2v_engine.DEFAULT_FAL_VIDEO_MODEL
+    expected_chain = list(i2v_engine.VIDEO_MODELS[default_model]["endpoints"])
     for legacy in (
         "grok_imagine_video",
         "grok-imagine-video-1.5",
         "xai:grok-imagine-video-1.5:1080p",
     ):
         chain, model = i2v_engine.resolve_video_model_chain(video_model=legacy)
-        assert model == "seedance"
-        assert chain == [i2v_engine.SEEDANCE_ENDPOINT, i2v_engine.PIXVERSE_V6_ENDPOINT]
+        assert model == default_model
+        assert chain == expected_chain
         assert all(not endpoint.startswith("xai:") for endpoint in chain)
 
 
@@ -112,12 +136,20 @@ def test_legacy_video_selection_dispatches_silent_fal_request(monkeypatch, tmp_p
         video_model="grok_imagine_video",
     )
 
-    assert [endpoint for endpoint, _args in calls] == [i2v_engine.SEEDANCE_ENDPOINT]
-    assert calls[0][1]["generate_audio"] is False
+    default_model = i2v_engine.DEFAULT_FAL_VIDEO_MODEL
+    first_hop = i2v_engine.VIDEO_MODELS[default_model]["endpoints"][0]
+    assert [endpoint for endpoint, _args in calls] == [first_hop]
+    # Endpoints spell the audio switch differently (generate_audio vs
+    # generate_audio_switch) and Kling 2.1 Pro has no audio parameter at all, so
+    # assert the invariant rather than one endpoint's payload shape: no audio key
+    # may ever be enabled. The unconditional strip+verify is covered by
+    # audio_stripped below.
+    audio_flags = {k: v for k, v in calls[0][1].items() if "audio" in k}
+    assert all(value is False for value in audio_flags.values()), audio_flags
     assert calls[0][1]["prompt"].startswith("SILENT visual-only")
     metadata = json.loads(output.with_suffix(".mp4.fal.json").read_text(encoding="utf-8"))
     assert metadata["provider"] == "fal"
-    assert metadata["video_model"] == "seedance"
+    assert metadata["video_model"] == default_model
     assert metadata["model_migrated_from"] == "grok_imagine_video"
     assert metadata["audio_stripped"] is True
 

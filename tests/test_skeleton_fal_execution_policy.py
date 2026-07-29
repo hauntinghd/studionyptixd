@@ -47,8 +47,8 @@ def test_legacy_media_models_migrate_to_explicit_fal_models() -> None:
         "xai:grok-imagine-video-1.5:1080p",
     ):
         chain, model_id = i2v_engine.resolve_video_model_chain(video_model=legacy)
-        assert model_id == "seedance"
-        assert chain == [i2v_engine.SEEDANCE_ENDPOINT, i2v_engine.PIXVERSE_V6_ENDPOINT]
+        assert model_id == i2v_engine.DEFAULT_FAL_VIDEO_MODEL
+        assert chain == list(i2v_engine.VIDEO_MODELS[model_id]["endpoints"])
         assert all(not endpoint.startswith("xai:") for endpoint in chain)
 
 
@@ -138,14 +138,19 @@ def test_legacy_video_selection_dispatches_silent_fal_request(
         video_model="grok_imagine_video",
     )
 
-    assert [endpoint for endpoint, _args in calls] == [i2v_engine.SEEDANCE_ENDPOINT]
-    assert calls[0][1]["generate_audio"] is False
+    default_model = i2v_engine.DEFAULT_FAL_VIDEO_MODEL
+    first_hop = i2v_engine.VIDEO_MODELS[default_model]["endpoints"][0]
+    assert [endpoint for endpoint, _args in calls] == [first_hop]
+    # See test_fal_only_media_policy: audio switches are endpoint-specific and
+    # Kling 2.1 Pro has none, so assert that no audio key is ever enabled.
+    audio_flags = {k: v for k, v in calls[0][1].items() if "audio" in k}
+    assert all(value is False for value in audio_flags.values()), audio_flags
     assert calls[0][1]["prompt"].startswith("SILENT visual-only")
     metadata = json.loads(
         output.with_suffix(output.suffix + ".fal.json").read_text(encoding="utf-8")
     )
     assert metadata["provider"] == "fal"
-    assert metadata["video_model"] == "seedance"
+    assert metadata["video_model"] == default_model
     assert metadata["model_migrated_from"] == "grok_imagine_video"
     assert metadata["audio_stripped"] is True
 

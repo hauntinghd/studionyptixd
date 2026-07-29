@@ -21,7 +21,7 @@ STT_CAPABILITY = "stt"
 
 DEFAULT_RUNNER_MODEL = "claude-sonnet-5"
 DEFAULT_FAL_IMAGE_MODEL = "seedream_edit"
-DEFAULT_FAL_VIDEO_MODEL = "seedance"
+DEFAULT_FAL_VIDEO_MODEL = "kling_pro"
 DEFAULT_FAL_VOICE_PROVIDER = "fal_minimax"
 
 

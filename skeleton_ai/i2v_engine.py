@@ -29,7 +29,10 @@ PIXVERSE_V6_ENDPOINT = "fal-ai/pixverse/v6/image-to-video"
 KLING_PRO_ENDPOINT = "fal-ai/kling-video/v2.1/pro/image-to-video"
 LTX_098_ENDPOINT = "fal-ai/ltxv-13b-098-distilled/image-to-video"
 
-DEFAULT_FAL_VIDEO_MODEL = "seedance"
+# Premium positioning: Kling 2.1 Pro is the default motion lane — it is both the
+# highest-quality FAL i2v model and ~3x cheaper per second than Seedance
+# ($0.098/s vs $0.3024/s), so it is strictly better for the no-artifacting bar.
+DEFAULT_FAL_VIDEO_MODEL = "kling_pro"
 LEGACY_NON_FAL_VIDEO_MODELS = {
     "grok_imagine_video": DEFAULT_FAL_VIDEO_MODEL,
     "grok-imagine-video": DEFAULT_FAL_VIDEO_MODEL,
@@ -43,6 +46,12 @@ LEGACY_NON_FAL_VIDEO_MODELS = {
 }
 
 STANDARD_FALLBACK_CHAIN = [SEEDANCE_ENDPOINT, PIXVERSE_V6_ENDPOINT]
+# The default lane must keep a permissive second hop. Content-policy rejections
+# are routine on FAL, and a single-endpoint default would turn a recoverable
+# moderation bounce into a failed scene. Pixverse is the permissive lane, and
+# clip QA still gates whatever comes back, so a fallback can never smuggle
+# artifacted motion into a delivered video.
+KLING_PRO_FALLBACK_CHAIN = [KLING_PRO_ENDPOINT, PIXVERSE_V6_ENDPOINT]
 AC_COST_STANDARD = 5
 AC_COST_PREMIUM = 7
 
@@ -58,7 +67,7 @@ class I2VRouteChanged(RuntimeError):
 VIDEO_MODELS: dict[str, dict[str, object]] = {
     "seedance": {
         "label": "Seedance 2.0",
-        "description": "Default FAL lane; falls back to Pixverse on policy rejection.",
+        "description": "Legacy FAL lane; falls back to Pixverse on policy rejection.",
         "endpoints": list(STANDARD_FALLBACK_CHAIN),
         "ac_cost": AC_COST_STANDARD,
     },
@@ -70,9 +79,15 @@ VIDEO_MODELS: dict[str, dict[str, object]] = {
     },
     "kling_pro": {
         "label": "Kling 2.1 Pro",
-        "description": "Highest-quality FAL motion lane.",
-        "endpoints": [KLING_PRO_ENDPOINT],
-        "ac_cost": AC_COST_PREMIUM,
+        "description": "Default FAL lane: highest quality, falls back to Pixverse on policy rejection.",
+        "endpoints": list(KLING_PRO_FALLBACK_CHAIN),
+        # Deliberately AC_COST_STANDARD, not AC_COST_PREMIUM. This is now the lane
+        # every standard-tier job resolves to, and skeleton_ai_router reserves
+        # AC_COST_STANDARD for those jobs. Leaving it at AC_COST_PREMIUM made the
+        # settled cost (7) exceed the reservation (5) on every short. Kling Pro is
+        # also genuinely cheaper than the model it replaced ($0.098/s vs $0.3024/s),
+        # so charging more AC for it was backwards.
+        "ac_cost": AC_COST_STANDARD,
     },
     "ltx_budget": {
         "label": "LTX 0.9.8 Budget",
