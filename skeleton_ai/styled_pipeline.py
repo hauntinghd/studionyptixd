@@ -39,6 +39,7 @@ from .pipeline import (
     apply_wardrobe_motion_lock,
     check_cancelled,
     plan_beat_count,
+    rebalance_durations,
     split_script_into_beats,
 )
 from .prompts.category_registry import get_category
@@ -3685,25 +3686,36 @@ def _apply_shortform_story_pacing(scenes: list[dict[str, Any]]) -> list[dict[str
     if len(scenes) < 2:
         return scenes
     ordered = sorted(scenes, key=lambda s: int(s.get("index", 0)))
+    original_total = sum(float(sc.get("duration_sec") or 5.0) for sc in ordered)
+
     first = ordered[0]
     first_dur = float(first.get("duration_sec") or 5.0)
     if first_dur > 4.5:
         first["duration_sec"] = 4.5
-    # Caps sit on the clip tier, not just below it. A 5.5s beat used to be
-    # served by a 5s clip whose last frame was then frozen for half a second -
-    # visible artifacting - and asking for the honest length instead would have
-    # bought a 10s clip at double the price. Pacing to 5.0s costs neither.
-    if len(ordered) >= 3:
-        for sc in ordered[1:-1]:
-            dur = float(sc.get("duration_sec") or 5.0)
-            if dur > CHEAP_CLIP_SECONDS:
-                sc["duration_sec"] = CHEAP_CLIP_SECONDS
     last = ordered[-1]
-    last_dur = float(last.get("duration_sec") or 5.0)
-    if last_dur < 4.0:
+    if float(last.get("duration_sec") or 5.0) < 4.0:
         last["duration_sec"] = 4.0
-    elif last_dur > CHEAP_CLIP_SECONDS:
-        last["duration_sec"] = CHEAP_CLIP_SECONDS
+
+    # Caps sit on the clip tier, and the time removed is redistributed rather
+    # than discarded. Trimming the total would be worse than the cost it saves:
+    # the final mux pads video to the narration clock by freezing the last
+    # frame, so every second the beats no longer cover becomes a freeze on
+    # screen. Redistribution keeps the video the length of its own audio.
+    rebalanced = rebalance_durations(
+        [float(sc.get("duration_sec") or 5.0) for sc in ordered], CHEAP_CLIP_SECONDS
+    )
+    if rebalanced is not None:
+        for sc, value in zip(ordered, rebalanced):
+            sc["duration_sec"] = value
+
+    paced_total = sum(float(sc.get("duration_sec") or 5.0) for sc in ordered)
+    if paced_total < original_total - 1e-6:
+        # The hook/outro shaping could not be absorbed inside the tier. Give the
+        # time back rather than end the video on a freeze; the longer clip is
+        # the honest cost of the pacing.
+        ordered[-1]["duration_sec"] = (
+            float(ordered[-1].get("duration_sec") or 5.0) + (original_total - paced_total)
+        )
     return ordered
 
 

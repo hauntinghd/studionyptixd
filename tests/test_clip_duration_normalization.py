@@ -55,13 +55,28 @@ def test_story_pacing_never_pushes_a_beat_past_the_cheap_tier() -> None:
     """Pacing used to cap middles at 5.5s and the outro at 6.0s.
 
     Both sat just over the tier, so every one of them either froze a frame or
-    doubled that clip's price.
+    doubled that clip's price. Here the beats can fit, so none may exceed it.
     """
-    scenes = [{"index": i, "duration_sec": 7.5} for i in range(6)]
+    scenes = [{"index": i, "duration_sec": 4.0} for i in range(8)]
+    scenes[3]["duration_sec"] = 6.5
+    scenes[4]["duration_sec"] = 5.5
     paced = _apply_shortform_story_pacing(scenes)
     assert paced, "pacing dropped the scenes"
     for scene in paced:
         assert float(scene["duration_sec"]) <= CHEAP_CLIP_SECONDS + 1e-9, scene
+
+
+def test_beats_that_cannot_fit_are_left_alone_rather_than_truncated() -> None:
+    """Squeezing an unfittable plan under the cap would only buy a freeze.
+
+    Six 7.5s beats cannot be served by 5s clips no matter how the time is
+    moved around. Shortening them would strip 15s off the video and the mux
+    would pad it back by freezing the final frame, so the long clips are the
+    honest cost and the durations must survive untouched.
+    """
+    scenes = [{"index": i, "duration_sec": 7.5} for i in range(6)]
+    paced = _apply_shortform_story_pacing(scenes)
+    assert sum(float(s["duration_sec"]) for s in paced) == pytest.approx(45.0)
 
 
 def test_story_pacing_still_tightens_the_hook() -> None:
@@ -75,3 +90,35 @@ def test_story_pacing_does_not_stretch_short_scenes() -> None:
     scenes = [{"index": i, "duration_sec": 3.0} for i in range(5)]
     paced = _apply_shortform_story_pacing(scenes)
     assert [float(scene["duration_sec"]) for scene in paced[:-1]] == [3.0] * 4
+
+
+def test_pacing_never_shortens_the_video() -> None:
+    """The freeze-frame trap.
+
+    mux_narration pads video to the narration clock by cloning the last frame,
+    so any second the beats stop covering becomes a visible freeze at the end.
+    Capping durations must redistribute the time, never discard it.
+    """
+    scenes = [{"index": i, "duration_sec": 7.5} for i in range(6)]
+    before = sum(float(s["duration_sec"]) for s in scenes)
+    paced = _apply_shortform_story_pacing(scenes)
+    after = sum(float(s["duration_sec"]) for s in paced)
+    assert after >= before - 1e-6, f"pacing lost {before - after:.2f}s of video"
+
+
+def test_pacing_preserves_total_for_ordinary_beats() -> None:
+    scenes = [{"index": i, "duration_sec": 4.0} for i in range(8)]
+    scenes[2]["duration_sec"] = 6.5
+    before = sum(float(s["duration_sec"]) for s in scenes)
+    paced = _apply_shortform_story_pacing(scenes)
+    assert sum(float(s["duration_sec"]) for s in paced) == pytest.approx(before)
+
+
+def test_pacing_is_idempotent() -> None:
+    """Finalize can run more than once; the video must not drift each time."""
+    scenes = [{"index": i, "duration_sec": 6.0} for i in range(7)]
+    once = _apply_shortform_story_pacing([dict(s) for s in scenes])
+    twice = _apply_shortform_story_pacing([dict(s) for s in once])
+    assert [float(s["duration_sec"]) for s in twice] == pytest.approx(
+        [float(s["duration_sec"]) for s in once]
+    )

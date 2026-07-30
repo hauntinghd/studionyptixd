@@ -123,31 +123,29 @@ def resolve_music_bed(explicit: str | Path | None = None, *, seed: str = "") -> 
     return tracks[int.from_bytes(digest[:8], "big") % len(tracks)]
 
 
-def _cap_beat_durations(beats: list[Beat], cap: float = CHEAP_CLIP_SECONDS) -> bool:
-    """Rebalance beat durations so none crosses a provider billing tier.
+def rebalance_durations(
+    values: list[float], cap: float = CHEAP_CLIP_SECONDS
+) -> list[float] | None:
+    """Fit every duration under ``cap`` without changing what they sum to.
 
-    Word-weighted retiming pushes long sentences past the cheap tier, and a live
-    canary paid $0.98 instead of $0.49 for three of its first five clips. The
-    narration length is fixed, so the fix is redistribution, not truncation:
-    time is moved off the overlong beats onto the short ones. Total duration is
-    preserved exactly, so the cut points shift but the video does not get
-    shorter and no audio is lost.
+    Total duration is load-bearing, not cosmetic: the final mux pads video to
+    the narration clock by *freezing the last frame*, so any second the beats
+    fail to cover becomes a visible freeze at the end of the video. Capping by
+    truncation would buy a cheaper clip and pay for it in artifacting.
 
-    Returns False and changes nothing when the beats genuinely cannot fit - if
-    the average beat already exceeds the cap, the longer clips are really needed
-    and paying for them is correct.
+    Returns None when the durations genuinely cannot fit - if the average
+    already exceeds the cap the longer clips are really needed, and paying for
+    them is correct.
     """
-    if not beats:
-        return False
-    total = sum(float(beat.duration_sec or 0) for beat in beats)
-    if total <= 0:
-        return False
-    if total > cap * len(beats):
-        return False
-    if all(float(beat.duration_sec or 0) <= cap for beat in beats):
-        return True
+    if not values:
+        return None
+    total = sum(float(value or 0) for value in values)
+    if total <= 0 or total > cap * len(values) + 1e-9:
+        return None
+    durations = [float(value or 0) for value in values]
+    if all(value <= cap for value in durations):
+        return durations
 
-    durations = [float(beat.duration_sec or 0) for beat in beats]
     for _ in range(len(durations) + 2):
         excess = sum(max(0.0, value - cap) for value in durations)
         if excess <= 1e-9:
@@ -156,19 +154,29 @@ def _cap_beat_durations(beats: list[Beat], cap: float = CHEAP_CLIP_SECONDS) -> b
         headroom = [cap - value for value in durations]
         available = sum(headroom)
         if available <= 1e-9:
-            return False
+            return None
         for i, room in enumerate(headroom):
             durations[i] += excess * (room / available)
 
     if any(value > cap + 1e-6 for value in durations):
-        return False
+        return None
     # Absorb float drift into the beat with the most headroom so the beats still
     # sum to the narration length - a short video would desync from the audio.
     drift = total - sum(durations)
     if abs(drift) > 1e-9:
         target = min(range(len(durations)), key=lambda i: durations[i])
         durations[target] = max(MIN_BEAT_SECONDS, durations[target] + drift)
-    for beat, value in zip(beats, durations):
+    return durations
+
+
+def _cap_beat_durations(beats: list[Beat], cap: float = CHEAP_CLIP_SECONDS) -> bool:
+    """Rebalance beat durations so none crosses a provider billing tier."""
+    if not beats:
+        return False
+    rebalanced = rebalance_durations([float(b.duration_sec or 0) for b in beats], cap)
+    if rebalanced is None:
+        return False
+    for beat, value in zip(beats, rebalanced):
         beat.duration_sec = value
     return True
 
