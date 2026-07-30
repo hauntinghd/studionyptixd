@@ -1,8 +1,9 @@
 """Short-form videos ship with a music bed under the narration.
 
-The skeleton short-form pipeline had no music or sound design at all - it muxed
-raw narration over silent video. `audio.py` already carried a BGM mixer, but
-only long-form ever used it.
+Two paths needed this for different reasons. The staged path already generated
+SFX and music and mixed them, but defaulted to "off" and summed them through an
+amix that quietly attenuated the voice. The one-shot skeleton pipeline had no
+music at all - it muxed raw narration over silent video.
 
 Two properties matter more than the mix sounding pleasant, because both are
 silent failures a viewer would notice before any test did:
@@ -175,3 +176,41 @@ def test_empty_files_are_not_treated_as_tracks(
     (library / "truncated.mp3").write_bytes(b"")
     monkeypatch.setenv("STUDIO_MUSIC_BED_DIR", str(library))
     assert resolve_music_bed(seed="x") is None
+
+
+def test_layering_sound_design_does_not_bury_the_narration(
+    fixtures: dict[str, Path]
+) -> None:
+    """The staged path had the same amix defect, and worse.
+
+    `_mix_short_sound_design` summed voice + SFX + music through a plain amix,
+    which divides by the input count: the narration lost ~6dB as soon as SFX
+    were added and ~9.5dB once a music bed joined it. Enabling music by default
+    would have made every short quieter, which is the opposite of shipping
+    sound design.
+    """
+    from skeleton_ai.styled_pipeline import _mix_short_sound_design
+
+    out = fixtures["dir"] / "staged_mix.mp3"
+    mixed = _mix_short_sound_design(
+        fixtures["narration"],
+        sfx_track=fixtures["music"],
+        bgm_track=fixtures["music"],
+        out_path=out,
+    )
+    voice_alone = _mean_dbfs(fixtures["narration"], start=1, length=2)
+    with_layers = _mean_dbfs(mixed, start=1, length=2)
+    assert with_layers > voice_alone - 1.0, (
+        f"narration lost {voice_alone - with_layers:.1f}dB under its own sound design"
+    )
+
+
+def test_mixing_with_no_layers_returns_the_narration_untouched(
+    fixtures: dict[str, Path]
+) -> None:
+    from skeleton_ai.styled_pipeline import _mix_short_sound_design
+
+    result = _mix_short_sound_design(
+        fixtures["narration"], out_path=fixtures["dir"] / "unused.mp3"
+    )
+    assert result == fixtures["narration"]

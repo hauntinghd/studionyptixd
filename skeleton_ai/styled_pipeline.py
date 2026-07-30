@@ -634,7 +634,14 @@ def _mix_short_sound_design(
         cmd.extend(["-i", str(path)])
     cmd.extend([
         "-filter_complex",
-        ";".join(labels) + ";" + "".join(mix_parts) + f"amix=inputs={len(mix_parts)}:duration=first:dropout_transition=1,apad=pad_dur=0.4[aout]",
+        # normalize=0 is load-bearing: amix otherwise divides every input by the
+        # input count, so the narration lost ~6dB the moment SFX were added and
+        # ~9.5dB once a music bed joined it. The voice must sound the same
+        # whatever is layered under it; the limiter catches the summed peaks
+        # that normalization was incidentally hiding.
+        ";".join(labels) + ";" + "".join(mix_parts)
+        + f"amix=inputs={len(mix_parts)}:duration=first:dropout_transition=1:normalize=0,"
+        + "alimiter=limit=0.95,apad=pad_dur=0.4[aout]",
         "-map", "[aout]",
         "-c:a", "libmp3lame",
         "-q:a", "2",
