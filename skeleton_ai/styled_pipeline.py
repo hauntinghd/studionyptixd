@@ -862,6 +862,22 @@ def _prior_still_is_accepted(
     )
 
 
+def _still_qa_rank(report: dict[str, Any] | None) -> tuple[int, int]:
+    """Order two QA reports so the better still can be kept.
+
+    Higher is better. A pass beats any fail outright; between two fails, fewer
+    distinct issues wins. `qa_unavailable` ranks below a real fail because an
+    unaudited still is not evidence of anything.
+    """
+    data = dict(report or {})
+    issues = [str(value) for value in (data.get("issues") or []) if str(value)]
+    if data.get("status") == "pass" and data.get("pass") is True:
+        return (2, 0)
+    if "qa_unavailable" in issues or not data:
+        return (0, 0)
+    return (1, -len(set(issues)))
+
+
 def _combine_still_qa_reports(**reports: dict[str, Any]) -> dict[str, Any]:
     present = {name: dict(report or {}) for name, report in reports.items() if report}
     passed = bool(present) and all(
@@ -1451,16 +1467,24 @@ def plan_scenes(
                     aspect_ratio="9:16",
                     attempt=1,
                 )
+                # Keep-best: attempt 1 is held, not discarded, until attempt 2 has
+                # been audited. The retry re-stages the scene and re-seeds, so it
+                # can easily come back worse - throwing the first still away before
+                # judging the second means paying for a repair that degrades the
+                # video. Everything the retry plan overwrites is saved so a losing
+                # attempt 2 can be fully reverted.
+                first_attempt = {
+                    "path": qa_target,
+                    "qa": dict(identity_qa or {}),
+                    "prompt": prompt,
+                    "action": action,
+                    "motion": motion,
+                    "hosts": hosts,
+                }
                 hosts = int(retry_plan["cast_count"])
                 action = str(retry_plan["scene_action"])
                 prompt = str(retry_plan["still_prompt"])
                 motion = str(retry_plan["motion_prompt"])
-                rejected_rel = _quarantine_still_candidate(
-                    workspace,
-                    qa_target,
-                    sid=sid,
-                    reason="identity_attempt1",
-                )
                 candidate_target = _new_still_candidate(workspace, sid, attempt=2)
                 qa_target = candidate_target
                 retry_prompt, retry_amount, retry_note, retry_key, retry_provider = (
@@ -1492,7 +1516,6 @@ def plan_scenes(
                         "pricing_note": retry_note,
                         "cached": False,
                         "semantic_qa_retry": True,
-                        "rejected_still": rejected_rel,
                     },
                 )
                 identity_qa = _audit_skeleton_still_for_generation(
@@ -1502,6 +1525,23 @@ def plan_scenes(
                     force=True,
                     cast_count=hosts,
                 )
+                if _still_qa_rank(identity_qa) <= _still_qa_rank(first_attempt["qa"]):
+                    # The repair did not improve the still. Revert to attempt 1
+                    # rather than shipping a regression the creator paid for.
+                    _quarantine_still_candidate(
+                        workspace, qa_target, sid=sid, reason="identity_attempt2_not_better"
+                    )
+                    qa_target = first_attempt["path"]
+                    candidate_target = qa_target
+                    identity_qa = first_attempt["qa"]
+                    prompt = first_attempt["prompt"]
+                    action = first_attempt["action"]
+                    motion = first_attempt["motion"]
+                    hosts = first_attempt["hosts"]
+                else:
+                    _quarantine_still_candidate(
+                        workspace, first_attempt["path"], sid=sid, reason="identity_attempt1"
+                    )
             from studio_agent.visual_qa import audit_generic_still
 
             style_qa = audit_generic_still(
