@@ -428,6 +428,59 @@ def _derive_short_sfx_prompt(scene: dict[str, Any], *, sound_design_brief: str =
     return " ".join(part for part in parts if part).strip()[:900]
 
 
+SHORTFORM_BGM_OFF = {"", "off", "none", "no", "no background music"}
+
+#: Music profiles per lane. Short-form beds must stay under narration, so these
+#: are texture descriptions, not songs - no lead melody to fight the voice.
+_SHORTFORM_BGM_PROFILES: tuple[tuple[tuple[str, ...], str], ...] = (
+    (
+        ("psychology", "dark", "relationship", "mind", "behaviour", "behavior"),
+        "restrained cinematic tension bed, low pulse, sparse and unresolved",
+    ),
+    (
+        ("crime", "mystery", "horror", "unsolved", "conspiracy"),
+        "ominous investigative bed, slow low-end pulse, cold and tense",
+    ),
+    (
+        ("history", "science", "education", "explainer", "space"),
+        "clean documentary bed, steady understated pulse, curious and open",
+    ),
+    (
+        ("motivation", "fitness", "money", "business", "hustle"),
+        "driving minimal bed, forward momentum, confident and uncluttered",
+    ),
+)
+
+#: Used when nothing matches. Deliberately neutral rather than absent - silence
+#: reads as unfinished on a short.
+SHORTFORM_BGM_DEFAULT = "subtle cinematic underscore, low and atmospheric, no lead melody"
+
+
+def resolve_shortform_background_music(
+    choice: str | None, *, category_key: str = "", topic: str = ""
+) -> str:
+    """Choose the music bed for a short, defaulting to music rather than silence.
+
+    Short-form already had SFX and BGM generation and a mixer - it simply
+    defaulted to "off", so every short shipped silent under the voice unless
+    the creator went looking for the setting. At $0.001/sec a 50s bed costs
+    about five cents against a roughly $6 render, so silence was never a cost
+    decision, just an unset default.
+
+    An explicit "off" is still honoured; only an unset choice now becomes music.
+    """
+    value = str(choice or "").strip()
+    if value and value.lower() not in {"auto"} | SHORTFORM_BGM_OFF:
+        return value
+    if value.lower() in SHORTFORM_BGM_OFF and value != "":
+        return value
+    haystack = f"{category_key} {topic}".lower()
+    for keywords, profile in _SHORTFORM_BGM_PROFILES:
+        if any(keyword in haystack for keyword in keywords):
+            return profile
+    return SHORTFORM_BGM_DEFAULT
+
+
 def _generate_short_audio_bed(prompt: str, duration_sec: float, out_path: Path) -> Path | None:
     out_path = Path(out_path)
     if out_path.exists() and out_path.stat().st_size > 1024:
@@ -4178,8 +4231,10 @@ def finalize_stage(
                 sound_result["sfx_track"] = str(sfx_track)
 
             bgm_track: Path | None = None
-            bgm_choice = str(background_music or "off").strip()
-            if bgm_choice.lower() not in {"", "off", "none", "no", "no background music"}:
+            bgm_choice = resolve_shortform_background_music(
+                background_music, category_key=str(category_key or ""), topic=str(topic or "")
+            )
+            if bgm_choice.lower() not in SHORTFORM_BGM_OFF:
                 bgm_prompt = (
                     f"{sound_design_brief}. "
                     if sound_design_brief else ""
