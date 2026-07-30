@@ -77,6 +77,63 @@ def _retime_beats_to_narration(beats: list[Beat], total_duration: float) -> None
         beat.duration_sec = max(2.0, dur * scale)
 
 
+#: FAL video lanes bill in whole duration tiers, not by the second. A beat of
+#: 5.1s buys a 10s clip at double the price and the extra 4.9s is trimmed away
+#: and discarded. This is the single largest avoidable cost in a short.
+CHEAP_CLIP_SECONDS = 5.0
+MIN_BEAT_SECONDS = 2.0
+
+
+def _cap_beat_durations(beats: list[Beat], cap: float = CHEAP_CLIP_SECONDS) -> bool:
+    """Rebalance beat durations so none crosses a provider billing tier.
+
+    Word-weighted retiming pushes long sentences past the cheap tier, and a live
+    canary paid $0.98 instead of $0.49 for three of its first five clips. The
+    narration length is fixed, so the fix is redistribution, not truncation:
+    time is moved off the overlong beats onto the short ones. Total duration is
+    preserved exactly, so the cut points shift but the video does not get
+    shorter and no audio is lost.
+
+    Returns False and changes nothing when the beats genuinely cannot fit - if
+    the average beat already exceeds the cap, the longer clips are really needed
+    and paying for them is correct.
+    """
+    if not beats:
+        return False
+    total = sum(float(beat.duration_sec or 0) for beat in beats)
+    if total <= 0:
+        return False
+    if total > cap * len(beats):
+        return False
+    if all(float(beat.duration_sec or 0) <= cap for beat in beats):
+        return True
+
+    durations = [float(beat.duration_sec or 0) for beat in beats]
+    for _ in range(len(durations) + 2):
+        excess = sum(max(0.0, value - cap) for value in durations)
+        if excess <= 1e-9:
+            break
+        durations = [min(value, cap) for value in durations]
+        headroom = [cap - value for value in durations]
+        available = sum(headroom)
+        if available <= 1e-9:
+            return False
+        for i, room in enumerate(headroom):
+            durations[i] += excess * (room / available)
+
+    if any(value > cap + 1e-6 for value in durations):
+        return False
+    # Absorb float drift into the beat with the most headroom so the beats still
+    # sum to the narration length - a short video would desync from the audio.
+    drift = total - sum(durations)
+    if abs(drift) > 1e-9:
+        target = min(range(len(durations)), key=lambda i: durations[i])
+        durations[target] = max(MIN_BEAT_SECONDS, durations[target] + drift)
+    for beat, value in zip(beats, durations):
+        beat.duration_sec = value
+    return True
+
+
 def split_script_into_beats(script_text: str, target_count: int = 12) -> list[str]:
     """Naive sentence split — Grok prompt told it to write one sentence per beat."""
     sentences = re.split(r"(?<=[.!?])\s+", script_text.strip())
@@ -723,6 +780,9 @@ def run(
         if timing_source != "verified_word":
             raise RuntimeError("word caption alignment lost verified timing provenance")
     _retime_beats_to_narration(beats, narration_duration)
+    # Keep every beat inside the cheap clip tier where the narration allows it.
+    # Without this, a beat that lands at 5.1s silently doubles that clip's price.
+    _cap_beat_durations(beats)
 
     # 4. Render stills + clips per beat (canonical master edit — identity locked).
     trimmed_paths: list[Path] = []
