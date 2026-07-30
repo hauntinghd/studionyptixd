@@ -20,7 +20,10 @@ Pipeline steps:
 Output: a single .mp4 at workspace_dir/skeleton_short.mp4 + metadata files.
 """
 from __future__ import annotations
+import hashlib
 import json
+import math
+import os
 import re
 from dataclasses import dataclass, asdict
 from pathlib import Path
@@ -84,6 +87,42 @@ CHEAP_CLIP_SECONDS = 5.0
 MIN_BEAT_SECONDS = 2.0
 
 
+MUSIC_BED_EXTENSIONS = (".mp3", ".m4a", ".wav", ".aac", ".ogg")
+
+
+def resolve_music_bed(explicit: str | Path | None = None, *, seed: str = "") -> Path | None:
+    """Pick the background music bed for a short, or None to stay silent.
+
+    Beds come from a local library (``STUDIO_MUSIC_BED_DIR``) rather than being
+    generated per video: a bespoke track per short would add provider cost to
+    every render for something the viewer hears at roughly 17dB under the
+    voice. An explicit path always wins so a caller can pin one.
+
+    Selection is seeded by topic so re-rendering the same video keeps the same
+    bed instead of shuffling the soundtrack between takes.
+    """
+    if explicit:
+        candidate = Path(explicit)
+        return candidate if candidate.is_file() and candidate.stat().st_size > 0 else None
+    library = str(os.getenv("STUDIO_MUSIC_BED_DIR", "") or "").strip()
+    if not library:
+        return None
+    directory = Path(library)
+    if not directory.is_dir():
+        return None
+    tracks = sorted(
+        path
+        for path in directory.iterdir()
+        if path.is_file()
+        and path.suffix.lower() in MUSIC_BED_EXTENSIONS
+        and path.stat().st_size > 0
+    )
+    if not tracks:
+        return None
+    digest = hashlib.sha256(str(seed or "").encode("utf-8")).digest()
+    return tracks[int.from_bytes(digest[:8], "big") % len(tracks)]
+
+
 def _cap_beat_durations(beats: list[Beat], cap: float = CHEAP_CLIP_SECONDS) -> bool:
     """Rebalance beat durations so none crosses a provider billing tier.
 
@@ -134,13 +173,89 @@ def _cap_beat_durations(beats: list[Beat], cap: float = CHEAP_CLIP_SECONDS) -> b
     return True
 
 
+#: Measured from a real narration: 203 words rendered to 73.8s of voiceover.
+#: Used only to size the beat plan before the audio exists; the real duration
+#: still governs once it has been synthesised.
+NARRATION_WORDS_PER_SECOND = 2.75
+
+
+def plan_beat_count(script_text: str, requested: int = 12) -> int:
+    """Choose enough beats that the average one fits the cheap clip tier.
+
+    A fixed beat count silently sets the price of a short. 203 words became
+    73.8s of narration, which over 12 beats is a 6.15s average - above the
+    tier - so every clip billed at 10s and the render cost about $12 instead of
+    about $8. More, shorter beats are strictly cheaper here, and they match the
+    5s average shot length this channel already cuts to.
+    """
+    words = len(re.findall(r"\w+", str(script_text or "")))
+    if not words:
+        return max(1, int(requested or 1))
+    estimated_seconds = words / NARRATION_WORDS_PER_SECOND
+    needed = int(math.ceil(estimated_seconds / CHEAP_CLIP_SECONDS))
+    return max(1, int(requested or 0), needed)
+
+
+def _split_sentence(sentence: str) -> tuple[str, str] | None:
+    """Split one sentence at the clause boundary nearest its middle."""
+    words = sentence.split()
+    if len(words) < 8:
+        return None
+    best: tuple[int, int] | None = None
+    for i, word in enumerate(words[:-3]):
+        if i < 3:
+            continue
+        if re.search(r"[,;:]$", word) or word.lower() in {
+            "and", "but", "because", "so", "which", "while", "when", "then",
+        }:
+            distance = abs(i - len(words) // 2)
+            if best is None or distance < best[0]:
+                best = (distance, i + 1)
+    index = best[1] if best else len(words) // 2
+    head = " ".join(words[:index]).strip()
+    tail = " ".join(words[index:]).strip()
+    if not head or not tail:
+        return None
+    return head, tail
+
+
 def split_script_into_beats(script_text: str, target_count: int = 12) -> list[str]:
-    """Naive sentence split — Grok prompt told it to write one sentence per beat."""
-    sentences = re.split(r"(?<=[.!?])\s+", script_text.strip())
+    """Split the narration into exactly the beats the render will use.
+
+    This used to return ``sentences[:target_count]``, which quietly dropped the
+    tail of the script from the visual plan while the voiceover still spoke it -
+    a real short shipped with a sentence of narration that had no shot assigned
+    to it. Nothing is dropped now: too many sentences are merged, too few are
+    split at clause boundaries.
+    """
+    sentences = re.split(r"(?<=[.!?])\s+", str(script_text or "").strip())
     sentences = [s.strip() for s in sentences if s.strip()]
     if not sentences:
         return []
-    return sentences[:target_count]
+    target = max(1, int(target_count or 1))
+
+    # Too many beats: merge the cheapest adjacent pair until the count fits, so
+    # every word keeps a shot rather than losing the overflow.
+    while len(sentences) > target:
+        pair = min(
+            range(len(sentences) - 1),
+            key=lambda i: len(sentences[i].split()) + len(sentences[i + 1].split()),
+        )
+        sentences[pair : pair + 2] = [f"{sentences[pair]} {sentences[pair + 1]}"]
+
+    # Too few beats: split the longest until the count fits or nothing splits.
+    while len(sentences) < target:
+        order = sorted(
+            range(len(sentences)), key=lambda i: len(sentences[i].split()), reverse=True
+        )
+        for index in order:
+            halves = _split_sentence(sentences[index])
+            if halves:
+                sentences[index : index + 1] = list(halves)
+                break
+        else:
+            break
+    return sentences
 
 
 _PLAN_SYSTEM_PROMPT = (
@@ -645,6 +760,7 @@ def run(
     master_reference_url: str = "",
     image_model_id: str = "seedream_edit",
     cast_count: Any = None,
+    music_track: str | Path | None = None,
 ) -> dict:
     """Run the full Skeleton AI pipeline. Returns a result dict."""
     workspace = Path(workspace)
@@ -697,8 +813,11 @@ def run(
         json.dumps(plan, indent=2, ensure_ascii=False), encoding="utf-8"
     )
 
-    # 3. Split into beats.
-    sentences = split_script_into_beats(script_text, target_count=beats_target)
+    # 3. Split into beats. The requested count is a floor, not a ceiling: a
+    # longer script needs more beats to keep each clip inside the cheap tier.
+    sentences = split_script_into_beats(
+        script_text, target_count=plan_beat_count(script_text, beats_target)
+    )
     if not sentences:
         raise RuntimeError("Anthropic returned empty script")
 
@@ -950,11 +1069,13 @@ def run(
     _write_progress(workspace, stage="compose", progress=94, detail="Muxing final MP4")
     # 6. Concat + mux.
     silent = concat_demuxer(trimmed_paths, workspace / "silent.mp4", work_dir)
+    music_bed = resolve_music_bed(music_track, seed=str(topic or category_key or ""))
     final = mux_narration(
         silent,
         narration_clock,
         workspace / "skeleton_short.mp4",
         caption_phrases=global_word_phrases,
+        music_track=music_bed,
     )
     timing_source = (
         "verified_word"

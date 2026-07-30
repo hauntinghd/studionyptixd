@@ -296,6 +296,44 @@ def concat_demuxer(trimmed_clips: list[Path], out_silent: Path, work_dir: Path) 
     return out_silent
 
 
+#: Music sits well under the voice. This is the bed level *before* ducking, so
+#: the audible level during speech is lower again.
+MUSIC_BED_GAIN = 0.16
+MUSIC_FADE_IN_SEC = 1.5
+MUSIC_FADE_OUT_SEC = 2.0
+
+
+def _music_bed_filters(duration_sec: float, music_gain: float) -> str:
+    """Build the ducked music bed graph mixed under the narration.
+
+    The bed is sidechained to the voice rather than set to a fixed level: a
+    static mix either buries the music between lines or fights the narration
+    during them. Ducking gives the bed presence in the gaps and gets out of the
+    way when anyone is speaking, which is what "low background music" actually
+    means in a finished video.
+    """
+    gain = max(0.01, float(music_gain))
+    fade_out_start = max(0.0, float(duration_sec) - MUSIC_FADE_OUT_SEC)
+    return (
+        # Two copies of the voice: one to mix, one to drive the ducker.
+        "[1:a]asetpts=PTS-STARTPTS,asplit=2[voice][key];"
+        f"[2:a]asetpts=PTS-STARTPTS,atrim=duration={duration_sec:.6f},"
+        # Keep the bed out of the vocal-presence and sub-bass ranges entirely.
+        "highpass=f=60,lowpass=f=7000,"
+        f"volume={gain:.3f},"
+        f"afade=t=in:st=0:d={MUSIC_FADE_IN_SEC:.3f},"
+        f"afade=t=out:st={fade_out_start:.6f}:d={MUSIC_FADE_OUT_SEC:.3f}[bed];"
+        # ratio/attack/release tuned so the bed dips quickly under a line and
+        # recovers smoothly in the pause rather than pumping between words.
+        "[bed][key]sidechaincompress=threshold=0.030:ratio=8:attack=15:release=350[ducked];"
+        # normalize=0 is required: amix otherwise divides every input by the
+        # input count, so simply adding a music bed would drop the narration by
+        # ~6dB. The voice must sound identical whether or not music is present.
+        "[voice][ducked]amix=inputs=2:duration=first:dropout_transition=0:normalize=0,"
+        "alimiter=limit=0.95[aout]"
+    )
+
+
 def mux_narration(
     silent_video: Path,
     narration_audio: Path,
@@ -303,12 +341,18 @@ def mux_narration(
     *,
     fps: int = 30,
     caption_phrases: Iterable[cap.CaptionPhrase] | None = None,
+    music_track: Path | None = None,
+    music_gain: float = MUSIC_BED_GAIN,
 ) -> Path:
     """Mux narration without ever shortening it to the provider video clock."""
     out_path = Path(out_path)
     duration_sec = probe_duration(narration_audio)
     if duration_sec <= 0.0:
         raise RuntimeError("cannot mux narration with an unreadable audio clock")
+    music_path = Path(music_track) if music_track else None
+    use_music = bool(
+        music_path and music_path.is_file() and music_path.stat().st_size > 0
+    )
     # Belt-and-suspenders: strip any leftover Grok/provider talk track first.
     strip_clip_audio(silent_video)
     video_filters = [
@@ -327,9 +371,27 @@ def mux_narration(
         "ffmpeg", "-y", "-loglevel", "error",
         "-i", str(silent_video),
         "-i", str(narration_audio),
-        "-map", "0:v:0", "-map", "1:a:0",
-        "-filter_script:v", str(filter_script),
-        "-af", "asetpts=PTS-STARTPTS",
+    ]
+    if use_music:
+        # Loop the bed so a short track still covers the whole video; the
+        # atrim in the graph cuts it back to the narration clock.
+        cmd += ["-stream_loop", "-1", "-i", str(music_path)]
+        audio_filter_script = out_path.with_suffix(out_path.suffix + ".mix-filter.txt")
+        audio_filter_script.write_text(
+            _music_bed_filters(duration_sec, music_gain), encoding="utf-8"
+        )
+        cmd += [
+            "-map", "0:v:0", "-map", "[aout]",
+            "-filter_script:v", str(filter_script),
+            "-filter_complex_script", str(audio_filter_script),
+        ]
+    else:
+        cmd += [
+            "-map", "0:v:0", "-map", "1:a:0",
+            "-filter_script:v", str(filter_script),
+            "-af", "asetpts=PTS-STARTPTS",
+        ]
+    cmd += [
         "-c:v", "libx264", "-preset", "medium", "-crf", "20", "-pix_fmt", "yuv420p",
         "-c:a", "aac", "-b:a", "192k",
         "-t", f"{duration_sec:.6f}",

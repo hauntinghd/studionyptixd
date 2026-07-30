@@ -162,17 +162,40 @@ class GrokClient:
             yield text
 
 
-def build_script_prompt(category_system: str, topic: str | None = None) -> str:
+#: Words, not seconds. Asked for "60 seconds" a model returned 203 words, which
+#: narrated to 73.8s - 23% long. Script length sets the number of clips and so
+#: the price of the short, and a word budget is followed far more reliably than
+#: a duration the model cannot hear.
+SHORTFORM_TARGET_SECONDS = 50
+SHORTFORM_WORDS_PER_SECOND = 2.75
+
+
+def shortform_word_budget(target_seconds: int = SHORTFORM_TARGET_SECONDS) -> tuple[int, int]:
+    centre = int(round(max(10, int(target_seconds)) * SHORTFORM_WORDS_PER_SECOND))
+    return max(20, centre - 8), centre + 8
+
+
+def build_script_prompt(
+    category_system: str,
+    topic: str | None = None,
+    *,
+    target_seconds: int = SHORTFORM_TARGET_SECONDS,
+) -> str:
     """Build the user prompt for short-form script generation."""
+    low, high = shortform_word_budget(target_seconds)
+    budget = (
+        f"Length is a hard requirement: write between {low} and {high} words "
+        f"(about {int(target_seconds)} seconds spoken). Do not exceed it."
+    )
     if topic:
         return (
-            "Generate the 60-second YouTube Shorts narration script for "
-            f"this topic now: {topic}\n\n"
+            f"Generate the YouTube Shorts narration script for this topic now: {topic}\n\n"
+            f"{budget}\n\n"
             "Output ONLY the narration text - no headings, no JSON, no "
             "scene breakdown, no commentary."
         )
     return (
-        "Generate a fresh 60-second YouTube Shorts narration script "
-        "following the system prompt's format. Output ONLY the "
-        "narration text - no headings, no JSON, no commentary."
+        "Generate a fresh YouTube Shorts narration script following the system "
+        f"prompt's format.\n\n{budget}\n\n"
+        "Output ONLY the narration text - no headings, no JSON, no commentary."
     )
