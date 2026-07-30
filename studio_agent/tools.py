@@ -2964,6 +2964,87 @@ def _credits_for_pending_usd(pending_usd: Any) -> int:
     return max(0, int(uc.usd_to_credits(pending_usd)))
 
 
+def shortform_delivery_exists(workspace: Path) -> bool:
+    """True when this job has already produced a video the creator can keep.
+
+    A failure after delivery (a repair, an edit, a re-render) is not terminal -
+    the creator still has their video, so the spend stays billable. A failure
+    with nothing delivered is terminal, and the house absorbs it.
+    """
+    workspace = Path(workspace)
+    try:
+        result = json.loads((workspace / "result.json").read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    if not isinstance(result, dict):
+        return False
+    for key in ("video_path", "final_video", "video", "output_path"):
+        candidate = str(result.get(key) or "").strip()
+        if not candidate:
+            continue
+        path = Path(candidate)
+        if not path.is_absolute():
+            path = workspace / candidate
+        try:
+            if path.is_file() and path.stat().st_size > 0:
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def absorb_terminal_failure_costs(
+    user_id: str | None,
+    job_id: str,
+    *,
+    reservation_payload: dict[str, Any] | None = None,
+    reason: str,
+) -> dict[str, Any]:
+    """Refund a terminally failed production in full; the house eats the spend.
+
+    Refunding only the *unused* reserve still charged the creator for a video
+    that does not exist - a live canary burned $2.72 and delivered nothing. The
+    consumed provider spend is real, but it is the house's cost of a failed
+    render, not the creator's purchase.
+
+    The spend is watermarked as billed at zero credits, so this is idempotent:
+    a replay, a double-settle, or a worker restart sees no pending spend and
+    cannot refund twice or re-charge.
+    """
+    jid = str(job_id or "").strip()
+    workspace = _shortform_workspace(jid)
+    loaded = reservation_payload or _load_shortform_credit_reservation(workspace)
+    reservation = (
+        loaded.get("reservation")
+        if isinstance(loaded, dict) and isinstance(loaded.get("reservation"), dict)
+        else None
+    )
+    uid = str(user_id or "").strip() or str((loaded or {}).get("user_id") or "").strip()
+    absorbed = production_costs.pending_billable_usd(workspace)
+    rid = str((reservation or {}).get("reservation_id") or "").strip()
+    if absorbed > 0:
+        production_costs.mark_billed(
+            workspace,
+            usd=absorbed,
+            credits=0,
+            user_id=uid,
+            reservation_id=rid,
+            reason=reason,
+            metadata={"absorbed_by_house": True, "terminal_failure": True, "job_id": jid},
+        )
+    if reservation:
+        _release_shortform_reservation(
+            uid, {"reservation": reservation, "user_id": uid}, reason=reason
+        )
+        _clear_shortform_credit_reservation(workspace)
+    return {
+        "charged": 0,
+        "absorbed_usd_decimal": str(absorbed),
+        "reservation_released": bool(reservation),
+        "terminal_failure": True,
+    }
+
+
 def _reconcile_shortform_costs(
     user_id: str | None,
     job_id: str,
@@ -10678,7 +10759,24 @@ def execute_tool_logged(
                     "re_edit_production",
                 }:
                     pending = production_costs.pending_billable_usd(_shortform_workspace(job_id))
-                    if pending > 0:
+                    if pending > 0 and not shortform_delivery_exists(
+                        _shortform_workspace(job_id)
+                    ):
+                        # Terminal failure: money was spent, no video exists.
+                        # Charging for it would sell the creator nothing, so the
+                        # house absorbs the render and the hold returns in full.
+                        absorb_terminal_failure_costs(
+                            user_id,
+                            job_id,
+                            reservation_payload={
+                                "reservation": credit_reservation,
+                                "user_id": user_id,
+                                "tool": name,
+                                "session_id": session_id or "",
+                            },
+                            reason=f"studio_tool_terminal_failure:{name}",
+                        )
+                    elif pending > 0:
                         _reconcile_shortform_costs(
                             user_id,
                             job_id,
