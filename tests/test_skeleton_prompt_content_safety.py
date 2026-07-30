@@ -19,12 +19,25 @@ import re
 
 import pytest
 
-from skeleton_ai.prompt_compose import compose_skeleton_still_prompt
+from skeleton_ai.canonical_edit import (
+    is_content_policy_error,
+    policy_safe_prompt,
+)
+from skeleton_ai.prompt_compose import compact_identity_locks, compose_skeleton_still_prompt
 
 
 # Words a partner content checker is likely to score as a nudity request. These
 # are about the *request* phrasing, not the rendered subject.
-FORBIDDEN = ("no clothes", "nude", "naked", "unclothed", "undressed", "full body front view")
+FORBIDDEN = (
+    "no clothes",
+    "nude",
+    "naked",
+    "unclothed",
+    "undressed",
+    "full body front view",
+    "human skin",
+    "glass skin",
+)
 
 
 def _prompts_without_outfit() -> list[str]:
@@ -82,3 +95,67 @@ def test_explicit_wardrobe_is_still_honoured() -> None:
     )
     assert "WARDROBE: dark 1920s FBI suit and fedora." in prompt
     assert "no garments" not in prompt.lower()
+
+
+@pytest.mark.parametrize("cast_count", (1, 2))
+def test_identity_lock_avoids_skin_vocabulary(cast_count: int) -> None:
+    """The LOCK clause said "skin" twice next to a garments negation.
+
+    Run 3 of the MrSkelewelly canary died on exactly this: the roster prompt
+    passed (the earlier fix held) but a *scene* prompt carrying the LOCK clause
+    was rejected. "Shell"/"flesh" says the same thing to the editor.
+    """
+    lock = compact_identity_locks(cast_count=cast_count)
+    assert "skin" not in lock.lower(), lock
+    # The rendering intent must survive the rewording.
+    assert "bones" in lock.lower(), lock
+
+
+def test_policy_safe_prompt_strips_the_clauses_that_were_rejected() -> None:
+    original = (
+        "EDIT ref. SCENE: uneasy posture, head tilted. No garments. "
+        "9:16; one host; no text. LOCK: thin glass skin on bones only "
+        "(never dome/pod/capsule); no human skin/text. Eyes in skull sockets only."
+    )
+    safer = policy_safe_prompt(original)
+    lowered = safer.lower()
+    for term in ("no garments", "skin", "nude", "naked"):
+        assert term not in lowered, f"{term!r} survived neutralisation:\n{safer}"
+    # It must stay a usable edit instruction, not be gutted.
+    assert "uneasy posture" in safer
+    assert "9:16" in safer
+    assert "eyes in skull sockets only" in lowered
+
+
+def test_policy_safe_prompt_is_idempotent() -> None:
+    """A second pass must not keep mutating, or the retry loop can never settle."""
+    once = policy_safe_prompt(
+        "SCENE: desk shot. No garments. LOCK: thin glass skin on bones only; no human skin/text."
+    )
+    assert policy_safe_prompt(once) == once
+
+
+def test_policy_safe_prompt_leaves_clean_prompts_alone() -> None:
+    """Equality with the original is the signal that suppresses a pointless retry."""
+    clean = "EDIT ref. SCENE: skeleton host at a desk. 9:16; one host; no text."
+    assert policy_safe_prompt(clean) == clean
+
+
+def test_content_policy_errors_are_recognised_by_body_text() -> None:
+    """raise_for_status() hides the body; the retry only fires if we match on it."""
+    body = (
+        'fal-ai/bytedance/seedream/v4.5/edit result fetch returned HTTP 422: '
+        '{"detail":[{"msg":"The content could not be processed because it contained '
+        'material flagged by a content checker.","type":"content_policy_violation",'
+        '"ctx":{"extra_info":{"reason":"partner_validation_failed"}}}]}'
+    )
+    assert is_content_policy_error(RuntimeError(body))
+
+
+@pytest.mark.parametrize(
+    "message",
+    ("connection reset by peer", "HTTP 500 internal server error", "timed out after 600s"),
+)
+def test_unrelated_failures_do_not_trigger_the_prompt_retry(message: str) -> None:
+    """Retrying a transport failure with a reworded prompt would just burn money."""
+    assert not is_content_policy_error(RuntimeError(message))
