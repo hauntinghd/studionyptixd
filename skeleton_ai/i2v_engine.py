@@ -206,6 +206,27 @@ def _verify_silent_output(path: Path) -> dict[str, object]:
     }
 
 
+#: The clip lengths the FAL video lanes actually accept. These endpoints take
+#: `duration` as a string and bill per whole tier, so an arbitrary number is
+#: both a rejection risk and, when rounded up, double the price.
+SUPPORTED_CLIP_SECONDS = (5, 10)
+
+
+def normalize_clip_seconds(duration_sec: float) -> int:
+    """Snap a beat length to the shortest supported clip that covers it.
+
+    Callers derive beat durations from narration timing, so they ask for things
+    like 5.5s or 6.0s. Truncating is wrong (the clip comes up short) and always
+    rounding up is expensive (a 5.1s beat buys a 10s clip). Snapping to the
+    shortest covering tier keeps the request valid and the price minimal.
+    """
+    requested = float(duration_sec or 0)
+    for supported in SUPPORTED_CLIP_SECONDS:
+        if requested <= supported + 1e-6:
+            return supported
+    return SUPPORTED_CLIP_SECONDS[-1]
+
+
 def _build_args(
     endpoint: str,
     motion_prompt: str,
@@ -215,6 +236,7 @@ def _build_args(
 ) -> dict:
     """Build endpoint-specific FAL arguments while disabling generated audio."""
     prompt = _silent_motion_prompt(motion_prompt)
+    duration_sec = normalize_clip_seconds(duration_sec)
     if endpoint == SEEDANCE_ENDPOINT:
         return {
             "prompt": prompt,

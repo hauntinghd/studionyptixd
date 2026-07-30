@@ -32,7 +32,15 @@ from .i2v_engine import (
     normalize_fal_video_model_id,
     resolve_video_model_chain,
 )
-from .pipeline import Beat, _write_progress, apply_wardrobe_motion_lock, check_cancelled, split_script_into_beats
+from .pipeline import (
+    CHEAP_CLIP_SECONDS,
+    Beat,
+    _write_progress,
+    apply_wardrobe_motion_lock,
+    check_cancelled,
+    plan_beat_count,
+    split_script_into_beats,
+)
 from .prompts.category_registry import get_category
 from .scripting_grok import GrokClient, build_script_prompt
 from .styled_stills import (
@@ -1061,7 +1069,12 @@ def plan_scenes(
         encoding="utf-8",
     )
 
-    sentences = split_script_into_beats(script_text, target_count=beats_target)
+    # The requested count is a floor. A longer script needs more beats to keep
+    # each clip inside the cheap tier - this is the customer-facing path, so it
+    # must price the same way the canary path does.
+    sentences = split_script_into_beats(
+        script_text, target_count=plan_beat_count(script_text, beats_target)
+    )
     if not sentences:
         raise RuntimeError("Grok returned empty script")
 
@@ -3676,17 +3689,21 @@ def _apply_shortform_story_pacing(scenes: list[dict[str, Any]]) -> list[dict[str
     first_dur = float(first.get("duration_sec") or 5.0)
     if first_dur > 4.5:
         first["duration_sec"] = 4.5
+    # Caps sit on the clip tier, not just below it. A 5.5s beat used to be
+    # served by a 5s clip whose last frame was then frozen for half a second -
+    # visible artifacting - and asking for the honest length instead would have
+    # bought a 10s clip at double the price. Pacing to 5.0s costs neither.
     if len(ordered) >= 3:
         for sc in ordered[1:-1]:
             dur = float(sc.get("duration_sec") or 5.0)
-            if dur > 5.5:
-                sc["duration_sec"] = 5.5
+            if dur > CHEAP_CLIP_SECONDS:
+                sc["duration_sec"] = CHEAP_CLIP_SECONDS
     last = ordered[-1]
     last_dur = float(last.get("duration_sec") or 5.0)
     if last_dur < 4.0:
         last["duration_sec"] = 4.0
-    elif last_dur > 6.5:
-        last["duration_sec"] = 6.0
+    elif last_dur > CHEAP_CLIP_SECONDS:
+        last["duration_sec"] = CHEAP_CLIP_SECONDS
     return ordered
 
 
