@@ -37,7 +37,12 @@ def test_scene_edit_prompt_puts_glass_container_ban_before_truncation():
 
     assert len(prompt) <= 300
     assert lower.startswith("edit ref.")
-    assert "thin glass skin on bones only" in lower
+    # "shell"/"flesh", not "skin": the literal wording changed because FAL's
+    # content checker rejected the old phrasing as a nudity request. The guard
+    # this test exists for - the glass-container ban surviving truncation - is
+    # unchanged.
+    assert "thin glass shell over bones only" in lower
     assert "never dome/pod/capsule" in lower
-    assert "no human skin/text" in lower
+    assert "no flesh/text" in lower
+    assert "skin" not in lower
     assert "capsule" in lower

@@ -26,9 +26,13 @@ def test_scene_prompt_forbids_human_tissue_at_clothing_edges():
         visual_description="Standing beside a bed with one hand on chest",
         outfit="hoodie, jeans, bare feet",
     ).lower()
-    assert "no human skin" in prompt
-    assert "thin glass skin on bones only" in prompt
+    # The no-human-tissue contract is now carried by "no flesh" rather than
+    # "no human skin" - same meaning to the editor, but the old wording tripped
+    # FAL's content checker and killed paid productions mid-job.
+    assert "no flesh" in prompt
+    assert "thin glass shell over bones only" in prompt
     assert "never dome/pod/capsule" in prompt
+    assert "skin" not in prompt
     assert "bare feet" not in prompt
     assert "glass-and-bone skeletal feet" in prompt
     assert "muscle definition" not in prompt
