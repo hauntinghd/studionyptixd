@@ -93,6 +93,15 @@ export default function CreatePanel({
     const [voicePitch, setVoicePitch] = useState(1.0);
     const [voiceLang, setVoiceLang] = useState('auto');
     const [captionFont, setCaptionFont] = useState('Komika Axis');
+    // Persisted: a creator sets their brand once, not per render. Until now
+    // every app render was watermarked 'Studio' regardless of whose channel
+    // it was for.
+    const [watermarkText, setWatermarkText] = useState(
+        () => localStorage.getItem('studio.watermarkText') || '',
+    );
+    const [visualBrief, setVisualBrief] = useState(
+        () => localStorage.getItem('studio.visualBrief') || '',
+    );
     const [voices, setVoices] = useState<Voice[]>([]);
     const [videoModel, setVideoModel] = useState<VideoModel>(renderTier === 'ship' ? 'kling_pro' : 'seedance');
     const [imageModel, setImageModel] = useState('');
@@ -324,6 +333,8 @@ export default function CreatePanel({
                     image_model: imageModel,
                     category: activeCategory,
                     reference_image: skeletonReference.payload,
+                    watermark_text: watermarkText.trim() || undefined,
+                    visual_brief: visualBrief.trim() || undefined,
                 }),
                 signal: controller.signal,
             });
@@ -436,6 +447,8 @@ export default function CreatePanel({
                     tier: videoModel === 'kling_pro' ? 'premium' : 'standard',
                     video_model: videoModel,
                     reference_image: skeletonReference.payload,
+                    watermark_text: watermarkText.trim() || undefined,
+                    visual_brief: visualBrief.trim() || undefined,
                 }),
             });
             const d = await r.json();
@@ -472,7 +485,7 @@ export default function CreatePanel({
         } finally {
             setGenerating(false);
         }
-    }, [script, voiceId, voiceSpeed, voicePitch, voiceLang, captionFont, videoModel, imageModel, imageModelOptions, accessToken, activeCategory, renderTier, skeletonReference?.payload]);
+    }, [script, voiceId, voiceSpeed, voicePitch, voiceLang, captionFont, videoModel, imageModel, imageModelOptions, accessToken, activeCategory, renderTier, skeletonReference?.payload, watermarkText, visualBrief]);
 
     const tierLabel = renderTier === 'ship' ? 'Ship tier · premium motion' : renderTier === 'documentary' ? 'Documentary lane' : 'Draft tier · fast iteration';
     const scriptHeading = nicheTitle ? `${nicheTitle} script` : 'Narration script';
@@ -566,6 +579,10 @@ export default function CreatePanel({
                     setVoiceLang={setVoiceLang}
                     captionFont={captionFont}
                     setCaptionFont={setCaptionFont}
+                    watermarkText={watermarkText}
+                    setWatermarkText={setWatermarkText}
+                    visualBrief={visualBrief}
+                    setVisualBrief={setVisualBrief}
                     videoModel={videoModel}
                     setVideoModel={setVideoModel}
                     onGenerate={startGenerate}
@@ -1061,7 +1078,9 @@ function Stat({ label, value }: { label: string; value: string }) {
 
 function AudioTab({
     voices, voiceId, setVoiceId, voiceSpeed, setVoiceSpeed, voicePitch, setVoicePitch,
-    voiceLang, setVoiceLang, captionFont, setCaptionFont, videoModel, setVideoModel,
+    voiceLang, setVoiceLang, captionFont, setCaptionFont,
+    watermarkText, setWatermarkText, visualBrief, setVisualBrief,
+    videoModel, setVideoModel,
     onGenerate, generating,
 }: {
     voices: Voice[];
@@ -1074,6 +1093,10 @@ function AudioTab({
     voiceLang: string;
     setVoiceLang: (s: string) => void;
     captionFont: string;
+    watermarkText: string;
+    setWatermarkText: (v: string) => void;
+    visualBrief: string;
+    setVisualBrief: (v: string) => void;
     setCaptionFont: (s: string) => void;
     videoModel: VideoModel;
     setVideoModel: (m: VideoModel) => void;
@@ -1121,6 +1144,41 @@ function AudioTab({
                     <option value="de">German</option>
                     <option value="pt">Portuguese</option>
                 </select>
+            </div>
+
+            <div>
+                <label className="text-sm text-zinc-300 block mb-1">Watermark / Brand</label>
+                <input
+                    type="text"
+                    value={watermarkText}
+                    maxLength={48}
+                    placeholder="MrSkelewelly"
+                    onChange={(e) => {
+                        setWatermarkText(e.target.value);
+                        localStorage.setItem('studio.watermarkText', e.target.value);
+                    }}
+                    className="w-full rounded-md bg-zinc-950 border border-zinc-800 px-3 py-2 text-sm text-white"
+                />
+                <div className="text-xs text-zinc-500 mt-1">
+                    Burned into the video and used in the description. Blank renders as &quot;Studio&quot;.
+                </div>
+            </div>
+
+            <div>
+                <label className="text-sm text-zinc-300 block mb-1">Visual Brief</label>
+                <textarea
+                    value={visualBrief}
+                    rows={3}
+                    placeholder="Art direction for every beat: look, palette, lighting, environment."
+                    onChange={(e) => {
+                        setVisualBrief(e.target.value);
+                        localStorage.setItem('studio.visualBrief', e.target.value);
+                    }}
+                    className="w-full rounded-md bg-zinc-950 border border-zinc-800 px-3 py-2 text-sm text-white"
+                />
+                <div className="text-xs text-zinc-500 mt-1">
+                    Avoid asking for internal or chest glow - it fights the identity lock.
+                </div>
             </div>
 
             <div>

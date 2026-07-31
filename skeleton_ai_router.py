@@ -381,6 +381,22 @@ class GenerateRequest(BaseModel):
         default=None,
         description="User-uploaded skeleton reference (HTTPS URL or data:image/... base64)",
     )
+    # The render pipeline already accepted these; the route simply never passed
+    # them, so every short made through the app was watermarked "Studio" and had
+    # no way to direct its own look. A creator rendering for their own channel
+    # needs both.
+    watermark_text: str | None = Field(
+        default=None,
+        description="Creator brand burned into the video and used in the description. Defaults to Studio.",
+    )
+    visual_brief: str | None = Field(
+        default=None,
+        description="Art direction applied to every beat: look, palette, lighting, environment.",
+    )
+    beats_target: int | None = Field(
+        default=None,
+        description="Floor for the beat count; the planner raises it so each clip fits the cheap duration tier.",
+    )
 
 
 class PlanRequest(BaseModel):
@@ -1191,6 +1207,8 @@ def build_skeleton_ai_router(
                         workspace,
                         str(body.reference_image).strip(),
                     )
+                brand = str(body.watermark_text or "").strip()[:48]
+                brief = str(body.visual_brief or "").strip()
                 result = run_pipeline(
                     category_key=body.category,
                     topic=body.topic,
@@ -1202,6 +1220,15 @@ def build_skeleton_ai_router(
                     user_id=uid,
                     master_reference_url=master_ref,
                     image_model_id=selected_image_model,
+                    # Omitted entirely until now, which is why app renders came
+                    # out branded "Studio" with no art direction.
+                    **({"watermark_text": brand} if brand else {}),
+                    **({"visual_brief": brief} if brief else {}),
+                    **(
+                        {"beats_target": max(1, min(30, int(body.beats_target)))}
+                        if body.beats_target
+                        else {}
+                    ),
                 )
         except ValueError as e:
             await settle_charge(
