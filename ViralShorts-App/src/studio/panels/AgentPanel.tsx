@@ -5077,7 +5077,13 @@ export default function AgentPanel({ onBack }: { onBack?: () => void }) {
                                 </button>
                             ))}
                         </div>
-                        {agentMode === 'studio' && (
+                        {/* Art style, image model and video model are planning
+                            decisions, so they stay reachable in Plan mode. They
+                            were studio-only, which meant the agent could ask
+                            "what's your visual style?" while the picker that
+                            answers it was hidden. Selecting a style costs
+                            nothing. ClipLab does not render these lanes. */}
+                        {agentMode !== 'cliplab' && (
                             <>
                         {/* Visual Style Grid - Seedream stills + on-demand i2v motion previews */}
                         <div className="relative">
