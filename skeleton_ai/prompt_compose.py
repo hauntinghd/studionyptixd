@@ -289,16 +289,23 @@ def compact_identity_locks(
     # plus a garments negation scores as a nudity request, even though the subject
     # is a skeleton. "Shell"/"no flesh" carries the identical rendering intent -
     # a translucent casing over bone, no human tissue - without the trigger words.
+    # "Eyes in skull sockets only" was meant as placement - eyes belong in the
+    # skull, not on the ribcage - but it reads as "sockets, and nothing in
+    # them". The QA judge enforced it literally and failed scenes for having
+    # irises, while still QA in the same run failed another scene for
+    # missing_eyes because its rubric requires "a distinctly coloured iris with
+    # a dark pupil". A render could not satisfy both, so the wording now states
+    # placement and detail together, matching the rubric it is judged against.
     if hosts >= 2:
         return (
             "LOCK: each host thin glass shell over bones only; never curved pods behind backs; "
-            "no shared bubble; eyes in skulls; empty hands; no flesh/text."
+            "no shared bubble; eyes with iris and pupil in skulls; empty hands; no flesh/text."
         )
     bits: list[str] = [
         "LOCK: thin glass shell over bones only (never dome/pod/capsule); no flesh/text."
     ]
     if include_eyes:
-        bits.append("Eyes in skull sockets only.")
+        bits.append("Eyes: iris and pupil, in skull sockets.")
     if include_torso:
         bits.append("No chest lights/orbs.")
     if include_props and not sports_topic:

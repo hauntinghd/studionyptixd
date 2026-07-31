@@ -227,8 +227,7 @@ _NEG_EDIT_GROUPS: tuple[str, ...] = (
     "extra eyeballs, third eye, fourth eye, eyes outside skull, eyes in abdomen, "
     "iris on ribs, pupil in chest, floating eye orbs in body, organ eyes, breast eyes, "
     "neon eyes, emissive eyes, laser eyes, orange glowing eyes, fire eyes, "
-    "eyes outside sockets, one eye much larger than the other, "
-    "realistic human eyeball, iris and pupil in skull socket, wet human eye",
+    "eyes outside sockets, one eye much larger than the other",
     # Self-emitted light. This is the most frequent QA rejection on record -
     # five of six scenes in the last production - and it was never named here:
     # the only defence was "No chest lights/orbs" in the positive prompt, which

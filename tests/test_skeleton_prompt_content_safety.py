@@ -356,3 +356,34 @@ def test_clip_keeps_whole_words() -> None:
     clipped = _clip("a modern psychology-studio environment matching the narration", 40)
     assert "…" not in clipped
     assert clipped.split()[-1] in "a modern psychology-studio environment matching the narration".split()
+
+
+# --- The eye contract must not contradict the rubric it is judged against -----
+
+@pytest.mark.parametrize("cast_count", (1, 2))
+def test_the_lock_does_not_demand_empty_sockets(cast_count: int) -> None:
+    """One production failed scenes both ways, in the same run.
+
+    Scenes 1 and 2 were rejected for showing "realistic irises/pupils placed in
+    skull sockets rather than empty orbits". Scene 3 was rejected with
+    missing_eyes because its iris could not be confirmed. The prompt said
+    "Eyes in skull sockets only" - meant as placement - while the still QA
+    rubric requires "a distinctly coloured iris with a dark pupil". No render
+    could satisfy both, so no amount of repair could ever finish that video.
+    """
+    lock = compact_identity_locks(cast_count=cast_count).lower()
+    assert "iris" in lock and "pupil" in lock, lock
+    assert "sockets only" not in lock, lock
+
+
+def test_the_lock_and_the_still_rubric_agree_about_eyes() -> None:
+    """Pin the two specs to each other; drift here costs a whole render."""
+    import inspect
+
+    from studio_agent import visual_qa
+
+    rubric = inspect.getsource(visual_qa)
+    assert "distinctly coloured iris with a dark pupil" in rubric
+    for cast in (1, 2):
+        lock = compact_identity_locks(cast_count=cast).lower()
+        assert "iris" in lock, lock
