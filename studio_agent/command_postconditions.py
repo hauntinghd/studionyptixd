@@ -270,18 +270,47 @@ def _verify_scene_repair(
         }
         for number in expected.selected_scene_numbers
     }
-    selected_qa_failed = [
+    # Postconditions verify that the tool did what it was told, not that a
+    # probabilistic image generator reached perfection. These were previously
+    # one all-or-nothing check: a single selected scene still failing visual QA
+    # marked the whole command failed with safe_claim="none", so a repair of six
+    # scenes where five came back clean was reported to the creator as though
+    # nothing had happened. Every recorded production-stage command failure was
+    # this tool, and the "error" was its own success note.
+    #
+    # It matters more now that structural defects deliberately do not retry:
+    # a held scene never passes QA by design, which under the old check turned
+    # every correct hold into a command failure.
+    stale = [number for number, qa in selected_qa.items() if qa["qa_stale"]]
+    checks.append(
+        PostconditionCheck(
+            name="selected_scene_qa_refreshed",
+            status="failed" if stale else "passed",
+            expected={"qa_stale": False},
+            actual={"stale_scenes": stale},
+            message=(
+                "Every selected scene must carry fresh asset-bound QA - that is the "
+                "proof the repair actually ran against it."
+            ),
+        )
+    )
+    still_failing = [
         number
         for number, qa in selected_qa.items()
-        if qa["qa_stale"] or qa["visual_qa_pass"] is not True
+        if not qa["qa_stale"] and qa["visual_qa_pass"] is not True
     ]
     checks.append(
         PostconditionCheck(
-            name="selected_scene_aggregate_qa",
-            status="failed" if selected_qa_failed else "passed",
-            expected={"qa_stale": False, "visual_qa_pass": True},
-            actual={"scenes": selected_qa, "failed": selected_qa_failed},
-            message="A repaired scene is complete only when current asset-bound aggregate QA passes.",
+            name="selected_scene_quality",
+            status="failed" if still_failing else "passed",
+            expected={"visual_qa_pass": True},
+            actual={"scenes": selected_qa, "still_failing": still_failing},
+            message=(
+                "Scenes whose quality the repair could not resolve. Reported as an "
+                "outcome, not a command failure: the work was performed and the "
+                "creator needs to see which scenes remain unresolved."
+            ),
+            required=False,
         )
     )
 

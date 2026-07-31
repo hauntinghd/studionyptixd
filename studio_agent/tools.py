@@ -6690,8 +6690,14 @@ def audit_and_repair_production_scenes(
                 hold = defect_classes.structural_hold_report(
                     scene_index=index, qa_report=still_qa, frame_path=str(still)
                 )
+                # Deliberately NOT added to `failed`. A structural hold is a
+                # decision the tool made correctly, not work it failed to do,
+                # and the `selected_scene_repairs_succeeded` postcondition fails
+                # the entire command on any non-empty `failed` list. Counting
+                # holds there would turn every correct refusal-to-waste-money
+                # into the "production stage fucked up again" the creator keeps
+                # hitting. It is surfaced via structural_holds instead.
                 structural_holds.append(index)
-                failed.append(index)
                 reports.append(hold)
                 continue
             attempted_still_repairs.append(index)

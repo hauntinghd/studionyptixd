@@ -271,3 +271,23 @@ def test_still_qa_model_is_overridable(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setenv("STUDIO_STILL_QA_VISION_MODEL", "claude-opus-4-8")
     assert visual_qa._still_qa_vision_model() == "claude-opus-4-8"
+
+
+def test_a_structural_hold_is_never_counted_as_a_failed_scene() -> None:
+    """A hold is a correct decision, not work the tool failed to do.
+
+    The `selected_scene_repairs_succeeded` postcondition fails the entire
+    command on any non-empty `failed` list. Counting structural holds there
+    would turn every correct refusal-to-waste-money into a production-stage
+    command failure - the exact symptom the creator keeps hitting.
+    """
+    from pathlib import Path
+
+    source = Path(__file__).resolve().parents[1] / "studio_agent" / "tools.py"
+    text = source.read_text(encoding="utf-8")
+    start = text.index("structural_hold_report(")
+    block = text[start : text.index("continue", start)]
+    assert "structural_holds.append" in block
+    assert "failed.append" not in block, (
+        "structural holds are being counted as failures, which fails the whole command"
+    )
