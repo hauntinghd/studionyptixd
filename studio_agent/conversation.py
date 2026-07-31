@@ -699,6 +699,31 @@ def normalize_spoken_request(user_text: str) -> str:
     return text
 
 
+def extract_quoted_spans(value: str, *, min_chars: int = 8, max_chars: int = 140) -> list[str]:
+    """Quoted spans, without mistaking an apostrophe for a quotation mark.
+
+    The apostrophe used to be a delimiter, so ordinary dictation hijacked the
+    production title. "you should be able to tell what's making it do good and
+    what's making it do bad" opened a quote inside the first contraction and
+    closed it inside the second, yielding "s making it do good and what" -
+    which then locked, and because quoted titles always win it outranked the
+    correct title on every later turn. A real short was rendered from it.
+
+    Double quotes are unambiguous. A single quote only delimits when it sits
+    outside a word on both ends, which is exactly what a contraction never
+    does.
+    """
+    text = str(value or "")
+    spans: list[str] = []
+    patterns = (
+        r"[\"“]([^\"”\n]{%d,%d})[\"”]" % (min_chars, max_chars),
+        r"(?<![\w])['‘]([^'’\n]{%d,%d})['’](?![\w])" % (min_chars, max_chars),
+    )
+    for pattern in patterns:
+        spans.extend(re.findall(pattern, text))
+    return spans
+
+
 def extract_user_locked_title(user_text: str) -> str:
     """Extract an explicit user-chosen working title from natural chat.
 
@@ -772,7 +797,7 @@ def extract_user_locked_title(user_text: str) -> str:
             return cand[:120]
 
     # Quoted titles always win.
-    quoted = re.findall(r"[\"“']([^\"”'\n]{8,140})[\"”']", value)
+    quoted = extract_quoted_spans(value, min_chars=8, max_chars=140)
     for q in reversed(quoted):
         cleaned = _clean_title_fragment(q)
         if len(cleaned) >= 8:

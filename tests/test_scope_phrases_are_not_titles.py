@@ -159,3 +159,64 @@ def test_real_titles_are_not_mistaken_for_fragments(title: str) -> None:
     from studio_agent.store import _looks_like_prose_fragment
 
     assert not _looks_like_prose_fragment(title)
+
+
+# --- An apostrophe is not a quotation mark ------------------------------------
+
+def test_two_contractions_do_not_become_the_locked_title() -> None:
+    """This rendered a real short about the wrong subject.
+
+    The quoted-title branch treated ' as a delimiter, so the apostrophe in the
+    first contraction opened a quote and the second closed it. From
+    "you should be able to tell what's making it do good and what's making it
+    do bad" it locked "s making it do good and what" - and because quoted
+    titles always win, that fragment outranked the correct title on every
+    later turn. Studio showed an Approve card reading "Why He Builds a Wall
+    the Second He Starts Falling for You" and then built a job whose topic was
+    the fragment, with a script about something else entirely.
+    """
+    from studio_agent.conversation import extract_user_locked_title
+
+    body = (
+        "because you have access to my catalyst engine. which means you should be "
+        "able to tell what's making it do good and what's making it do bad and how "
+        "to make it better. Does this make sense?"
+    )
+    assert extract_user_locked_title(body) == ""
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "tell me what's working and what's not on this channel",
+        "I don't know why he doesn't text back honestly",
+        "it's fine, we're not doing that one, that isn't the angle",
+    ],
+)
+def test_ordinary_contractions_never_lock_a_title(body: str) -> None:
+    from studio_agent.conversation import extract_user_locked_title
+
+    assert extract_user_locked_title(body) == ""
+
+
+def test_a_genuinely_quoted_title_still_wins() -> None:
+    """Single quotes must keep working when they actually delimit."""
+    from studio_agent.conversation import extract_user_locked_title
+
+    assert (
+        extract_user_locked_title("let's make 'Why Men Pull Away Fast' tonight")
+        == "Why Men Pull Away Fast"
+    )
+    assert (
+        extract_user_locked_title('let\'s make "Why Men Pull Away" tonight')
+        == "Why Men Pull Away"
+    )
+
+
+def test_quoted_span_extraction_ignores_word_internal_apostrophes() -> None:
+    from studio_agent.conversation import extract_quoted_spans
+
+    assert extract_quoted_spans("what's making it do good and what's making it bad") == []
+    assert extract_quoted_spans("he said 'the whole thing is wrong' loudly") == [
+        "the whole thing is wrong"
+    ]
