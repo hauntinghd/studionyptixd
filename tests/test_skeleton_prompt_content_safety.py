@@ -159,3 +159,30 @@ def test_content_policy_errors_are_recognised_by_body_text() -> None:
 def test_unrelated_failures_do_not_trigger_the_prompt_retry(message: str) -> None:
     """Retrying a transport failure with a reworded prompt would just burn money."""
     assert not is_content_policy_error(RuntimeError(message))
+
+
+# --- Structural defect negatives (Task 3) -------------------------------------
+
+@pytest.mark.parametrize(
+    "term",
+    ["missing fingers", "thumbless hand", "asymmetric eyes", "protruding eyes",
+     "featureless cranium", "stray lines", "detached bones"],
+)
+def test_the_negative_prompt_names_the_structural_defects(term: str) -> None:
+    """Frame inspection found all four structural classes in the reference.
+
+    They were not in the negative prompt, so nothing was asking the model to
+    avoid them.
+    """
+    from skeleton_ai.canonical_edit import NEG_EDIT
+
+    assert term in NEG_EDIT.lower(), f"{term!r} is not suppressed"
+
+
+def test_the_structural_negatives_did_not_reintroduce_nudity_phrasing() -> None:
+    """The negatives must not undo the content-policy fix."""
+    from skeleton_ai.canonical_edit import NEG_EDIT
+
+    low = NEG_EDIT.lower()
+    for banned in ("no clothes", "nude", "naked", "unclothed"):
+        assert banned not in low, f"{banned!r} came back into the negative prompt"

@@ -228,6 +228,19 @@ _NEG_EDIT_CORE = (
     "helmet bubble, glass walls, circular base, floor ring, floating glass edge, "
     "diagram label, callout, readable text, typography, UI element, "
     "extra fingers, extra hand, third hand, fourth hand, floating hand, duplicate hand, "
+    # The four structural defect classes, named explicitly. Frame inspection of a
+    # finished render found all four in effectively every frame that showed them,
+    # and they are baked into the reference before animation ever runs - so every
+    # clip inherits them and no downstream QA can recover the video.
+    "missing fingers, four fingers, six fingers, thumbless hand, missing thumb, "
+    "fused fingers, webbed fingers, elongated fingers, mangled hand, boneless fingers, "
+    "asymmetric eyes, mismatched eyes, uneven eye size, protruding eyes, bulging eyes, "
+    "googly eyes, eyes outside sockets, one eye larger, "
+    "featureless cranium, smooth glossy skull, blank skull dome, mannequin head, "
+    "seamless plastic skull, detail-free cranium, "
+    "stray lines, scratch marks, scratch lines on glass, stray pen strokes, "
+    "random line artifacts, detached bones, floating bones, disconnected humerus, "
+    "broken refraction, cracked shell seams, "
     # Default gym-master leakage: never invent sports gear for non-sports topics.
     "basketball, soccer ball, football, baseball, tennis ball, volleyball, sports ball, "
     "dumbbell, barbell, kettlebell, weight plate, gym equipment, gym rack, "

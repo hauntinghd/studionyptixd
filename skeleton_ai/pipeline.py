@@ -187,6 +187,39 @@ def _cap_beat_durations(beats: list[Beat], cap: float = CHEAP_CLIP_SECONDS) -> b
 NARRATION_WORDS_PER_SECOND = 2.75
 
 
+def _gate_reference_still(
+    roster_path: Path,
+    *,
+    master_ref: str,
+    outfit: str,
+    cast_count: int,
+) -> dict[str, Any]:
+    """Audit a reference still and refuse to animate a structurally broken one.
+
+    Raises ``ReferenceStillRejected`` rather than proceeding, so the one-shot
+    render path can no longer spend animation budget on a reference nothing
+    checked. QA that cannot run is a rejection, not a pass.
+    """
+    from studio_agent import still_gate, visual_qa
+
+    try:
+        report = visual_qa.audit_skeleton_still(
+            roster_path,
+            reference=master_ref,
+            locked_outfit=str(outfit or ""),
+            force=True,
+            cast_count=int(cast_count or 1),
+        )
+    except Exception as exc:  # QA failure is not permission to animate.
+        report = {
+            "status": "fail",
+            "pass": False,
+            "issues": ["qa_unavailable"],
+            "summary": f"Reference QA raised: {exc}",
+        }
+    return still_gate.require_animatable_reference(report, still_path=roster_path)
+
+
 def plan_beat_count(script_text: str, requested: int = 12) -> int:
     """Choose enough beats that the average one fits the cheap clip tier.
 
@@ -939,8 +972,19 @@ def run(
                     # view": paired with the no-garments wardrobe bit, the latter
                     # tripped FAL's content checker and failed the roster edit
                     # with content_policy_violation.
+                    # Anatomy detail is stated positively here because the roster
+                    # is the reference every scene inherits. Frame inspection
+                    # found a featureless skull and thumbless hands baked into
+                    # the reference *before* animation ran, so every clip
+                    # inherited them and no downstream QA could recover the
+                    # video. Fixing it here fixes every future render at zero
+                    # marginal cost.
                     visual_description=(
-                        "Plain neutral studio backdrop, full skeleton visible head to feet, front-facing."
+                        "Plain neutral studio backdrop, full skeleton visible head to feet, "
+                        "front-facing. Cranium shows real bone structure with visible sutures "
+                        "and temporal ridges, not a smooth dome. Both eyes equal size, seated "
+                        "level in the sockets. Each hand has five digits including an opposed "
+                        "thumb, correctly jointed."
                     ),
                     outfit=beat.outfit,
                     cast_count=production_cast,
@@ -967,6 +1011,18 @@ def run(
                     unit="image",
                     scene_index=beat.index,
                     metadata={"pricing_note": note, "role": "roster_reference"},
+                )
+                # This path used to have no visual QA at all - zero call sites -
+                # while remaining a public endpoint the Create panel calls. Every
+                # short made through it rendered ungated. The roster is the
+                # reference every beat inherits, so auditing it here is both the
+                # cheapest check available ($0.04 still vs $5.88 of animation)
+                # and the only one that can stop a doomed render before it pays.
+                _gate_reference_still(
+                    roster_path,
+                    master_ref=master_ref,
+                    outfit=beat.outfit,
+                    cast_count=production_cast,
                 )
                 roster_cache[outfit_key] = roster_path
             extra_refs = [str(roster_path)]
