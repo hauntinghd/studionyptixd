@@ -97,6 +97,7 @@ def analyze_render(
         "score": score,
         "summary": _summary(status, score),
         "checks": checks,
+        "release_bar": _release_bar_section(video_path, probe),
         "input_fingerprint": input_fingerprint,
         "created_at": time.time(),
     }
@@ -691,6 +692,29 @@ def _package_check(checks: list[dict[str, Any]], kind: str, package_path: Path |
     status = "pass" if not missing else "fail"
     detail = "All required sections found" if not missing else f"Missing sections: {', '.join(missing)}"
     _add_check(checks, "package", "Packaging present", status, detail)
+
+
+def _release_bar_section(video_path: Path, probe: dict[str, Any]) -> dict[str, Any]:
+    """Mark the finished media against RELEASE_BAR.md's structural clauses.
+
+    Only the structural half is decidable here - completion, freeze, desync. The
+    visible-defect clauses need extracted-frame inspection, which this module
+    does not perform, so they come back `unknown` and the render is correctly
+    not release-ready until a frame pass supplies them.
+    """
+    from studio_agent import release_bar
+
+    narration = video_path.parent / "narration.mp3"
+    evidence = release_bar.RenderEvidence(
+        completed=bool(probe.get("ok")),
+        failure_reason="" if probe.get("ok") else str(probe.get("error") or "media unreadable"),
+        video_duration_sec=float(probe.get("duration") or 0.0),
+        narration_duration_sec=(
+            release_bar.probe_duration(narration) if narration.is_file() else 0.0
+        ),
+        freeze_spans=release_bar.probe_freeze_spans(video_path) if probe.get("ok") else [],
+    )
+    return release_bar.evaluate_render(evidence)
 
 
 def _add_check(checks: list[dict[str, Any]], check_id: str, label: str, status: str, detail: str) -> None:
