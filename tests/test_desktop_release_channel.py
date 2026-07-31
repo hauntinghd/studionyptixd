@@ -20,7 +20,11 @@ SIGNED_FIXTURE_PATH = ROOT / "tests" / "fixtures" / "desktop_release_test_artifa
 SIGNED_FIXTURE_SIGNATURE_PATH = SIGNED_FIXTURE_PATH.with_suffix(
     f"{SIGNED_FIXTURE_PATH.suffix}.sig"
 )
-RELEASE_VERSION = "1.0.3"
+# Derived, not pinned. A hard-coded literal here meant every release had to
+# remember to edit this test, and forgetting it is exactly how the desktop
+# build went stale while web shipped on. The drift guard below still fails
+# loudly if the three version strings disagree.
+RELEASE_VERSION = backend.DESKTOP_RELEASE_VERSION
 RELEASE_FILENAME = f"NYPTID-Studio_{RELEASE_VERSION}_x64-setup.exe"
 RELEASE_BYTES = SIGNED_FIXTURE_PATH.read_bytes()
 RELEASE_SIGNATURE = SIGNED_FIXTURE_SIGNATURE_PATH.read_text(encoding="utf-8").strip()
@@ -250,10 +254,12 @@ def test_pending_1_0_2_source_and_updater_contract_are_canonical() -> None:
         (ROOT / "ViralShorts-App" / "src-tauri" / "Cargo.toml").read_text(encoding="utf-8")
     )
 
-    assert backend.DESKTOP_RELEASE_VERSION == RELEASE_VERSION
+    # The real guard: backend, Tauri and Cargo must agree on one version, or
+    # the installer, the updater manifest and the download filename disagree
+    # about what the release even is.
     assert backend.DESKTOP_RELEASE_FILENAME == RELEASE_FILENAME
-    assert tauri_config["version"] == RELEASE_VERSION
-    assert cargo_config["package"]["version"] == RELEASE_VERSION
+    assert tauri_config["version"] == backend.DESKTOP_RELEASE_VERSION
+    assert cargo_config["package"]["version"] == backend.DESKTOP_RELEASE_VERSION
     assert tauri_config["plugins"]["updater"]["endpoints"] == [
         f"{CANONICAL_API_URL}/api/desktop/updater/{{{{target}}}}/{{{{arch}}}}/{{{{current_version}}}}"
     ]
@@ -296,3 +302,19 @@ def test_versioned_download_rejects_non_current_release(release_dir: Path) -> No
 
     assert error.value.status_code == 404
     assert error.value.detail == "Studio desktop release version was not found"
+
+
+def test_a_version_bump_in_one_place_only_fails_loudly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Partial bumps are the failure this guard exists for.
+
+    Bumping backend without Tauri (or vice versa) ships an installer whose
+    filename, updater manifest and embedded version disagree, and the updater
+    then has nothing coherent to hand out.
+    """
+    tauri_config = json.loads(
+        (ROOT / "ViralShorts-App" / "src-tauri" / "tauri.conf.json").read_text(encoding="utf-8")
+    )
+    monkeypatch.setattr(backend, "DESKTOP_RELEASE_VERSION", "9.9.9")
+    assert tauri_config["version"] != backend.DESKTOP_RELEASE_VERSION
