@@ -4161,6 +4161,40 @@ def _session_has_expandable_proof_job(session: dict[str, Any], *, reply_to: dict
         return True  # job id found on session — treat as expandable if unsure
 
 
+def _session_has_expandable_proof_context(
+    session: dict[str, Any],
+    *,
+    reply_to: dict | None = None,
+) -> bool:
+    """True when THIS conversation actually has a proof short to expand.
+
+    Deliberately narrower than `_find_expandable_shortform_job`, which is
+    allowed to search hard once expansion is known to be the intent. This only
+    answers "is there a production in play here at all", and it accepts three
+    kinds of evidence: the creator replied to a job card, the session tracks an
+    active job, or a rendered deliverable was returned in this thread.
+
+    A job id appearing in raw message text is not evidence - carried-over
+    context can contain one from an unrelated conversation, which is exactly
+    how a fresh planning chat ended up being asked to approve a Scene 1 that
+    did not exist.
+    """
+    if reply_to and str(reply_to.get("job_id") or "").strip():
+        return True
+    for row in list(session.get("active_jobs") or []):
+        if isinstance(row, dict) and str(row.get("job_id") or "").strip():
+            return True
+    if session.get("short_expansion_intake"):
+        return True
+    for message in reversed(list(session.get("messages") or [])[-40:]):
+        if not isinstance(message, dict):
+            continue
+        deliverable = message.get("jobDeliverable")
+        if isinstance(deliverable, dict) and str(deliverable.get("job_id") or "").strip():
+            return True
+    return False
+
+
 def _find_expandable_shortform_job(
     session: dict[str, Any],
     *,
@@ -6276,6 +6310,14 @@ async def _apply_model_agnostic_studio_command(
     wants_expand = bool(
         (_wants_expand_visual_proof_short(user_text) or session.get("short_expansion_intake"))
         and not wants_repair
+        # "let's make the entire short" means expand an existing proof only when
+        # a proof exists. Said in a fresh conversation it means start one. The
+        # phrase alone used to be enough, and the target hunt then escalated
+        # from this session to raw message text to globbing every job on disk -
+        # so a fresh planning chat with WITH CONTEXT on would latch onto an
+        # unrelated old job and ask the creator to approve a "Scene 1" they had
+        # never seen. Intent now requires evidence in this conversation.
+        and _session_has_expandable_proof_context(session, reply_to=reply_to)
     )
     if not wants_expand and not wants_repair:
         return None
