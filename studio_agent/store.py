@@ -509,6 +509,30 @@ def _clean_title_candidate(candidate: str) -> str:
     return cleaned.strip(" -:,.")
 
 
+#: Scope words, not titles. "let's make the entire short" describes how much to
+#: build, not what it is about - but it used to be extracted as the working
+#: title, so the concept card, the Approve card and the rendered video's topic
+#: all became "the entire short" instead of the subject the creator had just
+#: spent the whole conversation planning.
+_GENERIC_PRODUCTION_SCOPE_TITLES = frozenset({
+    "short", "the short", "this short", "that short", "a short",
+    "entire short", "the entire short", "whole short", "the whole short",
+    "full short", "the full short", "rest of the short", "the rest of the short",
+    "video", "the video", "this video", "that video", "a video",
+    "entire video", "the entire video", "whole video", "the whole video",
+    "full video", "the full video",
+    "it", "this", "that", "the rest", "the whole thing", "everything",
+    "the plan", "that plan", "this plan", "the entire thing",
+})
+
+
+def _is_generic_scope_title(value: str) -> bool:
+    """True when a candidate names how much to build rather than what it is."""
+    cleaned = re.sub(r"[^a-z0-9\s]+", " ", str(value or "").strip().lower())
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned in _GENERIC_PRODUCTION_SCOPE_TITLES
+
+
 def _requested_title_from_user_text(text: str) -> str:
     """Best-effort title/topic extraction from the latest user instruction."""
     value = _normalize_quote_chars(_user_message_before_attachments(text))
@@ -516,6 +540,14 @@ def _requested_title_from_user_text(text: str) -> str:
         return ""
     if is_ideation_request(value):
         return ""
+    extracted = _requested_title_from_user_text_inner(value)
+    # A scope phrase must never survive as a title. Returning "" lets the
+    # caller fall back to the topic already established in the conversation,
+    # which is what the creator actually meant.
+    return "" if _is_generic_scope_title(extracted) else extracted
+
+
+def _requested_title_from_user_text_inner(value: str) -> str:
 
     # Prefer conversation-module extractor (handles "if we are making Title").
     try:
