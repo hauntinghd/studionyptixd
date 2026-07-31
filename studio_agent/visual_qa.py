@@ -1001,9 +1001,12 @@ def _still_semantic_prompt(
             if has_head_crop else ""
         )
         + "The canonical skeleton has a smooth polished cranium and large round eyes by "
-        "design - never report those as defects. Report missing_eyes when the orbital "
-        "sockets are empty, hollow or dark with no eyeball present - the character always "
-        "has visible round eyes with irises. Report hand_topology_failure when fingers "
+        "design - never report those as defects; their size and prominence are correct. "
+        "Report missing_eyes when the eyes lack a visible iris and pupil - blank featureless "
+        "pale discs filling the sockets, or empty hollow sockets. The character's eyes always "
+        "show a distinctly coloured iris with a dark pupil against the white of the eye. "
+        "A round shape in the socket is NOT sufficient; look for the iris and pupil. "
+        "Report hand_topology_failure when fingers "
         "are missing, added, fused, thumbless, or wrongly jointed; and glass_shell_failure "
         "when the shell shows stray scratch lines, broken refraction, or bones detached "
         "from the body inside it. "
@@ -1111,7 +1114,9 @@ def audit_skeleton_still(
             for terms, field in (
                 (("thumbless", "missing thumb", "missing finger", "extra finger", "fused finger", "six finger", "malformed hand"), "hand_topology_failure"),
                 (("scratch line", "stray line", "detached bone", "floating bone", "broken refraction"), "glass_shell_failure"),
-                (("empty eye socket", "hollow eye", "no eyeball", "missing eye", "eyeless", "empty socket"), "missing_eyes"),
+                (("empty eye socket", "hollow eye", "no eyeball", "missing eye", "eyeless",
+                  "empty socket", "no iris", "no pupil", "blank eye", "featureless eye",
+                  "without iris", "lacking iris"), "missing_eyes"),
             ):
                 if any(term in slow for term in terms) and field not in issues:
                     issues.append(field)
