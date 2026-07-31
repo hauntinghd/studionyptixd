@@ -912,7 +912,42 @@ def _qa_jpeg(source: Path, target: Path) -> Path | None:
         return None
 
 
-def _still_semantic_prompt(*, locked_outfit: str, cast_count: int = 1) -> str:
+def _qa_head_jpeg(source: Path, target: Path) -> Path | None:
+    """A magnified crop of the head region, for detail QA cannot otherwise see.
+
+    Stills are downscaled to 1024px for the vision call. On a full-body 9:16
+    frame that leaves the eyes around fifteen pixels across, and the classifier
+    described empty sockets as "large round eyes" because it simply could not
+    resolve them. Sending a blown-up head crop alongside the full frame costs
+    nothing and makes the eye check decidable.
+    """
+    try:
+        from PIL import Image
+
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with Image.open(source) as opened:
+            image = opened.convert("RGB")
+            width, height = image.size
+            box = (
+                int(width * 0.20),
+                0,
+                int(width * 0.80),
+                max(1, int(height * 0.30)),
+            )
+            head = image.crop(box)
+            head = head.resize(
+                (1024, max(1, int(1024 * head.height / max(1, head.width)))),
+                Image.LANCZOS,
+            )
+            head.save(target, format="JPEG", quality=92)
+        return target
+    except Exception:
+        return None
+
+
+def _still_semantic_prompt(
+    *, locked_outfit: str, cast_count: int = 1, has_head_crop: bool = False
+) -> str:
     wardrobe_detail = str(locked_outfit or "match the reference or remain unclothed")
     if "turtleneck" in wardrobe_detail.lower():
         wardrobe_detail += (
@@ -959,7 +994,13 @@ def _still_semantic_prompt(*, locked_outfit: str, cast_count: int = 1) -> str:
         # model reproduces them on essentially every draw. Naming them lets the
         # repair path stop instead of paying for a retry that returns the same
         # defect. anatomy_artifact stays reserved for a one-off limb glitch.
-        "The canonical skeleton has a smooth polished cranium and large round eyes by "
+        + (
+            "A THIRD image is provided: a magnified crop of the candidate's head. "
+            "Judge eye presence from that crop, not from the full frame - eyes are "
+            "only a few pixels wide at full-body scale. "
+            if has_head_crop else ""
+        )
+        + "The canonical skeleton has a smooth polished cranium and large round eyes by "
         "design - never report those as defects. Report missing_eyes when the orbital "
         "sockets are empty, hollow or dark with no eyeball present - the character always "
         "has visible round eyes with irises. Report hand_topology_failure when fingers "
@@ -1011,6 +1052,7 @@ def audit_skeleton_still(
     frame_dir = still.parent / f".vq_still_{still.stem}"
     ref_jpg = _qa_jpeg(reference, frame_dir / "reference.jpg")
     candidate_jpg = _qa_jpeg(still, frame_dir / "candidate.jpg")
+    head_jpg = _qa_head_jpeg(still, frame_dir / "candidate_head.jpg")
     if not ref_jpg or not candidate_jpg:
         return {
             "status": "fail" if required else "warn", "pass": False,
@@ -1018,9 +1060,16 @@ def audit_skeleton_still(
             "fingerprint": fingerprint,
         }
     try:
+        images = [str(ref_jpg), str(candidate_jpg)]
+        if head_jpg:
+            images.append(str(head_jpg))
         vision = _run_semantic_vision(
-            [str(ref_jpg), str(candidate_jpg)],
-            prompt=_still_semantic_prompt(locked_outfit=locked_outfit, cast_count=cast_count),
+            images,
+            prompt=_still_semantic_prompt(
+                locked_outfit=locked_outfit,
+                cast_count=cast_count,
+                has_head_crop=bool(head_jpg),
+            ),
         ) or {}
         parsed = vision.get("parsed") if isinstance(vision.get("parsed"), dict) else {}
         confidence = float(parsed.get("confidence") or 0.0)
