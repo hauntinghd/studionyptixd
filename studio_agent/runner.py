@@ -5,9 +5,11 @@ import asyncio
 import base64
 import hashlib
 import json
+import logging
 import os
 import re
 import time
+import traceback
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
@@ -15,6 +17,8 @@ from typing import Any
 EventEmitter = Callable[[dict[str, Any]], Awaitable[None] | None]
 
 from studio_agent import openrouter, production_budget, provider_policy, skills
+
+log = logging.getLogger(__name__)
 from studio_agent.anti_hallucination import ToolFire, audit_turn, guard_text
 from studio_agent import memory, store
 from studio_agent import telemetry, training_capture
@@ -10899,9 +10903,25 @@ async def stream_turn(
                     pass
                 await queue.put(("done", result))
                 return
+            # A turn that dies must leave a trace on the server. This handler
+            # forwarded str(exc) to the client and logged nothing, so an
+            # AttributeError in the concept-commit path made "yes make it"
+            # silently do nothing - repeatedly - with an empty docker log to
+            # investigate. The traceback is what makes the next one findable.
+            log.exception(
+                "studio agent turn failed: session=%s run=%s: %s",
+                session.get("session_id"),
+                run_id or "-",
+                exc,
+            )
             if run_id:
                 try:
-                    store.append_run_event(session["session_id"], run_id, "error", {"message": str(exc)})
+                    store.append_run_event(
+                        session["session_id"],
+                        run_id,
+                        "error",
+                        {"message": str(exc), "traceback": traceback.format_exc()[-4000:]},
+                    )
                     store.finish_run(session["session_id"], run_id, status="failed", error=str(exc))
                 except Exception:
                     pass

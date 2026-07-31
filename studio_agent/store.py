@@ -3050,6 +3050,38 @@ def _apply_visual_proof_args(
     return aligned
 
 
+def _prepare_shortform_pending_args(
+    args: dict[str, Any],
+    messages: list[dict[str, Any]],
+    *,
+    session: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Approve-card arguments: same alignment, planned scene count preserved.
+
+    Two call sites in the runner referenced this function and it did not exist,
+    so every concept-plan commit raised AttributeError inside the turn. The
+    exception was swallowed upstream, the request returned 200, and the creator
+    saw their concept card re-render with no explanation - "yes make it" did
+    nothing, repeatedly, with nothing in the logs.
+
+    It is separate from the execution variant because `_apply_visual_proof_args`
+    forces ``scene_count = 1`` for the staged one-still contract. That is right
+    at execution time and wrong on the pending card: clients treat a one-scene
+    card as stale and hide it, so the creator could never authorise the render
+    the card was asking them to authorise. The card therefore shows the planned
+    scope while execution still enforces the one-still gate.
+    """
+    prepared = _prepare_shortform_execution_args(args, messages, session=session)
+    try:
+        planned = int(dict(args or {}).get("scene_count") or 0)
+    except (TypeError, ValueError):
+        planned = 0
+    if planned > 1:
+        prepared = dict(prepared)
+        prepared["scene_count"] = planned
+    return prepared
+
+
 def _prepare_shortform_execution_args(
     args: dict[str, Any],
     messages: list[dict[str, Any]],
