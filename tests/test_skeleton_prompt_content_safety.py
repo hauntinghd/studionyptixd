@@ -165,8 +165,8 @@ def test_unrelated_failures_do_not_trigger_the_prompt_retry(message: str) -> Non
 
 @pytest.mark.parametrize(
     "term",
-    ["missing fingers", "thumbless hand", "asymmetric eyes", "protruding eyes",
-     "featureless cranium", "stray lines", "detached bones"],
+    ["missing fingers", "thumbless hand", "fused fingers",
+     "stray lines", "detached bones", "broken refraction"],
 )
 def test_the_negative_prompt_names_the_structural_defects(term: str) -> None:
     """Frame inspection found all four structural classes in the reference.

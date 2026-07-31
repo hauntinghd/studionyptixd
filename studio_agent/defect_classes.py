@@ -3,9 +3,9 @@
 Regeneration re-rolls the seed. That helps when the defect came from *this*
 draw - an unlucky limb, a bad framing, a continuity break. It does nothing when
 the model reproduces the defect on essentially every draw, which is the case for
-skull detail, eye consistency, glass-shell refraction, and hand topology on the
-skeleton subject. Frame inspection of a finished render found those four in
-effectively every frame that showed them.
+glass-shell refraction and hand topology on the skeleton subject. Frame
+inspection of a finished render found thumbless four-fingered hands, detached
+bones and stray scratch lines recurring across frames.
 
 Retrying a structural defect is the most expensive possible no-op: it costs a
 full clip or still, produces the same defect, and can loop. One short reached
@@ -25,9 +25,16 @@ STRUCTURAL = "structural"
 
 #: Defects the model reproduces on essentially every draw. Retrying is a no-op
 #: that costs money, so these fail to a human instead.
+#:
+#: Deliberately NOT here: cranial detail and eye size. Both were briefly listed
+#: as defects on the assumption that a featureless glossy dome and large round
+#: eyes were rendering failures. The channel's reference art shows they are the
+#: character - the skull is meant to be smooth and polished, the eyes large and
+#: round. Blocking on them would have failed renders for looking correct, and
+#: "fixing" them would have produced a different mascot. Genuine skull or eye
+#: deviation is caught as identity drift against the master reference, which is
+#: the right mechanism: the reference defines the character, not a word list.
 STRUCTURAL_ISSUES: frozenset[str] = frozenset({
-    "skull_detail_failure",
-    "eye_consistency_failure",
     "hand_topology_failure",
     "glass_shell_failure",
     "material_artifact",

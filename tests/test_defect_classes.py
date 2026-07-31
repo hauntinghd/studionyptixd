@@ -33,8 +33,7 @@ def _report(*issues: str, passed: bool = False) -> dict:
 
 @pytest.mark.parametrize(
     "issue",
-    ["skull_detail_failure", "eye_consistency_failure", "hand_topology_failure",
-     "glass_shell_failure", "material_artifact"],
+    ["hand_topology_failure", "glass_shell_failure", "material_artifact"],
 )
 def test_structural_defects_do_not_earn_a_retry(issue: str) -> None:
     verdict = classify_report(_report(issue))
@@ -121,7 +120,7 @@ def test_a_hold_carries_the_frame_and_states_zero_spend() -> None:
 
 def test_a_hold_is_not_reported_as_a_repair() -> None:
     """"We held" must never be readable as "we retried and it worked"."""
-    hold = structural_hold_report(scene_index=1, qa_report=_report("skull_detail_failure"))
+    hold = structural_hold_report(scene_index=1, qa_report=_report("hand_topology_failure"))
     assert hold["status"] != "repaired_still"
     assert hold["defect_class"] == STRUCTURAL
 
@@ -153,7 +152,7 @@ def test_a_structural_verdict_provably_costs_zero_in_retries(
         production_budget, "enforce_incremental_spend", _tripwire_spend
     )
 
-    structural = _report("skull_detail_failure", "eye_consistency_failure")
+    structural = _report("hand_topology_failure", "glass_shell_failure")
     assert defect_classes.repair_is_allowed(structural) is False
 
     hold = defect_classes.structural_hold_report(scene_index=3, qa_report=structural)
@@ -164,19 +163,21 @@ def test_a_structural_verdict_provably_costs_zero_in_retries(
 def test_a_reseed_verdict_is_the_only_thing_that_unlocks_spend() -> None:
     """The complement of the money proof: fixable defects must still repair."""
     assert repair_is_allowed(_report("composition_failure")) is True
-    assert repair_is_allowed(_report("skull_detail_failure")) is False
+    assert repair_is_allowed(_report("hand_topology_failure")) is False
 
 
 def test_the_observed_canary_defects_all_classify_as_structural() -> None:
     """Grounding against the real render.
 
-    Frame extraction found featureless skull, mismatched eyes, broken hand
-    topology and detached bones with scratch lines. If any of these classified
-    as fixable, the pipeline would pay to re-roll them on every future render.
+    Frame extraction found thumbless four-fingered hands and detached bones with
+    scratch lines. If either classified as fixable, the pipeline would pay to
+    re-roll them on every future render.
+
+    The featureless cranium and large eyes found alongside them are NOT here:
+    the channel's reference art shows both are the character, so blocking on
+    them would fail renders for looking correct.
     """
     for issue in (
-        "skull_detail_failure",
-        "eye_consistency_failure",
         "hand_topology_failure",
         "glass_shell_failure",
     ):
@@ -194,10 +195,7 @@ def test_the_qa_prompt_asks_for_the_structural_fields() -> None:
     from studio_agent.visual_qa import _still_semantic_prompt
 
     prompt = _still_semantic_prompt(locked_outfit="", cast_count=1)
-    for field in (
-        "skull_detail_failure", "eye_consistency_failure",
-        "hand_topology_failure", "glass_shell_failure",
-    ):
+    for field in ("hand_topology_failure", "glass_shell_failure"):
         assert field in prompt, f"QA cannot report {field}"
 
 

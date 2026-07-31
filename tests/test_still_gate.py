@@ -6,11 +6,14 @@ First, `/api/skeleton-ai/generate` - the endpoint the Create panel calls - ran
 `pipeline.run`, which had **zero** visual_qa call sites against 57 in the staged
 path. Every short made through the form rendered completely ungated.
 
-Second, the defects frame inspection found (featureless skull, mismatched eyes,
-thumbless hands, stray scratch lines) were present in the reference stills
+Second, the defects frame inspection found (thumbless four-fingered hands,
+detached bones, stray scratch lines) were present in the reference stills
 *before* animation ran. Animation is 90.7% of a short's cost and the reference
 is 0.3%, so the reference is the cheapest possible place to stop a doomed render
 - $0.04 against the $5.88 of clips it would seed.
+
+The smooth cranium and large round eyes seen alongside them are not defects at
+all: the channel's reference art defines both as the character.
 """
 from __future__ import annotations
 
@@ -32,8 +35,7 @@ def _qa(*issues: str, passed: bool = False) -> dict:
 
 @pytest.mark.parametrize(
     "issue",
-    ["skull_detail_failure", "eye_consistency_failure", "hand_topology_failure",
-     "glass_shell_failure", "material_artifact"],
+    ["hand_topology_failure", "glass_shell_failure", "material_artifact"],
 )
 def test_a_structurally_broken_reference_does_not_animate(issue: str) -> None:
     verdict = evaluate_reference_still(_qa(issue))
@@ -45,10 +47,10 @@ def test_a_structurally_broken_reference_does_not_animate(issue: str) -> None:
 def test_the_observed_canary_reference_defects_all_block() -> None:
     """The exact defects found by extracting frames from a finished render."""
     verdict = evaluate_reference_still(
-        _qa("skull_detail_failure", "eye_consistency_failure", "hand_topology_failure")
+        _qa("hand_topology_failure", "glass_shell_failure")
     )
     assert verdict["animation_allowed"] is False
-    assert len(verdict["blocking_issues"]) == 3
+    assert len(verdict["blocking_issues"]) == 2
 
 
 def test_missing_qa_is_not_permission_to_animate() -> None:

@@ -973,18 +973,17 @@ def run(
                     # tripped FAL's content checker and failed the roster edit
                     # with content_policy_violation.
                     # Anatomy detail is stated positively here because the roster
-                    # is the reference every scene inherits. Frame inspection
-                    # found a featureless skull and thumbless hands baked into
-                    # the reference *before* animation ran, so every clip
-                    # inherited them and no downstream QA could recover the
-                    # video. Fixing it here fixes every future render at zero
-                    # marginal cost.
+                    # is the reference every scene inherits, and weak draws drop
+                    # exactly these features. It describes the character as the
+                    # channel's reference art defines it - polished cranium and
+                    # large round eyes are correct and deliberately reinforced,
+                    # not corrected.
                     visual_description=(
                         "Plain neutral studio backdrop, full skeleton visible head to feet, "
-                        "front-facing. Cranium shows real bone structure with visible sutures "
-                        "and temporal ridges, not a smooth dome. Both eyes equal size, seated "
-                        "level in the sockets. Each hand has five digits including an opposed "
-                        "thumb, correctly jointed."
+                        "front-facing. Smooth polished ivory cranium, large round eyes seated "
+                        "in the sockets, fully defined dental arcade. Each hand has five "
+                        "digits including a thumb, individually jointed. Clean unscratched "
+                        "glass shell."
                     ),
                     outfit=beat.outfit,
                     cast_count=production_cast,
