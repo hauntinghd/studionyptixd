@@ -850,6 +850,22 @@ def _semantic_prompt(*, frame_count: int, locked_outfit: str, cast_count: int = 
     )
 
 
+#: Still QA judges fine anatomical detail - whether an eye has an iris, whether
+#: a hand has a thumb. Measured directly: Haiku 4.5 passed two stills whose eyes
+#: were blank featureless discs, describing them as "large round eyes" with 0.95
+#: confidence, even given a magnified head crop. Sonnet 5 flagged both and
+#: passed the good one. A QA call costs a fraction of the $0.49 clip it guards,
+#: so the stronger model is the cheap side of this trade.
+STILL_QA_VISION_MODEL_DEFAULT = "claude-sonnet-5"
+
+
+def _still_qa_vision_model() -> str:
+    return str(
+        os.getenv("STUDIO_STILL_QA_VISION_MODEL")
+        or STILL_QA_VISION_MODEL_DEFAULT
+    ).strip() or STILL_QA_VISION_MODEL_DEFAULT
+
+
 def _run_semantic_vision(image_paths: list[str], *, prompt: str) -> dict[str, Any]:
     """Run semantic QA through direct Anthropic only."""
     from studio_agent import competitor
@@ -858,10 +874,18 @@ def _run_semantic_vision(image_paths: list[str], *, prompt: str) -> dict[str, An
     provider_policy.assert_provider_allowed(
         "anthropic", provider_policy.SEMANTIC_QA_CAPABILITY
     )
-    result = competitor._summarize_keyframe_visuals_anthropic(
-        image_paths,
-        prompt_text=prompt,
-    )
+    previous = os.environ.get("STUDIO_REFERENCE_VISION_MODEL")
+    os.environ["STUDIO_REFERENCE_VISION_MODEL"] = _still_qa_vision_model()
+    try:
+        result = competitor._summarize_keyframe_visuals_anthropic(
+            image_paths,
+            prompt_text=prompt,
+        )
+    finally:
+        if previous is None:
+            os.environ.pop("STUDIO_REFERENCE_VISION_MODEL", None)
+        else:
+            os.environ["STUDIO_REFERENCE_VISION_MODEL"] = previous
     if not isinstance(result, dict):
         result = {"error": "anthropic_invalid_result", "summary": ""}
     summary = str(result.get("summary") or "").strip()

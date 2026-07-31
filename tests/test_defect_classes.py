@@ -249,3 +249,25 @@ def test_qa_can_report_missing_eyes() -> None:
     prompt = _still_semantic_prompt(locked_outfit="", cast_count=1)
     assert "missing_eyes" in prompt
     assert "never report those as defects" in prompt, "character traits not protected"
+
+
+def test_still_qa_uses_a_model_that_can_resolve_the_detail_it_judges() -> None:
+    """Measured, not assumed.
+
+    Haiku 4.5 passed two stills whose eyes were blank featureless discs,
+    describing them as "large round eyes" at 0.95 confidence - even when given a
+    magnified head crop. Sonnet 5 flagged both and passed the good one. Still QA
+    decides whether to spend $0.49 on a clip, so the stronger model is the cheap
+    side of the trade.
+    """
+    from studio_agent import visual_qa
+
+    assert visual_qa.STILL_QA_VISION_MODEL_DEFAULT == "claude-sonnet-5"
+    assert "haiku" not in visual_qa._still_qa_vision_model().lower()
+
+
+def test_still_qa_model_is_overridable(monkeypatch: pytest.MonkeyPatch) -> None:
+    from studio_agent import visual_qa
+
+    monkeypatch.setenv("STUDIO_STILL_QA_VISION_MODEL", "claude-opus-4-8")
+    assert visual_qa._still_qa_vision_model() == "claude-opus-4-8"
