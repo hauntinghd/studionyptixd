@@ -12,7 +12,22 @@ PipelineKind = Literal["skeleton_host", "styled_t2i"]
 DEFAULT_RENDER_STYLE = "cinematic"
 # historical_18th_century rides the same styled_t2i QA/retry contract as
 # ultra_realism and is required for the history channels' period look.
-LAUNCH_RENDER_STYLE_KEYS = frozenset(
+#: Styles the product exposes. This was pinned to four while the others were
+#: being validated, which left twenty finished styles in the registry that the
+#: picker, natural-language selection and the agent could not reach at all.
+#: They are not separate machinery - every non-skeleton style runs the same
+#: styled_t2i pipeline as ultra_realism and cinematic, so exposing them is a
+#: curation decision rather than a code one.
+#:
+#: Populated after registration at the bottom of this module, because the
+#: registry does not exist yet at this point in the file. Narrow it with
+#: STUDIO_LAUNCH_RENDER_STYLES (comma-separated keys) to stage a subset again.
+LAUNCH_RENDER_STYLE_KEYS: frozenset[str] = frozenset()
+
+#: Styles proven end to end with a tuned QA/retry contract. The rest are
+#: reachable but not yet hardened; this set records which is which instead of
+#: the distinction being lost once the gate opened.
+VALIDATED_RENDER_STYLE_KEYS = frozenset(
     {"skeleton_host", "ultra_realism", "cinematic", "historical_18th_century"}
 )
 
@@ -561,11 +576,26 @@ _register(RenderStyle(
 ))
 
 
+def _resolve_launch_render_style_keys() -> frozenset[str]:
+    """Every registered style, unless an explicit subset is configured."""
+    raw = str(os.getenv("STUDIO_LAUNCH_RENDER_STYLES", "") or "").strip()
+    if not raw:
+        return frozenset(RENDER_STYLES)
+    wanted = {part.strip().lower() for part in raw.split(",") if part.strip()}
+    allowed = wanted & set(RENDER_STYLES)
+    # An override that names nothing real must not silently disable every style.
+    return frozenset(allowed) if allowed else frozenset(RENDER_STYLES)
+
+
+# Registration is complete by this point, so the launch set can finally be built.
+LAUNCH_RENDER_STYLE_KEYS = _resolve_launch_render_style_keys()
+
+
 def list_render_styles() -> list[dict[str, Any]]:
     groups: dict[str, list[dict[str, Any]]] = {}
-    # Public launch intentionally exposes only the three production lanes that
-    # have a complete QA/retry contract.  The wider registry remains available
-    # internally for migration and future staged releases.
+    # Every registered style is exposed. VALIDATED_RENDER_STYLE_KEYS marks the
+    # ones already proven end to end, so the picker can show that distinction
+    # rather than hiding the rest entirely.
     for style in RENDER_STYLES.values():
         if style.key not in LAUNCH_RENDER_STYLE_KEYS:
             continue
@@ -623,13 +653,32 @@ def resolve_render_style(
     spoken = explicit_render_style_from_text(user_text)
     for candidate in (spoken, explicit, session_style, DEFAULT_RENDER_STYLE):
         if candidate and str(candidate).strip():
-            try:
-                style = get_render_style(str(candidate).strip())
-                if style.key in LAUNCH_RENDER_STYLE_KEYS:
-                    return style
-            except KeyError:
-                continue
+            style = _style_from_candidate(str(candidate).strip())
+            if style is not None and style.key in LAUNCH_RENDER_STYLE_KEYS:
+                return style
     return RENDER_STYLES[DEFAULT_RENDER_STYLE]
+
+
+def _style_from_candidate(value: str) -> RenderStyle | None:
+    """Resolve a registry key OR a human name like "skeleton" / "ghibli".
+
+    Aliases used to apply only to spoken text, so an explicit or stored value of
+    "skeleton" matched no registry key (it is `skeleton_host`) and fell through
+    to the cinematic default. That failed silently: the wrong art style was
+    rendered and charged for, with nothing reporting a mismatch. Every
+    resolution path now understands the same names the creator does.
+    """
+    try:
+        return get_render_style(value)
+    except KeyError:
+        pass
+    alias_key = explicit_render_style_from_text(value)
+    if not alias_key:
+        return None
+    try:
+        return get_render_style(alias_key)
+    except KeyError:
+        return None
 
 
 def is_skeleton_style(style: RenderStyle | str) -> bool:
