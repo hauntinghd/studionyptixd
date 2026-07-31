@@ -85,3 +85,77 @@ def test_scope_detection_is_exact_not_substring(value: str, expected: bool) -> N
 def test_punctuation_and_case_do_not_smuggle_a_scope_phrase_through() -> None:
     for variant in ("the entire short!", "THE ENTIRE SHORT", "the-entire-short"):
         assert store._is_generic_scope_title(variant) is True
+
+
+# --- Prose is not a title -----------------------------------------------------
+
+def test_the_word_topic_in_a_sentence_is_not_a_label() -> None:
+    """This reached an Approve card as the title of a real production.
+
+    Catalyst was explaining itself in ordinary prose. The extractor matched the
+    bare word "topic" followed by a space, took the rest of the clause, and
+    stopped inside the apostrophe of "you've" - so Studio offered to render
+    "cluster (men pulling away / emotional walls) without checking against what
+    you" and would have charged about six dollars for it.
+    """
+    from studio_agent.store import _extract_title_from_assistant_text
+
+    body = (
+        "Yeah, that's a real gap - Catalyst is pattern-matching on the topic cluster "
+        "(men pulling away / emotional walls) without checking against what you've "
+        "already put out. Totally fair complaint."
+    )
+    assert _extract_title_from_assistant_text(body) == ""
+
+
+def test_a_labelled_title_is_still_extracted() -> None:
+    from studio_agent.store import _extract_title_from_assistant_text
+
+    body = "**Working title:** The Real Reason Men Build Emotional Walls"
+    assert (
+        _extract_title_from_assistant_text(body)
+        == "The Real Reason Men Build Emotional Walls"
+    )
+
+
+def test_an_apostrophe_no_longer_truncates_a_title() -> None:
+    """The capture excluded quote characters, so it also excluded apostrophes."""
+    from studio_agent.store import _extract_title_from_assistant_text
+
+    body = "**Working title:** Why He Doesn't Text Back"
+    assert _extract_title_from_assistant_text(body) == "Why He Doesn't Text Back"
+
+
+def test_bold_emphasis_mid_sentence_is_not_a_title() -> None:
+    from studio_agent.store import _extract_title_from_assistant_text
+
+    body = "That's the **single biggest reason people bounce off the hook** in my view."
+    assert _extract_title_from_assistant_text(body) == ""
+
+
+@pytest.mark.parametrize(
+    "fragment",
+    [
+        "cluster (men pulling away / emotional walls) without checking against what you",
+        "pattern-matching on the",
+        "retention is the tell in this niche, not raw views and",
+    ],
+)
+def test_prose_fragments_are_rejected(fragment: str) -> None:
+    from studio_agent.store import _looks_like_prose_fragment
+
+    assert _looks_like_prose_fragment(fragment)
+
+
+@pytest.mark.parametrize(
+    "title",
+    [
+        "The Real Reason Men Build Emotional Walls",
+        "Why You Test The People Who Actually Love You",
+        "Why He Doesn't Text Back",
+    ],
+)
+def test_real_titles_are_not_mistaken_for_fragments(title: str) -> None:
+    from studio_agent.store import _looks_like_prose_fragment
+
+    assert not _looks_like_prose_fragment(title)

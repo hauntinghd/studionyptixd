@@ -2413,6 +2413,35 @@ def _clean_outline_title_candidate(raw: str) -> str:
     return s[:120]
 
 
+# Words a title does not end on. A clause that trails off into one of these is
+# a piece of a sentence, not something to name a video after and charge for.
+_FRAGMENT_TAIL_WORDS = frozenset(
+    """a an and or but the of for to with without against about over under into from
+    than then that this these those is are was were be been being as at by in on if
+    so because unless though while when where which who whom whose""".split()
+)
+
+
+def _looks_like_prose_fragment(candidate: str) -> str | bool:
+    """True when a heuristic title reads as a clipping of a sentence.
+
+    The loose patterns match inside ordinary prose, so they can return a
+    grammatical fragment that is nonetheless 10+ words long and passes every
+    blocklist. One reached production as the title of a real short:
+    "cluster (men pulling away / emotional walls) without checking against what
+    you". Titles the assistant writes begin with a capital; clauses lifted out
+    of the middle of a sentence do not.
+    """
+    text = str(candidate or "").strip()
+    if not text:
+        return True
+    first = text[0]
+    if first.isalpha() and first.islower():
+        return True
+    words = re.findall(r"[A-Za-z']+", text.lower())
+    return bool(words) and words[-1] in _FRAGMENT_TAIL_WORDS
+
+
 def _extract_title_from_assistant_text(text: str) -> str:
     """Best-effort title from one assistant turn (scene breakdowns may omit it)."""
     body = str(text or "")
@@ -2434,19 +2463,33 @@ def _extract_title_from_assistant_text(text: str) -> str:
         cleaned = _clean_outline_title_candidate(hook) or hook.strip()[:120]
         if cleaned and len(cleaned) >= 10:
             return cleaned
+    # Bold is emphasis as often as it is a title, so it has to survive the same
+    # fragment check as the loose patterns below.
     bold = re.findall(r"\*\*([^*\n]{10,140})\*\*", body)
     for cand in reversed(bold):
         cleaned = _clean_outline_title_candidate(cand)
-        if cleaned:
+        if cleaned and not _looks_like_prose_fragment(cleaned):
             return cleaned
+    # A label, not a word in a sentence. "[:\s]+" matched the bare word "topic"
+    # mid-prose - "pattern-matching on the topic cluster (men pulling away /
+    # emotional walls) without checking against what you've already put out" -
+    # and made the rest of that clause the title of a production. The capture
+    # also excluded apostrophes, so it stopped inside "you've", which is the
+    # same reason a real title like "Why He Doesn't Text Back" would arrive
+    # clipped to "Why He Doesn".
     for pattern in (
-        r"(?:working title|title|topic|outline)[:\s]+[\"“']?([^\"'\n]{10,140})",
-        r"(?:let'?s make|make)\s+[\"“']([^\"'\n]{10,140})",
+        r"(?:working title|title|topic|outline)\s*:\s*[\"“']?([^\n]{10,140})",
+        r"(?:let'?s make|make)\s+[\"“']([^\"”'\n]{10,140})",
     ):
         m = re.search(pattern, body, re.I)
         if m:
-            cleaned = _clean_outline_title_candidate(m.group(1))
-            if cleaned:
+            candidate = str(m.group(1) or "")
+            # A quoted label ends at its closing quote; an unquoted one at the line.
+            quoted = re.match(r"\s*[\"“']([^\"”'\n]{10,140})", " " + candidate)
+            if quoted:
+                candidate = quoted.group(1)
+            cleaned = _clean_outline_title_candidate(candidate)
+            if cleaned and not _looks_like_prose_fragment(cleaned):
                 return cleaned
     block = re.search(r"Skeleton outline[^\n]*\n+([^\n]{12,160})", body, re.I)
     if block:
