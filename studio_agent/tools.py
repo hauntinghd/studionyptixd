@@ -19,7 +19,7 @@ from contextvars import copy_context
 from pathlib import Path
 from typing import Any
 
-from studio_agent import production_budget, production_costs, provider_policy, store
+from studio_agent import defect_classes, production_budget, production_costs, provider_policy, store
 from studio_agent.fs_paths import skeleton_output_root
 from studio_agent.production_slots import production_slot
 from studio_agent import skills as skill_loader
@@ -6641,6 +6641,7 @@ def audit_and_repair_production_scenes(
     repaired_animations: list[int] = []
     attempted_still_repairs: list[int] = []
     attempted_animation_repairs: list[int] = []
+    structural_holds: list[int] = []
     route_history: list[dict[str, Any]] = []
     failed: list[int] = []
     for index in selected:
@@ -6683,6 +6684,16 @@ def audit_and_repair_production_scenes(
         scene["still_qa"] = still_qa
         save_scenes(ws, scenes)
         if still_qa.get("pass") is not True and still_qa.get("status") != "warn":
+            # A structural defect is reproduced on every draw, so a retry is a
+            # paid no-op. Stop here with the frame attached instead of spending.
+            if not defect_classes.repair_is_allowed(still_qa):
+                hold = defect_classes.structural_hold_report(
+                    scene_index=index, qa_report=still_qa, frame_path=str(still)
+                )
+                structural_holds.append(index)
+                failed.append(index)
+                reports.append(hold)
+                continue
             attempted_still_repairs.append(index)
             try:
                 repair = json.loads(regenerate_production_scene(
@@ -6854,10 +6865,16 @@ def audit_and_repair_production_scenes(
         "repaired_animations": repaired_animations,
         "attempted_still_repairs": sorted(set(attempted_still_repairs)),
         "attempted_animation_repairs": sorted(set(attempted_animation_repairs)),
+        "structural_holds": sorted(set(structural_holds)),
+        "needs_human_review": bool(structural_holds),
         "failed": failed,
         "routes": route_history,
         "scenes": reports,
-        "note": "Fresh artifact, identity, animation, and narrative-correspondence QA completed; only failed scenes were regenerated.",
+        "note": (
+            "Fresh artifact, identity, animation, and narrative-correspondence QA completed. "
+            "Seed-dependent defects were regenerated; structural defects were held for human "
+            "review with the frame attached and cost nothing in retries."
+        ),
     }, indent=2)
 
 

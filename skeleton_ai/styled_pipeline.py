@@ -1519,10 +1519,16 @@ def plan_scenes(
                 outfit=str(outfit or ""),
                 cast_count=hosts,
             ) or {"status": "fail", "pass": False, "issues": ["qa_unavailable"], "summary": "Still QA returned no report"}
+            from studio_agent import defect_classes
+
+            # Only a seed-dependent defect earns a paid retry. Skull detail, eye
+            # consistency, hand topology and shell refraction come back on every
+            # draw, so re-rolling them buys the same still twice.
             if (
                 candidate_target is not None
                 and identity_qa.get("status") != "pass"
                 and "qa_unavailable" not in list(identity_qa.get("issues") or [])
+                and defect_classes.repair_is_allowed(identity_qa)
             ):
                 # One bounded recovery: preserve the scene's narrative beat but
                 # change the short staging variant and seed. Never prepend the

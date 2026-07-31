@@ -953,7 +953,20 @@ def _still_semantic_prompt(*, locked_outfit: str, cast_count: int = 1) -> str:
         '{"pass":false,"confidence":0.0,"summary":"short factual reason",'
         '"identity_drift":false,"human_or_skin":false,"anatomy_artifact":false,'
         '"wardrobe_drift":false,"layout_artifact":false,"symbolic_clutter":false,'
-        '"text_artifact":false,"background_artifact":false}. Uncertainty is a fail.'
+        '"text_artifact":false,"background_artifact":false,'
+        '"skull_detail_failure":false,"eye_consistency_failure":false,'
+        '"hand_topology_failure":false,"glass_shell_failure":false}. '
+        # These four are reported separately from anatomy_artifact because the
+        # model reproduces them on essentially every draw. Naming them lets the
+        # repair path stop instead of paying for a retry that returns the same
+        # defect. anatomy_artifact stays reserved for a one-off limb glitch.
+        "Report skull_detail_failure when the cranium is a featureless glossy dome with no "
+        "suture or bone structure; eye_consistency_failure when the eyes are mismatched in "
+        "size, asymmetric, protruding, or not seated in the sockets; hand_topology_failure "
+        "when fingers are missing, added, fused, thumbless, or wrongly jointed; and "
+        "glass_shell_failure when the shell shows stray scratch lines, broken refraction, or "
+        "bones detached from the body inside it. "
+        "Uncertainty is a fail."
     )
 
 
@@ -1014,6 +1027,10 @@ def audit_skeleton_still(
         issue_fields = (
             "identity_drift", "human_or_skin", "anatomy_artifact", "wardrobe_drift",
             "layout_artifact", "symbolic_clutter", "text_artifact", "background_artifact",
+            # Structural classes: reported separately so the repair path can
+            # refuse to spend on a defect a fresh seed will reproduce.
+            "skull_detail_failure", "eye_consistency_failure",
+            "hand_topology_failure", "glass_shell_failure",
         )
         issues = [field for field in issue_fields if parsed.get(field) is True]
         if not parsed and vision.get("error"):
@@ -1040,6 +1057,17 @@ def audit_skeleton_still(
                 issues.append("layout_artifact")
             if any(term in slow for term in ("text", "hashtag", "watermark", "caption overlay")) and "text_artifact" not in issues:
                 issues.append("text_artifact")
+            # Structural backfill. Without this a summary that plainly describes
+            # a featureless skull or thumbless hand lands as a generic anatomy
+            # artifact, and the repair path pays for a retry that cannot fix it.
+            for terms, field in (
+                (("featureless skull", "featureless cranium", "smooth dome", "no suture", "glossy dome"), "skull_detail_failure"),
+                (("mismatched eye", "asymmetric eye", "protruding eye", "googly", "eyes differ", "uneven eyes"), "eye_consistency_failure"),
+                (("thumbless", "missing thumb", "missing finger", "extra finger", "fused finger", "six finger", "malformed hand"), "hand_topology_failure"),
+                (("scratch line", "stray line", "detached bone", "floating bone", "broken refraction"), "glass_shell_failure"),
+            ):
+                if any(term in slow for term in terms) and field not in issues:
+                    issues.append(field)
         passed = parsed.get("pass") is True and confidence >= 0.80 and not issues
         report = {
             "version": STILL_SEMANTIC_QA_VERSION,

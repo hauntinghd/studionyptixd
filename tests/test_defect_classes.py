@@ -1,0 +1,224 @@
+"""Structural defects must never buy a retry.
+
+Regeneration re-rolls the seed, which helps only when the defect came from this
+draw. Frame inspection of a finished render found featureless skulls, mismatched
+eyes, and broken hand topology in effectively every frame that showed them - the
+model reproduces those. Paying to re-roll them is the most expensive kind of
+no-op: full price, same defect, and it can loop. One short reached $18.71 that
+way.
+
+The load-bearing assertion in this file is the money one: a structural verdict
+must reach zero paid calls.
+"""
+from __future__ import annotations
+
+import pytest
+
+from studio_agent import defect_classes
+from studio_agent.defect_classes import (
+    RESEED_FIXABLE,
+    STRUCTURAL,
+    classify_issue,
+    classify_report,
+    repair_is_allowed,
+    structural_hold_report,
+)
+
+
+def _report(*issues: str, passed: bool = False) -> dict:
+    return {"pass": passed, "status": "pass" if passed else "fail", "issues": list(issues)}
+
+
+# --- The two branches ---------------------------------------------------------
+
+@pytest.mark.parametrize(
+    "issue",
+    ["skull_detail_failure", "eye_consistency_failure", "hand_topology_failure",
+     "glass_shell_failure", "material_artifact"],
+)
+def test_structural_defects_do_not_earn_a_retry(issue: str) -> None:
+    verdict = classify_report(_report(issue))
+    assert verdict["defect_class"] == STRUCTURAL
+    assert verdict["repair_allowed"] is False
+    assert issue in verdict["structural_issues"]
+
+
+@pytest.mark.parametrize(
+    "issue",
+    ["composition_failure", "layout_artifact", "anatomy_artifact", "crop_artifact",
+     "background_artifact", "wardrobe_drift", "identity_drift", "symbolic_clutter"],
+)
+def test_seed_dependent_defects_do_earn_a_retry(issue: str) -> None:
+    verdict = classify_report(_report(issue))
+    assert verdict["defect_class"] == RESEED_FIXABLE
+    assert verdict["repair_allowed"] is True
+
+
+def test_a_one_off_limb_glitch_is_distinct_from_hand_topology() -> None:
+    """anatomy_artifact is a bad draw; hand_topology_failure is what the model does."""
+    assert classify_issue("anatomy_artifact") == RESEED_FIXABLE
+    assert classify_issue("hand_topology_failure") == STRUCTURAL
+
+
+# --- The rules that keep money from leaking -----------------------------------
+
+def test_a_mixed_verdict_resolves_to_structural() -> None:
+    """A retry cannot succeed while a structural issue is present.
+
+    Paying for one because a fixable issue rode alongside it is the same waste
+    with extra steps.
+    """
+    verdict = classify_report(_report("composition_failure", "hand_topology_failure"))
+    assert verdict["defect_class"] == STRUCTURAL
+    assert verdict["repair_allowed"] is False
+    assert verdict["reseed_issues"] == ["composition_failure"]
+
+
+def test_an_unrecognised_issue_fails_closed() -> None:
+    """New QA fields must be classified deliberately, not authorise spend by default."""
+    verdict = classify_report(_report("some_brand_new_qa_field"))
+    assert verdict["defect_class"] == STRUCTURAL
+    assert verdict["repair_allowed"] is False
+
+
+def test_unavailable_qa_does_not_authorise_spend() -> None:
+    verdict = classify_report(_report("qa_unavailable"))
+    assert verdict["repair_allowed"] is False
+    assert "guesswork" in verdict["reason"]
+
+
+def test_a_failure_with_no_named_issue_does_not_authorise_spend() -> None:
+    verdict = classify_report({"pass": False, "status": "fail", "issues": []})
+    assert verdict["repair_allowed"] is False
+
+
+def test_a_passing_verdict_triggers_nothing() -> None:
+    verdict = classify_report(_report(passed=True))
+    assert verdict["repair_allowed"] is False
+    assert verdict["defect_class"] == ""
+
+
+def test_a_missing_report_does_not_authorise_spend() -> None:
+    assert repair_is_allowed(None) is False
+    assert repair_is_allowed({}) is False
+
+
+# --- The hold record ----------------------------------------------------------
+
+def test_a_hold_carries_the_frame_and_states_zero_spend() -> None:
+    """A human reviews the image, not a verdict string."""
+    hold = structural_hold_report(
+        scene_index=7,
+        qa_report=_report("hand_topology_failure"),
+        frame_path="/w/stills/b07.png",
+    )
+    assert hold["status"] == "structural_hold"
+    assert hold["frame"] == "/w/stills/b07.png"
+    assert hold["retry_spend_usd"] == 0.0
+    assert hold["needs_human_review"] is True
+    assert "hand_topology_failure" in hold["structural_issues"]
+
+
+def test_a_hold_is_not_reported_as_a_repair() -> None:
+    """"We held" must never be readable as "we retried and it worked"."""
+    hold = structural_hold_report(scene_index=1, qa_report=_report("skull_detail_failure"))
+    assert hold["status"] != "repaired_still"
+    assert hold["defect_class"] == STRUCTURAL
+
+
+# --- The money proof ----------------------------------------------------------
+
+def test_a_structural_verdict_provably_costs_zero_in_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Drive the real repair decision and assert no paid call is reached.
+
+    Both the regenerate entry point and the budget chokepoint are replaced with
+    tripwires. A structural verdict must touch neither.
+    """
+    from studio_agent import production_budget, tools
+
+    spent: list[str] = []
+
+    def _tripwire_regenerate(*args, **kwargs):
+        spent.append("regenerate_production_scene")
+        raise AssertionError("structural defect reached a paid regenerate")
+
+    def _tripwire_spend(*args, **kwargs):
+        spent.append("enforce_incremental_spend")
+        raise AssertionError("structural defect reached the budget chokepoint")
+
+    monkeypatch.setattr(tools, "regenerate_production_scene", _tripwire_regenerate)
+    monkeypatch.setattr(
+        production_budget, "enforce_incremental_spend", _tripwire_spend
+    )
+
+    structural = _report("skull_detail_failure", "eye_consistency_failure")
+    assert defect_classes.repair_is_allowed(structural) is False
+
+    hold = defect_classes.structural_hold_report(scene_index=3, qa_report=structural)
+    assert hold["retry_spend_usd"] == 0.0
+    assert spent == [], f"structural defect triggered paid work: {spent}"
+
+
+def test_a_reseed_verdict_is_the_only_thing_that_unlocks_spend() -> None:
+    """The complement of the money proof: fixable defects must still repair."""
+    assert repair_is_allowed(_report("composition_failure")) is True
+    assert repair_is_allowed(_report("skull_detail_failure")) is False
+
+
+def test_the_observed_canary_defects_all_classify_as_structural() -> None:
+    """Grounding against the real render.
+
+    Frame extraction found featureless skull, mismatched eyes, broken hand
+    topology and detached bones with scratch lines. If any of these classified
+    as fixable, the pipeline would pay to re-roll them on every future render.
+    """
+    for issue in (
+        "skull_detail_failure",
+        "eye_consistency_failure",
+        "hand_topology_failure",
+        "glass_shell_failure",
+    ):
+        assert classify_report(_report(issue))["repair_allowed"] is False, issue
+
+
+# --- QA must be able to name the structural classes ---------------------------
+
+def test_the_qa_prompt_asks_for_the_structural_fields() -> None:
+    """The gate is only as good as the vocabulary QA can report in.
+
+    Without these fields every structural defect arrives as a generic
+    anatomy_artifact and buys a retry that cannot fix it.
+    """
+    from studio_agent.visual_qa import _still_semantic_prompt
+
+    prompt = _still_semantic_prompt(locked_outfit="", cast_count=1)
+    for field in (
+        "skull_detail_failure", "eye_consistency_failure",
+        "hand_topology_failure", "glass_shell_failure",
+    ):
+        assert field in prompt, f"QA cannot report {field}"
+
+
+def test_every_field_the_qa_prompt_requests_is_classified() -> None:
+    """A field QA can emit but the classifier does not know fails closed.
+
+    That is safe, but silent. This test makes adding a QA field without
+    classifying it a visible failure instead.
+    """
+    from studio_agent.visual_qa import _still_semantic_prompt
+
+    prompt = _still_semantic_prompt(locked_outfit="", cast_count=1)
+    known = defect_classes.STRUCTURAL_ISSUES | defect_classes.RESEED_FIXABLE_ISSUES
+    emitted = {
+        field for field in known if f'"{field}"' in prompt
+    }
+    unclassified = {
+        token.strip('"')
+        for token in prompt.split()
+        if token.startswith('"') and token.endswith('":false,')
+    }
+    assert emitted, "no classified fields found in the QA prompt"
+    for field in unclassified:
+        assert field in known or field in {"pass"}, f"{field} is emitted but unclassified"
