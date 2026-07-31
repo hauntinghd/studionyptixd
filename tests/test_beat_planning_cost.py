@@ -124,3 +124,44 @@ def test_a_script_written_to_budget_stays_inside_the_cheap_tier() -> None:
         script = " ".join(["word"] * words)
         count = plan_beat_count(script, requested=10)
         assert (words / NARRATION_WORDS_PER_SECOND) / count <= CHEAP_CLIP_SECONDS + 1e-9
+
+
+# --- An explicit count is a contract, not a floor ------------------------------
+
+def test_a_visual_proof_still_stays_one_still() -> None:
+    """The regression this guards.
+
+    The staged workflow asks for exactly one still so the creator can approve
+    the look before paying for a short. Treating that 1 as a floor rendered
+    eleven stills from a 144-word script - eleven times the cost, and an
+    approval gate that no longer gated anything.
+    """
+    script = " ".join(["word"] * 144)
+    assert plan_beat_count(script, 1, exact=True) == 1
+
+
+def test_a_creator_specified_count_is_honoured() -> None:
+    """Asking for six scenes must not silently produce eleven."""
+    script = " ".join(["word"] * 144)
+    assert plan_beat_count(script, 6, exact=True) == 6
+
+
+def test_the_default_is_still_raised_to_fit_the_cheap_tier() -> None:
+    """Without an explicit request the cost fix must still apply."""
+    script = " ".join(["word"] * 203)
+    assert plan_beat_count(script, 12) > 12
+
+
+def test_exact_never_returns_zero_or_negative() -> None:
+    for requested in (0, -3, None):
+        assert plan_beat_count("some script", requested or 0, exact=True) >= 1
+
+
+def test_the_staged_path_marks_explicit_counts_as_exact() -> None:
+    """tools.py must pass the contract flag, or the fix never reaches production."""
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parents[1] / "studio_agent" / "tools.py").read_text(
+        encoding="utf-8"
+    )
+    assert "beats_exact=bool(visual_proof_only or scene_count)" in source

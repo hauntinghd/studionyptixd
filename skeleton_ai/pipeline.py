@@ -220,7 +220,7 @@ def _gate_reference_still(
     return still_gate.require_animatable_reference(report, still_path=roster_path)
 
 
-def plan_beat_count(script_text: str, requested: int = 12) -> int:
+def plan_beat_count(script_text: str, requested: int = 12, *, exact: bool = False) -> int:
     """Choose enough beats that the average one fits the cheap clip tier.
 
     A fixed beat count silently sets the price of a short. 203 words became
@@ -228,7 +228,15 @@ def plan_beat_count(script_text: str, requested: int = 12) -> int:
     tier - so every clip billed at 10s and the render cost about $12 instead of
     about $8. More, shorter beats are strictly cheaper here, and they match the
     5s average shot length this channel already cuts to.
+
+    ``exact`` marks the requested count as a contract rather than a default.
+    Raising it is right for an unspecified count and catastrophic for an
+    explicit one: the staged workflow asks for a single visual-proof still, and
+    treating that 1 as a floor produced eleven stills - eleven times the cost,
+    and an approval gate that no longer gates anything.
     """
+    if exact:
+        return max(1, int(requested or 1))
     words = len(re.findall(r"\w+", str(script_text or "")))
     if not words:
         return max(1, int(requested or 1))

@@ -1068,6 +1068,7 @@ def plan_scenes(
     video_model: str | None = None,
     visual_brief: str | None = None,
     beats_target: int = 12,
+    beats_exact: bool = False,
     grok: GrokClient | None = None,
     script_override: str | None = None,
     user_id: str | None = None,
@@ -1130,11 +1131,13 @@ def plan_scenes(
         encoding="utf-8",
     )
 
-    # The requested count is a floor. A longer script needs more beats to keep
-    # each clip inside the cheap tier - this is the customer-facing path, so it
-    # must price the same way the canary path does.
+    # The requested count is a floor only when it is a default. An explicit
+    # count is a contract - above all the staged workflow's single visual-proof
+    # still, where treating 1 as a floor rendered eleven stills at eleven times
+    # the cost and made the approval gate meaningless.
     sentences = split_script_into_beats(
-        script_text, target_count=plan_beat_count(script_text, beats_target)
+        script_text,
+        target_count=plan_beat_count(script_text, beats_target, exact=bool(beats_exact)),
     )
     if not sentences:
         raise RuntimeError("Grok returned empty script")

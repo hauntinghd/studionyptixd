@@ -3389,6 +3389,10 @@ def _spawn_shortform_job(
                     video_model=video_model,
                     visual_brief=visual_brief,
                     beats_target=1 if visual_proof_only else int(scene_count) if scene_count else 12,
+                    # A proof still or a creator-specified scene count is a
+                    # contract; only the unspecified default may be raised to
+                    # keep clips inside the cheap duration tier.
+                    beats_exact=bool(visual_proof_only or scene_count),
                     script_override=script,
                     user_id=user_id,
                     default_animate=False,
