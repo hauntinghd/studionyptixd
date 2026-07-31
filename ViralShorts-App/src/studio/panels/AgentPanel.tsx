@@ -993,15 +993,24 @@ function isStaleShortformPendingAction(
     }
     const actionTitle = pendingActionTitle(action);
     const args = action.arguments || {};
+    // If the assistant just prepared production and asked for approval, the card
+    // is fresh by definition - it is the answer to a question Studio asked one
+    // message ago. This must be checked BEFORE the one-still rule below.
+    //
+    // It used to come after, and so could never run: the permanent staged
+    // short-form contract stamps visual_proof_only on every new short, so a
+    // creator saying "yes make it" always failed the one-still test and the
+    // Approve card was hidden the instant it arrived. Production could not be
+    // started through the agent at all - the client filtered out the very card
+    // it had just been told to show.
+    if (/approve when you'?re ready|approval required|prepared production/i.test(asst)) {
+        return false;
+    }
     // One-still proof jobs are stale unless the latest user message asked for a single still.
     if (args.visual_proof_only === true || Number(args.scene_count || 0) === 1) {
         if (!/\b(?:one|1|single|first)\s+(?:still|scene|image|frame)\b|\bvisual\s+proof\b|\bproof\s+(?:still|image)\b/i.test(latestText)) {
             return true;
         }
-    }
-    // If the assistant just asked for approval, never hide the card on this turn.
-    if (/approve when you'?re ready|approval required|prepared production/i.test(asst)) {
-        return false;
     }
     if (!actionTitle) return false;
     for (let i = actionIndex + 1; i < siblingPending.length; i += 1) {
