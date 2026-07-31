@@ -43,6 +43,11 @@ STRUCTURAL_ISSUES: frozenset[str] = frozenset({
 #: Defects that vary between draws, so a fresh seed and staging can resolve them.
 RESEED_FIXABLE_ISSUES: frozenset[str] = frozenset({
     "anatomy_artifact",          # one-off limb glitch; topology has its own class
+    # Eye presence varies between draws - some candidates from the same prompt
+    # keep the eyes and some render empty sockets - so a reroll genuinely fixes
+    # it. The eyes themselves are character (see SKELETON_CHARACTER_SPEC.md);
+    # this is only about them going missing.
+    "missing_eyes",
     "composition_failure",
     "layout_artifact",
     "crop_artifact",

@@ -954,13 +954,15 @@ def _still_semantic_prompt(*, locked_outfit: str, cast_count: int = 1) -> str:
         '"identity_drift":false,"human_or_skin":false,"anatomy_artifact":false,'
         '"wardrobe_drift":false,"layout_artifact":false,"symbolic_clutter":false,'
         '"text_artifact":false,"background_artifact":false,'
-        '"hand_topology_failure":false,"glass_shell_failure":false}. '
+        '"hand_topology_failure":false,"glass_shell_failure":false,"missing_eyes":false}. '
         # These four are reported separately from anatomy_artifact because the
         # model reproduces them on essentially every draw. Naming them lets the
         # repair path stop instead of paying for a retry that returns the same
         # defect. anatomy_artifact stays reserved for a one-off limb glitch.
         "The canonical skeleton has a smooth polished cranium and large round eyes by "
-        "design - never report those as defects. Report hand_topology_failure when fingers "
+        "design - never report those as defects. Report missing_eyes when the orbital "
+        "sockets are empty, hollow or dark with no eyeball present - the character always "
+        "has visible round eyes with irises. Report hand_topology_failure when fingers "
         "are missing, added, fused, thumbless, or wrongly jointed; and glass_shell_failure "
         "when the shell shows stray scratch lines, broken refraction, or bones detached "
         "from the body inside it. "
@@ -1027,7 +1029,7 @@ def audit_skeleton_still(
             "layout_artifact", "symbolic_clutter", "text_artifact", "background_artifact",
             # Structural classes: reported separately so the repair path can
             # refuse to spend on a defect a fresh seed will reproduce.
-            "hand_topology_failure", "glass_shell_failure",
+            "hand_topology_failure", "glass_shell_failure", "missing_eyes",
         )
         issues = [field for field in issue_fields if parsed.get(field) is True]
         if not parsed and vision.get("error"):
@@ -1060,6 +1062,7 @@ def audit_skeleton_still(
             for terms, field in (
                 (("thumbless", "missing thumb", "missing finger", "extra finger", "fused finger", "six finger", "malformed hand"), "hand_topology_failure"),
                 (("scratch line", "stray line", "detached bone", "floating bone", "broken refraction"), "glass_shell_failure"),
+                (("empty eye socket", "hollow eye", "no eyeball", "missing eye", "eyeless", "empty socket"), "missing_eyes"),
             ):
                 if any(term in slow for term in terms) and field not in issues:
                     issues.append(field)

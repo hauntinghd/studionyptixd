@@ -220,3 +220,32 @@ def test_every_field_the_qa_prompt_requests_is_classified() -> None:
     assert emitted, "no classified fields found in the QA prompt"
     for field in unclassified:
         assert field in known or field in {"pass"}, f"{field} is emitted but unclassified"
+
+
+def test_missing_eyes_is_reseed_fixable_not_structural() -> None:
+    """Observed directly: same prompt, five draws, two lost the eyes.
+
+    Candidates 0 and 2 rendered eyes with irises; 3 and 4 came back with empty
+    sockets. A defect that varies between draws is exactly what a reroll fixes,
+    so it must earn a repair rather than a human hold.
+    """
+    verdict = classify_report(_report("missing_eyes"))
+    assert verdict["defect_class"] == RESEED_FIXABLE
+    assert verdict["repair_allowed"] is True
+
+
+def test_missing_eyes_is_distinct_from_the_eyes_being_large() -> None:
+    """The character has big round eyes by design; only their absence is a defect."""
+    from studio_agent import defect_classes as dc
+
+    assert "missing_eyes" in dc.RESEED_FIXABLE_ISSUES
+    assert "eye_consistency_failure" not in dc.STRUCTURAL_ISSUES
+    assert "eye_consistency_failure" not in dc.RESEED_FIXABLE_ISSUES
+
+
+def test_qa_can_report_missing_eyes() -> None:
+    from studio_agent.visual_qa import _still_semantic_prompt
+
+    prompt = _still_semantic_prompt(locked_outfit="", cast_count=1)
+    assert "missing_eyes" in prompt
+    assert "never report those as defects" in prompt, "character traits not protected"
