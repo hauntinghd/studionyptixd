@@ -791,9 +791,18 @@ def _is_job_status_followup(user_text: str) -> bool:
         return True
     if re.fullmatch(r"stats?", compact):
         return True
+    # A status ping is short. Every literal above is five words or fewer, and
+    # the pattern below used an unbounded ".*" across the whole message - so a
+    # 200-word analytics brief matched "what" near the start ("look at what
+    # made it perform") against "find" at the very end ("find a way to make it
+    # better"). That misread hijacked the turn with a stale production card and
+    # the question was never answered.
+    if len(re.findall(r"[a-z0-9']+", compact)) > 12:
+        return False
     return bool(
         re.search(
-            r"\b(?:what|show|tell|give)\b.*\b(?:find|found|findings|results?|analysis|update|status|stats?)\b",
+            r"\b(?:what|show|tell|give)\b[^.?!]{0,40}?"
+            r"\b(?:find|found|findings|results?|analysis|update|status|stats?)\b",
             compact,
             re.IGNORECASE,
         )
@@ -4037,6 +4046,15 @@ def _recover_shortform_job_from_session(session: dict[str, Any]) -> str | None:
 
     wanted_user = str(session.get("user_id") or "").strip()
     wanted_session = str(session.get("session_id") or "").strip()
+    # Evidence that this chat has produced something of its own. Only such a
+    # session may claim a job whose spec names no owner.
+    session_owns_production = bool(
+        referenced
+        or session.get("last_production")
+        or session.get("active_jobs")
+        or session.get("production_commands")
+        or session.get("latest_production_command")
+    )
     blocked = {
         str(job_id).strip()
         for job_id in (session.get("blocked_job_ids") or [])
@@ -4057,7 +4075,15 @@ def _recover_shortform_job_from_session(session: dict[str, Any]) -> str | None:
                 if wanted_user and str(spec.get("user_id") or "").strip() != wanted_user:
                     continue
                 owner_session = str(spec.get("session_id") or spec.get("owner_session_id") or "").strip()
-                if owner_session and wanted_session and owner_session != wanted_session:
+                if owner_session:
+                    if wanted_session and owner_session != wanted_session:
+                        continue
+                elif not session_owns_production:
+                    # Most specs on disk record no owning session, so the check
+                    # above was inert for them and any brand-new chat could
+                    # adopt one. A session that has never produced anything
+                    # cannot be the owner of an orphan job - it opened moments
+                    # ago - so it must not inherit one and answer with its card.
                     continue
                 progress_path = workspace / "progress.json"
                 progress: dict[str, Any] = {}
@@ -11724,7 +11750,11 @@ async def _run_turn_impl(
             if continued_cliplab is not None:
                 return continued_cliplab
 
-    if not reply_to and _is_job_status_followup(user_text):
+    # Plan mode is conversation-first: a production status card is not an
+    # answer. Every other continuation path here is already gated on
+    # plan_only; this one was not, so a Plan-mode question could be replaced
+    # by a card about an unrelated job.
+    if not plan_only and not reply_to and _is_job_status_followup(user_text):
         poll_target = _recover_poll_target(session)
         if poll_target:
             job_id, kind = poll_target
