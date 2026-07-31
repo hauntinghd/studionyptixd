@@ -486,6 +486,49 @@ def _remember_recommended_topics(
         )
 
 
+def _channel_published_rows(
+    data: dict[str, Any],
+    insights: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """The channel's own posts, from whichever key this payload carried them in.
+
+    Per-video retention rows are the richest source but are not always
+    available; top_titles always is. Taking both, retention first, means the
+    brief degrades to view-ordering rather than disappearing.
+    """
+    for key in ("channel_video_rows", "video_rows", "retention_rows"):
+        rows = data.get(key) or insights.get(key)
+        if isinstance(rows, list) and rows:
+            return [row for row in rows if isinstance(row, dict)]
+    top = insights.get("top_titles")
+    return [row for row in list(top or []) if isinstance(row, dict)]
+
+
+def _channel_performance_notes(
+    data: dict[str, Any],
+    insights: dict[str, Any],
+) -> list[str]:
+    """Catalyst's performance brief, folded into the channel profile note."""
+    rows = _channel_published_rows(data, insights)
+    if not rows:
+        return []
+    try:
+        from studio_agent.catalyst_performance import (
+            PLATFORM_YOUTUBE,
+            build_performance_brief,
+            normalize_posts,
+        )
+
+        posts = normalize_posts(PLATFORM_YOUTUBE, rows)
+        if not posts:
+            return []
+        brief = build_performance_brief(posts, max_titles=6)
+    except Exception:
+        # Never let the learning layer break the tool that feeds it.
+        return []
+    return [_short_text(brief, 1200)] if brief else []
+
+
 def _remember_channel_analytics_lessons(
     user_id: str,
     args: dict[str, Any],
@@ -520,6 +563,13 @@ def _remember_channel_analytics_lessons(
             f"Breakout pattern candidate: '{_short_text(b.get('title'), 140)}' "
             f"lift {float(b.get('lift_vs_baseline') or 0.0):.1f}x vs channel baseline."
         )
+    # What this channel already published, and what its own numbers say about
+    # it. Without this the planner proposes topics from demand clusters alone
+    # and has no way to notice it is re-making an angle that already
+    # underperformed - the gap Studio described as "pattern-matching on the
+    # topic cluster without checking against what you've already put out".
+    notes.extend(_channel_performance_notes(data, insights))
+
     limitation = str(quality.get("limitation") or "").strip()
     if limitation:
         notes.append("Analytics limitation: " + _short_text(limitation, 220) + ".")
