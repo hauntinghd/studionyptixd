@@ -173,10 +173,16 @@ def test_the_negative_prompt_names_the_structural_defects(term: str) -> None:
 
     They were not in the negative prompt, so nothing was asking the model to
     avoid them.
-    """
-    from skeleton_ai.canonical_edit import NEG_EDIT
 
-    assert term in NEG_EDIT.lower(), f"{term!r} is not suppressed"
+    Asserted against what the request actually carries, not against the source
+    constant. The earlier version of this test checked ``NEG_EDIT`` while the
+    dispatcher sent ``NEG_EDIT[:1500]`` - so it passed green while
+    "stray lines" and "detached bones" were being cut off before dispatch, and
+    the defects they name kept appearing in finished renders.
+    """
+    from skeleton_ai.canonical_edit import NEG_EDIT, fit_negative_prompt
+
+    assert term in fit_negative_prompt(NEG_EDIT).lower(), f"{term!r} never reaches the model"
 
 
 def test_the_structural_negatives_did_not_reintroduce_nudity_phrasing() -> None:
@@ -186,3 +192,167 @@ def test_the_structural_negatives_did_not_reintroduce_nudity_phrasing() -> None:
     low = NEG_EDIT.lower()
     for banned in ("no clothes", "nude", "naked", "unclothed"):
         assert banned not in low, f"{banned!r} came back into the negative prompt"
+
+
+# --- Self-emitted light: the planner contradicting the identity lock ----------
+
+def test_the_planners_circuit_glow_is_stripped_from_the_outfit() -> None:
+    """The exact art direction that failed five of six scenes in production.
+
+    The planner wrote this for a technology-flavoured topic. It asks the body
+    to emit light while the identity lock says "No chest lights/orbs" - the
+    positive prompt wins, the model draws the orb, and QA then rejects the
+    scene Studio itself asked for. No number of repairs can pass that render.
+    """
+    from skeleton_ai.canonical_edit import sanitize_skeleton_outfit
+
+    outfit = (
+        "No clothing; bare ivory-white bones and translucent glass torso exposed, "
+        "faint circuit-like light lines pulsing subtly along limbs to suggest live processing"
+    )
+    cleaned = sanitize_skeleton_outfit(outfit, topic="psychology").lower()
+
+    for banned in ("circuit", "light lines", "pulsing"):
+        assert banned not in cleaned, f"{banned!r} still asks the body to emit light"
+    assert "glass torso" in cleaned, "the wardrobe intent must survive the scrub"
+
+
+@pytest.mark.parametrize(
+    "phrase",
+    [
+        "glowing chest cavity",
+        "lit from within",
+        "neon light lines along the ribs",
+        "an energy core in the sternum",
+        "self-illuminated bones",
+    ],
+)
+def test_every_emissive_phrasing_is_stripped(phrase: str) -> None:
+    from skeleton_ai.canonical_edit import sanitize_emissive_language
+
+    assert not sanitize_emissive_language(phrase).strip()
+
+
+@pytest.mark.parametrize(
+    "phrase",
+    [
+        "sharp commercial lighting",
+        "rim light on the shoulders",
+        "soft studio lighting",
+        "backlit background panel",
+    ],
+)
+def test_environment_lighting_survives(phrase: str) -> None:
+    """The style is lit. Only the body emitting its own light is the defect."""
+    from skeleton_ai.canonical_edit import sanitize_emissive_language
+
+    assert sanitize_emissive_language(phrase) == phrase
+
+
+# --- The request cap must not eat defect classes ------------------------------
+
+def test_the_negative_prompt_is_never_cut_mid_term() -> None:
+    """A plain slice sent "...elon" and dropped the rest of the hand defects."""
+    from skeleton_ai.canonical_edit import NEG_EDIT, fit_negative_prompt
+
+    sent = fit_negative_prompt(NEG_EDIT)
+    source_terms = {t.strip().lower() for t in NEG_EDIT.split(",") if t.strip()}
+    for term in (t.strip().lower() for t in sent.split(",") if t.strip()):
+        assert term in source_terms, f"{term!r} is a fragment, not a whole term"
+
+
+def test_the_negative_prompt_fits_the_request_cap() -> None:
+    from skeleton_ai.canonical_edit import (
+        NEGATIVE_PROMPT_MAX_CHARS,
+        NEG_EDIT,
+        NEG_EDIT_DUAL,
+        fit_negative_prompt,
+    )
+
+    for source in (NEG_EDIT, NEG_EDIT_DUAL):
+        assert len(fit_negative_prompt(source)) <= NEGATIVE_PROMPT_MAX_CHARS
+
+
+@pytest.mark.parametrize(
+    "term",
+    [
+        "chest orb",
+        "internal glow",
+        "detached bones",
+        "stray lines",
+        "missing fingers",
+        "thumbless hand",
+        "missing teeth",
+        "cropped feet",
+        "eyes in chest",
+    ],
+)
+def test_the_defect_classes_survive_the_cap(term: str) -> None:
+    """Ordering is load-bearing: these must outrank generic filler.
+
+    Every one of these names a defect found by extracting frames from a paid
+    render. A dropped "detached bones" ships a defective video; a dropped
+    "watermark" ships nothing.
+    """
+    from skeleton_ai.canonical_edit import NEG_EDIT, fit_negative_prompt
+
+    assert term in fit_negative_prompt(NEG_EDIT).lower()
+
+
+def test_a_repeated_term_does_not_pay_twice() -> None:
+    from skeleton_ai.canonical_edit import fit_negative_prompt
+
+    assert fit_negative_prompt("glowing eyes, blurry, glowing eyes") == "glowing eyes, blurry"
+
+
+# --- Prompts must not carry fragments the model cannot act on -----------------
+
+def test_the_scene_prompt_never_ends_mid_word() -> None:
+    """Live prompts carried "...environment matching th…" and "hands;…".
+
+    The budget was applied as a raw slice, so both the scene direction and the
+    tail of the identity lock reached the editor as fragments, with a trailing
+    ellipsis the model reads as content rather than as omission.
+    """
+    from skeleton_ai.prompt_compose import compose_skeleton_still_prompt
+
+    prompt = compose_skeleton_still_prompt(
+        visual_description=(
+            "Exactly one canonical skeleton host in a modern psychology-studio "
+            "environment matching the narration, empty hands in a presenter "
+            "gesture, sharp commercial lighting, vertical 9:16"
+        ),
+        outfit="",
+        topic="psychology",
+        aspect_ratio="9:16",
+        budget=300,
+        cast_count=1,
+    )
+    assert "…" not in prompt, prompt
+    assert not re.search(r"\b\w+…", prompt), prompt
+
+
+@pytest.mark.parametrize("budget", (200, 240, 300))
+@pytest.mark.parametrize("cast", (1, 2))
+def test_the_identity_lock_survives_every_budget(budget: int, cast: int) -> None:
+    """The lock is what keeps the character the character."""
+    from skeleton_ai.prompt_compose import compose_skeleton_still_prompt
+
+    prompt = compose_skeleton_still_prompt(
+        visual_description="Skeleton host in a modern studio, presenter gesture, commercial lighting.",
+        outfit="",
+        topic="psychology",
+        aspect_ratio="9:16",
+        budget=budget,
+        cast_count=cast,
+    )
+    assert "LOCK:" in prompt, prompt
+    assert len(prompt) <= budget, prompt
+
+
+def test_clip_keeps_whole_words() -> None:
+    from skeleton_ai.prompt_compose import _clip
+
+    clipped = _clip("a modern psychology-studio environment matching the narration", 40)
+    assert "…" not in clipped
+    assert clipped.split()[-1] in "a modern psychology-studio environment matching the narration".split()

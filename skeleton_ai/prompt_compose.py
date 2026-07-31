@@ -182,12 +182,33 @@ def compact_skeleton_scene_direction(visual_description: str, *, max_chars: int 
 
 
 def _clip(text: str, max_chars: int) -> str:
+    """Trim to budget on a clause boundary, never mid-word.
+
+    A raw slice put fragments into live prompts - "...psychology-studio
+    environment matching th…" and an identity lock ending "Empty attached
+    hands;…". Both are instructions the model cannot act on, and the trailing
+    ellipsis is not a character the editor understands: it reads as content.
+    Whole clauses are what these prompts are written in, so cut there and let
+    the last one go rather than send half of it.
+    """
     text = re.sub(r"\s+", " ", str(text or "")).strip()
     if max_chars <= 0 or len(text) <= max_chars:
         return text
     if max_chars <= 3:
         return text[:max_chars]
-    return text[: max_chars - 1].rstrip() + "…"
+
+    head = text[:max_chars]
+    # Prefer ending on a completed clause; keep the terminator.
+    clause = max(head.rfind(". "), head.rfind("; "), head.rfind(", "))
+    if clause >= max(24, int(max_chars * 0.5)):
+        return head[: clause + 1].rstrip()
+    if head.endswith((".", ";", ",")):
+        return head.rstrip()
+    # Otherwise fall back to the last whole word.
+    word = head.rfind(" ")
+    if word >= max(16, int(max_chars * 0.4)):
+        return head[:word].rstrip(" ,;")
+    return head.rstrip(" ,;")
 
 
 def compose_priority_prompt(

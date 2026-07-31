@@ -209,47 +209,72 @@ ARTIFACT_GUARD = (
     f"{SKELETON_HAND_LOCK} {SINGLE_FRAME_LOCK}"
 )
 
-_NEG_EDIT_CORE = (
+# The request carries at most NEGATIVE_PROMPT_MAX_CHARS, so this order is not
+# cosmetic - it decides what actually reaches the model. Groups are listed by
+# what it costs us when one is dropped: a lost "detached bones" ships a
+# defective render, a lost "watermark" ships nothing. The list used to be
+# assembled in an order that put the frame-inspection defect classes last, and
+# the cap silently discarded 769 characters of them mid-word.
+#
+# Note what is deliberately absent: nothing here suppresses a smooth glossy
+# cranium or large round eyes. Those are the character. An earlier revision
+# listed them as defects and would have suppressed the mascot's own face.
+_NEG_EDIT_GROUPS: tuple[str, ...] = (
+    # Identity. The character has to stay the character.
     "different character, redesigned skeleton, alternate mascot, chibi, anime, "
     "cartoon eyes, glowing eyes, empty eye sockets, no eyes, hollow eyes, missing eyeballs, "
     "eyes in chest, eyes in ribcage, eyes on sternum, eyes in torso, eyeballs on ribs, "
     "extra eyeballs, third eye, fourth eye, eyes outside skull, eyes in abdomen, "
     "iris on ribs, pupil in chest, floating eye orbs in body, organ eyes, breast eyes, "
-    "glowing eyes, neon eyes, emissive eyes, laser eyes, orange glowing eyes, fire eyes, "
-    "exposed brain, brain outside skull, open cranium, circuit board head, neural circuits, "
-    "cyber implants, LED skull, tech halo, cyberpunk wires on head, "
-    "missing bones, exposed ribcage outside shell, "
+    "neon eyes, emissive eyes, laser eyes, orange glowing eyes, fire eyes, "
+    "eyes outside sockets, one eye much larger than the other, "
+    "realistic human eyeball, iris and pupil in skull socket, wet human eye",
+    # Self-emitted light. This is the most frequent QA rejection on record -
+    # five of six scenes in the last production - and it was never named here:
+    # the only defence was "No chest lights/orbs" in the positive prompt, which
+    # loses to any prose asking for a glow.
+    "glowing chest, chest orb, chest light, glowing orb in ribcage, light inside ribcage, "
+    "internal glow, lit from within, self-illuminated body, energy core, power core, "
+    "glowing circuitry, circuit lines on bones, pulsing light lines, neon strips on limbs",
+    # Hands. Frame inspection found these in most frames showing hands.
+    "extra fingers, extra hand, third hand, fourth hand, floating hand, duplicate hand, "
+    "missing fingers, four fingers, six fingers, thumbless hand, missing thumb, "
+    "fused fingers, webbed fingers, elongated fingers, mangled hand, boneless fingers, "
+    "broken hands",
+    # Structural artifacts baked into the reference before animation runs, so
+    # every clip inherits them and no downstream QA can recover the video.
+    "stray lines, scratch marks, scratch lines on glass, stray pen strokes, "
+    "random line artifacts, detached bones, floating bones, disconnected humerus, "
+    "broken refraction, cracked shell seams",
+    # Framing. A crop that loses feet or hands fails the vertical contract.
+    "cropped feet, cut off legs, cropped hands, hands cut by frame edge, "
+    "head cropped, subject cut off by frame",
+    # Quality markers the reference art shows and weak draws drop.
+    "missing teeth, blank jaw, undefined dental arcade, featureless mandible",
+    # Human tissue. Also the content-policy tightrope - phrased as material, not
+    # as nudity.
     "human skin, flesh, human body, human actor, human arm, human hand, human fingers, "
     "human leg, human foot, human toes, fingernails, toenails, muscles, hybrid human skeleton, "
     "half human, asymmetrical anatomy, opaque skin replacing glass, "
-    "melted clothing, fused fabric, incomplete pants, missing shoes, half shirt, "
-    "bare chest, exposed sternum, exposed ribs under jacket, transparent shirt, disappearing shirt, "
+    "missing bones, exposed ribcage outside shell",
+    # Head. The cyber/circuit variants the model reaches for on tech topics.
+    "exposed brain, brain outside skull, open cranium, circuit board head, neural circuits, "
+    "cyber implants, LED skull, tech halo, cyberpunk wires on head",
+    # Enclosures. The glass shell is on the bones, never around the body.
     "bell jar, capsule, dome, specimen tube, cylinder, display case, glass container, "
-    "helmet bubble, glass walls, circular base, floor ring, floating glass edge, "
-    "diagram label, callout, readable text, typography, UI element, "
-    "extra fingers, extra hand, third hand, fourth hand, floating hand, duplicate hand, "
-    # The real structural defect classes, named explicitly. Frame inspection of a
-    # finished render found these recurring, and they are baked into the
-    # reference before animation runs - so every clip inherits them and no
-    # downstream QA can recover the video.
-    #
-    # Note what is deliberately absent: nothing here suppresses a smooth glossy
-    # cranium or large round eyes. Those are the character. An earlier revision
-    # listed them as defects and would have suppressed the mascot's own face.
-    "missing fingers, four fingers, six fingers, thumbless hand, missing thumb, "
-    "fused fingers, webbed fingers, elongated fingers, mangled hand, boneless fingers, "
-    "eyes outside sockets, one eye much larger than the other, "
-    "stray lines, scratch marks, scratch lines on glass, stray pen strokes, "
-    "random line artifacts, detached bones, floating bones, disconnected humerus, "
-    "broken refraction, cracked shell seams, "
-    # Quality markers the reference art shows and weak draws drop.
-    "missing teeth, blank jaw, undefined dental arcade, featureless mandible, "
+    "helmet bubble, glass walls, circular base, floor ring, floating glass edge",
+    # Wardrobe coherence, for the clothed variants.
+    "melted clothing, fused fabric, incomplete pants, missing shoes, half shirt, "
+    "bare chest, exposed sternum, exposed ribs under jacket, transparent shirt, disappearing shirt",
+    "diagram label, callout, readable text, typography, UI element",
     # Default gym-master leakage: never invent sports gear for non-sports topics.
     "basketball, soccer ball, football, baseball, tennis ball, volleyball, sports ball, "
     "dumbbell, barbell, kettlebell, weight plate, gym equipment, gym rack, "
-    "holding ball, holding dumbbell, sports jersey, basketball court, "
-    "broken hands, low quality, blurry, watermark, text overlay"
+    "holding ball, holding dumbbell, sports jersey, basketball court",
+    "low quality, blurry, watermark, text overlay",
 )
+
+_NEG_EDIT_CORE = ", ".join(_NEG_EDIT_GROUPS)
 
 NEG_EDIT = (
     f"{_NEG_EDIT_CORE}, duplicate skeleton, twin bodies, "
@@ -266,6 +291,42 @@ NEG_EDIT_DUAL = (
 
 def negative_prompt_for_cast(cast_count: int = 1) -> str:
     return NEG_EDIT_DUAL if int(cast_count or 1) >= 2 else NEG_EDIT
+
+
+# What the edit endpoint accepts. Kept conservative on purpose: the cost of
+# guessing high is a rejected request mid-render.
+NEGATIVE_PROMPT_MAX_CHARS = 1500
+
+
+def fit_negative_prompt(negative_prompt: str, limit: int = NEGATIVE_PROMPT_MAX_CHARS) -> str:
+    """Trim to the request cap on term boundaries, keeping whole terms.
+
+    A plain slice cut the list mid-word - it sent "...elon" and dropped
+    "gated fingers, mangled hand, ... detached bones, ... missing teeth" - so
+    defect classes that tests proved were "in the negative prompt" never
+    reached the model at all, and the renders they were written to prevent kept
+    coming back. Duplicates are dropped first, because a term repeated is a
+    term's worth of budget spent twice.
+    """
+    terms: list[str] = []
+    seen: set[str] = set()
+    for raw in str(negative_prompt or "").split(","):
+        term = raw.strip()
+        key = term.lower()
+        if not term or key in seen:
+            continue
+        seen.add(key)
+        terms.append(term)
+
+    kept: list[str] = []
+    used = 0
+    for term in terms:
+        cost = len(term) + (2 if kept else 0)
+        if used + cost > limit:
+            continue
+        kept.append(term)
+        used += cost
+    return ", ".join(kept)
 
 # Props the gym master / lazy edits invent when the topic is psychology/relationships.
 _BANNED_SPORTS_PROP_PATTERNS: tuple[str, ...] = (
@@ -327,9 +388,63 @@ def sanitize_skeleton_prop_language(
     return cleaned
 
 
+# Prose asking the body to emit light. The scene planner writes this whenever
+# the topic sounds technological - one production asked for "faint circuit-like
+# light lines pulsing subtly along limbs to suggest live processing" - and it
+# directly contradicts the identity lock's "No chest lights/orbs". The positive
+# prompt wins that fight, so the model draws the orb and QA then rejects the
+# scene it was told to make. Five of six scenes in the last production failed
+# this way, which is a render that can never pass no matter how often it is
+# repaired.
+#
+# Environment lighting is deliberately not matched: "sharp commercial lighting",
+# "rim light" and "studio lighting" are how the style is lit and must survive.
+_EMISSIVE_BODY_PATTERNS: tuple[str, ...] = (
+    r"\bglow(?:ing|s)?\b",
+    r"\bluminous\b",
+    r"\b(?:bio)?luminescent\b",
+    r"\bincandescent\b",
+    r"\bemissive\b",
+    r"\bemitting light\b",
+    r"\bself[\s-]*illuminat(?:ed|ing)\b",
+    r"\blit from within\b",
+    r"\binner light\b",
+    r"\binternal light\b",
+    r"\benergy core\b",
+    r"\bpower core\b",
+    r"\bplasma\b",
+    r"\bneon\b",
+    r"\bLED\b",
+    r"\bcircuit(?:ry|s|[\s-]*like)?\b",
+    r"\blight lines?\b",
+    r"\bpulsing light\b",
+    r"\bbacklit bones\b",
+)
+
+_EMISSIVE_BODY_RE = re.compile("|".join(_EMISSIVE_BODY_PATTERNS), re.IGNORECASE)
+
+
+def sanitize_emissive_language(text: str) -> str:
+    """Drop clauses that ask the figure to emit its own light.
+
+    Whole clauses, not words: deleting "glowing" from "faint circuit-like light
+    lines pulsing subtly along limbs" leaves a fragment that still asks for the
+    light lines. Clause boundaries are what the planner writes to.
+    """
+    cleaned = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not cleaned or not _EMISSIVE_BODY_RE.search(cleaned):
+        return cleaned
+    kept = [
+        clause.strip()
+        for clause in re.split(r"\s*[;,]\s*", cleaned)
+        if clause.strip() and not _EMISSIVE_BODY_RE.search(clause)
+    ]
+    return ", ".join(kept).strip(" ,.;")
+
+
 def sanitize_skeleton_outfit(outfit: str, *, topic: str = "", visual_brief: str = "") -> str:
     """Remove wardrobe language that makes edit models reconstruct human tissue or invent props."""
-    text = str(outfit or "").strip()
+    text = sanitize_emissive_language(outfit)
     replacements = (
         (r"\bbare[\s-]*feet\b", "uncovered canonical glass-and-bone skeletal feet"),
         (r"\bbare[\s-]*foot\b", "uncovered canonical glass-and-bone skeletal foot"),
@@ -777,7 +892,7 @@ def generate_still_edit(
         "num_images": 1,
     }
     if normalized_model == "seedream_edit":
-        request_payload["negative_prompt"] = neg[:1500]
+        request_payload["negative_prompt"] = fit_negative_prompt(neg)
         request_payload["seed"] = int(seed)
     elif normalized_model == "seedream_v4":
         request_payload["seed"] = int(seed)
