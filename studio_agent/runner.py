@@ -9020,6 +9020,14 @@ def _catalyst_capture_turn(
         if tool_fires:
             public_rows: list[dict[str, Any]] = []
             topic_rows: list[dict[str, Any]] = []
+            # The connected channel's own titles and retention rows. Without
+            # these, rank_next_video_candidates drops min_channel_overlap from
+            # 0.17 to 0.0 -- the channel-relevance filter switches off entirely,
+            # and a public trending row from an unrelated niche can be returned
+            # as this channel's "strongest next test". A Roblox title was
+            # recommended to a business-documentary channel that way.
+            channel_insights: dict[str, Any] = {}
+            channel_video_rows: list[dict[str, Any]] = []
             for fire in tool_fires or []:
                 if str(fire.name or "") not in {
                     "get_public_search_trends",
@@ -9041,10 +9049,26 @@ def _catalyst_capture_turn(
                     recs = payload.get(key)
                     if isinstance(recs, list):
                         topic_rows.extend([dict(row) for row in recs if isinstance(row, dict)])
+                if str(fire.name or "") == "get_channel_analytics":
+                    insights = payload.get("insights")
+                    if isinstance(insights, dict) and not channel_insights:
+                        channel_insights = dict(insights)
+                    for metrics_key in ("video_metrics", "harvest_video_metrics"):
+                        metrics = payload.get(metrics_key)
+                        if not isinstance(metrics, dict):
+                            continue
+                        for rows_key in ("top_by_retention", "top_by_views", "top_shorts_by_retention"):
+                            rows = metrics.get(rows_key)
+                            if isinstance(rows, list):
+                                channel_video_rows.extend(
+                                    dict(row) for row in rows if isinstance(row, dict)
+                                )
             predicted = rank_next_video_candidates(
                 reference_payload=reference_payload,
                 public_rows=public_rows,
                 predicted_topics=topic_rows,
+                channel_insights=channel_insights or None,
+                channel_video_rows=channel_video_rows or None,
                 search_query=search_query,
             )
 
