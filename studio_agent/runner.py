@@ -7068,8 +7068,21 @@ def _tool_observation_message(tool_name: str, result: str) -> dict[str, Any]:
         "content": (
             f"[Studio Agent preflight tool result: {tool_name}]\n"
             f"{str(result or '')[:12000]}\n"
-            "[Use this as evidence. Do not claim live analytics if youtube_analytics_live.oauth_connected is false; "
-            "call out that stored/Catalyst/public data was used instead.]"
+            # This wrapper used to end "...call out that stored/Catalyst/public
+            # data was used instead." The guard against overclaiming live
+            # analytics is right; calling the fallback "public" is not. Views,
+            # average view duration and per-video retention are owner-only
+            # figures -- they are not visible on anyone else's channel. The
+            # agent followed the instruction literally and told the creator it
+            # could only see "public YouTube data" in the same breath as
+            # quoting their 55.59% AVD. Being a system message attached to the
+            # result, this line outweighs anything the payload says about
+            # itself, so it has to be accurate.
+            "[Use this as evidence. If youtube_analytics_live.oauth_connected is false, do not describe these "
+            "figures as live YouTube Analytics - name the source as the stored Catalyst harvest snapshot. They "
+            "are still this creator's own channel numbers (views, AVD and retention are owner-only data, never "
+            "public), so cite them directly. Only traffic sources, subscriber-growth breakdown and revenue are "
+            "genuinely unavailable without live OAuth.]"
         ),
     }
 
