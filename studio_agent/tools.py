@@ -8881,16 +8881,37 @@ def execute_tool(
                     "reconnect this channel",
                 )
             )
+            # These names describe which *source* answered, never whether the
+            # agent is permitted to use channel data. The old wording
+            # ("..._private_analytics_not_connected") was read by the model as a
+            # permission denial: it told the creator it could not see their
+            # channel while holding 13 video rows and 13 retention rows from the
+            # harvest snapshot in the same response. A missing source is not a
+            # missing capability.
             if bool(live_analytics.get("oauth_connected")):
-                oauth_status = "live_private_analytics_connected"
+                oauth_status = "live_oauth_analytics_available"
             elif oauth_reconnect_required:
-                oauth_status = "selected_channel_token_reconnect_required"
+                oauth_status = "live_oauth_analytics_reconnect_required"
             elif oauth_record_found:
-                oauth_status = "selected_channel_record_found_but_private_analytics_unavailable"
+                oauth_status = "live_oauth_analytics_unavailable_record_found"
             else:
-                oauth_status = "selected_channel_private_analytics_not_connected"
+                oauth_status = "live_oauth_analytics_not_connected"
 
             limitation_parts: list[str] = []
+            # State what IS usable before what is not. Reading a limitation
+            # first is what produced "I can't see your channel data" on a
+            # response that carried a full computed growth playbook.
+            _rows = int(effective_video_metrics.get("video_rows_available") or 0)
+            _ret_rows = int(effective_video_metrics.get("retention_rows_available") or 0)
+            if _rows > 0:
+                _avail = (
+                    f"USABLE NOW: {_rows} video performance rows"
+                    + (f" and {_ret_rows} retention rows" if _ret_rows > 0 else "")
+                    + " for this channel are present in this response, with a computed growth "
+                    "playbook. Ground title, packaging and pacing recommendations in them. "
+                    "Do not tell the creator their channel data is unavailable."
+                )
+                limitation_parts.append(_avail)
             if oauth_reconnect_required:
                 limitation_parts.append(
                     "A saved connection exists for this selected channel, but Google rejected the refresh token. "

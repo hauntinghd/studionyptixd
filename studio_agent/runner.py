@@ -500,7 +500,44 @@ def _needs_live_demand_preflight(
     return False
 
 
+#: Direct questions about whether Studio can see the creator's own channel.
+#: These have to bypass the auto-run gate below: that gate recognises imperative
+#: commands ("pull my analytics") but not questions ("can you see my analytics"),
+#: so a question about channel data was never treated as a request for it. The
+#: agent then answered from whatever the channel selector had loaded and
+#: explained the gap by inventing a privacy restriction -- while the tool it
+#: never called would have returned 13 video rows and 13 retention rows.
+_CHANNEL_DATA_QUESTION_PHRASES = (
+    "able to see",
+    "can you see",
+    "do you see",
+    "do you have access",
+    "have access to",
+    "see the data",
+    "see all the data",
+    "see my data",
+    "what data do you have",
+    "channel data",
+    "my analytics",
+    "channel analytics",
+)
+
+
+def _is_channel_data_question(user_text: str) -> bool:
+    low = str(user_text or "").lower()
+    if not any(phrase in low for phrase in _CHANNEL_DATA_QUESTION_PHRASES):
+        return False
+    # Only when it is about a channel/their own numbers, not a generic
+    # "can you see this image" style question.
+    return any(
+        marker in low
+        for marker in ("channel", "analytic", "data", "subscriber", "retention", "views")
+    )
+
+
 def _needs_channel_data_preflight(user_text: str) -> bool:
+    if _is_channel_data_question(user_text):
+        return True
     if not store.should_auto_run_tools(user_text):
         return False
     # "Find an exact topic first" is a Catalyst request, not idle ideation.
