@@ -93,8 +93,21 @@ async def transcribe_with_fal_whisper(audio_path: str, fal_key: str) -> list[Tra
             text = str(row.get("text") or "").strip()
             if not text:
                 continue
-            start = float(row.get("timestamp") or row.get("start") or 0)
-            end = float(row.get("end") or start + max(1.0, len(text.split()) * 0.35))
+            # fal-ai/whisper returns `timestamp` as a two-element [start, end]
+            # list, not a scalar. float() on the list raised, the whole call was
+            # swallowed by the except below, and transcription silently returned
+            # zero cues. The scalar forms are kept for other providers.
+            raw_ts = row.get("timestamp")
+            if isinstance(raw_ts, (list, tuple)) and raw_ts:
+                start = float(raw_ts[0] or 0)
+                end = float(raw_ts[1]) if len(raw_ts) > 1 and raw_ts[1] is not None else 0.0
+            else:
+                start = float(raw_ts or row.get("start") or 0)
+                end = float(row.get("end") or 0)
+            # Only fall back to the words-per-second estimate when the provider
+            # gave us nothing usable; a real end timestamp always wins.
+            if end <= start:
+                end = start + max(1.0, len(text.split()) * 0.35)
             words_raw = text.split()
             step = max(0.05, (end - start) / max(1, len(words_raw)))
             words = [

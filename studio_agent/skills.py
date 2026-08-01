@@ -33,10 +33,21 @@ def read_skill(slug: str, *, max_chars: int = 80_000) -> str:
 
 def read_skill_companion(slug: str, filename: str, *, max_chars: int = 80_000) -> str:
     slug = slug.strip().replace("/", "").replace("\\", "")
-    fname = Path(filename).name
-    path = SKILLS / slug / fname
+    # Companions legitimately live in subdirectories (references/, scripts/).
+    # Taking only Path(filename).name flattened "references/bank.md" to
+    # "bank.md" and raised FileNotFoundError for every skill that organises its
+    # material -- silently, since callers treat a missing companion as "none".
+    # Resolve the real path, then confirm it stayed inside the skill directory
+    # so a caller cannot walk out of it with "../".
+    root = (SKILLS / slug).resolve()
+    candidate = (root / str(filename or "").replace("\\", "/")).resolve()
+    try:
+        candidate.relative_to(root)
+    except ValueError as exc:
+        raise FileNotFoundError(f"{slug}/{filename} is outside the skill directory") from exc
+    path = candidate
     if not path.exists():
-        raise FileNotFoundError(f"{slug}/{fname} not found")
+        raise FileNotFoundError(f"{slug}/{filename} not found")
     text = path.read_text(encoding="utf-8")
     if len(text) > max_chars:
         return text[:max_chars] + f"\n\n… truncated"
