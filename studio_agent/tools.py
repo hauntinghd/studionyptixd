@@ -8918,9 +8918,26 @@ def execute_tool(
                     "Reconnect this exact channel/account in Settings before Studio Agent can use private YouTube Analytics."
                 )
             elif not bool(live_analytics.get("oauth_connected")):
-                limitation_parts.append(
-                    "Studio Agent only has cached/public channel data for this selected channel; private YouTube Analytics did not connect in this tool call."
-                )
+                # This used to read "only has cached/public channel data". That is
+                # wrong whenever the harvest carries retention: per-video retention
+                # and AVD are the channel owner's analytics, not public numbers.
+                # The agent repeated the label faithfully and told the creator it
+                # could not access their private analytics -- in the same reply
+                # where it quoted their retention percentages.
+                _src = "the Catalyst harvest snapshot"
+                if _ret_rows > 0:
+                    limitation_parts.append(
+                        f"The per-video figures in this response (views, retention/AVD) come from {_src}, "
+                        "not from a live YouTube Analytics call. They are this creator's own channel numbers "
+                        "and are correct to cite. What the live Reporting API would add on top is traffic "
+                        "sources, subscriber-growth breakdown and revenue -- only those are unavailable here."
+                    )
+                else:
+                    limitation_parts.append(
+                        f"Per-video figures in this response come from {_src}; live YouTube Analytics did not "
+                        "connect on this call, so traffic sources, subscriber-growth breakdown and revenue "
+                        "are unavailable."
+                    )
             if not bool(effective_video_metrics.get("video_level_retention_available")):
                 limitation_parts.append(
                     "No per-video retention rows were returned to Studio Agent. To identify a specific 50-60% AVD short, refresh channel intelligence "
