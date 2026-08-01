@@ -83,7 +83,19 @@ def _retime_beats_to_narration(beats: list[Beat], total_duration: float) -> None
 #: FAL video lanes bill in whole duration tiers, not by the second. A beat of
 #: 5.1s buys a 10s clip at double the price and the extra 4.9s is trimmed away
 #: and discarded. This is the single largest avoidable cost in a short.
-CHEAP_CLIP_SECONDS = 5.0
+#:
+#: The 5.0 default is correct for the tier-billed lanes (Kling, PixVerse,
+#: Seedance): asking them for less than a full tier still buys the tier, so a
+#: shorter cap would pay for footage nobody sees.
+#:
+#: LTX bills per frame and therefore has no floor — and measurably loses
+#: identity past ~3s (eye asymmetry, skull reshaping, invented soft tissue).
+#: On that lane a shorter cap is both cheaper and better, so the pair is
+#: switched together behind one flag rather than independently.
+_SHORT_CLIP_LANE = os.environ.get("SKELETON_SHORT_CLIP_LANE", "").strip().lower() in {
+    "1", "true", "yes", "on",
+}
+CHEAP_CLIP_SECONDS = 2.7 if _SHORT_CLIP_LANE else 5.0
 MIN_BEAT_SECONDS = 2.0
 
 

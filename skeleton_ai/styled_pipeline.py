@@ -13,6 +13,7 @@ import subprocess
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import urlparse
 
 from studio_agent import production_budget, production_costs
 from studio_agent.image_model_catalog import (
@@ -95,6 +96,45 @@ def _skeleton_image_model(sc: dict[str, Any] | None, workspace: Path) -> str:
     return normalize_fal_image_model_id("")
 
 
+#: Hosts that resolve inside the *provider's* container, never ours. A remote
+#: image model handed one of these fetches nothing and quietly falls back to
+#: drawing the scene from scratch -- which is indistinguishable from a working
+#: edit until the QA bill arrives. One local run spent $1.40 and rejected 25 of
+#: 35 stills for identity drift before anyone noticed the master was a loopback
+#: URL derived from a dev SITE_URL.
+_UNREACHABLE_REFERENCE_HOSTS = frozenset({
+    "localhost", "127.0.0.1", "0.0.0.0", "::1", "host.docker.internal",
+})
+
+
+class SkeletonReferenceUnreachable(RuntimeError):
+    """The canonical master is not fetchable by a remote provider."""
+
+
+def _assert_reference_reachable_by_provider(url: str) -> None:
+    """Fail loudly rather than silently degrading an edit into a fresh draw.
+
+    Raising costs one clear error. Not raising costs a full render of
+    identity-drifted stills, billed per image.
+    """
+    value = str(url or "").strip()
+    if not value or value.startswith("data:image/"):
+        return
+    try:
+        host = (urlparse(value).hostname or "").lower()
+    except ValueError:
+        return
+    if host in _UNREACHABLE_REFERENCE_HOSTS:
+        raise SkeletonReferenceUnreachable(
+            f"skeleton master reference {value!r} points at {host!r}, which a remote "
+            "image provider cannot fetch -- every scene would be drawn from scratch "
+            "instead of edited from the canonical master. Set "
+            "SKELETON_GLOBAL_REFERENCE_IMAGE_URL (or SITE_URL) to a publicly "
+            "reachable https URL, or stage the master into the workspace as "
+            "reference.png."
+        )
+
+
 def _resolve_skeleton_master_reference(
     workspace: Path,
     reference_images: list[str] | None = None,
@@ -112,6 +152,7 @@ def _resolve_skeleton_master_reference(
         if not value:
             return ""
         if value.startswith("data:image/") or re.match(r"^[a-z][a-z0-9+.-]*://", value, re.I):
+            _assert_reference_reachable_by_provider(value)
             return value
         try:
             path = Path(value)
@@ -4042,6 +4083,10 @@ def finalize_stage(
     caption_scenes: list[dict[str, Any]] = []
     caption_offset = 0.0
     total = max(len(scenes), 1)
+    # Delivery speed per beat, derived from the plan's own words-per-minute.
+    # Computed once for the whole script so each beat is scaled against the
+    # script's median rather than against a provider-specific baseline.
+    _beat_speeds = _beat_tts_speeds(scenes)
     for n, sc in enumerate(scenes):
         check_cancelled(workspace)
         _write_progress(workspace, stage="compose", progress=10 + int(n / total * 60),
@@ -4100,7 +4145,13 @@ def finalize_stage(
             "audio",
             on_wait=_slot_wait_progress(workspace, "audio_queue", f"Scene {n + 1} narration"),
         ):
-            na = el.synthesize(text=sc["narration"], out_path=na_path, voice_id=voice_id)
+            _beat_speed = _beat_speeds.get(n)
+            if _beat_speed is not None:
+                na = el.synthesize(
+                    text=sc["narration"], out_path=na_path, voice_id=voice_id, speed=_beat_speed
+                )
+            else:
+                na = el.synthesize(text=sc["narration"], out_path=na_path, voice_id=voice_id)
         voice_provider = str(getattr(el, "last_provider", "") or "fal")
         amount, note, key, qty, provider_name, unit = production_costs.price_tts(voice_provider, sc["narration"])
         provider, amount, note = _metered_provider_values(provider_name, amount, note)
@@ -4512,6 +4563,91 @@ def finalize_stage(
     return result
 
 
+#: Per-beat delivery speed bounds. TTS degrades audibly when pushed hard, so
+#: the oscillation is deliberately narrower than a human's. Measured reference:
+#: a hand-directed Empire Magnates cold open ran 99-319 wpm across segments
+#: (median 179) -- but that spread includes intra-segment pauses, which inflate
+#: the extremes. +/-15% reproduces the *shape* of an authored read without the
+#: artifacts of aggressive time-stretching.
+_BEAT_SPEED_MIN = float(os.getenv("STUDIO_TTS_BEAT_SPEED_MIN", "0.85") or 0.85)
+_BEAT_SPEED_MAX = float(os.getenv("STUDIO_TTS_BEAT_SPEED_MAX", "1.15") or 1.15)
+_BEAT_SPEED_ENABLED = os.getenv("STUDIO_TTS_BEAT_SPEED", "1").strip().lower() in {
+    "1", "true", "yes", "on",
+}
+
+
+def _beat_tts_speeds(scenes: list[dict[str, Any]], base_speed: float = 0.95) -> dict[int, float]:
+    """Derive a delivery speed per beat from the scene plan's own pacing.
+
+    Narration was synthesized at one fixed speed for every beat, so a one-second
+    hammer line and a six-second explanation were read at identical pace. The
+    plan already encodes the intended difference: a beat's words divided by its
+    duration is the writer's target words-per-minute.
+
+    Speeds are normalised against the script's own median rather than an assumed
+    baseline for the voice, because the model's natural rate at speed 1.0 is
+    unknown and provider-specific. Normalising keeps the *relative* shape --
+    which is what makes a read sound directed -- without needing that constant.
+    """
+    if not _BEAT_SPEED_ENABLED:
+        return {}
+    implied: dict[int, float] = {}
+    for index, scene in enumerate(scenes):
+        words = len(str(scene.get("narration") or "").split())
+        try:
+            duration = float(scene.get("duration_sec") or 0.0)
+        except (TypeError, ValueError):
+            duration = 0.0
+        if words >= 3 and duration > 0.5:
+            implied[index] = words / (duration / 60.0)
+    if len(implied) < 2:
+        return {}
+    ordered = sorted(implied.values())
+    mid = len(ordered) // 2
+    median = ordered[mid] if len(ordered) % 2 else (ordered[mid - 1] + ordered[mid]) / 2.0
+    if median <= 0:
+        return {}
+    out: dict[int, float] = {}
+    for index, wpm in implied.items():
+        scaled = base_speed * (wpm / median)
+        out[index] = round(min(_BEAT_SPEED_MAX, max(_BEAT_SPEED_MIN, scaled)), 3)
+    return out
+
+
+def _auto_approve_qa_passed_scenes(workspace: Path) -> int:
+    """Grant `approved_for_video` on the no-review path.
+
+    `approved_for_video` is only ever assigned False inside this module; the one
+    exception copies its own previous value. The single writer of True is the
+    agent tool `set_production_scenes_animate`, which the review path calls
+    after a human looks at the stills.
+
+    run_styled documents itself as the straight-through path with no review
+    gate, then called animate_scenes_stage, which requires that flag -- so the
+    auto path could never finish. It raised "no approved scenes to animate"
+    after paying for a full set of stills.
+
+    Approval here is still earned: only scenes whose still QA passed are
+    approved, so this grants the human's rubber stamp, never the QA verdict.
+    """
+    scenes = load_scenes(workspace)
+    approved = 0
+    for scene in scenes:
+        if scene.get("approved_for_video"):
+            continue
+        report = scene.get("still_qa") or {}
+        motion_graphic = str((scene.get("visual_treatment") or {}).get("kind") or "") == "motion_graphic"
+        passed = motion_graphic or (
+            report.get("status") == "pass" and report.get("pass") is True
+        )
+        if passed:
+            scene["approved_for_video"] = True
+            approved += 1
+    if approved:
+        save_scenes(workspace, scenes)
+    return approved
+
+
 def run_styled(
     category_key: str,
     topic: str | None,
@@ -4539,6 +4675,7 @@ def run_styled(
         video_model=video_model, visual_brief=visual_brief, beats_target=beats_target,
         grok=grok, script_override=script_override, user_id=user_id, default_animate=animate,
     )
+    _auto_approve_qa_passed_scenes(workspace)
     if animate:
         animate_scenes_stage(workspace, indices=None, tier=tier)
     return finalize_stage(

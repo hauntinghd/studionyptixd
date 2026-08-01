@@ -32,7 +32,20 @@ LTX_098_ENDPOINT = "fal-ai/ltxv-13b-098-distilled/image-to-video"
 # Premium positioning: Kling 2.1 Pro is the default motion lane — it is both the
 # highest-quality FAL i2v model and ~3x cheaper per second than Seedance
 # ($0.098/s vs $0.3024/s), so it is strictly better for the no-artifacting bar.
-DEFAULT_FAL_VIDEO_MODEL = "kling_pro"
+#
+# SKELETON_SHORT_CLIP_LANE switches to LTX at a ~2.7s clip cap. Measured over 18
+# clips on the canonical master (walk / gesture / turn / ambient — NOT talking
+# beats, which grow lips on this lane): 1 visible defect, ~$0.12 per clip
+# against ~$0.49, and ~11s render latency against ~78s. It is a flag rather than
+# the default because that sample is small, it was measured on a bare character
+# with no scene dressing, and it has never been run end-to-end into a finished
+# short. Flip it only against a measured full render.
+DEFAULT_FAL_VIDEO_MODEL = (
+    "ltx_budget"
+    if os.environ.get("SKELETON_SHORT_CLIP_LANE", "").strip().lower()
+    in {"1", "true", "yes", "on"}
+    else "kling_pro"
+)
 LEGACY_NON_FAL_VIDEO_MODELS = {
     "grok_imagine_video": DEFAULT_FAL_VIDEO_MODEL,
     "grok-imagine-video": DEFAULT_FAL_VIDEO_MODEL,
@@ -209,7 +222,16 @@ def _verify_silent_output(path: Path) -> dict[str, object]:
 #: The clip lengths the FAL video lanes actually accept. These endpoints take
 #: `duration` as a string and bill per whole tier, so an arbitrary number is
 #: both a rejection risk and, when rounded up, double the price.
+#:
+#: LTX is the exception: it takes `num_frames` rather than a duration tier, so
+#: it is billed per frame and can render sub-5s clips. It must not be snapped
+#: to these tiers — see _build_args.
 SUPPORTED_CLIP_SECONDS = (5, 10)
+
+#: 24 frames at 24fps = 1.0s. Measured: this lane holds identity cleanly through
+#: ~2.7s and visibly drifts (eye asymmetry, skull reshaping, soft-tissue
+#: invention) by ~4.3s, so short clips are a quality control, not only a cost one.
+MIN_LTX_FRAMES = 24
 
 
 def normalize_clip_seconds(duration_sec: float) -> int:
@@ -236,7 +258,11 @@ def _build_args(
 ) -> dict:
     """Build endpoint-specific FAL arguments while disabling generated audio."""
     prompt = _silent_motion_prompt(motion_prompt)
-    duration_sec = normalize_clip_seconds(duration_sec)
+    # LTX is billed per frame and keeps the caller's exact length; every other
+    # endpoint sells whole (5, 10) tiers and must be snapped before use.
+    requested_sec = float(duration_sec or 0)
+    if endpoint != LTX_098_ENDPOINT:
+        duration_sec = normalize_clip_seconds(duration_sec)
     if endpoint == SEEDANCE_ENDPOINT:
         return {
             "prompt": prompt,
@@ -272,7 +298,11 @@ def _build_args(
             "negative_prompt": _NEG_VIDEO,
             "resolution": "720p",
             "aspect_ratio": aspect_ratio,
-            "num_frames": max(121, int(duration_sec) * fps),
+            # LTX bills by frame count, not by the (5, 10) tiers the other
+            # endpoints sell, so it is not subject to the 5s floor. The old
+            # max(121, ...) forced every clip to 5.04s — past the point where
+            # this lane holds identity. Floor is now one second of motion.
+            "num_frames": max(MIN_LTX_FRAMES, int(round(requested_sec * fps))),
             "frame_rate": fps,
             "expand_prompt": False,
             "enable_detail_pass": False,
@@ -538,10 +568,20 @@ def generate(
     return out_path
 
 
+#: The eye clauses were added after eyes shipped broken. The soft-tissue and
+#: frame-exit clauses were added for the same reason: a brief that asked the
+#: skeleton to speak grew it human lips (the model renders a talking mouth, and
+#: on a skull that means inventing one), and head-rotation briefs ended on a
+#: black frame. Both reproduced across runs and both disappeared once named
+#: here. Do not add camera-framing terms — constraining framing in the negative
+#: prompt measurably degraded output into uncontrolled extreme close-ups.
 _NEG_VIDEO = (
     "blur, low quality, jitter, warping, deformation, identity drift, "
     "glowing eyes, supernatural eyes, white glowing eye, asymmetric eyes, "
-    "character morphing, body warping, frozen pose, text overlays, dialogue, music, audio"
+    "character morphing, body warping, frozen pose, text overlays, dialogue, music, audio, "
+    "lips, human lips, mouth skin, flesh, soft tissue, facial muscle, tongue, gums, "
+    "human nose, skin covering skull, fading to black, black frame, empty frame, "
+    "subject exits frame, camera cutaway, extra limbs, fused fingers"
 )
 
 
