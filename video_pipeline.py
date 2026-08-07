@@ -223,19 +223,40 @@ CREATIVE_IMAGE_MODEL_PROFILES = [
         "fal_endpoint_id": "fal-ai/flux-lora",
         "enabled": bool(FAL_AI_KEY),
         "supports_reference_conditioning": False,
-        "lora_url": "https://v3b.fal.media/files/b/0a9733ff/Bkucfhd84UnGjSPkJrX1o_pytorch_lora_weights.safetensors",
+        # v3 LoRA — retrained 2026-04-21 on 240 images with the canonical
+        # Cryptic Science aesthetic baked in: polished porcelain skull,
+        # large cartoon eyeballs, partial rubber mask at jaw/neck/shoulders,
+        # cervical vertebrae visible between collar and jaw. Previous v1
+        # LoRA (URL ...Bkucfhd84UnGjSPkJrX1o...) rendered rough anatomical
+        # bones with empty eye sockets — not the channel look. Frame-by-
+        # frame reference analysis in D:/recaps/SKELETON_REFERENCE_VIDEO_
+        # ANALYSIS.md confirmed the 9 canonical signals and drove the v3
+        # training prompt rewrite.
+        "lora_url": "https://v3b.fal.media/files/b/0a9734d4/phvDy4eJ6enG0E6Dvwq2A_pytorch_lora_weights.safetensors",
         "trigger_word": "nyptid_skeleton",
         # Scale 1.3 validated 2026-04-21 — 1.0 rendered human bodies with
-        # skull overlay only; 1.5 stripped outfits. 1.3 gets the full
-        # anatomical skeleton + clothing visible simultaneously.
+        # skull overlay only; 1.5 stripped outfits. 1.3 gets canonical
+        # skeleton + clothing visible simultaneously.
         "lora_scale": 1.3,
-        # Anatomy tokens injected alongside the trigger word so flux-schnell
-        # reproduces the training-distribution skeleton body, not "human
-        # with skeletal accessories."
+        # Balanced aesthetic prompt validated 2026-04-21 against 4 diverse
+        # outfits (FBI, greek toga, politician, astronaut). Splits the two
+        # concepts cleanly:
+        #   (a) translucent rubber skin MANDATORY on face + neck — always
+        #       visible regardless of outfit, with the skull showing through
+        #   (b) clothing OPAQUE on body — no see-through effect over torso
+        #       or limbs, bones visible only at head + hands + cervical
+        #       bridge between shirt collar and jaw
+        # Injected alongside the trigger word so every Skeleton render
+        # gets the canonical look automatically.
         "anatomy_lock": (
-            "fully anatomical ivory-white 3D skeleton body with exposed rib cage, "
-            "visible pelvis bones, exposed forearm radius ulna, kneecap bones visible, "
-            "no human skin on torso, no human muscle tissue, complete skeletal form head to feet"
+            "translucent rubbery silicone skin visible on the cheeks, chin, jaw, and temples "
+            "with the polished porcelain ivory skull showing through, LARGE 3D cartoon eyeballs "
+            "with white sclera and small black pupils in the eye sockets, partial translucent "
+            "skin on the sides of the neck with 3 to 5 cervical vertebrae visible between shirt "
+            "collar and jaw. Body wearing OPAQUE clothing that fits like a real person, no "
+            "see-through effect over the torso or limbs, skeletal bones visible ONLY at the "
+            "head, hands, and neck bridge. Correctly proportioned human skeleton, normal body "
+            "proportions, no warped bones"
         ),
     },
 ]
